@@ -1,0 +1,55 @@
+# .github/workflows/ingest-finess.yml
+name: Ingest FINESS
+
+on:
+  schedule:
+    # 1st and 15th of each month at 04:00 UTC (FINESS publishes bimonthly)
+    - cron: "0 4 1,15 * *"
+  workflow_dispatch: {}
+
+# Never run on pull_request — secrets are not available there, by design.
+
+concurrency:
+  group: ingest-finess
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run FINESS ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: pnpm ingest:finess
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[ingestion-failure] FINESS run failed (run #${context.runId})`,
+              body: `The FINESS ingestion workflow failed.\n\n` +
+                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                    `Check the \`ingest_log\` table for the latest \`failed\` row to see error_phase and error_message.`,
+              labels: ['ingestion-failure', 'finess'],
+            })
