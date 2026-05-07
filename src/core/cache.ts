@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { DEFAULT_USER_AGENT } from "./http.js";
 
 export type CacheOptions = {
   /** Dossier où stocker les caches (défaut : ~/.cache/france-data-mcp) */
@@ -43,7 +44,7 @@ export async function downloadWithCache(
     cacheDir = DEFAULT_CACHE_DIR,
     ttlMs = 7 * 24 * 60 * 60 * 1000,
     force = false,
-    userAgent = "france-data-mcp/0.1.0 (+https://github.com/cturkieh/france-data-mcp)",
+    userAgent = DEFAULT_USER_AGENT,
     signal,
   } = options;
 

@@ -74,27 +74,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
   const isBatch = Array.isArray(body);
   const requests: JsonRpcRequest[] = isBatch ? body : [body];
-  const responses: Array<JsonRpcSuccess | JsonRpcError> = [];
 
-  for (const request of requests) {
-    let response: JsonRpcSuccess | JsonRpcError | null = null;
-    try {
-      if (!request || typeof request !== "object") {
-        response = error(null, -32600, "Invalid Request: not a JSON-RPC object");
-      } else {
-        response = await handleRpc(request);
+  // Batch JSON-RPC : on traite les requêtes en parallèle. handleRpc catch déjà
+  // toutes ses exceptions internes, donc aucune promise ne reject — Promise.all
+  // ne court-circuite pas. L'ordre des réponses suit l'ordre des requêtes (sémantique
+  // Promise.all). Win typique : un batch de 5 tools/call qui font chacun un appel
+  // réseau ~300ms passe de ~1.5s à ~300ms.
+  const settled = await Promise.all(
+    requests.map(async (request) => {
+      try {
+        if (!request || typeof request !== "object") {
+          return error(null, -32600, "Invalid Request: not a JSON-RPC object");
+        }
+        return await handleRpc(request);
+      } catch (err) {
+        // Filet de sécurité pour les exceptions synchrones hors du try interne
+        // de handleRpc (ex: accès à request.id sur un null, JSON.stringify d'un
+        // objet circulaire). Sans ce filet, la fonction Vercel crash sans réponse
+        // et le client MCP timeout sans diagnostic.
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[france-data-mcp] unexpected error in batch loop: ${message}`);
+        return error(null, -32603, `Internal error in batch handling: ${message}`);
       }
-    } catch (err) {
-      // Filet de sécurité pour les exceptions synchrones hors du try interne
-      // de handleRpc (ex: accès à request.id sur un null, JSON.stringify d'un
-      // objet circulaire). Sans ce filet, la fonction Vercel crash sans réponse
-      // et le client MCP timeout sans diagnostic.
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(`[france-data-mcp] unexpected error in batch loop: ${message}`);
-      response = error(null, -32603, `Internal error in batch handling: ${message}`);
-    }
-    if (response) responses.push(response);
-  }
+    }),
+  );
+  const responses: Array<JsonRpcSuccess | JsonRpcError> = settled.filter(
+    (r): r is JsonRpcSuccess | JsonRpcError => r !== null,
+  );
 
   if (responses.length === 0) {
     res.status(204).end();

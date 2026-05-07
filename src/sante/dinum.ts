@@ -15,7 +15,10 @@
  * (8610Z), EHPAD (8710A), centres médico-sociaux, etc.
  */
 
+import { parseCoordinates } from "../core/coords.js";
 import { fetchJson } from "../core/http.js";
+import { clamp } from "../core/numbers.js";
+import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
 
 const BASE_URL = "https://recherche-entreprises.api.gouv.fr/search";
@@ -221,7 +224,7 @@ export async function searchEntreprises(
   }
   if (onlyActive) params.set("etat_administratif", "A");
   params.set("page", String(Math.max(1, page)));
-  params.set("per_page", String(Math.min(Math.max(perPage, 1), 25)));
+  params.set("per_page", String(clamp(perPage, 1, 25)));
 
   const url = `${BASE_URL}?${params.toString()}`;
   const data = await fetchJson<ApiResponse>(url, { signal });
@@ -284,49 +287,45 @@ function toEntreprise(api: ApiEntreprise): Entreprise {
     }
   }
 
-  const entreprise: Entreprise = {
+  return {
     siren: api.siren,
     nomComplet: api.nom_complet ?? api.nom_raison_sociale ?? api.siren,
     finances,
-    dirigeants: (api.dirigeants ?? []).map((d) => {
-      const out: Dirigeant = {};
-      if (d.nom) out.nom = d.nom;
-      if (d.prenoms) out.prenoms = d.prenoms;
-      if (d.fonction) out.fonction = d.fonction;
-      if (d.qualite) out.qualite = d.qualite;
-      return out;
-    }),
+    dirigeants: (api.dirigeants ?? []).map(toDirigeant),
     etablissements,
     actif: (api.etat_administratif ?? "A") === "A",
+    ...pickDefined({
+      siretSiege: api.siege?.siret,
+      naf: api.activite_principale,
+      nafLibelle: api.libelle_activite_principale,
+      trancheEffectif: api.tranche_effectif_salarie,
+      natureJuridique: api.nature_juridique,
+    }),
   };
+}
 
-  if (api.siege?.siret) entreprise.siretSiege = api.siege.siret;
-  if (api.activite_principale) entreprise.naf = api.activite_principale;
-  if (api.libelle_activite_principale) entreprise.nafLibelle = api.libelle_activite_principale;
-  if (api.tranche_effectif_salarie) entreprise.trancheEffectif = api.tranche_effectif_salarie;
-  if (api.nature_juridique) entreprise.natureJuridique = api.nature_juridique;
-
-  return entreprise;
+function toDirigeant(api: ApiDirigeant): Dirigeant {
+  return pickDefined({
+    nom: api.nom,
+    prenoms: api.prenoms,
+    fonction: api.fonction,
+    qualite: api.qualite,
+  });
 }
 
 function toEtablissement(api: ApiSiege): Etablissement {
-  const e: Etablissement = {
+  const point = parseCoordinates(api.longitude, api.latitude);
+  return {
     siret: api.siret ?? "",
     adresse: api.adresse ?? "",
     actif: (api.etat_administratif ?? "A") === "A",
+    ...pickDefined({
+      codePostal: api.code_postal,
+      commune: api.libelle_commune,
+      naf: api.activite_principale,
+      trancheEffectif: api.tranche_effectif_salarie,
+      dateCreation: api.date_creation,
+    }),
+    ...(point ? { point } : {}),
   };
-  if (api.code_postal) e.codePostal = api.code_postal;
-  if (api.libelle_commune) e.commune = api.libelle_commune;
-  if (api.activite_principale) e.naf = api.activite_principale;
-  if (api.tranche_effectif_salarie) e.trancheEffectif = api.tranche_effectif_salarie;
-  if (api.date_creation) e.dateCreation = api.date_creation;
-  if (api.latitude !== undefined && api.longitude !== undefined) {
-    const lat = typeof api.latitude === "string" ? Number.parseFloat(api.latitude) : api.latitude;
-    const lon =
-      typeof api.longitude === "string" ? Number.parseFloat(api.longitude) : api.longitude;
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      e.point = { lon, lat };
-    }
-  }
-  return e;
 }

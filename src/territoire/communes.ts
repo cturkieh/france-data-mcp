@@ -8,6 +8,8 @@
  */
 
 import { fetchJson } from "../core/http.js";
+import { clamp } from "../core/numbers.js";
+import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
 
 const BASE_URL = "https://geo.api.gouv.fr";
@@ -97,7 +99,7 @@ export async function searchCommunes(options: SearchCommunesOptions): Promise<Co
   if (codePostal) params.set("codePostal", codePostal);
   if (code) params.set("code", code);
   params.set("fields", DEFAULT_FIELDS);
-  params.set("limit", String(Math.min(Math.max(limit, 1), 30)));
+  params.set("limit", String(clamp(limit, 1, 30)));
   if (boostPopulation) params.set("boost", "population");
 
   const url = `${BASE_URL}/communes?${params.toString()}`;
@@ -119,18 +121,19 @@ export async function getCommuneByCode(
 }
 
 function toCommune(api: ApiCommune): Commune {
-  const commune: Commune = {
+  const centre = api.centre?.coordinates
+    ? { lon: api.centre.coordinates[0], lat: api.centre.coordinates[1] }
+    : undefined;
+  return {
     code: api.code,
     nom: api.nom,
     codesPostaux: api.codesPostaux ?? [],
+    ...(centre ? { centre } : {}),
+    ...(api.population !== undefined ? { population: api.population } : {}),
+    ...pickDefined({
+      codeDepartement: api.codeDepartement,
+      codeRegion: api.codeRegion,
+      codeEpci: api.codeEpci,
+    }),
   };
-  if (api.centre?.coordinates) {
-    const [lon, lat] = api.centre.coordinates;
-    commune.centre = { lon, lat };
-  }
-  if (api.population !== undefined) commune.population = api.population;
-  if (api.codeDepartement) commune.codeDepartement = api.codeDepartement;
-  if (api.codeRegion) commune.codeRegion = api.codeRegion;
-  if (api.codeEpci) commune.codeEpci = api.codeEpci;
-  return commune;
 }

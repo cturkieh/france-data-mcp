@@ -6,6 +6,9 @@
  * les dumps gouv.fr). Si un dataset le requiert, basculer vers une lib dédiée.
  */
 
+// U+FEFF, marqueur de début de fichier UTF-8 produit par Excel et certains
+// dumps data.gouv.fr. Caractère invisible — vérifier avec un éditeur qui
+// affiche les codes points si la ligne paraît vide.
 const BOM = "﻿";
 
 export type CsvParseOptions = {

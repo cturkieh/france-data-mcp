@@ -11,6 +11,8 @@
  */
 
 import { fetchJson } from "../core/http.js";
+import { clamp } from "../core/numbers.js";
+import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
 
 const BASE_URL = "https://data.geopf.fr/geocodage";
@@ -109,7 +111,7 @@ export async function geocodeMany(
   const { codePostal, codeCommune, type, limit = 5, signal } = options;
 
   const params = new URLSearchParams({ q: address });
-  params.set("limit", String(Math.min(Math.max(limit, 1), 20)));
+  params.set("limit", String(clamp(limit, 1, 20)));
   if (codePostal) params.set("postcode", codePostal);
   if (codeCommune) params.set("citycode", codeCommune);
   if (type) params.set("type", type);
@@ -139,14 +141,15 @@ export async function reverseGeocode(
 
 function toGeocodeResult(feature: ApiFeature): GeocodeResult {
   const [lon, lat] = feature.geometry.coordinates;
-  const result: GeocodeResult = {
+  return {
     point: { lon, lat },
     label: feature.properties.label,
     score: feature.properties.score,
     type: feature.properties.type,
+    ...pickDefined({
+      codePostal: feature.properties.postcode,
+      codeCommune: feature.properties.citycode,
+      commune: feature.properties.city,
+    }),
   };
-  if (feature.properties.postcode) result.codePostal = feature.properties.postcode;
-  if (feature.properties.citycode) result.codeCommune = feature.properties.citycode;
-  if (feature.properties.city) result.commune = feature.properties.city;
-  return result;
 }

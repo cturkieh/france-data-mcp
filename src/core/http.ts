@@ -9,7 +9,8 @@
 
 import type { RateLimitOptions } from "./types.js";
 
-const DEFAULT_USER_AGENT = "france-data-mcp/0.1.0 (+https://github.com/cturkieh/france-data-mcp)";
+export const DEFAULT_USER_AGENT =
+  "france-data-mcp/0.1.0 (+https://github.com/cturkieh/france-data-mcp)";
 
 export class HttpError extends Error {
   constructor(
@@ -120,6 +121,8 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
 
 function parseRetryAfter(header: string | null): number {
   if (!header) return 5;
+  // Cap à 60 s : si une API exige une attente plus longue, on préfère échouer
+  // (et laisser le caller gérer) plutôt que bloquer un handler MCP/serveur.
   const seconds = Number.parseInt(header, 10);
   if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, 60);
   // Format HTTP-date (RFC 7231 §7.1.3) : "Wed, 21 Oct 2015 07:28:00 GMT"

@@ -76,4 +76,28 @@ describe("streamCsvLines", () => {
     }
     expect(out).toEqual([{ nom: "Jean", age: "42" }]);
   });
+
+  it("ne yield pas de row fantôme sur trailing whitespace", async () => {
+    // Régression : avant le fix `buffer.trim().length > 0`, un buffer composé
+    // uniquement d'espaces/CR yieldait un row vide qui faussait les comptages.
+    async function* source() {
+      yield "nom;age\nJean;42\n   ";
+    }
+    const out: Array<Record<string, string>> = [];
+    for await (const row of streamCsvLines(source())) {
+      out.push(row);
+    }
+    expect(out).toEqual([{ nom: "Jean", age: "42" }]);
+  });
+
+  it("ne yield pas de row fantôme si le CSV se termine par juste \\r\\n", async () => {
+    async function* source() {
+      yield "nom;age\nJean;42\n\r\n";
+    }
+    const out: Array<Record<string, string>> = [];
+    for await (const row of streamCsvLines(source())) {
+      out.push(row);
+    }
+    expect(out).toEqual([{ nom: "Jean", age: "42" }]);
+  });
 });

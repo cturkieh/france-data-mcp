@@ -138,6 +138,65 @@ describe("getEntrepriseBySiren", () => {
     expect(e).toBeNull();
   });
 
+  it("envoie q=<siren> en clair (PAS la syntaxe Lucene q=siren:XXX)", async () => {
+    // Garde-fou contre la régression où on utiliserait `q=siren:${siren}` qui
+    // n'est pas supporté par l'API DINUM. Tester explicitement la query string.
+    fetchMock.mockResolvedValue(apiResponse({ results: [] }));
+    await getEntrepriseBySiren("787120435");
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    expect(url).toContain("q=787120435");
+    expect(url).not.toContain("siren%3A");
+    expect(url).not.toContain("siren:");
+  });
+
+  it("filtre côté client : ignore les résultats dont le SIREN ne correspond pas exactement", async () => {
+    // L'API DINUM peut renvoyer des entreprises dont le nom contient les chiffres.
+    // On ne veut récupérer que celle dont siren === argument.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 3,
+        results: [
+          { siren: "787120999", nom_complet: "AUTRE 1", etat_administratif: "A" },
+          { siren: "787120435", nom_complet: "RENAULT", etat_administratif: "A" },
+          { siren: "787120111", nom_complet: "AUTRE 2", etat_administratif: "A" },
+        ],
+      }),
+    );
+    const e = await getEntrepriseBySiren("787120435");
+    expect(e).not.toBeNull();
+    expect(e?.siren).toBe("787120435");
+    expect(e?.nomComplet).toBe("RENAULT");
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("warn et retourne null si l'API renvoie des résultats sans match SIREN exact", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 2,
+        results: [
+          { siren: "111111111", nom_complet: "PAS LE BON", etat_administratif: "A" },
+          { siren: "222222222", nom_complet: "PAS LE BON NON PLUS", etat_administratif: "A" },
+        ],
+      }),
+    );
+    const e = await getEntrepriseBySiren("787120435");
+    expect(e).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("787120435");
+    warnSpy.mockRestore();
+  });
+
+  it("envoie onlyActive=false (pas de filtre etat_administratif)", async () => {
+    // getEntrepriseBySiren doit pouvoir retrouver des entreprises radiées
+    fetchMock.mockResolvedValue(apiResponse({ results: [] }));
+    await getEntrepriseBySiren("787120435");
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    expect(url).not.toContain("etat_administratif=A");
+  });
+
   it("retourne l'entreprise avec finances ordonnées par année décroissante", async () => {
     fetchMock.mockResolvedValue(
       apiResponse({

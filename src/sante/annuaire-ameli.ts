@@ -19,6 +19,7 @@
 import { createReadStream } from "node:fs";
 import { type CacheOptions, downloadWithCache } from "../core/cache.js";
 import { streamCsvLines } from "../core/csv.js";
+import { pickDefined } from "../core/object-utils.js";
 
 const ANNUAIRE_AMELI_CSV_URL =
   "https://www.data.gouv.fr/api/1/datasets/r/3a700a1c-3079-4f7f-9bd7-83611e3f5e35";
@@ -63,11 +64,11 @@ export type StreamAnnuaireOptions = CacheOptions & {
   /**
    * Chemin local d'un CSV déjà téléchargé (court-circuite le download).
    *
-   * @security Cette option fait un `readFile` direct du chemin fourni. Ne
-   * JAMAIS la forwarder depuis une entrée non-trustée (requête HTTP, args MCP) :
-   * c'est un read fichier local non restreint qui peut exposer des fichiers
-   * sensibles. Strictement réservé à un usage Node.js trusted (CLI, script,
-   * code applicatif).
+   * @security Cette option ouvre un `createReadStream` direct sur le chemin
+   * fourni. Ne JAMAIS la forwarder depuis une entrée non-trustée (requête
+   * HTTP, args MCP) : c'est une lecture fichier local non restreinte qui peut
+   * exposer des fichiers sensibles. Strictement réservé à un usage Node.js
+   * trusted (CLI, script, code applicatif).
    */
   csvPath?: string;
 };
@@ -218,45 +219,24 @@ function toProfessionnelSante(row: Record<string, string>): ProfessionnelSante |
   const prenom = row.ps_activite_prenom ?? "";
   if (!nom && !prenom) return null;
 
-  const ps: ProfessionnelSante = { nom, prenom };
-
-  const civilite = row.ps_activite_civilite;
-  if (civilite) ps.civilite = civilite;
-
-  const raisonSociale = row.ps_activite_raison_sociale;
-  if (raisonSociale) ps.raisonSociale = raisonSociale;
-
-  const specialiteCode = row.specialite_code;
-  if (specialiteCode) ps.specialiteCode = specialiteCode;
-  const specialiteLibelle = row.specialite_libelle;
-  if (specialiteLibelle) ps.specialiteLibelle = specialiteLibelle;
-
-  const typePsCode = row.type_ps_code;
-  if (typePsCode) ps.typePsCode = typePsCode;
-  const typePsLibelle = row.type_ps_libelle;
-  if (typePsLibelle) ps.typePsLibelle = typePsLibelle;
-
-  if (row.coordonnees_voie) ps.adresse = row.coordonnees_voie;
-
-  const complement = row.coordonnees_complement ?? row.coordonnees_lieu_dit;
-  if (complement) ps.complementAdresse = complement;
-
-  const codePostal = row.coordonnees_code_postal;
-  if (codePostal) ps.codePostal = codePostal;
-
-  const commune = row.coordonnees_ville;
-  if (commune) ps.commune = commune;
-
-  const tel = row.coordonnees_num_tel;
-  if (tel) ps.telephone = tel;
-
-  const sectCode = row.secteur_conventionnel_code;
-  if (sectCode) ps.secteurConventionnel = sectCode;
-  const sectLib = row.secteur_conventionnel_libelle;
-  if (sectLib) ps.secteurConventionnelLibelle = sectLib;
-
-  const nature = row.nature_exercice_libelle ?? row.nature_exercice_code;
-  if (nature) ps.natureExercice = nature;
-
-  return ps;
+  return {
+    nom,
+    prenom,
+    ...pickDefined({
+      civilite: row.ps_activite_civilite,
+      raisonSociale: row.ps_activite_raison_sociale,
+      specialiteCode: row.specialite_code,
+      specialiteLibelle: row.specialite_libelle,
+      typePsCode: row.type_ps_code,
+      typePsLibelle: row.type_ps_libelle,
+      adresse: row.coordonnees_voie,
+      complementAdresse: row.coordonnees_complement || row.coordonnees_lieu_dit,
+      codePostal: row.coordonnees_code_postal,
+      commune: row.coordonnees_ville,
+      telephone: row.coordonnees_num_tel,
+      secteurConventionnel: row.secteur_conventionnel_code,
+      secteurConventionnelLibelle: row.secteur_conventionnel_libelle,
+      natureExercice: row.nature_exercice_libelle || row.nature_exercice_code,
+    }),
+  };
 }

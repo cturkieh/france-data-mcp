@@ -123,7 +123,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "entreprises_in_radius",
     description:
-      "Recherche d'entreprises françaises dans un rayon géographique, avec filtres NAF et tranche d'effectif. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, dates de création.",
+      "Recherche d'entreprises françaises dans un rayon géographique, avec filtres NAF, code postal et département. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.",
     inputSchema: {
       type: "object",
       properties: {

@@ -16,7 +16,9 @@
 
 import { readFile } from "node:fs/promises";
 import { type CacheOptions, downloadWithCache } from "../core/cache.js";
+import { parseCoordinates } from "../core/coords.js";
 import { parseCsv } from "../core/csv.js";
+import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
 import { libelleCategorieFiness } from "./finess-categories.js";
 
@@ -92,7 +94,14 @@ export async function loadFiness(options: LoadFinessOptions = {}): Promise<Etabl
 
   const content = await readFile(csvPath, "utf-8");
   const rows = parseCsv(content, { delimiter: ";" });
-  const ets = rows.map(toEtablissementFiness).filter((e): e is EtablissementFiness => e !== null);
+
+  // Une seule passe pour mapper + filtrer les lignes invalides : évite
+  // d'allouer un tableau intermédiaire de ~120k éléments pour FINESS.
+  const ets: EtablissementFiness[] = [];
+  for (const row of rows) {
+    const e = toEtablissementFiness(row);
+    if (e !== null) ets.push(e);
+  }
 
   // Si plus de 5% des lignes sont droppées (champ FINESS_ET manquant), c'est
   // probablement une migration de schéma upstream (annoncée par l'ANS pour
@@ -173,53 +182,31 @@ function toEtablissementFiness(row: Record<string, string>): EtablissementFiness
   const finessEt = row.nofinesset ?? row["FINESS ET"] ?? row.finesset;
   if (!finessEt) return null;
 
-  const e: EtablissementFiness = {
-    finessEt,
-    raisonSociale: row.rs ?? row.raisonsociale ?? row["Raison sociale"] ?? row.rslongue ?? "",
-  };
-
-  const finessEj = row.nofinessej ?? row["FINESS EJ"] ?? row.finessej;
-  if (finessEj) e.finessEj = finessEj;
-
   const categorieCode = row.categetab ?? row.categagretab ?? row.libcategetab;
-  if (categorieCode) {
-    e.categorieCode = categorieCode;
-    const lib = libelleCategorieFiness(categorieCode);
-    if (lib) e.categorieLibelle = lib;
-    else if (row.libcategetab) e.categorieLibelle = row.libcategetab;
-  }
+  const categorieLibelle = categorieCode
+    ? (libelleCategorieFiness(categorieCode) ?? row.libcategetab)
+    : undefined;
 
   const adresseParts = [row.numvoie, row.typvoie, row.voie, row.compvoie].filter(Boolean);
-  if (adresseParts.length > 0) e.adresse = adresseParts.join(" ").trim();
-  else if (row.adresse) e.adresse = row.adresse;
+  const adresse = adresseParts.length > 0 ? adresseParts.join(" ").trim() : row.adresse;
 
-  const codePostal = row.cpostal ?? row.codepostal;
-  if (codePostal) e.codePostal = codePostal;
+  const point = parseCoordinates(row.coordxet ?? row.longitude, row.coordyet ?? row.latitude);
 
-  const commune = row.commune ?? row.libcommune;
-  if (commune) e.commune = commune;
-
-  const codeCommune = row.codecommune ?? row.codinsee;
-  if (codeCommune) e.codeCommune = codeCommune;
-
-  const departement = row.departement ?? row.codedepartement;
-  if (departement) e.departement = departement;
-
-  const telephone = row.telephone ?? row.tel;
-  if (telephone) e.telephone = telephone;
-
-  const siren = row.siren;
-  if (siren) e.siren = siren;
-
-  const lonRaw = row.coordxet ?? row.longitude;
-  const latRaw = row.coordyet ?? row.latitude;
-  if (lonRaw && latRaw) {
-    const lon = Number.parseFloat(lonRaw.replace(",", "."));
-    const lat = Number.parseFloat(latRaw.replace(",", "."));
-    if (Number.isFinite(lon) && Number.isFinite(lat)) {
-      e.point = { lon, lat };
-    }
-  }
-
-  return e;
+  return {
+    finessEt,
+    raisonSociale: row.rs ?? row.raisonsociale ?? row["Raison sociale"] ?? row.rslongue ?? "",
+    ...pickDefined({
+      finessEj: row.nofinessej ?? row["FINESS EJ"] ?? row.finessej,
+      categorieCode,
+      categorieLibelle,
+      adresse,
+      codePostal: row.cpostal ?? row.codepostal,
+      commune: row.commune ?? row.libcommune,
+      codeCommune: row.codecommune ?? row.codinsee,
+      departement: row.departement ?? row.codedepartement,
+      telephone: row.telephone ?? row.tel,
+      siren: row.siren,
+    }),
+    ...(point ? { point } : {}),
+  };
 }
