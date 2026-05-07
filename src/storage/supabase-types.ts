@@ -366,6 +366,51 @@ export type Database = {
         | { Args: { table_name: string }; Returns: string }
       enablelongtransactions: { Args: never; Returns: string }
       equals: { Args: { geom1: unknown; geom2: unknown }; Returns: boolean }
+      finess_by_categorie: {
+        Args: {
+          p_code_insee: string
+          p_codes: string[]
+          p_departement: string
+          p_limit: number
+        }
+        Returns: {
+          categorie_code: string
+          categorie_libelle: string
+          code_insee: string
+          code_postal: string
+          distance_meters: number
+          email: string
+          geom: unknown
+          num_finess: string
+          raison_sociale: string
+          telephone: string
+          ville: string
+          voie: string
+        }[]
+      }
+      finess_in_radius: {
+        Args: {
+          p_codes: string[]
+          p_lat: number
+          p_limit: number
+          p_lon: number
+          p_radius_meters: number
+        }
+        Returns: {
+          categorie_code: string
+          categorie_libelle: string
+          code_insee: string
+          code_postal: string
+          distance_meters: number
+          email: string
+          geom: unknown
+          num_finess: string
+          raison_sociale: string
+          telephone: string
+          ville: string
+          voie: string
+        }[]
+      }
       geometry: { Args: { "": string }; Returns: unknown }
       geometry_above: {
         Args: { geom1: unknown; geom2: unknown }
