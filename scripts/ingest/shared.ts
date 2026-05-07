@@ -107,8 +107,7 @@ export interface IngestLogEntry {
 
 export async function writeIngestLog(entry: IngestLogEntry): Promise<void> {
   const supabase = getServiceClient();
-  // biome-ignore lint/suspicious/noExplicitAny: Database types are still a placeholder until pnpm db:types runs.
-  const { error } = await (supabase.from("ingest_log") as any).insert(entry);
+  const { error } = await supabase.from("ingest_log").insert(entry);
   if (error) {
     // We don't throw — failing to log shouldn't override the original ingest failure.
     console.error(`[france-data-mcp] failed to write ingest_log: ${error.message}`);
@@ -129,8 +128,7 @@ export interface AtomicSwapInput {
  */
 export async function atomicSwapTables(input: AtomicSwapInput): Promise<void> {
   const supabase = getServiceClient();
-  // biome-ignore lint/suspicious/noExplicitAny: Database types are still a placeholder until pnpm db:types runs.
-  const { error } = await (supabase.rpc as any)("ingest_atomic_swap", {
+  const { error } = await supabase.rpc("ingest_atomic_swap", {
     p_prod_table: input.prodTable,
   });
   if (error) {
