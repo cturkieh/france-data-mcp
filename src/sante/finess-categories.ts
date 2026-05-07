@@ -57,3 +57,20 @@ export const FINESS_MSP_CPTS = ["603", "604"] as const satisfies readonly Finess
 export function libelleCategorieFiness(code: string): string | undefined {
   return (FINESS_CATEGORIES as Record<string, string>)[code];
 }
+
+export type FinessFamille = "mco" | "ehpad" | "ssr" | "autre";
+
+// Source: ANS FINESS code catalogue. Numerical ranges per family.
+// MCO (Médecine-Chirurgie-Obstétrique): 4100-4199
+// SSR (Soins de Suite et Réadaptation): 4200-4299
+// EHPAD: 500-599
+// Anything else maps to "autre" — caller can drill into categorie_libelle if needed.
+export function finessFamille(code: string | null | undefined): FinessFamille {
+  if (!code) return "autre";
+  const n = Number.parseInt(code, 10);
+  if (Number.isNaN(n)) return "autre";
+  if (n >= 4100 && n <= 4199) return "mco";
+  if (n >= 4200 && n <= 4299) return "ssr";
+  if (n >= 500 && n <= 599) return "ehpad";
+  return "autre";
+}
