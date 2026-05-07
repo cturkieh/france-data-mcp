@@ -59,12 +59,20 @@
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:unit": "vitest run --exclude '**/*.integration.test.ts'",
+    "test:integration": "vitest run --include '**/*.integration.test.ts'",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.api.json --noEmit",
     "dev:server": "vercel dev",
     "deploy:server": "vercel --prod",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:push": "supabase db push",
+    "db:types": "supabase gen types typescript --local > src/storage/supabase-types.ts",
+    "ingest:finess": "tsx scripts/ingest/finess.ts"
   },
   "engines": {
     "node": ">=20"
