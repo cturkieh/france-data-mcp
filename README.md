@@ -45,6 +45,19 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 
 ---
 
+## Outils MCP exposés
+
+### V0.2 — Health establishments (FINESS)
+
+| Tool                                  | Description                                                |
+|---------------------------------------|------------------------------------------------------------|
+| `etablissements_finess_in_radius`     | Find FINESS establishments within a radius (filter by family) |
+| `etablissements_finess_by_categorie`  | List FINESS establishments by family + optional dept/commune  |
+
+Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.md](docs/ingestion.md).
+
+---
+
 ## Installation
 
 ### En tant que serveur MCP (le plus simple)
