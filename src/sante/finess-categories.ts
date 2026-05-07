@@ -101,11 +101,15 @@ const SSR_CODES = new Set<string>([
 // family classification.
 const EHPAD_CODES = new Set<string>(FINESS_EHPAD);
 
-// Codes present in FINESS_CATEGORIES that we deliberately map to "autre" in V0.2.
-// This list exists so that the invariant test in finess-categories.test.ts can
-// fail when a new code is added to FINESS_CATEGORIES without an explicit family
-// decision — preventing silent classification regressions on DREES nomenclature
-// updates.
+/**
+ * Codes present in FINESS_CATEGORIES that are deliberately classified as "autre"
+ * for V0.2 scope. Powers the invariant test that fails when a new code is added
+ * to FINESS_CATEGORIES without an explicit family decision — preventing silent
+ * classification regressions on DREES nomenclature updates.
+ *
+ * @internal Exported solely for the invariant test in finess-categories.test.ts.
+ *           Do not import from runtime code — couple to `finessFamille()` instead.
+ */
 export const DELIBERATELY_AUTRE = new Set<string>([
   "292", // CHS                      → psychiatrie (out of V0.2 scope)
   "362", // CH spé psychiatrie       → psychiatrie
@@ -130,10 +134,9 @@ export const DELIBERATELY_AUTRE = new Set<string>([
  * before matching against the family Sets, tolerating whitespace artefacts
  * occasionally present in DREES dumps (e.g. `" 108 "` → "mco").
  *
- * Note: empty/whitespace inputs are *upstream-parsing-bug suspects* (column
- * shift, header mismatch) but this function intentionally has no telemetry
- * hook — surfacing the empty-rate is the ingest layer's responsibility,
- * tracked separately when scripts/ingest/finess.ts lands.
+ * Note: empty/whitespace inputs are upstream-parsing-bug suspects (column
+ * shift, header mismatch) but this classifier intentionally has no telemetry
+ * hook — surfacing the empty-rate is the ingest layer's responsibility.
  */
 export function finessFamille(code: string | null | undefined): FinessFamille {
   const trimmed = code?.trim();

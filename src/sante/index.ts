@@ -54,7 +54,9 @@ export {
   FINESS_EHPAD,
   FINESS_MSP_CPTS,
   libelleCategorieFiness,
+  finessFamille,
   type FinessCategorieCode,
+  type FinessFamille,
 } from "./finess-categories.js";
 
 export const SANTE_VERSION = "0.1.0";

@@ -34,8 +34,8 @@ describe("finessFamille", () => {
 
   it("returns 'autre' for empty string and pure-whitespace inputs", () => {
     // Empty / whitespace-only inputs are upstream-parsing-bug suspects but
-    // this classifier silently maps them to "autre" — surfacing them is the
-    // ingest layer's job (will land with scripts/ingest/finess.ts).
+    // this classifier silently maps them to "autre" — surfacing the
+    // empty-rate is the ingest layer's responsibility, not this function's.
     expect(finessFamille("")).toBe("autre");
     expect(finessFamille("   ")).toBe("autre");
     expect(finessFamille("\t")).toBe("autre");
