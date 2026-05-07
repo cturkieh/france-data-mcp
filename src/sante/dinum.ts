@@ -57,6 +57,18 @@ export type Dirigeant = {
   qualite?: string;
 };
 
+/**
+ * État de l'enrichissement de la liste `etablissements` :
+ *
+ * - `not_attempted` : monosite (ou data SIRENE manquante) — pas de second appel.
+ * - `success` : `etablissements.length === nombreEtablissements` (ou >=).
+ * - `partial` : second appel OK mais retourne moins que le total SIRENE
+ *   (cause typique : entreprise multi-département ou NAF secondaires).
+ * - `failed` : second appel a échoué (rate limit, panne API, parsing…).
+ *   `enrichmentWarning` contient le message d'erreur.
+ */
+export type EnrichmentStatus = "not_attempted" | "success" | "partial" | "failed";
+
 export type Entreprise = {
   /** SIREN 9 chiffres */
   siren: string;
@@ -83,15 +95,25 @@ export type Entreprise = {
    * ne contenir que le siège — l'API DINUM ne retourne que les établissements
    * « matchant » la requête. `getEntrepriseBySiren()` fait un second appel
    * automatique pour récupérer les établissements du même NAF principal dans
-   * le département du siège (couvre la majorité des cas pour les multi-sites).
-   * Voir `nombreEtablissements` / `nombreEtablissementsOuverts` pour le total
-   * réel côté SIRENE.
+   * le département du siège.
+   *
+   * **Le caller doit lire `enrichmentStatus`** pour savoir si la liste est
+   * complète (`success`), tronquée (`partial`), ou si l'enrichissement a échoué
+   * (`failed`). Comparer aussi `etablissements.length` à `nombreEtablissements`.
    */
   etablissements: Etablissement[];
   /** Nombre total d'établissements (actifs + fermés), source SIRENE */
   nombreEtablissements?: number;
   /** Nombre d'établissements actuellement ouverts, source SIRENE */
   nombreEtablissementsOuverts?: number;
+  /**
+   * État de l'enrichissement multi-sites (cf. `EnrichmentStatus`).
+   * Toujours présent pour les retours de `getEntrepriseBySiren()`.
+   * Absent pour les `searchEntreprises()` (pas d'enrichissement tenté).
+   */
+  enrichmentStatus?: EnrichmentStatus;
+  /** Message d'aide quand `enrichmentStatus` ∈ {"partial", "failed"}. */
+  enrichmentWarning?: string;
   /** Statut administratif global */
   actif: boolean;
 };
@@ -312,40 +334,121 @@ export async function getEntrepriseBySiren(
   }
   if (!match) return null;
 
-  // Second appel pour récupérer les établissements supplémentaires : l'API
-  // DINUM ne les expose dans `matching_etablissements` que quand on filtre par
-  // NAF + département. On filtre ensuite par SIREN côté client.
+  // Trouve le siège : on préfère le SIRET déclaré comme siège plutôt que
+  // l'index 0 du tableau (l'ordre n'est pas garanti et peut changer si on
+  // ré-ordonne plus tard).
+  const siege =
+    match.etablissements.find((e) => e.siret === match.siretSiege) ?? match.etablissements[0];
+  const siegePostalCode = siege?.codePostal;
+  const departement = deptFromPostal(siegePostalCode);
   const naf = match.naf;
-  const siegePostalCode = match.etablissements[0]?.codePostal;
-  const departement = siegePostalCode?.slice(0, 2);
-  if (naf && departement && (match.nombreEtablissements ?? 0) > 1) {
-    try {
-      const more = await searchEntreprises({
-        naf,
-        departement,
-        perPage: 25,
-        onlyActive: false,
-        signal,
-      });
-      const enriched = more.entreprises.find((e) => e.siren === siren);
-      if (enriched) {
-        const seen = new Set(match.etablissements.map((e) => e.siret));
-        for (const et of enriched.etablissements) {
-          if (et.siret && !seen.has(et.siret)) {
-            match.etablissements.push(et);
-            seen.add(et.siret);
-          }
+  const totalSirene = match.nombreEtablissements ?? 0;
+
+  if (totalSirene <= 1) {
+    match.enrichmentStatus = "not_attempted";
+    return match;
+  }
+  if (!naf || !departement) {
+    match.enrichmentStatus = "not_attempted";
+    match.enrichmentWarning = warnSkipped({ naf, siegePostalCode, departement });
+    return match;
+  }
+
+  // Second appel : l'API DINUM expose les autres établissements dans
+  // `matching_etablissements` uniquement quand on filtre par NAF + département.
+  // ⚠️ Coût : ce wrapper consomme 2 appels DINUM par invocation pour les
+  // multi-sites (rate limit observé ~1 req/s effectif après 429). Throttler
+  // côté caller en cas de batch.
+  try {
+    const more = await searchEntreprises({
+      naf,
+      departement,
+      perPage: 25,
+      onlyActive: false,
+      signal,
+    });
+    const enriched = more.entreprises.find((e) => e.siren === siren);
+    if (enriched) {
+      const seen = new Set(match.etablissements.map((e) => e.siret));
+      for (const et of enriched.etablissements) {
+        if (et.siret && !seen.has(et.siret)) {
+          match.etablissements.push(et);
+          seen.add(et.siret);
         }
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `[france-data-mcp] getEntrepriseBySiren(${siren}): échec enrichissement établissements (${msg}). Résultat limité au siège.`,
-      );
     }
+
+    if (match.etablissements.length >= totalSirene) {
+      match.enrichmentStatus = "success";
+    } else {
+      match.enrichmentStatus = "partial";
+      match.enrichmentWarning = warnPartial({
+        found: match.etablissements.length,
+        totalSirene,
+        naf,
+        departement,
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const errType = err instanceof Error ? err.constructor.name : typeof err;
+    console.error(
+      `[france-data-mcp] getEntrepriseBySiren(${siren}): échec enrichissement (errType=${errType}, naf=${naf}, departement=${departement}): ${msg}`,
+    );
+    match.enrichmentStatus = "failed";
+    match.enrichmentWarning = warnFailed({ errType, msg, totalSirene });
   }
 
   return match;
+}
+
+function warnSkipped(opts: {
+  naf: string | undefined;
+  siegePostalCode: string | undefined;
+  departement: string | undefined;
+}): string {
+  return `Enrichissement ignoré (naf=${opts.naf ?? "absent"}, codePostal=${opts.siegePostalCode ?? "absent"}, departement=${opts.departement ?? "non déductible"}).`;
+}
+
+function warnPartial(opts: {
+  found: number;
+  totalSirene: number;
+  naf: string;
+  departement: string;
+}): string {
+  return `Enrichissement partiel : ${opts.found}/${opts.totalSirene} établissements. Stratégie API DINUM (naf=${opts.naf} + departement=${opts.departement}) ne couvre pas les sites multi-département ni les établissements à NAF différent du siège. Pour exhaustivité : utiliser \`entreprises_in_radius\` par zone géographique, ou interroger SIRENE directement.`;
+}
+
+function warnFailed(opts: { errType: string; msg: string; totalSirene: number }): string {
+  return `Enrichissement échoué (${opts.errType}: ${opts.msg}). nombreEtablissements=${opts.totalSirene} mais seul le siège est listé. Réessayer plus tard, ou utiliser \`entreprises_in_radius\` pour cibler géographiquement.`;
+}
+
+/**
+ * Extrait le code département depuis un code postal français.
+ *
+ * Cas couverts :
+ * - Métropole : `08000` → `"08"`, `75001` → `"75"`
+ * - DOM (codes 971-978) : `97400` → `"974"`, `97600` → `"976"`
+ * - TOM (codes 988) : `98800` → `"988"`
+ * - Corse : `20100` → `"2A"` (Corse-du-Sud, 20000-20190),
+ *           `20200` → `"2B"` (Haute-Corse, 20200-20620)
+ *
+ * Note : différent de `deptFromCommune` (api/tools.ts) qui prend un code
+ * commune INSEE (Corse `2A004` → `"2A"` directement). Ici on travaille sur
+ * les codes postaux (Corse `20xxx`) qui demandent un mapping par plage.
+ */
+function deptFromPostal(codePostal: string | undefined): string | undefined {
+  if (!codePostal || codePostal.length < 2) return undefined;
+  if (codePostal.startsWith("97") || codePostal.startsWith("98")) {
+    return codePostal.length >= 3 ? codePostal.slice(0, 3) : undefined;
+  }
+  if (codePostal.startsWith("20") && /^\d{5}$/.test(codePostal)) {
+    const n = Number.parseInt(codePostal, 10);
+    if (n >= 20000 && n <= 20190) return "2A";
+    if (n >= 20200 && n <= 20620) return "2B";
+    return undefined;
+  }
+  return codePostal.slice(0, 2);
 }
 
 /**

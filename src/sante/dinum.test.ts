@@ -35,6 +35,31 @@ function apiResponse(
   });
 }
 
+/**
+ * Forge une `Response` `apiResponse` contenant exactement une entreprise.
+ * Évite la répétition `apiResponse({ total_results: 1, results: [{ ... }] })`
+ * dans les tests d'enrichissement de `getEntrepriseBySiren`.
+ *
+ * Les overrides du payload de l'entreprise sont mergés. `siege` est mergé
+ * shallow pour pouvoir surcharger juste `code_postal` ou `siret` sans répéter
+ * `etat_administratif: "A"` à chaque test.
+ */
+function entrepriseResponse(
+  overrides: Record<string, unknown> & { siege?: Record<string, unknown> },
+): Response {
+  const { siege, ...rest } = overrides;
+  return apiResponse({
+    total_results: 1,
+    results: [
+      {
+        etat_administratif: "A",
+        ...rest,
+        siege: { etat_administratif: "A", ...siege },
+      },
+    ],
+  });
+}
+
 /** URL de la dernière requête fetch interceptée. */
 function lastFetchUrl(): string {
   return fetchMock.mock.calls[0]?.[0] as string;
@@ -336,7 +361,141 @@ describe("getEntrepriseBySiren", () => {
     );
     const e = await getEntrepriseBySiren("111111111");
     expect(e?.etablissements).toHaveLength(1);
+    expect(e?.enrichmentStatus).toBe("not_attempted");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("envoie departement=974 pour un siège DOM (Réunion 97400, pas '97')", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "222222222",
+          nom_complet: "LABO REUNION",
+          activite_principale: "86.90B",
+          nombre_etablissements: 5,
+          nombre_etablissements_ouverts: 3,
+          siege: { siret: "22222222200010", code_postal: "97400", libelle_commune: "SAINT-DENIS" },
+        }),
+      )
+      .mockResolvedValueOnce(apiResponse({ results: [] }));
+    await getEntrepriseBySiren("222222222");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondUrl = fetchMock.mock.calls[1]?.[0] as string;
+    expect(secondUrl).toContain("departement=974");
+    expect(secondUrl).not.toMatch(/departement=97[^0-9]/);
+  });
+
+  it("envoie departement=2A pour un siège Corse-du-Sud (20100)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "333333333",
+          nom_complet: "LABO AJACCIO",
+          activite_principale: "86.90B",
+          nombre_etablissements: 3,
+          nombre_etablissements_ouverts: 2,
+          siege: { siret: "33333333300010", code_postal: "20100" },
+        }),
+      )
+      .mockResolvedValueOnce(apiResponse({ results: [] }));
+    await getEntrepriseBySiren("333333333");
+    const secondUrl = fetchMock.mock.calls[1]?.[0] as string;
+    expect(secondUrl).toContain("departement=2A");
+  });
+
+  it("envoie departement=2B pour un siège Haute-Corse (20200)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "444444444",
+          nom_complet: "LABO BASTIA",
+          activite_principale: "86.90B",
+          nombre_etablissements: 3,
+          siege: { siret: "44444444400010", code_postal: "20200" },
+        }),
+      )
+      .mockResolvedValueOnce(apiResponse({ results: [] }));
+    await getEntrepriseBySiren("444444444");
+    const secondUrl = fetchMock.mock.calls[1]?.[0] as string;
+    expect(secondUrl).toContain("departement=2B");
+  });
+
+  it("dégrade gracieusement si le 2e appel échoue : enrichmentStatus='failed' + warning", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "555555555",
+          nom_complet: "BIG SAS",
+          activite_principale: "86.90B",
+          nombre_etablissements: 10,
+          siege: { siret: "55555555500010", code_postal: "08300" },
+        }),
+      )
+      .mockRejectedValueOnce(new TypeError("network down"));
+
+    const e = await getEntrepriseBySiren("555555555");
+    expect(e?.etablissements).toHaveLength(1);
+    expect(e?.enrichmentStatus).toBe("failed");
+    expect(e?.enrichmentWarning).toContain("nombreEtablissements=10");
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("signale enrichmentStatus='partial' quand l'enrichissement ne couvre pas tous les sites", async () => {
+    // 19 sites SIRENE, l'enrichissement n'en remonte que 3 (multi-département supposé)
+    fetchMock
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "666666666",
+          nom_complet: "MULTI-DEPT SAS",
+          activite_principale: "86.90B",
+          nombre_etablissements: 19,
+          nombre_etablissements_ouverts: 19,
+          siege: { siret: "66666666600010", code_postal: "08000" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "666666666",
+          siege: { siret: "66666666600010" },
+          matching_etablissements: [
+            { siret: "66666666600028", code_postal: "08200", etat_administratif: "A" },
+            { siret: "66666666600036", code_postal: "08600", etat_administratif: "A" },
+          ],
+        }),
+      );
+    const e = await getEntrepriseBySiren("666666666");
+    expect(e?.etablissements).toHaveLength(3);
+    expect(e?.enrichmentStatus).toBe("partial");
+    expect(e?.enrichmentWarning).toContain("3/19");
+    expect(e?.enrichmentWarning).toContain("multi-département");
+  });
+
+  it("enrichmentStatus='success' quand on a tous les établissements", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "777777777",
+          nom_complet: "OK SAS",
+          activite_principale: "86.90B",
+          nombre_etablissements: 2,
+          siege: { siret: "77777777700010", code_postal: "08000" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        entrepriseResponse({
+          siren: "777777777",
+          siege: { siret: "77777777700010" },
+          matching_etablissements: [
+            { siret: "77777777700028", code_postal: "08200", etat_administratif: "A" },
+          ],
+        }),
+      );
+    const e = await getEntrepriseBySiren("777777777");
+    expect(e?.etablissements).toHaveLength(2);
+    expect(e?.enrichmentStatus).toBe("success");
+    expect(e?.enrichmentWarning).toBeUndefined();
   });
 
   it("retourne l'entreprise avec finances ordonnées par année décroissante", async () => {
