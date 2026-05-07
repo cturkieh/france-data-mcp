@@ -60,13 +60,26 @@ export function libelleCategorieFiness(code: string): string | undefined {
 
 export type FinessFamille = "mco" | "ssr" | "ehpad" | "autre";
 
-// Source: nomenclature FINESS DREES (3-digit category codes, see FINESS_CATEGORIES above).
-//   MCO (Médecine-Chirurgie-Obstétrique, court séjour) groups acute-care hospitals.
-//   SSR (Soins de Suite et Réadaptation) groups follow-up / rehabilitation establishments.
-//   EHPAD groups senior dependent-care facilities (EHPAD + retirement homes + foyers logements).
-// Anything outside these sets falls back to "autre" — the caller can use FINESS_CATEGORIES
-// or categorie_libelle to drill in.
-const MCO_CODES = new Set([
+// Family classification of FINESS DREES category codes (see FINESS_CATEGORIES above
+// for the 3-digit code reference).
+//
+//   MCO   = Médecine-Chirurgie-Obstétrique (court séjour). Acute-care hospitals.
+//   SSR   = Soins de Suite et Réadaptation. Follow-up / rehabilitation establishments.
+//   EHPAD = Établissements pour personnes âgées dépendantes + adjacent senior housing.
+//
+// Anything outside these three families falls back to "autre" for V0.2 scope.
+// Future scopes (psychiatry, ambulatoire, labo, pharmacie, ...) will be added as
+// distinct family values when their consumer use cases are confirmed.
+
+// MCO: deliberately diverges from FINESS_HOPITAUX (line 39) on two points:
+//   - excludes 292 (CHS) and 362 (CH spé psychiatrie) — psychiatry is its own
+//     planned family, NOT acute-care MCO.
+//   - includes 365 (CLCC = Centre de Lutte Contre le Cancer), which DREES treats
+//     as acute-care oncology, but FINESS_HOPITAUX (a more "hospitals in general"
+//     bucket) does not list.
+// Do NOT replace this Set with `new Set(FINESS_HOPITAUX)` — the lists are
+// intentionally different.
+const MCO_CODES = new Set<string>([
   "108", // CHU
   "355", // CH
   "354", // Hôpital privé
@@ -74,19 +87,58 @@ const MCO_CODES = new Set([
   "365", // Centre de Lutte Contre le Cancer
   "106", // Hôpital local
 ]);
-const SSR_CODES = new Set([
+
+// SSR: deliberately conservative for V0.2 — only the unambiguous "109" code.
+// Code 122 (Centre de cure médicale) overlaps DREES SSR semantically but is
+// classification-ambiguous; left in DELIBERATELY_AUTRE below until product
+// scope clarifies.
+const SSR_CODES = new Set<string>([
   "109", // SSR
 ]);
-const EHPAD_CODES = new Set([
-  "500", // EHPAD
-  "501", // Maison de retraite
-  "502", // Logement-foyer
+
+// EHPAD: derived from the existing FINESS_EHPAD constant to keep a single
+// source of truth. Adding a code to FINESS_EHPAD automatically updates the
+// family classification.
+const EHPAD_CODES = new Set<string>(FINESS_EHPAD);
+
+// Codes present in FINESS_CATEGORIES that we deliberately map to "autre" in V0.2.
+// This list exists so that the invariant test in finess-categories.test.ts can
+// fail when a new code is added to FINESS_CATEGORIES without an explicit family
+// decision — preventing silent classification regressions on DREES nomenclature
+// updates.
+export const DELIBERATELY_AUTRE = new Set<string>([
+  "292", // CHS                      → psychiatrie (out of V0.2 scope)
+  "362", // CH spé psychiatrie       → psychiatrie
+  "120", // Hôpital de jour          → ambiguous (MCO vs autre)
+  "122", // Centre de cure médicale  → DREES classification ambiguous (cure ≈ SSR but not always)
+  "124", // Centre de Santé          → ambulatoire (planned family)
+  "603", // MSP                      → ambulatoire (re-exported as FINESS_MSP_CPTS)
+  "604", // CPTS                     → ambulatoire
+  "611", // Laboratoire              → labo (re-exported as FINESS_LABOS, planned family)
+  "619", // Cabinet d'imagerie       → imagerie (planned family)
+  "620", // Pharmacie                → pharmacie (re-exported as FINESS_PHARMACIES)
+  "697", // GCS                      → groupement de coopération
+  "698", // GCSMS                    → groupement
+  "600", // Foyer handicapés         → médico-social handicap (≠ EHPAD)
 ]);
 
+/**
+ * Classify a FINESS category code into a family for query-side filtering.
+ *
+ * Inputs:
+ *   - `null` or `undefined`: legitimate "field absent in source row" → "autre".
+ *   - empty string `""`: distinct from null — typically signals an upstream CSV
+ *     parsing bug (column shift, header mismatch). Returns "autre" but kept as
+ *     a separate code path so callers can detect+log empty-rate at the ingest
+ *     boundary if needed.
+ *   - any other string: trimmed, then matched against the family Sets above.
+ */
 export function finessFamille(code: string | null | undefined): FinessFamille {
-  if (!code) return "autre";
-  if (MCO_CODES.has(code)) return "mco";
-  if (SSR_CODES.has(code)) return "ssr";
-  if (EHPAD_CODES.has(code)) return "ehpad";
+  if (code === null || code === undefined) return "autre";
+  const trimmed = code.trim();
+  if (trimmed === "") return "autre";
+  if (MCO_CODES.has(trimmed)) return "mco";
+  if (SSR_CODES.has(trimmed)) return "ssr";
+  if (EHPAD_CODES.has(trimmed)) return "ehpad";
   return "autre";
 }

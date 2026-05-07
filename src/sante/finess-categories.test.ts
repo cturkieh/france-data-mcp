@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { finessFamille } from "./finess-categories";
+import { DELIBERATELY_AUTRE, FINESS_CATEGORIES, finessFamille } from "./finess-categories";
 
 describe("finessFamille", () => {
   it("maps MCO codes to 'mco'", () => {
@@ -30,6 +30,35 @@ describe("finessFamille", () => {
     expect(finessFamille("620")).toBe("autre"); // Pharmacie
     expect(finessFamille(null)).toBe("autre");
     expect(finessFamille(undefined)).toBe("autre");
+  });
+
+  it("returns 'autre' for empty string and pure-whitespace inputs", () => {
+    // Empty string is semantically distinct from null (likely upstream parsing
+    // bug) but currently both map to "autre" — pinned here so the contract is
+    // explicit. Detection of empty-rate happens at the ingest boundary.
     expect(finessFamille("")).toBe("autre");
+    expect(finessFamille("   ")).toBe("autre");
+    expect(finessFamille("\t")).toBe("autre");
+  });
+
+  it("trims surrounding whitespace before matching", () => {
+    expect(finessFamille(" 108 ")).toBe("mco");
+    expect(finessFamille("\t500\n")).toBe("ehpad");
+    expect(finessFamille("109 ")).toBe("ssr");
+  });
+
+  it("invariant: every FINESS_CATEGORIES code has an explicit family decision", () => {
+    // Adding a code to FINESS_CATEGORIES without classifying it (either via
+    // a family Set or via DELIBERATELY_AUTRE) is a silent-failure trap. This
+    // test forces the decision to be explicit at code-review time.
+    for (const code of Object.keys(FINESS_CATEGORIES)) {
+      const fam = finessFamille(code);
+      if (fam === "autre") {
+        expect(
+          DELIBERATELY_AUTRE.has(code),
+          `Code "${code}" (${(FINESS_CATEGORIES as Record<string, string>)[code]}) is in FINESS_CATEGORIES but maps to "autre" without being declared in DELIBERATELY_AUTRE. Add it to a family Set or to DELIBERATELY_AUTRE with a comment.`,
+        ).toBe(true);
+      }
+    }
   });
 });
