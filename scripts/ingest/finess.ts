@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
 import { parseCoordinates } from "../../src/core/coords.js";
+import { requireEnv } from "../../src/storage/supabase.js";
 import {
   IngestError,
   type IngestLogEntry,
@@ -54,15 +55,17 @@ interface FinessStagingRow {
  * and avoids `as any` casts on the payload.
  */
 function getUntypedServiceClient(): SupabaseClient {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key) {
-    throw new IngestError(
-      "copy",
-      "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY — required for staging inserts.",
-    );
+  // Reuse the shared `requireEnv` helper so empty-string env vars are
+  // diagnosed the same way as in the typed clients (catches misconfigured
+  // GitHub Secrets early — see SFH-1 round 2 audit).
+  try {
+    const url = requireEnv("SUPABASE_URL");
+    const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+    return createClient(url, key, { auth: { persistSession: false } });
+  } catch (err) {
+    console.error("[finess] failed to build service client:", err);
+    throw new IngestError("copy", err instanceof Error ? err.message : String(err), err);
   }
-  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 async function main(): Promise<void> {
@@ -135,7 +138,7 @@ async function main(): Promise<void> {
     log.finished_at = new Date().toISOString();
     await writeIngestLog(log);
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
-    console.log(`[finess] success: ${rowCount} rows ingested in ${elapsedSec}s`);
+    console.log(`[finess] success: ${stats.inserted} rows ingested in ${elapsedSec}s`);
   } catch (err) {
     console.error("[finess] ingestion failed:", err);
     const ingestErr =
@@ -209,10 +212,10 @@ type ParsedFinessRow =
   | { row: FinessStagingRow; skipReason?: never }
   | { row?: never; skipReason: "no_finess_id" | "no_commune" };
 
-const getNonEmpty = (rec: Record<string, string>, name: string): string | null => {
+function getNonEmpty(rec: Record<string, string>, name: string): string | null {
   const v = rec[name];
   return v === undefined || v === "" ? null : v;
-};
+}
 
 function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   const numFiness = getNonEmpty(rec, "nofinesset");

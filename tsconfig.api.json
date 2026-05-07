@@ -6,6 +6,6 @@
     "declaration": false,
     "declarationMap": false
   },
-  "include": ["api", "src"],
+  "include": ["api", "src", "scripts"],
   "exclude": ["node_modules", "dist", "examples", "**/*.test.ts"]
 }

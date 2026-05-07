@@ -98,16 +98,7 @@ export async function getFinessInRadius(input: InRadiusInput): Promise<FinessQue
   if (error) {
     throw new Error(`[france-data-mcp] finess_in_radius RPC failed: ${error.message}`);
   }
-
-  const rows = (data ?? []) as RawFinessRow[];
-  const truncated = rows.length > limit;
-  const sliced = truncated ? rows.slice(0, limit) : rows;
-
-  return {
-    count: sliced.length,
-    truncated,
-    results: sliced.map(toFinessResult),
-  };
+  return buildFinessQueryResult(data, limit);
 }
 
 /**
@@ -127,19 +118,21 @@ export async function getFinessByCategorie(input: ByCategorieInput): Promise<Fin
   if (error) {
     throw new Error(`[france-data-mcp] finess_by_categorie failed: ${error.message}`);
   }
+  return buildFinessQueryResult(data, limit);
+}
 
+// --- internals -------------------------------------------------------------
+
+function buildFinessQueryResult(data: unknown, limit: number): FinessQueryResult {
   const rows = (data ?? []) as RawFinessRow[];
   const truncated = rows.length > limit;
   const sliced = truncated ? rows.slice(0, limit) : rows;
-
   return {
     count: sliced.length,
     truncated,
     results: sliced.map(toFinessResult),
   };
 }
-
-// --- internals -------------------------------------------------------------
 
 interface RawFinessRow {
   num_finess: string;

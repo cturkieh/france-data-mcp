@@ -4,7 +4,13 @@ import type { Database } from "./supabase-types.js";
 let anonClient: SupabaseClient<Database> | null = null;
 let serviceClient: SupabaseClient<Database> | null = null;
 
-function requireEnv(name: string): string {
+/**
+ * Read a required environment variable, distinguishing "absent" from "set
+ * but empty" — the latter is the typical signature of a misconfigured GitHub
+ * Secret (renamed, unscoped, or out-of-org). Exported so ingestion scripts
+ * (`scripts/ingest/*`) can reuse the same diagnostic.
+ */
+export function requireEnv(name: string): string {
   const value = process.env[name];
   if (value === undefined) {
     throw new Error(
