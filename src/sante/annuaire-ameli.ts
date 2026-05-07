@@ -60,7 +60,15 @@ export type ProfessionnelSante = {
 };
 
 export type StreamAnnuaireOptions = CacheOptions & {
-  /** Chemin local d'un CSV déjà téléchargé (court-circuite le download) */
+  /**
+   * Chemin local d'un CSV déjà téléchargé (court-circuite le download).
+   *
+   * @security Cette option fait un `readFile` direct du chemin fourni. Ne
+   * JAMAIS la forwarder depuis une entrée non-trustée (requête HTTP, args MCP) :
+   * c'est un read fichier local non restreint qui peut exposer des fichiers
+   * sensibles. Strictement réservé à un usage Node.js trusted (CLI, script,
+   * code applicatif).
+   */
   csvPath?: string;
 };
 
@@ -98,8 +106,9 @@ export async function ensureAnnuaireAmeli(options: StreamAnnuaireOptions = {}): 
  *
  * @example Tous les MG du 08
  * ```ts
+ * const out: string[] = [];
  * for await (const ps of streamProfessionnels({ codePostalPrefix: "08", specialite: "généraliste" })) {
- *   console.log(`${ps.nom} ${ps.prenom} - ${ps.commune}`);
+ *   out.push(`${ps.nom} ${ps.prenom} - ${ps.commune}`);
  * }
  * ```
  */
@@ -109,7 +118,6 @@ export async function* streamProfessionnels(
   const csvPath = await ensureAnnuaireAmeli(options);
 
   const fileStream = createReadStream(csvPath, { encoding: "utf-8" });
-  const stringStream = nodeReadableToAsyncIterable(fileStream);
 
   const {
     codePostal,
@@ -126,28 +134,54 @@ export async function* streamProfessionnels(
   const communeLower = commune?.toLowerCase();
   const typePsLower = typePs?.toLowerCase();
   let yielded = 0;
+  let parsed = 0;
+  let skipped = 0;
 
-  for await (const row of streamCsvLines(stringStream, { delimiter: ";" })) {
-    const ps = toProfessionnelSante(row);
-    if (!ps) continue;
+  try {
+    const stringStream = nodeReadableToAsyncIterable(fileStream);
+    for await (const row of streamCsvLines(stringStream, { delimiter: ";" })) {
+      parsed++;
+      const ps = toProfessionnelSante(row);
+      if (!ps) {
+        skipped++;
+        continue;
+      }
 
-    if (codePostal && ps.codePostal !== codePostal) continue;
-    if (codePostalPrefix && (!ps.codePostal || !ps.codePostal.startsWith(codePostalPrefix)))
-      continue;
-    if (communeLower && (!ps.commune || !ps.commune.toLowerCase().includes(communeLower))) continue;
-    if (
-      specialiteLower &&
-      (!ps.specialiteLibelle || !ps.specialiteLibelle.toLowerCase().includes(specialiteLower))
-    )
-      continue;
-    if (specialiteCode && ps.specialiteCode !== specialiteCode) continue;
-    if (typePsLower && (!ps.typePsLibelle || !ps.typePsLibelle.toLowerCase().includes(typePsLower)))
-      continue;
-    if (secteurConventionnel && ps.secteurConventionnel !== secteurConventionnel) continue;
+      if (codePostal && ps.codePostal !== codePostal) continue;
+      if (codePostalPrefix && (!ps.codePostal || !ps.codePostal.startsWith(codePostalPrefix)))
+        continue;
+      if (communeLower && (!ps.commune || !ps.commune.toLowerCase().includes(communeLower)))
+        continue;
+      if (
+        specialiteLower &&
+        (!ps.specialiteLibelle || !ps.specialiteLibelle.toLowerCase().includes(specialiteLower))
+      )
+        continue;
+      if (specialiteCode && ps.specialiteCode !== specialiteCode) continue;
+      if (
+        typePsLower &&
+        (!ps.typePsLibelle || !ps.typePsLibelle.toLowerCase().includes(typePsLower))
+      )
+        continue;
+      if (secteurConventionnel && ps.secteurConventionnel !== secteurConventionnel) continue;
 
-    yield ps;
-    yielded++;
-    if (limit !== undefined && yielded >= limit) return;
+      yield ps;
+      yielded++;
+      if (limit !== undefined && yielded >= limit) return;
+    }
+  } finally {
+    // Détruit explicitement le stream pour libérer le file descriptor même si
+    // le caller fait `break` ou `return` au milieu (cas typique avec `limit`).
+    fileStream.destroy();
+    // Si plus de 10% des lignes parsées sont invalides, c'est probablement un
+    // changement de schéma upstream (Ameli renomme une colonne, format CSV
+    // qui évolue). Le skip silencieux serait dangereux : un caller pourrait
+    // recevoir 0 résultat alors que le fichier en contient des milliers.
+    if (parsed > 100 && skipped > parsed * 0.1) {
+      console.warn(
+        `[france-data-mcp] annuaire-ameli: ${skipped}/${parsed} lignes invalides (${((skipped / parsed) * 100).toFixed(1)}%). Schéma CSV peut-être changé. Colonnes attendues: ps_activite_nom, ps_activite_prenom, specialite_libelle, coordonnees_code_postal, coordonnees_ville. Vérifier https://www.data.gouv.fr/datasets/annuaire-sante-ameli/`,
+      );
+    }
   }
 }
 
@@ -168,8 +202,14 @@ export async function loadProfessionnels(
 async function* nodeReadableToAsyncIterable(
   readable: NodeJS.ReadableStream,
 ): AsyncGenerator<string> {
-  for await (const chunk of readable) {
-    yield typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+  try {
+    for await (const chunk of readable) {
+      yield typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    }
+  } finally {
+    if ("destroy" in readable && typeof readable.destroy === "function") {
+      readable.destroy();
+    }
   }
 }
 
@@ -196,12 +236,7 @@ function toProfessionnelSante(row: Record<string, string>): ProfessionnelSante |
   const typePsLibelle = row.type_ps_libelle;
   if (typePsLibelle) ps.typePsLibelle = typePsLibelle;
 
-  const adresseParts = [
-    row.coordonnees_num_tel ? "" : row.coordonnees_voie,
-    row.coordonnees_voie,
-  ].filter(Boolean);
   if (row.coordonnees_voie) ps.adresse = row.coordonnees_voie;
-  else if (adresseParts.length > 0) ps.adresse = adresseParts.join(" ");
 
   const complement = row.coordonnees_complement ?? row.coordonnees_lieu_dit;
   if (complement) ps.complementAdresse = complement;

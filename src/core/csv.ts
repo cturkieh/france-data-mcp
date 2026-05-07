@@ -128,7 +128,7 @@ export async function* streamCsvLines(
     }
   }
 
-  if (buffer.length > 0 && headers) {
+  if (buffer.trim().length > 0 && headers) {
     yield rowToObject(headers, parseCsvLine(buffer, options));
   }
 }
@@ -144,22 +144,39 @@ function rowToObject(headers: string[], values: string[]): Record<string, string
 
 /**
  * Adapte un Web ReadableStream<Uint8Array> en AsyncIterable<string> pour
- * `streamCsvLines`. Décode en UTF-8.
+ * `streamCsvLines`. Décode en UTF-8 strict (`fatal: true`) : si le dump
+ * contient des octets invalides (latin-1 ou corruption), on throw au lieu de
+ * silencieusement insérer des U+FFFD qui casseraient les filtres
+ * insensibles à la casse sur les caractères accentués.
  */
 export async function* streamReaderToStrings(
   reader: ReadableStream<Uint8Array>,
 ): AsyncGenerator<string> {
-  const decoder = new TextDecoder("utf-8");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   const r = reader.getReader();
   try {
     while (true) {
       const { done, value } = await r.read();
       if (done) {
-        const final = decoder.decode();
-        if (final) yield final;
+        try {
+          const final = decoder.decode();
+          if (final) yield final;
+        } catch (decodeErr) {
+          console.error(
+            `[france-data-mcp] UTF-8 decode error at end of stream: ${(decodeErr as Error).message}. Le dump n'est peut-être pas en UTF-8.`,
+          );
+          throw decodeErr;
+        }
         break;
       }
-      yield decoder.decode(value, { stream: true });
+      try {
+        yield decoder.decode(value, { stream: true });
+      } catch (decodeErr) {
+        console.error(
+          `[france-data-mcp] UTF-8 decode error in CSV stream: ${(decodeErr as Error).message}.`,
+        );
+        throw decodeErr;
+      }
     }
   } finally {
     r.releaseLock();

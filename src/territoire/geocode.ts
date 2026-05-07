@@ -67,9 +67,16 @@ type ApiResponse = {
   features: ApiFeature[];
 };
 
+/** Seuil sous lequel on considère qu'un match géocodage est très incertain. */
+const LOW_SCORE_THRESHOLD = 0.5;
+
 /**
  * Géocode une adresse en coordonnées GPS.
  * Renvoie `null` si aucun résultat n'est trouvé.
+ *
+ * Si le meilleur match a un score < 0.5, on émet un `console.warn` parce qu'un
+ * faux match plausible est plus dangereux qu'un null (le caller risque
+ * d'utiliser des coordonnées qui pointent vers une autre commune).
  *
  * @example
  * ```ts
@@ -82,7 +89,14 @@ export async function geocode(
   options: GeocodeOptions = {},
 ): Promise<GeocodeResult | null> {
   const results = await geocodeMany(address, { ...options, limit: 1 });
-  return results[0] ?? null;
+  const top = results[0];
+  if (!top) return null;
+  if (top.score < LOW_SCORE_THRESHOLD) {
+    console.warn(
+      `[france-data-mcp] geocode("${address}"): score ${top.score.toFixed(2)} < ${LOW_SCORE_THRESHOLD} — résultat très incertain (label retourné: "${top.label}").`,
+    );
+  }
+  return top;
 }
 
 /**
@@ -129,7 +143,7 @@ function toGeocodeResult(feature: ApiFeature): GeocodeResult {
     point: { lon, lat },
     label: feature.properties.label,
     score: feature.properties.score,
-    type: feature.properties.type as GeocodeResult["type"],
+    type: feature.properties.type,
   };
   if (feature.properties.postcode) result.codePostal = feature.properties.postcode;
   if (feature.properties.citycode) result.codeCommune = feature.properties.citycode;

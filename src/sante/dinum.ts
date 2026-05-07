@@ -246,13 +246,17 @@ export async function getEntrepriseBySiren(
   if (!/^\d{9}$/.test(siren)) {
     throw new Error(`getEntrepriseBySiren: SIREN invalide "${siren}" (attendu 9 chiffres)`);
   }
-  const result = await searchEntreprises({
-    q: `siren:${siren}`,
-    perPage: 1,
-    onlyActive: false,
-    signal,
-  });
-  return result.entreprises[0] ?? null;
+  // L'API DINUM ne supporte pas la syntaxe Lucene `q=siren:XXX` : on passe le SIREN
+  // en plain `q` (full-text matche le SIREN), puis on filtre côté client sur l'égalité
+  // exacte parce que `q` peut renvoyer des entreprises dont le nom contient les chiffres.
+  const result = await searchEntreprises({ q: siren, perPage: 5, onlyActive: false, signal });
+  const match = result.entreprises.find((e) => e.siren === siren);
+  if (!match && result.entreprises.length > 0) {
+    console.warn(
+      `[france-data-mcp] getEntrepriseBySiren(${siren}): l'API a renvoyé ${result.entreprises.length} résultat(s) sans match exact du SIREN.`,
+    );
+  }
+  return match ?? null;
 }
 
 function toEntreprise(api: ApiEntreprise): Entreprise {

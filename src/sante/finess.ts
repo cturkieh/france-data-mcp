@@ -54,7 +54,14 @@ export type EtablissementFiness = {
 };
 
 export type LoadFinessOptions = CacheOptions & {
-  /** Chemin local d'un CSV déjà téléchargé (court-circuite le download) */
+  /**
+   * Chemin local d'un CSV déjà téléchargé (court-circuite le download).
+   *
+   * @security Cette option fait un `readFile` direct du chemin fourni. Ne
+   * JAMAIS la forwarder depuis une entrée non-trustée (requête HTTP, args MCP) :
+   * c'est un read fichier local non restreint. Strictement réservé à un usage
+   * Node.js trusted.
+   */
   csvPath?: string;
 };
 
@@ -85,7 +92,23 @@ export async function loadFiness(options: LoadFinessOptions = {}): Promise<Etabl
 
   const content = await readFile(csvPath, "utf-8");
   const rows = parseCsv(content, { delimiter: ";" });
-  return rows.map(toEtablissementFiness).filter((e): e is EtablissementFiness => e !== null);
+  const ets = rows.map(toEtablissementFiness).filter((e): e is EtablissementFiness => e !== null);
+
+  // Si plus de 5% des lignes sont droppées (champ FINESS_ET manquant), c'est
+  // probablement une migration de schéma upstream (annoncée par l'ANS pour
+  // l'été 2026). Le silence serait dangereux : `searchEtablissementsFiness`
+  // renverrait `[]` sans alerte alors que l'index est cassé.
+  const total = rows.length;
+  if (total > 100) {
+    const dropRate = (total - ets.length) / total;
+    if (dropRate > 0.05) {
+      console.error(
+        `[france-data-mcp] FINESS: ${total - ets.length}/${total} lignes invalides (${(dropRate * 100).toFixed(1)}%). Schéma CSV probablement changé. Colonnes attendues: nofinesset, rs, categetab, cpostal, commune. Migration ANS prévue été 2026 — vérifier github.com/ansforge/finess et https://www.data.gouv.fr/datasets/finess-extraction-du-fichier-des-etablissements-sanitaires-et-sociaux/`,
+      );
+    }
+  }
+
+  return ets;
 }
 
 /**

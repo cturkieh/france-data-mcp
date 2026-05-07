@@ -10,7 +10,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -60,12 +60,32 @@ export async function downloadWithCache(
     signal,
   });
   if (!response.ok) {
-    throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
+    throw new Error(`Failed to download ${url}: HTTP ${response.status} ${response.statusText}`);
   }
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await writeFile(cachePath, buffer);
-  return cachePath;
+  // Écriture atomique : on écrit dans un fichier .tmp, puis on `rename` qui est
+  // atomique au niveau du FS. Si le download échoue ou que l'écriture est
+  // interrompue, on n'a jamais un cachePath corrompu.
+  const tmpPath = `${cachePath}.tmp.${process.pid}`;
+  try {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await writeFile(tmpPath, buffer);
+    await rename(tmpPath, cachePath);
+    return cachePath;
+  } catch (err) {
+    console.error(
+      `[france-data-mcp] cache write failed for ${url} → ${cachePath}: ${(err as Error).message}`,
+    );
+    await unlink(tmpPath).catch((unlinkErr: unknown) => {
+      const code = (unlinkErr as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        console.warn(
+          `[france-data-mcp] failed to clean up temp cache file ${tmpPath} (${code ?? "unknown"}): ${(unlinkErr as Error).message}`,
+        );
+      }
+    });
+    throw err;
+  }
 }
 
 async function isCacheFresh(filePath: string, ttlMs: number): Promise<boolean> {
@@ -75,9 +95,13 @@ async function isCacheFresh(filePath: string, ttlMs: number): Promise<boolean> {
     const ageMs = Date.now() - stats.mtimeMs;
     return ageMs < ttlMs;
   } catch (err) {
-    console.warn(
-      `[france-data-mcp] could not stat cache file ${filePath}: ${(err as Error).message}`,
+    const code = (err as NodeJS.ErrnoException).code;
+    // ENOENT = race entre existsSync et stat, OK on retélécharge
+    if (code === "ENOENT") return false;
+    // EACCES, EROFS, ENOSPC = problème système réel, on doit le savoir
+    console.error(
+      `[france-data-mcp] cache stat failed unexpectedly for ${filePath} (${code ?? "unknown"}): ${(err as Error).message}`,
     );
-    return false;
+    throw err;
   }
 }

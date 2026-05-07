@@ -77,7 +77,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
   const responses: Array<JsonRpcSuccess | JsonRpcError> = [];
 
   for (const request of requests) {
-    const response = await handleRpc(request);
+    let response: JsonRpcSuccess | JsonRpcError | null = null;
+    try {
+      if (!request || typeof request !== "object") {
+        response = error(null, -32600, "Invalid Request: not a JSON-RPC object");
+      } else {
+        response = await handleRpc(request);
+      }
+    } catch (err) {
+      // Filet de sécurité pour les exceptions synchrones hors du try interne
+      // de handleRpc (ex: accès à request.id sur un null, JSON.stringify d'un
+      // objet circulaire). Sans ce filet, la fonction Vercel crash sans réponse
+      // et le client MCP timeout sans diagnostic.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[france-data-mcp] unexpected error in batch loop: ${message}`);
+      response = error(null, -32603, `Internal error in batch handling: ${message}`);
+    }
     if (response) responses.push(response);
   }
 
@@ -131,13 +146,16 @@ async function handleRpc(request: JsonRpcRequest): Promise<JsonRpcSuccess | Json
         return error(id, -32602, `Unknown tool: ${name}`);
       }
       const result = await tool.handler(args);
+      let resultText: string;
+      try {
+        resultText = JSON.stringify(result, null, 2);
+      } catch (stringifyErr) {
+        const msg = stringifyErr instanceof Error ? stringifyErr.message : String(stringifyErr);
+        console.error(`[france-data-mcp] tools/call ${name}: JSON.stringify failed: ${msg}`);
+        return error(id, -32603, `Tool ${name} returned a non-serialisable value: ${msg}`);
+      }
       return success(id, {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
+        content: [{ type: "text", text: resultText }],
       });
     }
 

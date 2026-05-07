@@ -98,6 +98,12 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
     } catch (err) {
       if (err instanceof HttpError) throw err;
       lastError = err as Error;
+      // Une SyntaxError du JSON parser veut dire que l'API a renvoyé un body non-JSON
+      // (HTML d'erreur, page de maintenance…). Le retry ne servira à rien — on échoue vite.
+      if (lastError instanceof SyntaxError) {
+        console.error(`[france-data-mcp] invalid JSON response from ${url}: ${lastError.message}`);
+        throw lastError;
+      }
       const isFinalAttempt = attempt === maxRetries;
       const log = isFinalAttempt ? console.error : console.warn;
       log(
@@ -116,6 +122,12 @@ function parseRetryAfter(header: string | null): number {
   if (!header) return 5;
   const seconds = Number.parseInt(header, 10);
   if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, 60);
+  // Format HTTP-date (RFC 7231 §7.1.3) : "Wed, 21 Oct 2015 07:28:00 GMT"
+  const dateMs = Date.parse(header);
+  if (Number.isFinite(dateMs)) {
+    const deltaSec = Math.ceil((dateMs - Date.now()) / 1000);
+    if (deltaSec > 0) return Math.min(deltaSec, 60);
+  }
   return 5;
 }
 
