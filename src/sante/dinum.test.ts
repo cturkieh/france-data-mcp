@@ -35,6 +35,11 @@ function apiResponse(
   });
 }
 
+/** URL de la dernière requête fetch interceptée. */
+function lastFetchUrl(): string {
+  return fetchMock.mock.calls[0]?.[0] as string;
+}
+
 describe("searchEntreprises", () => {
   it("recherche labos par NAF + rayon géographique", async () => {
     fetchMock.mockResolvedValue(
@@ -87,7 +92,7 @@ describe("searchEntreprises", () => {
     expect(labo?.etablissements[0]?.point).toEqual({ lon: 4.7192, lat: 49.7672 });
     expect(labo?.dirigeants[0]?.nom).toBe("DUPONT");
 
-    const url = fetchMock.mock.calls[0]?.[0] as string;
+    const url = lastFetchUrl();
     expect(url).toContain("q=laboratoire");
     expect(url).toContain("lat=49.7672");
     expect(url).toContain("long=4.7192");
@@ -131,29 +136,26 @@ describe("searchEntreprises", () => {
       center: { lon: 4.7, lat: 49.7 },
       radiusKm: 999,
     });
-    const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).toContain("radius=50");
+    expect(lastFetchUrl()).toContain("radius=50");
   });
 
   it("clamp perPage à 25", async () => {
     fetchMock.mockResolvedValue(apiResponse({}));
     await searchEntreprises({ naf: "4773Z", perPage: 999 });
-    const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).toContain("per_page=25");
+    expect(lastFetchUrl()).toContain("per_page=25");
   });
 
   it("filtre par département", async () => {
     fetchMock.mockResolvedValue(apiResponse({}));
     await searchEntreprises({ naf: "8710A", departement: "08" });
-    const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).toContain("departement=08");
+    expect(lastFetchUrl()).toContain("departement=08");
   });
 
   it("normalise le NAF compact (8690B) en format pointé (86.90B) attendu par DINUM", async () => {
     fetchMock.mockResolvedValue(apiResponse({}));
     await searchEntreprises({ naf: "8690B", departement: "08" });
-    const url = fetchMock.mock.calls[0]?.[0] as string;
     // L'URL doit contenir 86.90B (URL-encoded en 86.90B ou 86%2E90B selon URLSearchParams)
+    const url = lastFetchUrl();
     expect(url).toMatch(/activite_principale=86\.?90B/);
     expect(url).not.toMatch(/activite_principale=8690B[^.]/);
   });
@@ -161,8 +163,7 @@ describe("searchEntreprises", () => {
   it("préserve un NAF déjà au format pointé", async () => {
     fetchMock.mockResolvedValue(apiResponse({}));
     await searchEntreprises({ naf: "86.90B", departement: "08" });
-    const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).toMatch(/activite_principale=86\.?90B/);
+    expect(lastFetchUrl()).toMatch(/activite_principale=86\.?90B/);
   });
 });
 
@@ -178,7 +179,7 @@ describe("getEntrepriseBySiren", () => {
     // n'est pas supporté par l'API DINUM. Tester explicitement la query string.
     fetchMock.mockResolvedValue(apiResponse({ results: [] }));
     await getEntrepriseBySiren("787120435");
-    const url = fetchMock.mock.calls[0]?.[0] as string;
+    const url = lastFetchUrl();
     expect(url).toContain("q=787120435");
     expect(url).not.toContain("siren%3A");
     expect(url).not.toContain("siren:");
@@ -228,8 +229,7 @@ describe("getEntrepriseBySiren", () => {
     // getEntrepriseBySiren doit pouvoir retrouver des entreprises radiées
     fetchMock.mockResolvedValue(apiResponse({ results: [] }));
     await getEntrepriseBySiren("787120435");
-    const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).not.toContain("etat_administratif=A");
+    expect(lastFetchUrl()).not.toContain("etat_administratif=A");
   });
 
   it("retourne l'entreprise avec finances ordonnées par année décroissante", async () => {

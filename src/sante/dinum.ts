@@ -93,7 +93,13 @@ export type SearchEntreprisesOptions = {
   departement?: string;
   /** Filtre par code commune INSEE */
   codeCommune?: string;
-  /** Recherche géographique : centre + rayon (km, max 50). Combine avec `q` ou `naf`. */
+  /**
+   * Recherche géographique : centre + rayon (km, max 50). DOIT être combiné
+   * avec `q` (recherche textuelle) — l'API DINUM rejette `naf + lat/lon/radius`
+   * directement. Pour combiner NAF + zone géographique, utiliser le tool MCP
+   * `entreprises_in_radius` qui applique un fallback automatique
+   * (reverseGeocode → département → filtre Haversine).
+   */
   center?: Coordinates;
   /** Rayon en km (1-50). Requis si `center` est fourni. */
   radiusKm?: number;
@@ -287,12 +293,16 @@ export async function getEntrepriseBySiren(
  * L'API DINUM rejette les codes en format INSEE compact (`8690B`) avec un
  * HTTP 400 et la liste des valeurs valides. La nomenclature officielle utilise
  * des points (`86.90B`), donc on accepte les deux entrées et on convertit.
+ *
+ * On exige la lettre finale (`[A-Z]`) parce que les codes NAF sans lettre
+ * (ex: `"8690"`) ne correspondent à aucune sous-classe valide — laisser passer
+ * un tel code en le réécrivant `"86.90"` produirait toujours un 400, sans gain.
  */
 function normalizeNafCode(naf: string): string {
-  // Déjà au format pointé : "86.90B" ou "01.11Z"
-  if (/^\d{2}\.\d{2}[A-Z]?$/.test(naf)) return naf;
-  // Format compact : "8690B" → "86.90B", "0111Z" → "01.11Z"
-  if (/^\d{4}[A-Z]?$/.test(naf)) return `${naf.slice(0, 2)}.${naf.slice(2)}`;
+  // Déjà au format pointé : "86.90B"
+  if (/^\d{2}\.\d{2}[A-Z]$/.test(naf)) return naf;
+  // Format compact : "8690B" → "86.90B"
+  if (/^\d{4}[A-Z]$/.test(naf)) return `${naf.slice(0, 2)}.${naf.slice(2)}`;
   // Format inconnu : on laisse passer, l'API renverra une erreur claire
   return naf;
 }

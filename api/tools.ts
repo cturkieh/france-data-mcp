@@ -8,7 +8,11 @@
  */
 
 import { haversineDistance } from "../src/sante/finess.js";
-import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
+import {
+  type SearchEntreprisesResult,
+  getEntrepriseBySiren,
+  searchEntreprises,
+} from "../src/sante/index.js";
 import {
   geocode,
   getCommuneByCode,
@@ -22,6 +26,127 @@ export type McpTool = {
   inputSchema: Record<string, unknown>;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 };
+
+/** Garde de typage : renvoie la valeur si c'est une string, sinon undefined. */
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Garde de typage : renvoie la valeur si c'est un number fini, sinon undefined. */
+function asNumber(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * Réponse enrichie du fallback `naf + center+radiusKm` (limite API DINUM).
+ *
+ * Le champ `fallback` documente la stratégie ET signale honnêtement quand la
+ * réponse peut être incomplète (`truncated: true` quand l'API a renvoyé plus
+ * d'entreprises NAF dans le département qu'on n'a pu en évaluer).
+ *
+ * - `total` : nombre d'entreprises dans le rayon (post-filtrage Haversine).
+ * - `fallback.totalInDepartement` : nombre total NAF dans le département (avant Haversine).
+ * - `fallback.evaluees` : nombre d'entreprises effectivement évaluées (max 25).
+ * - `fallback.truncated` : true si on a évalué moins que `totalInDepartement`.
+ * - `fallback.warning` : message actionnable pour le caller, présent uniquement quand truncated.
+ */
+type EntreprisesInRadiusFallbackResult = SearchEntreprisesResult & {
+  fallback: {
+    strategy: string;
+    departementUtilise: string;
+    evaluees: number;
+    totalInDepartement: number;
+    truncated: boolean;
+    warning?: string;
+  };
+};
+
+/**
+ * Extrait le code département d'un code commune INSEE.
+ *
+ * - Métropole + Corse (`08105` → `08`, `2A004` → `2A`) : 2 caractères.
+ * - DOM (`974xx` → `974`, `971xx` → `971`) : 3 caractères, codes commençant par `97` ou `98`.
+ *
+ * Renvoie `undefined` si le codeCommune est trop court ou vide.
+ */
+export function deptFromCommune(codeCommune: string | undefined): string | undefined {
+  if (!codeCommune || codeCommune.length < 2) return undefined;
+  if (codeCommune.startsWith("97") || codeCommune.startsWith("98")) {
+    return codeCommune.length >= 3 ? codeCommune.slice(0, 3) : undefined;
+  }
+  return codeCommune.slice(0, 2);
+}
+
+/**
+ * Contourne la limitation API DINUM : `activite_principale + lat/long/radius`
+ * n'est pas supporté nativement (les coords requièrent un `q` textuel).
+ *
+ * Stratégie : reverseGeocode du centre → département → searchEntreprises filtré
+ * → filtre Haversine côté serveur sur les sièges des établissements.
+ *
+ * Limitation : seules les 25 premières entreprises NAF du département sont
+ * évaluées (cap `perPage` API DINUM).
+ */
+async function searchByNafInRadius(params: {
+  naf: string;
+  center: { lon: number; lat: number };
+  radiusKm: number;
+}): Promise<EntreprisesInRadiusFallbackResult> {
+  const { naf, center, radiusKm } = params;
+
+  let reverse: Awaited<ReturnType<typeof reverseGeocode>>;
+  try {
+    reverse = await reverseGeocode(center);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[france-data-mcp] entreprises_in_radius fallback: reverseGeocode failed for lon=${center.lon} lat=${center.lat}: ${msg}`,
+    );
+    throw new Error(
+      `entreprises_in_radius: reverseGeocode IGN a échoué (${msg}). Fournir 'departement' ou 'codePostal' explicitement pour contourner.`,
+    );
+  }
+
+  const fallbackDept = deptFromCommune(reverse?.codeCommune);
+  if (!fallbackDept) {
+    throw new Error(
+      `entreprises_in_radius: impossible de déduire le département du point lon=${center.lon} lat=${center.lat} via reverseGeocode (codeCommune="${reverse?.codeCommune ?? "absent"}"). Fournir 'departement' ou 'codePostal' explicitement.`,
+    );
+  }
+
+  const result = await searchEntreprises({
+    naf,
+    departement: fallbackDept,
+    perPage: 25,
+    page: 1,
+  });
+  const radiusMeters = radiusKm * 1000;
+  const filtered = result.entreprises.filter((e) =>
+    e.etablissements.some((et) => et.point && haversineDistance(center, et.point) <= radiusMeters),
+  );
+
+  const evaluees = result.entreprises.length;
+  const totalInDepartement = result.total;
+  const truncated = totalInDepartement > evaluees;
+  const fallback: EntreprisesInRadiusFallbackResult["fallback"] = {
+    strategy: "reverseGeocode + departement + Haversine client-side filter",
+    departementUtilise: fallbackDept,
+    evaluees,
+    totalInDepartement,
+    truncated,
+  };
+  if (truncated) {
+    fallback.warning = `Seules ${evaluees}/${totalInDepartement} entreprises NAF ${naf} du département ${fallbackDept} ont été évaluées (limite API DINUM 25 par page). Le résultat peut sous-estimer le nombre réel d'entreprises dans le rayon. Pour exhaustivité, restreindre par 'codePostal' précis ou utiliser un 'q' textuel avec center+radiusKm.`;
+  }
+
+  return {
+    ...result,
+    entreprises: filtered,
+    total: filtered.length,
+    totalPages: 1,
+    fallback,
+  };
+}
 
 export const TOOLS: McpTool[] = [
   {
@@ -51,10 +176,14 @@ export const TOOLS: McpTool[] = [
       const opts: Parameters<typeof searchCommunes>[0] = {
         boostPopulation: args.boostPopulation !== false,
       };
-      if (typeof args.nom === "string") opts.nom = args.nom;
-      if (typeof args.codePostal === "string") opts.codePostal = args.codePostal;
-      if (typeof args.code === "string") opts.code = args.code;
-      if (typeof args.limit === "number") opts.limit = args.limit;
+      const nom = asString(args.nom);
+      const codePostal = asString(args.codePostal);
+      const code = asString(args.code);
+      const limit = asNumber(args.limit);
+      if (nom) opts.nom = nom;
+      if (codePostal) opts.codePostal = codePostal;
+      if (code) opts.code = code;
+      if (limit !== undefined) opts.limit = limit;
       return searchCommunes(opts);
     },
   },
@@ -93,11 +222,14 @@ export const TOOLS: McpTool[] = [
       required: ["adresse"],
     },
     handler: async (args) => {
-      if (typeof args.adresse !== "string") throw new Error("adresse (string) requise");
+      const adresse = asString(args.adresse);
+      if (!adresse) throw new Error("adresse (string) requise");
       const opts: Parameters<typeof geocode>[1] = {};
-      if (typeof args.codePostal === "string") opts.codePostal = args.codePostal;
-      if (typeof args.codeCommune === "string") opts.codeCommune = args.codeCommune;
-      return geocode(args.adresse, opts);
+      const codePostal = asString(args.codePostal);
+      const codeCommune = asString(args.codeCommune);
+      if (codePostal) opts.codePostal = codePostal;
+      if (codeCommune) opts.codeCommune = codeCommune;
+      return geocode(adresse, opts);
     },
   },
   {
@@ -151,53 +283,22 @@ export const TOOLS: McpTool[] = [
       },
     },
     handler: async (args) => {
-      const naf = typeof args.naf === "string" ? args.naf : undefined;
-      const q = typeof args.q === "string" ? args.q : undefined;
-      const codePostal = typeof args.codePostal === "string" ? args.codePostal : undefined;
-      const departement = typeof args.departement === "string" ? args.departement : undefined;
-      const perPage = typeof args.perPage === "number" ? args.perPage : undefined;
-      const page = typeof args.page === "number" ? args.page : undefined;
-      const lon = typeof args.lon === "number" ? args.lon : Number.NaN;
-      const lat = typeof args.lat === "number" ? args.lat : Number.NaN;
-      const radiusKm = typeof args.radiusKm === "number" ? args.radiusKm : undefined;
-      const hasCoords = Number.isFinite(lon) && Number.isFinite(lat) && radiusKm !== undefined;
+      const naf = asString(args.naf);
+      const q = asString(args.q);
+      const codePostal = asString(args.codePostal);
+      const departement = asString(args.departement);
+      const perPage = asNumber(args.perPage);
+      const page = asNumber(args.page);
+      const lon = asNumber(args.lon);
+      const lat = asNumber(args.lat);
+      const radiusKm = asNumber(args.radiusKm);
+      const hasCoords = lon !== undefined && lat !== undefined && radiusKm !== undefined;
 
       // Cas qui pose problème côté API DINUM : `naf + lat/long/radius`. L'API
       // exige que les coords soient accompagnées d'un `q` textuel. On contourne
-      // en faisant un reverseGeocode pour obtenir le département (ou code commune),
-      // puis en filtrant côté client par distance Haversine sur le siège.
+      // via reverseGeocode + filtrage Haversine, géré dans `searchByNafInRadius`.
       if (naf && hasCoords && !q && !departement && !codePostal) {
-        const center = { lon, lat };
-        const reverse = await reverseGeocode(center);
-        const fallbackDept = reverse?.codeCommune?.slice(0, 2);
-        if (!fallbackDept) {
-          throw new Error(
-            `entreprises_in_radius: impossible de déduire le département du point lon=${lon} lat=${lat} via reverseGeocode. Fournir 'departement' ou 'codePostal' explicitement.`,
-          );
-        }
-        const result = await searchEntreprises({
-          naf,
-          departement: fallbackDept,
-          perPage: 25,
-          page: 1,
-        });
-        const radiusMeters = (radiusKm ?? 0) * 1000;
-        const filtered = result.entreprises.filter((e) =>
-          e.etablissements.some(
-            (et) => et.point && haversineDistance(center, et.point) <= radiusMeters,
-          ),
-        );
-        return {
-          ...result,
-          entreprises: filtered,
-          total: filtered.length,
-          totalPages: 1,
-          fallback: {
-            strategy: "reverseGeocode + departement + Haversine client-side filter",
-            departementUtilise: fallbackDept,
-            limite: "Au max 25 entreprises NAF du département évaluées (limite API).",
-          },
-        };
+        return searchByNafInRadius({ naf, center: { lon, lat }, radiusKm });
       }
 
       const opts: Parameters<typeof searchEntreprises>[0] = {};
