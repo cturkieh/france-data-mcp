@@ -58,19 +58,35 @@ export function libelleCategorieFiness(code: string): string | undefined {
   return (FINESS_CATEGORIES as Record<string, string>)[code];
 }
 
-export type FinessFamille = "mco" | "ehpad" | "ssr" | "autre";
+export type FinessFamille = "mco" | "ssr" | "ehpad" | "autre";
 
-// Source: ANS FINESS code catalogue. Numerical ranges per family.
-// MCO (Médecine-Chirurgie-Obstétrique): 4100-4199
-// SSR (Soins de Suite et Réadaptation): 4200-4299
-// EHPAD: 500-599
-// Anything else maps to "autre" — caller can drill into categorie_libelle if needed.
+// Source: nomenclature FINESS DREES (3-digit category codes, see FINESS_CATEGORIES above).
+//   MCO (Médecine-Chirurgie-Obstétrique, court séjour) groups acute-care hospitals.
+//   SSR (Soins de Suite et Réadaptation) groups follow-up / rehabilitation establishments.
+//   EHPAD groups senior dependent-care facilities (EHPAD + retirement homes + foyers logements).
+// Anything outside these sets falls back to "autre" — the caller can use FINESS_CATEGORIES
+// or categorie_libelle to drill in.
+const MCO_CODES = new Set([
+  "108", // CHU
+  "355", // CH
+  "354", // Hôpital privé
+  "295", // Établissement Public de Santé
+  "365", // Centre de Lutte Contre le Cancer
+  "106", // Hôpital local
+]);
+const SSR_CODES = new Set([
+  "109", // SSR
+]);
+const EHPAD_CODES = new Set([
+  "500", // EHPAD
+  "501", // Maison de retraite
+  "502", // Logement-foyer
+]);
+
 export function finessFamille(code: string | null | undefined): FinessFamille {
   if (!code) return "autre";
-  const n = Number.parseInt(code, 10);
-  if (Number.isNaN(n)) return "autre";
-  if (n >= 4100 && n <= 4199) return "mco";
-  if (n >= 4200 && n <= 4299) return "ssr";
-  if (n >= 500 && n <= 599) return "ehpad";
+  if (MCO_CODES.has(code)) return "mco";
+  if (SSR_CODES.has(code)) return "ssr";
+  if (EHPAD_CODES.has(code)) return "ehpad";
   return "autre";
 }
