@@ -61,7 +61,9 @@
     "test:watch": "vitest",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.api.json --noEmit",
+    "dev:server": "vercel dev",
+    "deploy:server": "vercel --prod",
     "prepublishOnly": "pnpm build"
   },
   "engines": {
@@ -71,6 +73,7 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^22.9.0",
+    "@vercel/node": "^5.7.15",
     "tsup": "^8.3.5",
     "typescript": "^5.6.3",
     "vitest": "^2.1.5"

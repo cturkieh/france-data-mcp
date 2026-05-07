@@ -7,13 +7,13 @@
  * mais pas exposés dans le serveur MCP V0 sur Vercel serverless.
  */
 
-import { getEntrepriseBySiren, searchEntreprises } from "france-data-mcp/sante";
+import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
 import {
   geocode,
   getCommuneByCode,
   reverseGeocode,
   searchCommunes,
-} from "france-data-mcp/territoire";
+} from "../src/territoire/index.js";
 
 export type McpTool = {
   name: string;

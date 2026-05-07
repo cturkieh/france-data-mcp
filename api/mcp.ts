@@ -13,7 +13,7 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { TOOLS, findTool } from "../src/tools.js";
+import { TOOLS, findTool } from "./tools.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = {
