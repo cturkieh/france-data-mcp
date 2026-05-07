@@ -1,0 +1,78 @@
+{
+  "name": "france-data-mcp",
+  "version": "0.1.0",
+  "description": "Boîte à outils MCP et TypeScript pour interroger les données publiques françaises (INSEE, FINESS, Annuaire Santé Ameli, IGN géocodage, geo.api.gouv.fr, DINUM Recherche Entreprises). Conçu pour Claude, Cursor et toute application qui veut exploiter l'open data territorial français.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "france",
+    "open-data",
+    "data-gouv",
+    "insee",
+    "finess",
+    "rpps",
+    "annuaire-sante",
+    "ameli",
+    "ign",
+    "geocodage",
+    "sirene",
+    "dinum",
+    "territoire",
+    "sante",
+    "claude",
+    "civic-tech"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "Cyril Turkieh",
+    "url": "https://github.com/cturkieh"
+  },
+  "homepage": "https://github.com/cturkieh/france-data-mcp",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cturkieh/france-data-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cturkieh/france-data-mcp/issues"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./territoire": {
+      "types": "./dist/territoire/index.d.ts",
+      "import": "./dist/territoire/index.js"
+    },
+    "./sante": {
+      "types": "./dist/sante/index.d.ts",
+      "import": "./dist/sante/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.9.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}
