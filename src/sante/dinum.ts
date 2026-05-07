@@ -76,8 +76,22 @@ export type Entreprise = {
   finances: Finance[];
   /** Dirigeants déclarés au RNE */
   dirigeants: Dirigeant[];
-  /** Établissements actifs et inactifs */
+  /**
+   * Établissements actifs et inactifs.
+   *
+   * ⚠️ Pour `searchEntreprises({ q })` ou `getEntrepriseBySiren()`, ce champ peut
+   * ne contenir que le siège — l'API DINUM ne retourne que les établissements
+   * « matchant » la requête. `getEntrepriseBySiren()` fait un second appel
+   * automatique pour récupérer les établissements du même NAF principal dans
+   * le département du siège (couvre la majorité des cas pour les multi-sites).
+   * Voir `nombreEtablissements` / `nombreEtablissementsOuverts` pour le total
+   * réel côté SIRENE.
+   */
   etablissements: Etablissement[];
+  /** Nombre total d'établissements (actifs + fermés), source SIRENE */
+  nombreEtablissements?: number;
+  /** Nombre d'établissements actuellement ouverts, source SIRENE */
+  nombreEtablissementsOuverts?: number;
   /** Statut administratif global */
   actif: boolean;
 };
@@ -159,6 +173,8 @@ type ApiEntreprise = {
   nature_juridique?: string;
   tranche_effectif_salarie?: string;
   etat_administratif?: string;
+  nombre_etablissements?: number;
+  nombre_etablissements_ouverts?: number;
   finances?: ApiFinances;
   dirigeants?: ApiDirigeant[];
   siege?: ApiSiege;
@@ -265,7 +281,20 @@ export async function searchEntreprises(
 
 /**
  * Récupère une entreprise par son SIREN (9 chiffres).
- * Renvoie null si introuvable.
+ * Renvoie null si introuvable. Throw si l'API DINUM est en panne ou rate-limit dépassé.
+ *
+ * Implémentation :
+ * 1. `q=<siren>` (l'API DINUM matche le SIREN dans le full-text), filtrage côté
+ *    client sur l'égalité exacte du SIREN.
+ * 2. **Limitation API DINUM** : `q=<siren>` ne retourne que le siège dans
+ *    `matching_etablissements`. Pour récupérer les autres établissements, on
+ *    fait un second appel `activite_principale=<naf>&departement=<dept_siège>`
+ *    qui retourne tous les établissements de l'entreprise ayant le NAF
+ *    principal dans le département du siège (couvre la majorité des
+ *    multi-sites). Les `etablissements` du résultat fusionnent siège + ces
+ *    établissements supplémentaires (déduplication par SIRET).
+ * 3. `nombreEtablissements` / `nombreEtablissementsOuverts` reflètent toujours
+ *    le total réel SIRENE (non limité par l'API DINUM).
  */
 export async function getEntrepriseBySiren(
   siren: string,
@@ -274,9 +303,6 @@ export async function getEntrepriseBySiren(
   if (!/^\d{9}$/.test(siren)) {
     throw new Error(`getEntrepriseBySiren: SIREN invalide "${siren}" (attendu 9 chiffres)`);
   }
-  // L'API DINUM ne supporte pas la syntaxe Lucene `q=siren:XXX` : on passe le SIREN
-  // en plain `q` (full-text matche le SIREN), puis on filtre côté client sur l'égalité
-  // exacte parce que `q` peut renvoyer des entreprises dont le nom contient les chiffres.
   const result = await searchEntreprises({ q: siren, perPage: 5, onlyActive: false, signal });
   const match = result.entreprises.find((e) => e.siren === siren);
   if (!match && result.entreprises.length > 0) {
@@ -284,7 +310,42 @@ export async function getEntrepriseBySiren(
       `[france-data-mcp] getEntrepriseBySiren(${siren}): l'API a renvoyé ${result.entreprises.length} résultat(s) sans match exact du SIREN.`,
     );
   }
-  return match ?? null;
+  if (!match) return null;
+
+  // Second appel pour récupérer les établissements supplémentaires : l'API
+  // DINUM ne les expose dans `matching_etablissements` que quand on filtre par
+  // NAF + département. On filtre ensuite par SIREN côté client.
+  const naf = match.naf;
+  const siegePostalCode = match.etablissements[0]?.codePostal;
+  const departement = siegePostalCode?.slice(0, 2);
+  if (naf && departement && (match.nombreEtablissements ?? 0) > 1) {
+    try {
+      const more = await searchEntreprises({
+        naf,
+        departement,
+        perPage: 25,
+        onlyActive: false,
+        signal,
+      });
+      const enriched = more.entreprises.find((e) => e.siren === siren);
+      if (enriched) {
+        const seen = new Set(match.etablissements.map((e) => e.siret));
+        for (const et of enriched.etablissements) {
+          if (et.siret && !seen.has(et.siret)) {
+            match.etablissements.push(et);
+            seen.add(et.siret);
+          }
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[france-data-mcp] getEntrepriseBySiren(${siren}): échec enrichissement établissements (${msg}). Résultat limité au siège.`,
+      );
+    }
+  }
+
+  return match;
 }
 
 /**
@@ -332,7 +393,7 @@ function toEntreprise(api: ApiEntreprise): Entreprise {
     }
   }
 
-  return {
+  const entreprise: Entreprise = {
     siren: api.siren,
     nomComplet: api.nom_complet ?? api.nom_raison_sociale ?? api.siren,
     finances,
@@ -347,6 +408,13 @@ function toEntreprise(api: ApiEntreprise): Entreprise {
       natureJuridique: api.nature_juridique,
     }),
   };
+  if (api.nombre_etablissements !== undefined) {
+    entreprise.nombreEtablissements = api.nombre_etablissements;
+  }
+  if (api.nombre_etablissements_ouverts !== undefined) {
+    entreprise.nombreEtablissementsOuverts = api.nombre_etablissements_ouverts;
+  }
+  return entreprise;
 }
 
 function toDirigeant(api: ApiDirigeant): Dirigeant {

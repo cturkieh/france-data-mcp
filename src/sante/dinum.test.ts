@@ -232,6 +232,113 @@ describe("getEntrepriseBySiren", () => {
     expect(lastFetchUrl()).not.toContain("etat_administratif=A");
   });
 
+  it("enrichit les établissements via un second appel naf+departement (bug #1 fix)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        apiResponse({
+          total_results: 1,
+          results: [
+            {
+              siren: "787120435",
+              nom_complet: "BIOLAB ARDENNES",
+              activite_principale: "86.90B",
+              nombre_etablissements: 19,
+              nombre_etablissements_ouverts: 10,
+              etat_administratif: "A",
+              siege: {
+                siret: "78712043500070",
+                adresse: "ZI DE L'ETOILE 08300 RETHEL",
+                code_postal: "08300",
+                libelle_commune: "RETHEL",
+                etat_administratif: "A",
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        apiResponse({
+          total_results: 1,
+          results: [
+            {
+              siren: "787120435",
+              nom_complet: "BIOLAB ARDENNES",
+              activite_principale: "86.90B",
+              etat_administratif: "A",
+              siege: {
+                siret: "78712043500070",
+                adresse: "ZI DE L'ETOILE 08300 RETHEL",
+                code_postal: "08300",
+                etat_administratif: "A",
+              },
+              matching_etablissements: [
+                {
+                  siret: "78712043500088",
+                  adresse: "5 Cours Briand 08000 Charleville-Mézières",
+                  code_postal: "08000",
+                  etat_administratif: "A",
+                },
+                {
+                  siret: "78712043500096",
+                  adresse: "10 Rue Sedan 08200 Sedan",
+                  code_postal: "08200",
+                  etat_administratif: "A",
+                },
+                {
+                  siret: "78712043500104",
+                  adresse: "Givet 08600",
+                  code_postal: "08600",
+                  etat_administratif: "A",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+    const e = await getEntrepriseBySiren("787120435");
+    expect(e).not.toBeNull();
+    expect(e?.nombreEtablissements).toBe(19);
+    expect(e?.nombreEtablissementsOuverts).toBe(10);
+    expect(e?.etablissements).toHaveLength(4);
+    expect(e?.etablissements.map((et) => et.siret).sort()).toEqual([
+      "78712043500070",
+      "78712043500088",
+      "78712043500096",
+      "78712043500104",
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const secondUrl = fetchMock.mock.calls[1]?.[0] as string;
+    expect(secondUrl).toMatch(/activite_principale=86\.?90B/);
+    expect(secondUrl).toContain("departement=08");
+  });
+
+  it("ne fait PAS le second appel si nombreEtablissements <= 1", async () => {
+    fetchMock.mockResolvedValueOnce(
+      apiResponse({
+        total_results: 1,
+        results: [
+          {
+            siren: "111111111",
+            nom_complet: "MONOSITE SAS",
+            activite_principale: "86.90B",
+            nombre_etablissements: 1,
+            nombre_etablissements_ouverts: 1,
+            etat_administratif: "A",
+            siege: {
+              siret: "11111111100010",
+              code_postal: "75001",
+              etat_administratif: "A",
+            },
+          },
+        ],
+      }),
+    );
+    const e = await getEntrepriseBySiren("111111111");
+    expect(e?.etablissements).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("retourne l'entreprise avec finances ordonnées par année décroissante", async () => {
     fetchMock.mockResolvedValue(
       apiResponse({
