@@ -1,20 +1,12 @@
 import { getAnonClient } from "../storage/supabase.js";
-import { type FinessFamille, finessFamille } from "./finess-categories.js";
+import {
+  FINESS_FAMILY_CODES,
+  type FinessFamille,
+  type FinessFamilleQuery,
+  finessFamille,
+} from "./finess-categories.js";
 
-// Filter type: a strict subset of FinessFamille — we don't expose "autre" as
-// a query input because it would require an inverse-match (everything-except)
-// which is YAGNI for V0.2. To get "autre" results, omit `familles` entirely
-// and post-filter on the client side via result.categorie.famille.
-export type FinessFamilleQuery = Exclude<FinessFamille, "autre">;
-
-// Authoritative DREES code lists per family (kept in sync with finessFamille()
-// in finess-categories.ts). Centralised here for the query layer to translate
-// user-facing family names into DB code lists.
-const FAMILLE_QUERY_CODES: Record<FinessFamilleQuery, readonly string[]> = {
-  mco: ["108", "355", "354", "295", "365", "106"],
-  ssr: ["109"],
-  ehpad: ["500", "501", "502"],
-};
+export type { FinessFamilleQuery } from "./finess-categories.js";
 
 export interface FinessResult {
   num_finess: string;
@@ -65,9 +57,21 @@ function clampLimit(limit: number | undefined): number {
   return limit;
 }
 
+function validateCoords(lat: number, lon: number): void {
+  // PostGIS accepts any number, so a caller swapping lat/lon (e.g. lat=2.6,
+  // lon=49.7) silently returns 0 results — indistinguishable from "no FINESS
+  // here". Validate the WGS84 bounds so the failure is loud.
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+    throw new RangeError(`[france-data-mcp] lat must be in [-90, 90], got ${lat}`);
+  }
+  if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+    throw new RangeError(`[france-data-mcp] lon must be in [-180, 180], got ${lon}`);
+  }
+}
+
 function familiesToCodes(familles: FinessFamilleQuery[] | undefined): string[] {
   if (!familles || familles.length === 0) return [];
-  return familles.flatMap((f) => FAMILLE_QUERY_CODES[f]) as string[];
+  return familles.flatMap((f) => [...FINESS_FAMILY_CODES[f]]);
 }
 
 /**
@@ -80,6 +84,7 @@ function familiesToCodes(familles: FinessFamilleQuery[] | undefined): string[] {
  */
 export async function getFinessInRadius(input: InRadiusInput): Promise<FinessQueryResult> {
   const limit = clampLimit(input.limit);
+  validateCoords(input.center.lat, input.center.lon);
 
   const supabase = getAnonClient();
   const { data, error } = await supabase.rpc("finess_in_radius", {
@@ -114,7 +119,7 @@ export async function getFinessByCategorie(input: ByCategorieInput): Promise<Fin
 
   const supabase = getAnonClient();
   const { data, error } = await supabase.rpc("finess_by_categorie", {
-    p_codes: [...FAMILLE_QUERY_CODES[input.famille]],
+    p_codes: [...FINESS_FAMILY_CODES[input.famille]],
     p_departement: input.departement ?? (null as unknown as string),
     p_code_insee: input.code_insee ?? (null as unknown as string),
     p_limit: limit + 1,

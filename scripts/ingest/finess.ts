@@ -2,6 +2,7 @@ import "dotenv/config";
 import * as fs from "node:fs";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
+import { parseCoordinates } from "../../src/core/coords.js";
 import {
   IngestError,
   type IngestLogEntry,
@@ -92,21 +93,38 @@ async function main(): Promise<void> {
     if (stagingErr) {
       throw new IngestError("copy", `Failed to create finess_staging table: ${stagingErr.message}`);
     }
-    const rowCount = await streamCsvToStaging(downloaded.filePath, supabase);
-    log.row_count = rowCount;
+    const stats = await streamCsvToStaging(downloaded.filePath, supabase);
+    log.row_count = stats.inserted;
 
     // 4. VALIDATE COHERENCE
-    if (rowCount < MIN_ROWS) {
+    if (stats.inserted < MIN_ROWS) {
       throw new IngestError(
         "validate",
-        `Row count ${rowCount} below minimum ${MIN_ROWS} — suspected partial parse`,
+        `Row count ${stats.inserted} below minimum ${MIN_ROWS} — suspected partial parse`,
       );
     }
-    if (rowCount > MAX_ROWS) {
+    if (stats.inserted > MAX_ROWS) {
       throw new IngestError(
         "validate",
-        `Row count ${rowCount} above maximum ${MAX_ROWS} — suspected format change`,
+        `Row count ${stats.inserted} above maximum ${MAX_ROWS} — suspected format change`,
       );
+    }
+    // Surface upstream-parsing-bug suspects: rows dropped due to missing
+    // required fields. Threshold of 1% of inserted rows is the same alarm
+    // bar discussed in the V0.2 final review (SFH-5).
+    const skippedTotal = stats.skippedNoFinessId + stats.skippedNoCommune;
+    const skipRate = stats.inserted > 0 ? skippedTotal / (stats.inserted + skippedTotal) : 0;
+    if (skippedTotal > 0) {
+      const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
+      console.warn(
+        `[finess] skipped ${skippedTotal} rows (${fmt(skipRate)}): ${stats.skippedNoFinessId} missing nofinesset, ${stats.skippedNoCommune} missing commune`,
+      );
+      if (skipRate > 0.01) {
+        throw new IngestError(
+          "validate",
+          `Skip rate ${fmt(skipRate)} above 1% threshold — likely upstream parsing regression (column rename/shift)`,
+        );
+      }
     }
 
     // 5. ATOMIC SWAP
@@ -134,23 +152,33 @@ async function main(): Promise<void> {
   }
 }
 
-async function streamCsvToStaging(filePath: string, supabase: SupabaseClient): Promise<number> {
+interface IngestStreamStats {
+  inserted: number;
+  skippedNoFinessId: number;
+  skippedNoCommune: number;
+}
+
+async function streamCsvToStaging(
+  filePath: string,
+  supabase: SupabaseClient,
+): Promise<IngestStreamStats> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
 
-  // csv-parse handles quoted fields, embedded delimiters, and CRLF correctly.
   const parser = stream.pipe(
     parse({
       delimiter: ";",
-      columns: true, // first line = header → records are objects keyed by column name
+      columns: true,
       skip_empty_lines: true,
-      relax_quotes: true, // FINESS source occasionally has unbalanced quotes
+      relax_quotes: true,
       trim: true,
-      bom: true, // strip UTF-8 BOM if present
+      bom: true,
     }),
   );
 
   let batch: FinessStagingRow[] = [];
-  let total = 0;
+  let inserted = 0;
+  let skippedNoFinessId = 0;
+  let skippedNoCommune = 0;
 
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
@@ -158,44 +186,50 @@ async function streamCsvToStaging(filePath: string, supabase: SupabaseClient): P
     if (error) {
       throw new IngestError("copy", `Insert into finess_staging failed: ${error.message}`);
     }
-    total += batch.length;
+    inserted += batch.length;
     batch = [];
   };
 
   for await (const record of parser as AsyncIterable<Record<string, string>>) {
-    const row = parseFinessRecord(record);
-    if (row) batch.push(row);
+    const parsed = parseFinessRecord(record);
+    if (parsed.row) {
+      batch.push(parsed.row);
+    } else if (parsed.skipReason === "no_finess_id") {
+      skippedNoFinessId++;
+    } else if (parsed.skipReason === "no_commune") {
+      skippedNoCommune++;
+    }
     if (batch.length >= BATCH_SIZE) await flush();
   }
   await flush();
-  return total;
+  return { inserted, skippedNoFinessId, skippedNoCommune };
 }
 
-function parseFinessRecord(rec: Record<string, string>): FinessStagingRow | null {
-  const get = (name: string): string | null => {
-    const v = rec[name];
-    if (v === undefined || v === "") return null;
-    return v;
-  };
+type ParsedFinessRow =
+  | { row: FinessStagingRow; skipReason?: never }
+  | { row?: never; skipReason: "no_finess_id" | "no_commune" };
 
-  const numFiness = get("nofinesset");
-  if (!numFiness) return null;
+const getNonEmpty = (rec: Record<string, string>, name: string): string | null => {
+  const v = rec[name];
+  return v === undefined || v === "" ? null : v;
+};
 
-  const codeInsee = get("commune");
-  if (!codeInsee) return null;
+function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
+  const numFiness = getNonEmpty(rec, "nofinesset");
+  if (!numFiness) return { skipReason: "no_finess_id" };
+
+  const codeInsee = getNonEmpty(rec, "commune");
+  if (!codeInsee) return { skipReason: "no_commune" };
 
   // FINESS extract publishes coords as separate `latitude` / `longitude` columns
   // in the augmented dataset (the raw ANS extract is geocoded by data.gouv).
   // See https://www.data.gouv.fr/fr/datasets/finess-extraction-du-fichier-des-etablissements/
-  // for the column reference. Fall back to NULL if absent.
-  const lat = get("latitude");
-  const lon = get("longitude");
-  const latNum = lat ? Number.parseFloat(lat.replace(",", ".")) : Number.NaN;
-  const lonNum = lon ? Number.parseFloat(lon.replace(",", ".")) : Number.NaN;
-  const geomWkt =
-    Number.isFinite(latNum) && Number.isFinite(lonNum)
-      ? `SRID=4326;POINT(${lonNum} ${latNum})`
-      : null;
+  // Fall back to NULL if absent or unparseable.
+  const coords = parseCoordinates(
+    getNonEmpty(rec, "longitude") ?? undefined,
+    getNonEmpty(rec, "latitude") ?? undefined,
+  );
+  const geomWkt = coords ? `SRID=4326;POINT(${coords.lon} ${coords.lat})` : null;
 
   // Filter raw to only non-empty string entries, for compact JSONB storage.
   const raw: Record<string, string> = {};
@@ -204,22 +238,24 @@ function parseFinessRecord(rec: Record<string, string>): FinessStagingRow | null
   }
 
   return {
-    num_finess: numFiness,
-    raison_sociale: get("rs") ?? "",
-    categorie_code: get("categetab"),
-    categorie_libelle: get("libcategetab"),
-    num_voie: get("numvoie"),
-    type_voie: get("typvoie"),
-    voie: get("voie"),
-    code_postal: null, // FINESS embeds postal in `ligneacheminement`; left for V0.3 to extract
-    code_insee: codeInsee,
-    ville: get("libdepartement"),
-    telephone: get("telephone"),
-    email: null,
-    date_ouverture: get("dateouv"),
-    date_maj: get("datemaj"),
-    geom: geomWkt,
-    raw,
+    row: {
+      num_finess: numFiness,
+      raison_sociale: getNonEmpty(rec, "rs") ?? "",
+      categorie_code: getNonEmpty(rec, "categetab"),
+      categorie_libelle: getNonEmpty(rec, "libcategetab"),
+      num_voie: getNonEmpty(rec, "numvoie"),
+      type_voie: getNonEmpty(rec, "typvoie"),
+      voie: getNonEmpty(rec, "voie"),
+      code_postal: null, // FINESS embeds postal in `ligneacheminement`; left for V0.3 to extract
+      code_insee: codeInsee,
+      ville: getNonEmpty(rec, "libdepartement"),
+      telephone: getNonEmpty(rec, "telephone"),
+      email: null,
+      date_ouverture: getNonEmpty(rec, "dateouv"),
+      date_maj: getNonEmpty(rec, "datemaj"),
+      geom: geomWkt,
+      raw,
+    },
   };
 }
 

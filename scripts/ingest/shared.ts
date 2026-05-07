@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { DEFAULT_USER_AGENT } from "../../src/core/http.js";
 import { getServiceClient } from "../../src/storage/supabase.js";
 
 export type IngestPhase = "download" | "pre_validate" | "copy" | "validate" | "swap";
@@ -12,9 +13,12 @@ export class IngestError extends Error {
   constructor(
     public readonly phase: IngestPhase,
     message: string,
-    public override readonly cause?: unknown,
+    cause?: unknown,
   ) {
-    super(message);
+    // Pass cause via Error options so engine-internal slots (Sentry,
+    // util.inspect, structured loggers) read it correctly. Constructor-field
+    // shadowing breaks that machinery.
+    super(message, cause !== undefined ? { cause } : undefined);
     this.name = "IngestError";
   }
 }
@@ -31,8 +35,6 @@ export interface DownloadResult {
   url: string;
 }
 
-const USER_AGENT = "france-data-mcp/0.2 (+https://github.com/cturkieh/france-data-mcp)";
-
 /** Download a CSV with retry-on-failure (3 attempts, exponential backoff). */
 export async function downloadCsv(url: string, destFilename: string): Promise<DownloadResult> {
   const filePath = path.join(os.tmpdir(), destFilename);
@@ -40,7 +42,7 @@ export async function downloadCsv(url: string, destFilename: string): Promise<Do
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
+      const res = await fetch(url, { headers: { "User-Agent": DEFAULT_USER_AGENT } });
       if (!res.ok || !res.body) {
         throw new Error(`HTTP ${res.status} ${res.statusText}`);
       }

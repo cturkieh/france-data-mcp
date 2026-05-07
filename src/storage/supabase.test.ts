@@ -36,6 +36,13 @@ describe("getAnonClient", () => {
     const mod = await import("./supabase");
     expect(mod.getAnonClient()).toBe(mod.getAnonClient());
   });
+
+  it("distinguishes empty-string env from missing env (GitHub Secret misconfig)", async () => {
+    process.env.SUPABASE_URL = "https://example.supabase.co";
+    process.env.SUPABASE_ANON_KEY = "";
+    const mod = await import("./supabase");
+    expect(() => mod.getAnonClient()).toThrow(/set but empty/);
+  });
 });
 
 describe("getServiceClient", () => {

@@ -9,6 +9,12 @@ on:
 
 # Never run on pull_request — secrets are not available there, by design.
 
+# Explicit permissions: orgs that enforce read-only default GITHUB_TOKEN
+# would otherwise silently fail to open the failure issue.
+permissions:
+  contents: read
+  issues: write
+
 concurrency:
   group: ingest-finess
   cancel-in-progress: false

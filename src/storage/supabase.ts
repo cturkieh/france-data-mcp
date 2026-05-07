@@ -6,9 +6,17 @@ let serviceClient: SupabaseClient<Database> | null = null;
 
 function requireEnv(name: string): string {
   const value = process.env[name];
-  if (!value) {
+  if (value === undefined) {
     throw new Error(
       `[france-data-mcp] Missing required environment variable: ${name}. Set it in .env.local for local dev or in GitHub Secrets for CI/Actions.`,
+    );
+  }
+  // GitHub Actions substitutes "" for `${{ secrets.X }}` when X is renamed,
+  // unset, or out-of-scope. Distinguishing this from "var truly missing" gives
+  // operators a faster diagnosis path than a generic "missing var" message.
+  if (value === "") {
+    throw new Error(
+      `[france-data-mcp] Environment variable ${name} is set but empty. Likely a misconfigured GitHub Secret (renamed/unscoped) or an empty line in .env.local.`,
     );
   }
   return value;

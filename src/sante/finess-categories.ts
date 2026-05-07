@@ -60,46 +60,46 @@ export function libelleCategorieFiness(code: string): string | undefined {
 
 export type FinessFamille = "mco" | "ssr" | "ehpad" | "autre";
 
-// Family classification of FINESS DREES category codes (see FINESS_CATEGORIES above
-// for the 3-digit code reference).
-//
-//   MCO   = Médecine-Chirurgie-Obstétrique (court séjour). Acute-care hospitals.
-//   SSR   = Soins de Suite et Réadaptation. Follow-up / rehabilitation establishments.
-//   EHPAD = Établissements pour personnes âgées dépendantes + adjacent senior housing.
-//
-// Anything outside these three families falls back to "autre" for V0.2 scope.
-// Future scopes (psychiatry, ambulatoire, labo, pharmacie, ...) will be added as
-// distinct family values when their consumer use cases are confirmed.
+/**
+ * Family classification of FINESS DREES category codes (see FINESS_CATEGORIES
+ * above for the 3-digit code reference).
+ *
+ *   MCO   = Médecine-Chirurgie-Obstétrique (court séjour). Acute-care hospitals.
+ *   SSR   = Soins de Suite et Réadaptation. Follow-up / rehabilitation.
+ *   EHPAD = Établissements pour personnes âgées dépendantes + adjacent senior housing.
+ *
+ * Anything outside these three families falls back to "autre" for V0.2 scope.
+ *
+ * The query-only subtype excludes "autre" (it would require an inverse-match
+ * which is YAGNI for V0.2 — to get "autre" results, omit the family filter
+ * and post-filter via `result.categorie.famille`).
+ *
+ * MCO deliberately diverges from FINESS_HOPITAUX on two points:
+ *   - excludes 292 (CHS) and 362 (CH spé psychiatrie) — psychiatry is its own
+ *     planned family, NOT acute-care MCO.
+ *   - includes 365 (CLCC = Centre de Lutte Contre le Cancer), which DREES treats
+ *     as acute-care oncology, but FINESS_HOPITAUX (a more "hospitals in general"
+ *     bucket) does not list.
+ * Do NOT replace MCO with FINESS_HOPITAUX — the lists are intentionally different.
+ *
+ * SSR is deliberately conservative for V0.2 — only the unambiguous "109" code.
+ * Code 122 (Centre de cure médicale) overlaps DREES SSR semantically but is
+ * classification-ambiguous; left in DELIBERATELY_AUTRE below.
+ *
+ * EHPAD reuses FINESS_EHPAD as the single source of truth — adding a code there
+ * automatically extends the family.
+ */
+export type FinessFamilleQuery = Exclude<FinessFamille, "autre">;
 
-// MCO: deliberately diverges from FINESS_HOPITAUX (line 39) on two points:
-//   - excludes 292 (CHS) and 362 (CH spé psychiatrie) — psychiatry is its own
-//     planned family, NOT acute-care MCO.
-//   - includes 365 (CLCC = Centre de Lutte Contre le Cancer), which DREES treats
-//     as acute-care oncology, but FINESS_HOPITAUX (a more "hospitals in general"
-//     bucket) does not list.
-// Do NOT replace this Set with `new Set(FINESS_HOPITAUX)` — the lists are
-// intentionally different.
-const MCO_CODES = new Set<string>([
-  "108", // CHU
-  "355", // CH
-  "354", // Hôpital privé
-  "295", // Établissement Public de Santé
-  "365", // Centre de Lutte Contre le Cancer
-  "106", // Hôpital local
-]);
+export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> = {
+  mco: ["108", "355", "354", "295", "365", "106"],
+  ssr: ["109"],
+  ehpad: FINESS_EHPAD,
+} as const;
 
-// SSR: deliberately conservative for V0.2 — only the unambiguous "109" code.
-// Code 122 (Centre de cure médicale) overlaps DREES SSR semantically but is
-// classification-ambiguous; left in DELIBERATELY_AUTRE below until product
-// scope clarifies.
-const SSR_CODES = new Set<string>([
-  "109", // SSR
-]);
-
-// EHPAD: derived from the existing FINESS_EHPAD constant to keep a single
-// source of truth. Adding a code to FINESS_EHPAD automatically updates the
-// family classification.
-const EHPAD_CODES = new Set<string>(FINESS_EHPAD);
+const MCO_CODES = new Set<string>(FINESS_FAMILY_CODES.mco);
+const SSR_CODES = new Set<string>(FINESS_FAMILY_CODES.ssr);
+const EHPAD_CODES = new Set<string>(FINESS_FAMILY_CODES.ehpad);
 
 /**
  * Codes present in FINESS_CATEGORIES that are deliberately classified as "autre"
