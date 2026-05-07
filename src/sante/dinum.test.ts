@@ -88,7 +88,7 @@ describe("searchEntreprises", () => {
     expect(labo?.dirigeants[0]?.nom).toBe("DUPONT");
 
     const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).toContain("activite_principale=8690B");
+    expect(url).toMatch(/activite_principale=86\.?90B/);
     expect(url).toContain("lat=49.7672");
     expect(url).toContain("long=4.7192");
     expect(url).toContain("radius=5");
@@ -128,6 +128,22 @@ describe("searchEntreprises", () => {
     await searchEntreprises({ naf: "8710A", departement: "08" });
     const url = fetchMock.mock.calls[0]?.[0] as string;
     expect(url).toContain("departement=08");
+  });
+
+  it("normalise le NAF compact (8690B) en format pointé (86.90B) attendu par DINUM", async () => {
+    fetchMock.mockResolvedValue(apiResponse({}));
+    await searchEntreprises({ naf: "8690B", departement: "08" });
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    // L'URL doit contenir 86.90B (URL-encoded en 86.90B ou 86%2E90B selon URLSearchParams)
+    expect(url).toMatch(/activite_principale=86\.?90B/);
+    expect(url).not.toMatch(/activite_principale=8690B[^.]/);
+  });
+
+  it("préserve un NAF déjà au format pointé", async () => {
+    fetchMock.mockResolvedValue(apiResponse({}));
+    await searchEntreprises({ naf: "86.90B", departement: "08" });
+    const url = fetchMock.mock.calls[0]?.[0] as string;
+    expect(url).toMatch(/activite_principale=86\.?90B/);
   });
 });
 

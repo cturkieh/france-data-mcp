@@ -213,7 +213,7 @@ export async function searchEntreprises(
 
   const params = new URLSearchParams();
   if (q) params.set("q", q);
-  if (naf) params.set("activite_principale", naf);
+  if (naf) params.set("activite_principale", normalizeNafCode(naf));
   if (codePostal) params.set("code_postal", codePostal);
   if (departement) params.set("departement", departement);
   if (codeCommune) params.set("code_commune", codeCommune);
@@ -260,6 +260,22 @@ export async function getEntrepriseBySiren(
     );
   }
   return match ?? null;
+}
+
+/**
+ * Normalise un code NAF vers le format attendu par l'API DINUM (`XX.XXY`).
+ *
+ * L'API DINUM rejette les codes en format INSEE compact (`8690B`) avec un
+ * HTTP 400 et la liste des valeurs valides. La nomenclature officielle utilise
+ * des points (`86.90B`), donc on accepte les deux entrées et on convertit.
+ */
+function normalizeNafCode(naf: string): string {
+  // Déjà au format pointé : "86.90B" ou "01.11Z"
+  if (/^\d{2}\.\d{2}[A-Z]?$/.test(naf)) return naf;
+  // Format compact : "8690B" → "86.90B", "0111Z" → "01.11Z"
+  if (/^\d{4}[A-Z]?$/.test(naf)) return `${naf.slice(0, 2)}.${naf.slice(2)}`;
+  // Format inconnu : on laisse passer, l'API renverra une erreur claire
+  return naf;
 }
 
 function toEntreprise(api: ApiEntreprise): Entreprise {

@@ -1,5 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "echo 'API-only project, no static build needed'",
+  "outputDirectory": ".",
   "functions": {
     "api/mcp.ts": {
       "maxDuration": 60
