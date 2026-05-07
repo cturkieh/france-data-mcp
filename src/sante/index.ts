@@ -59,4 +59,14 @@ export {
   type FinessFamille,
 } from "./finess-categories.js";
 
-export const SANTE_VERSION = "0.1.0";
+export {
+  getFinessInRadius,
+  getFinessByCategorie,
+  type FinessResult,
+  type FinessQueryResult,
+  type InRadiusInput,
+  type ByCategorieInput,
+  type FinessFamilleQuery,
+} from "./finess-db.js";
+
+export const SANTE_VERSION = "0.2.0-pre";
