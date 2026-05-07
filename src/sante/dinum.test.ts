@@ -70,7 +70,7 @@ describe("searchEntreprises", () => {
     );
 
     const result = await searchEntreprises({
-      naf: "8690B",
+      q: "laboratoire",
       center: { lon: 4.7192, lat: 49.7672 },
       radiusKm: 5,
     });
@@ -88,11 +88,30 @@ describe("searchEntreprises", () => {
     expect(labo?.dirigeants[0]?.nom).toBe("DUPONT");
 
     const url = fetchMock.mock.calls[0]?.[0] as string;
-    expect(url).toMatch(/activite_principale=86\.?90B/);
+    expect(url).toContain("q=laboratoire");
     expect(url).toContain("lat=49.7672");
     expect(url).toContain("long=4.7192");
     expect(url).toContain("radius=5");
     expect(url).toContain("etat_administratif=A");
+  });
+
+  it("rejette `naf + center+radiusKm` (limitation API DINUM) avec message d'aide", async () => {
+    await expect(
+      searchEntreprises({
+        naf: "8690B",
+        center: { lon: 4.7192, lat: 49.7672 },
+        radiusKm: 5,
+      }),
+    ).rejects.toThrow(/n'accepte pas `naf` \+ `center\+radiusKm`/);
+  });
+
+  it("rejette `center+radiusKm` sans `q` ni `naf`", async () => {
+    await expect(
+      searchEntreprises({
+        center: { lon: 4.7192, lat: 49.7672 },
+        radiusKm: 5,
+      }),
+    ).rejects.toThrow(/recherche textuelle/);
   });
 
   it("rejette si aucun critère fourni", async () => {
@@ -108,7 +127,7 @@ describe("searchEntreprises", () => {
   it("clamp le radius à 50 km", async () => {
     fetchMock.mockResolvedValue(apiResponse({}));
     await searchEntreprises({
-      naf: "8690B",
+      q: "labo",
       center: { lon: 4.7, lat: 49.7 },
       radiusKm: 999,
     });

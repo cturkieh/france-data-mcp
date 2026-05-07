@@ -211,6 +211,25 @@ export async function searchEntreprises(
     throw new Error("searchEntreprises: radiusKm > 0 requis quand center est fourni");
   }
 
+  // L'API DINUM exige que `lat/long/radius` soient accompagnés d'un `q` (recherche
+  // textuelle). On ne peut pas combiner `activite_principale` + lat/long/radius
+  // directement. Si le caller fournit center+radiusKm sans q, on en injecte un
+  // par défaut via le NAF si présent, sinon on signale l'incompatibilité.
+  if (center && !q) {
+    if (naf) {
+      throw new Error(
+        "searchEntreprises: l'API DINUM n'accepte pas `naf` + `center+radiusKm` directement. " +
+          "Options : (1) `q='<terme>'` + center+radiusKm (recherche textuelle géolocalisée), " +
+          "(2) `naf` + `codePostal`/`departement`/`codeCommune` (filtrage administratif), " +
+          "(3) faire un reverseGeocode du center pour obtenir codeCommune puis filtrer.",
+      );
+    }
+    throw new Error(
+      "searchEntreprises: `center+radiusKm` requiert un paramètre `q` (recherche textuelle). " +
+        "L'API DINUM ne supporte pas la recherche géographique pure.",
+    );
+  }
+
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (naf) params.set("activite_principale", normalizeNafCode(naf));

@@ -7,6 +7,7 @@
  * mais pas exposés dans le serveur MCP V0 sur Vercel serverless.
  */
 
+import { haversineDistance } from "../src/sante/finess.js";
 import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
 import {
   geocode,
@@ -123,7 +124,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "entreprises_in_radius",
     description:
-      "Recherche d'entreprises françaises dans un rayon géographique, avec filtres NAF, code postal et département. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.",
+      "Recherche d'entreprises françaises avec filtres NAF, code postal, département ou rayon géographique. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.\n\nLimitation API DINUM : la combinaison `naf + lat/lon/radiusKm` n'est pas supportée nativement (lat/lon nécessitent un `q` textuel). Le serveur applique alors un fallback : reverseGeocode du point → recherche par département → filtrage Haversine côté serveur. Les résultats sont limités aux 25 premières entreprises du NAF dans le département (limite API).",
     inputSchema: {
       type: "object",
       properties: {
@@ -150,18 +151,65 @@ export const TOOLS: McpTool[] = [
       },
     },
     handler: async (args) => {
-      const opts: Parameters<typeof searchEntreprises>[0] = {};
-      if (typeof args.naf === "string") opts.naf = args.naf;
-      if (typeof args.q === "string") opts.q = args.q;
-      if (typeof args.codePostal === "string") opts.codePostal = args.codePostal;
-      if (typeof args.departement === "string") opts.departement = args.departement;
-      if (typeof args.perPage === "number") opts.perPage = args.perPage;
-      if (typeof args.page === "number") opts.page = args.page;
+      const naf = typeof args.naf === "string" ? args.naf : undefined;
+      const q = typeof args.q === "string" ? args.q : undefined;
+      const codePostal = typeof args.codePostal === "string" ? args.codePostal : undefined;
+      const departement = typeof args.departement === "string" ? args.departement : undefined;
+      const perPage = typeof args.perPage === "number" ? args.perPage : undefined;
+      const page = typeof args.page === "number" ? args.page : undefined;
       const lon = typeof args.lon === "number" ? args.lon : Number.NaN;
       const lat = typeof args.lat === "number" ? args.lat : Number.NaN;
-      if (Number.isFinite(lon) && Number.isFinite(lat)) {
+      const radiusKm = typeof args.radiusKm === "number" ? args.radiusKm : undefined;
+      const hasCoords = Number.isFinite(lon) && Number.isFinite(lat) && radiusKm !== undefined;
+
+      // Cas qui pose problème côté API DINUM : `naf + lat/long/radius`. L'API
+      // exige que les coords soient accompagnées d'un `q` textuel. On contourne
+      // en faisant un reverseGeocode pour obtenir le département (ou code commune),
+      // puis en filtrant côté client par distance Haversine sur le siège.
+      if (naf && hasCoords && !q && !departement && !codePostal) {
+        const center = { lon, lat };
+        const reverse = await reverseGeocode(center);
+        const fallbackDept = reverse?.codeCommune?.slice(0, 2);
+        if (!fallbackDept) {
+          throw new Error(
+            `entreprises_in_radius: impossible de déduire le département du point lon=${lon} lat=${lat} via reverseGeocode. Fournir 'departement' ou 'codePostal' explicitement.`,
+          );
+        }
+        const result = await searchEntreprises({
+          naf,
+          departement: fallbackDept,
+          perPage: 25,
+          page: 1,
+        });
+        const radiusMeters = (radiusKm ?? 0) * 1000;
+        const filtered = result.entreprises.filter((e) =>
+          e.etablissements.some(
+            (et) => et.point && haversineDistance(center, et.point) <= radiusMeters,
+          ),
+        );
+        return {
+          ...result,
+          entreprises: filtered,
+          total: filtered.length,
+          totalPages: 1,
+          fallback: {
+            strategy: "reverseGeocode + departement + Haversine client-side filter",
+            departementUtilise: fallbackDept,
+            limite: "Au max 25 entreprises NAF du département évaluées (limite API).",
+          },
+        };
+      }
+
+      const opts: Parameters<typeof searchEntreprises>[0] = {};
+      if (naf) opts.naf = naf;
+      if (q) opts.q = q;
+      if (codePostal) opts.codePostal = codePostal;
+      if (departement) opts.departement = departement;
+      if (perPage !== undefined) opts.perPage = perPage;
+      if (page !== undefined) opts.page = page;
+      if (hasCoords) {
         opts.center = { lon, lat };
-        if (typeof args.radiusKm === "number") opts.radiusKm = args.radiusKm;
+        opts.radiusKm = radiusKm;
       }
       return searchEntreprises(opts);
     },
