@@ -1,0 +1,20 @@
+{
+  "name": "france-data-mcp-server",
+  "version": "0.1.0",
+  "description": "Serveur HTTP MCP pour france-data-mcp, déployable sur Vercel.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'Vercel build is automatic for serverless functions'",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "france-data-mcp": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@vercel/node": "^3.2.30",
+    "typescript": "^5.6.3"
+  }
+}

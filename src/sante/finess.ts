@@ -1,0 +1,202 @@
+/**
+ * FINESS — Fichier National des Établissements Sanitaires et Médico-Sociaux.
+ *
+ * Source : data.gouv.fr → dump CSV bimestriel ~35 Mo (`finess-extraction-du-fichier-des-etablissements`).
+ * Variante géolocalisée : Atlasanté `referentiel-finess-t-finess` (~232 Mo).
+ *
+ * ⚠️ Migration ANS été 2026 : tous les datasets data.gouv portent l'avertissement
+ * que la génération du flux actuel s'arrêtera. Surveiller le repo
+ * github.com/ansforge/finess pour le nouveau format (probablement FHIR-compatible).
+ *
+ * Cette fonction télécharge le CSV avec cache 7j puis charge en mémoire (~35 Mo
+ * → ~70 Mo de RAM résidente Node). Adapté à un usage CLI ou serveur node long.
+ * Pour un usage serverless (Vercel Edge), ne pas charger l'intégralité —
+ * préférer une DB externe (PostGIS, DuckDB).
+ */
+
+import { readFile } from "node:fs/promises";
+import { type CacheOptions, downloadWithCache } from "../core/cache.js";
+import { parseCsv } from "../core/csv.js";
+import type { Coordinates } from "../core/types.js";
+import { libelleCategorieFiness } from "./finess-categories.js";
+
+const FINESS_CSV_URL =
+  "https://www.data.gouv.fr/api/1/datasets/r/3dc9b1d5-0157-440d-a7b5-c894fcfdfd45";
+const FINESS_CACHE_FILE = "finess-etablissements.csv";
+
+export type EtablissementFiness = {
+  /** Numéro FINESS de l'entité géographique (ET) sur 9 chiffres */
+  finessEt: string;
+  /** Numéro FINESS de l'entité juridique (EJ) à laquelle l'ET est rattaché */
+  finessEj?: string;
+  /** Raison sociale (longue, plus complète que le nom court) */
+  raisonSociale: string;
+  /** Code de catégorie d'établissement (ex: "500" pour EHPAD) */
+  categorieCode?: string;
+  /** Libellé de la catégorie (mappé depuis FINESS_CATEGORIES si reconnu) */
+  categorieLibelle?: string;
+  /** Adresse ligne complète */
+  adresse?: string;
+  /** Code postal */
+  codePostal?: string;
+  /** Commune */
+  commune?: string;
+  /** Code INSEE de la commune (5 caractères) */
+  codeCommune?: string;
+  /** Code département (2 ou 3 caractères) */
+  departement?: string;
+  /** Coordonnées GPS (présentes dans le dump géolocalisé Atlasanté) */
+  point?: Coordinates;
+  /** Téléphone */
+  telephone?: string;
+  /** SIREN si renseigné */
+  siren?: string;
+};
+
+export type LoadFinessOptions = CacheOptions & {
+  /** Chemin local d'un CSV déjà téléchargé (court-circuite le download) */
+  csvPath?: string;
+};
+
+export type SearchFinessOptions = {
+  /** Filtre par codes de catégorie (ex: ["500"] pour EHPAD seuls) */
+  categories?: string[];
+  /** Filtre par code postal exact */
+  codePostal?: string;
+  /** Filtre par code département */
+  departement?: string;
+  /** Filtre par code commune INSEE */
+  codeCommune?: string;
+  /** Recherche géographique : centre + rayon en km (nécessite dump géolocalisé) */
+  center?: Coordinates;
+  /** Rayon en km */
+  radiusKm?: number;
+  /** Limite de résultats (défaut tous) */
+  limit?: number;
+};
+
+/**
+ * Charge l'index FINESS en mémoire. Télécharge le CSV si pas en cache.
+ * Le résultat est utilisable plusieurs fois sans re-charger.
+ */
+export async function loadFiness(options: LoadFinessOptions = {}): Promise<EtablissementFiness[]> {
+  const csvPath =
+    options.csvPath ?? (await downloadWithCache(FINESS_CSV_URL, FINESS_CACHE_FILE, options));
+
+  const content = await readFile(csvPath, "utf-8");
+  const rows = parseCsv(content, { delimiter: ";" });
+  return rows.map(toEtablissementFiness).filter((e): e is EtablissementFiness => e !== null);
+}
+
+/**
+ * Recherche des établissements dans un index FINESS pré-chargé.
+ * Pour avoir l'index : `const index = await loadFiness();`
+ */
+export function searchEtablissementsFiness(
+  index: EtablissementFiness[],
+  options: SearchFinessOptions,
+): EtablissementFiness[] {
+  const { categories, codePostal, departement, codeCommune, center, radiusKm, limit } = options;
+
+  if (center && (radiusKm === undefined || radiusKm <= 0)) {
+    throw new Error("searchEtablissementsFiness: radiusKm > 0 requis quand center est fourni");
+  }
+
+  const radiusMeters = center && radiusKm !== undefined ? radiusKm * 1000 : null;
+  const categoriesSet = categories ? new Set(categories) : null;
+
+  const matches: EtablissementFiness[] = [];
+  for (const e of index) {
+    if (categoriesSet && (!e.categorieCode || !categoriesSet.has(e.categorieCode))) continue;
+    if (codePostal && e.codePostal !== codePostal) continue;
+    if (departement && e.departement !== departement) continue;
+    if (codeCommune && e.codeCommune !== codeCommune) continue;
+    if (center && radiusMeters !== null) {
+      if (!e.point) continue;
+      if (haversineDistance(center, e.point) > radiusMeters) continue;
+    }
+    matches.push(e);
+    if (limit !== undefined && matches.length >= limit) break;
+  }
+
+  return matches;
+}
+
+/**
+ * Distance Haversine entre deux points GPS, en mètres.
+ * Formule sphérique standard (suffisante pour les rayons < 100 km).
+ */
+export function haversineDistance(a: Coordinates, b: Coordinates): number {
+  const R = 6_371_000;
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const deltaLat = toRad(b.lat - a.lat);
+  const deltaLon = toRad(b.lon - a.lon);
+  const h =
+    Math.sin(deltaLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function toRad(deg: number): number {
+  return (deg * Math.PI) / 180;
+}
+
+/**
+ * Mapping des colonnes du CSV FINESS vers le type interne.
+ * Le CSV data.gouv.fr utilise les en-têtes suivants (varie légèrement selon
+ * l'export, on est défensif sur les noms alternatifs).
+ */
+function toEtablissementFiness(row: Record<string, string>): EtablissementFiness | null {
+  const finessEt = row.nofinesset ?? row["FINESS ET"] ?? row.finesset;
+  if (!finessEt) return null;
+
+  const e: EtablissementFiness = {
+    finessEt,
+    raisonSociale: row.rs ?? row.raisonsociale ?? row["Raison sociale"] ?? row.rslongue ?? "",
+  };
+
+  const finessEj = row.nofinessej ?? row["FINESS EJ"] ?? row.finessej;
+  if (finessEj) e.finessEj = finessEj;
+
+  const categorieCode = row.categetab ?? row.categagretab ?? row.libcategetab;
+  if (categorieCode) {
+    e.categorieCode = categorieCode;
+    const lib = libelleCategorieFiness(categorieCode);
+    if (lib) e.categorieLibelle = lib;
+    else if (row.libcategetab) e.categorieLibelle = row.libcategetab;
+  }
+
+  const adresseParts = [row.numvoie, row.typvoie, row.voie, row.compvoie].filter(Boolean);
+  if (adresseParts.length > 0) e.adresse = adresseParts.join(" ").trim();
+  else if (row.adresse) e.adresse = row.adresse;
+
+  const codePostal = row.cpostal ?? row.codepostal;
+  if (codePostal) e.codePostal = codePostal;
+
+  const commune = row.commune ?? row.libcommune;
+  if (commune) e.commune = commune;
+
+  const codeCommune = row.codecommune ?? row.codinsee;
+  if (codeCommune) e.codeCommune = codeCommune;
+
+  const departement = row.departement ?? row.codedepartement;
+  if (departement) e.departement = departement;
+
+  const telephone = row.telephone ?? row.tel;
+  if (telephone) e.telephone = telephone;
+
+  const siren = row.siren;
+  if (siren) e.siren = siren;
+
+  const lonRaw = row.coordxet ?? row.longitude;
+  const latRaw = row.coordyet ?? row.latitude;
+  if (lonRaw && latRaw) {
+    const lon = Number.parseFloat(lonRaw.replace(",", "."));
+    const lat = Number.parseFloat(latRaw.replace(",", "."));
+    if (Number.isFinite(lon) && Number.isFinite(lat)) {
+      e.point = { lon, lat };
+    }
+  }
+
+  return e;
+}
