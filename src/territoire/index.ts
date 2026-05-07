@@ -1,12 +1,25 @@
 /**
  * Module territoire — données géographiques et démographiques françaises.
  *
- * Wrappers prévus :
- *  - communes.ts   : autocomplétion via geo.api.gouv.fr
- *  - geocode.ts    : géocodage adresse via IGN Géoplateforme
- *  - insee-iris.ts : démographie infra-communale via INSEE
- *
- * Implémentation à venir.
+ * Sources :
+ *  - geo.api.gouv.fr (DINUM/Etalab) → recherche de communes
+ *  - data.geopf.fr (IGN Géoplateforme) → géocodage d'adresse
+ *  - INSEE → population IRIS infra-communale (à venir)
  */
+
+export {
+  searchCommunes,
+  getCommuneByCode,
+  type Commune,
+  type SearchCommunesOptions,
+} from "./communes.js";
+
+export {
+  geocode,
+  geocodeMany,
+  reverseGeocode,
+  type GeocodeResult,
+  type GeocodeOptions,
+} from "./geocode.js";
 
 export const TERRITOIRE_VERSION = "0.1.0";
