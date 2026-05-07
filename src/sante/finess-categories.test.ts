@@ -33,9 +33,9 @@ describe("finessFamille", () => {
   });
 
   it("returns 'autre' for empty string and pure-whitespace inputs", () => {
-    // Empty string is semantically distinct from null (likely upstream parsing
-    // bug) but currently both map to "autre" — pinned here so the contract is
-    // explicit. Detection of empty-rate happens at the ingest boundary.
+    // Empty / whitespace-only inputs are upstream-parsing-bug suspects but
+    // this classifier silently maps them to "autre" — surfacing them is the
+    // ingest layer's job (will land with scripts/ingest/finess.ts).
     expect(finessFamille("")).toBe("autre");
     expect(finessFamille("   ")).toBe("autre");
     expect(finessFamille("\t")).toBe("autre");
@@ -59,6 +59,17 @@ describe("finessFamille", () => {
           `Code "${code}" (${(FINESS_CATEGORIES as Record<string, string>)[code]}) is in FINESS_CATEGORIES but maps to "autre" without being declared in DELIBERATELY_AUTRE. Add it to a family Set or to DELIBERATELY_AUTRE with a comment.`,
         ).toBe(true);
       }
+    }
+  });
+
+  it("invariant: DELIBERATELY_AUTRE is disjoint from every family Set", () => {
+    // A code cannot simultaneously be classified into a family AND declared
+    // as deliberately unclassified. Catches accidental double-listing.
+    for (const code of DELIBERATELY_AUTRE) {
+      expect(
+        finessFamille(code),
+        `Code "${code}" is in DELIBERATELY_AUTRE but classifies as a family — remove it from one of the two declarations.`,
+      ).toBe("autre");
     }
   });
 });

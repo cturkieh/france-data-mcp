@@ -125,18 +125,19 @@ export const DELIBERATELY_AUTRE = new Set<string>([
 /**
  * Classify a FINESS category code into a family for query-side filtering.
  *
- * Inputs:
- *   - `null` or `undefined`: legitimate "field absent in source row" → "autre".
- *   - empty string `""`: distinct from null — typically signals an upstream CSV
- *     parsing bug (column shift, header mismatch). Returns "autre" but kept as
- *     a separate code path so callers can detect+log empty-rate at the ingest
- *     boundary if needed.
- *   - any other string: trimmed, then matched against the family Sets above.
+ * Inputs are normalized first: `null`, `undefined`, empty string, and
+ * whitespace-only strings all resolve to "autre". Non-empty inputs are trimmed
+ * before matching against the family Sets, tolerating whitespace artefacts
+ * occasionally present in DREES dumps (e.g. `" 108 "` → "mco").
+ *
+ * Note: empty/whitespace inputs are *upstream-parsing-bug suspects* (column
+ * shift, header mismatch) but this function intentionally has no telemetry
+ * hook — surfacing the empty-rate is the ingest layer's responsibility,
+ * tracked separately when scripts/ingest/finess.ts lands.
  */
 export function finessFamille(code: string | null | undefined): FinessFamille {
-  if (code === null || code === undefined) return "autre";
-  const trimmed = code.trim();
-  if (trimmed === "") return "autre";
+  const trimmed = code?.trim();
+  if (!trimmed) return "autre";
   if (MCO_CODES.has(trimmed)) return "mco";
   if (SSR_CODES.has(trimmed)) return "ssr";
   if (EHPAD_CODES.has(trimmed)) return "ehpad";
