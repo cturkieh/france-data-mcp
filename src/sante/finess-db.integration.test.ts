@@ -27,6 +27,19 @@ describe("getFinessInRadius", () => {
     expect(result.results[0]?.distance_km).toBeLessThanOrEqual(
       result.results[1]?.distance_km ?? Number.POSITIVE_INFINITY,
     );
+
+    // Locks the C2 contract: PostGIS geom must come back as parseable
+    // GeoJSON, not raw EWKB hex. Regression here would mean the RPC stopped
+    // casting via ST_AsGeoJSON and the wrapper silently emits coords: null.
+    const first = result.results[0];
+    expect(first?.coords).toBeDefined();
+    expect(typeof first?.coords?.lat).toBe("number");
+    expect(typeof first?.coords?.lon).toBe("number");
+    // Charleville sits around (49.77, 4.72) — sanity-bound the parsed values.
+    expect(first?.coords?.lat).toBeGreaterThan(49);
+    expect(first?.coords?.lat).toBeLessThan(50);
+    expect(first?.coords?.lon).toBeGreaterThan(4);
+    expect(first?.coords?.lon).toBeLessThan(5);
   });
 
   it("filters by family (mco)", async () => {

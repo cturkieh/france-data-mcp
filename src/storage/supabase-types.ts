@@ -380,7 +380,7 @@ export type Database = {
           code_postal: string
           distance_meters: number
           email: string
-          geom: unknown
+          geom: Json
           num_finess: string
           raison_sociale: string
           telephone: string
@@ -403,7 +403,7 @@ export type Database = {
           code_postal: string
           distance_meters: number
           email: string
-          geom: unknown
+          geom: Json
           num_finess: string
           raison_sociale: string
           telephone: string

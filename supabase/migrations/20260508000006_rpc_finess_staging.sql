@@ -1,9 +1,16 @@
 -- Create the FINESS staging table from scratch each ingestion run.
 -- Same schema as `finess` so the atomic swap (rename staging → prod) lands cleanly.
--- Anon reads are blocked: only service_role writes during ingestion.
+--
+-- IMPORTANT: the staging policy MUST mirror the prod policy exactly. After
+-- ingest_atomic_swap renames `finess_staging` → `finess`, the table's RLS
+-- policies are preserved (Postgres only renames relname). If staging used
+-- `USING (false)`, the swap would lock anon out of `finess` permanently — the
+-- MCP server would silently return empty results for every query. Caught by
+-- the final code review on V0.2 phase 1+2.
 CREATE OR REPLACE FUNCTION ingest_create_finess_staging()
 RETURNS VOID
 LANGUAGE plpgsql
+SET search_path = public, extensions
 AS $$
 BEGIN
   DROP TABLE IF EXISTS finess_staging CASCADE;
@@ -30,8 +37,10 @@ BEGIN
   CREATE INDEX finess_staging_categorie_idx ON finess_staging (categorie_code);
   CREATE INDEX finess_staging_dept_idx      ON finess_staging (left(code_insee, 2));
   ALTER TABLE finess_staging ENABLE ROW LEVEL SECURITY;
-  -- Block anon reads on staging; only service_role inserts during ingestion.
-  CREATE POLICY "anon read finess_staging" ON finess_staging FOR SELECT TO anon USING (false);
+  -- Same policy name + USING clause as prod, so the rename is idempotent and
+  -- anon retains read access after the swap. Service_role writes during
+  -- ingestion bypass RLS regardless (no INSERT policy needed).
+  CREATE POLICY "anon read finess" ON finess_staging FOR SELECT TO anon USING (true);
 END;
 $$;
 

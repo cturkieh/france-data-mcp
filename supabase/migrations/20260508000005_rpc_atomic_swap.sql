@@ -3,6 +3,7 @@
 CREATE OR REPLACE FUNCTION ingest_atomic_swap(p_prod_table TEXT)
 RETURNS VOID
 LANGUAGE plpgsql
+SET search_path = public, extensions
 AS $$
 DECLARE
   v_staging  TEXT := p_prod_table || '_staging';

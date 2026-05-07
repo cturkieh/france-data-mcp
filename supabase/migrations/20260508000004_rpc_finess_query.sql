@@ -1,3 +1,9 @@
+-- IMPORTANT: `geom` is returned as GeoJSON via ST_AsGeoJSON()::JSONB rather than
+-- as a raw geometry. PostgREST serializes raw `geometry` columns as the EWKB hex
+-- string (e.g. "0101000020E61000..."), which the TypeScript wrapper cannot parse
+-- into { lat, lon } and crashes at runtime. Caught by the final code review on
+-- V0.2 phase 1+2.
+
 -- RPC 1/2: spatial search for FINESS within radius, with optional code-list filter.
 -- Pass p_codes = '{}' (empty array) to disable the filter (return all categories).
 CREATE OR REPLACE FUNCTION finess_in_radius(
@@ -17,10 +23,11 @@ CREATE OR REPLACE FUNCTION finess_in_radius(
   ville             TEXT,
   telephone         VARCHAR(20),
   email             TEXT,
-  geom              GEOMETRY,
+  geom              JSONB,
   distance_meters   DOUBLE PRECISION
 )
 LANGUAGE plpgsql STABLE
+SET search_path = public, extensions
 AS $$
 DECLARE
   v_point geography := ST_SetSRID(ST_MakePoint(p_lon, p_lat), 4326)::geography;
@@ -28,7 +35,8 @@ BEGIN
   RETURN QUERY
   SELECT
     f.num_finess, f.raison_sociale, f.categorie_code, f.categorie_libelle,
-    f.voie, f.code_postal, f.code_insee, f.ville, f.telephone, f.email, f.geom,
+    f.voie, f.code_postal, f.code_insee, f.ville, f.telephone, f.email,
+    ST_AsGeoJSON(f.geom)::jsonb AS geom,
     ST_Distance(f.geom::geography, v_point) AS distance_meters
   FROM finess f
   WHERE f.geom IS NOT NULL
@@ -56,16 +64,18 @@ CREATE OR REPLACE FUNCTION finess_by_categorie(
   ville             TEXT,
   telephone         VARCHAR(20),
   email             TEXT,
-  geom              GEOMETRY,
+  geom              JSONB,
   distance_meters   DOUBLE PRECISION
 )
 LANGUAGE plpgsql STABLE
+SET search_path = public, extensions
 AS $$
 BEGIN
   RETURN QUERY
   SELECT
     f.num_finess, f.raison_sociale, f.categorie_code, f.categorie_libelle,
-    f.voie, f.code_postal, f.code_insee, f.ville, f.telephone, f.email, f.geom,
+    f.voie, f.code_postal, f.code_insee, f.ville, f.telephone, f.email,
+    ST_AsGeoJSON(f.geom)::jsonb AS geom,
     NULL::DOUBLE PRECISION AS distance_meters
   FROM finess f
   WHERE f.categorie_code = ANY(p_codes)
