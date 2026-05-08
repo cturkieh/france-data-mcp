@@ -32,7 +32,12 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 22 has native WebSocket. @supabase/realtime-js eagerly
+          # initializes a RealtimeClient when createClient runs, even if we
+          # never use realtime — Node 20 doesn't have native WebSocket so
+          # the client crashes on init. Bumping fixes it without adding
+          # the `ws` package as a runtime dep.
+          node-version: 22
           cache: pnpm
 
       - name: Install dependencies

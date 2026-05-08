@@ -87,7 +87,10 @@ async function main(): Promise<void> {
     await preValidateFile(downloaded.filePath, {
       minSizeBytes: MIN_SIZE_BYTES,
       expectedHeaderColumns: ["nofinesset", "rs", "categetab", "departement"],
-      delimiter: ";",
+      // The data.gouv geocoded FINESS CSV is comma-delimited (NOT ";", which
+      // would be the convention for raw ANS extracts). Verified from a real
+      // run on 2026-05-08 — first line started with "," (empty first column).
+      delimiter: ",",
     });
 
     // 3. COPY → STAGING
@@ -169,7 +172,8 @@ async function streamCsvToStaging(
 
   const parser = stream.pipe(
     parse({
-      delimiter: ";",
+      // Match the pre-validate delimiter — see header-validation block above.
+      delimiter: ",",
       columns: true,
       skip_empty_lines: true,
       relax_quotes: true,

@@ -19,7 +19,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Match ingest-finess.yml — Node 22 for native WebSocket support
+          # (required by @supabase/realtime-js even when not used).
+          node-version: 22
           cache: pnpm
 
       - name: Install dependencies
