@@ -16,7 +16,7 @@
 import { describe, expect, it } from "vitest";
 import { __TESTING__ } from "./finess.js";
 
-const { parseFinessRecord, isValidDept } = __TESTING__;
+const { parseFinessRecord, isValidDept, parseLambert93Coord } = __TESTING__;
 
 const charlevilleEhpadRow: Record<string, string> = {
   nofinesset: "080000235",
@@ -147,12 +147,87 @@ describe("parseFinessRecord (v0.2.1 audit fixes)", () => {
     expect(out.skipReason).toBe("bad_dept");
   });
 
-  it("preserves coords in `raw` JSONB for the server-side Lambert→WGS84 transform", () => {
+  it("parses coordxet/coordyet into typed columns and empties raw (V0.4.2)", () => {
     const out = parseFinessRecord(charlevilleEhpadRow);
-    expect(out.row?.raw.coordxet).toBe("823923.6");
-    expect(out.row?.raw.coordyet).toBe("6964785.4");
-    // geom is left NULL — populated server-side by ingest_apply_finess_geom_batch
-    expect(out.row?.geom).toBeNull();
+    if (!out.row) throw new Error("expected row");
+    expect(out.row.coordx_lambert93).toBe(823923.6);
+    expect(out.row.coordy_lambert93).toBe(6964785.4);
+    expect(out.row.raw).toEqual({});
+    expect(out.row.geom).toBeNull();
+  });
+
+  it("parses French decimal comma in coordxet/coordyet", () => {
+    const row = { ...charlevilleEhpadRow, coordxet: "823923,6", coordyet: "6964785,4" };
+    const out = parseFinessRecord(row);
+    expect(out.row?.coordx_lambert93).toBe(823923.6);
+    expect(out.row?.coordy_lambert93).toBe(6964785.4);
+  });
+
+  it("returns null coords when coordxet/coordyet are missing or non-numeric", () => {
+    const empty = parseFinessRecord({ ...charlevilleEhpadRow, coordxet: "", coordyet: "" });
+    expect(empty.row?.coordx_lambert93).toBeNull();
+    expect(empty.row?.coordy_lambert93).toBeNull();
+
+    const garbage = parseFinessRecord({
+      ...charlevilleEhpadRow,
+      coordxet: "GARBAGE",
+      coordyet: "BLOB",
+    });
+    expect(garbage.row?.coordx_lambert93).toBeNull();
+    expect(garbage.row?.coordy_lambert93).toBeNull();
+  });
+
+  it("flags ligneacheminement parse failures via the parser return", () => {
+    const malformed = parseFinessRecord({ ...charlevilleEhpadRow, ligneacheminement: "GARBAGE" });
+    expect(malformed.ligneAchPresentButUnparsed).toBe(true);
+    expect(malformed.row?.code_postal).toBeNull();
+
+    const ok = parseFinessRecord(charlevilleEhpadRow);
+    expect(ok.ligneAchPresentButUnparsed).toBe(false);
+
+    const empty = parseFinessRecord({ ...charlevilleEhpadRow, ligneacheminement: "" });
+    expect(empty.ligneAchPresentButUnparsed).toBe(false);
+  });
+});
+
+describe("parseLambert93Coord (V0.4.2)", () => {
+  it("parses a numeric string with a dot decimal", () => {
+    expect(parseLambert93Coord("823923.6")).toBe(823923.6);
+    expect(parseLambert93Coord("-1234.5")).toBe(-1234.5);
+    expect(parseLambert93Coord("0")).toBe(0);
+  });
+
+  it("parses a numeric string with a French decimal comma", () => {
+    expect(parseLambert93Coord("823923,6")).toBe(823923.6);
+    expect(parseLambert93Coord("6964785,4")).toBe(6964785.4);
+  });
+
+  it("returns null for null, empty string, or non-numeric input", () => {
+    expect(parseLambert93Coord(null)).toBeNull();
+    expect(parseLambert93Coord("")).toBeNull();
+    expect(parseLambert93Coord("ABC")).toBeNull();
+    expect(parseLambert93Coord("NaN")).toBeNull();
+  });
+
+  it("rejects partial-parse inputs (defense against CSV column shifts)", () => {
+    expect(parseLambert93Coord("12 RUE DUMAS")).toBeNull();
+    expect(parseLambert93Coord("823923.6abc")).toBeNull();
+    expect(parseLambert93Coord("12.3.4")).toBeNull();
+    expect(parseLambert93Coord("1e6")).toBeNull(); // notation scientifique non standard CSV FR
+  });
+
+  it("rejects French thousand-separator commas (multi-comma input)", () => {
+    // `replace(",", ".")` sans `g` flag ne remplace que la première virgule,
+    // donc "1,234,5" devient "1.234,5" qui échoue la regex stricte → null.
+    // Pas un partial-parse silencieux, mais le test ancre le contrat.
+    expect(parseLambert93Coord("1,234,5")).toBeNull();
+    expect(parseLambert93Coord("1.234,5")).toBeNull();
+  });
+
+  it("trims surrounding whitespace including \\r (Windows CSV) and tab", () => {
+    expect(parseLambert93Coord("823923.6\r")).toBe(823923.6);
+    expect(parseLambert93Coord("\t823923.6")).toBe(823923.6);
+    expect(parseLambert93Coord("  823923.6  ")).toBe(823923.6);
   });
 });
 

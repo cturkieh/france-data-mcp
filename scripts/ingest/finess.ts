@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./load-env.js";
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -84,6 +84,10 @@ interface FinessStagingRow {
   date_maj: string | null;
   /** EWKT string — PostGIS auto-casts to `geometry(Point, 4326)` on insert. */
   geom: string | null;
+  /** Lambert 93 X coordinate (EPSG:2154), parsed from CSV. NULL if missing/invalid. */
+  coordx_lambert93: number | null;
+  /** Lambert 93 Y coordinate (EPSG:2154), parsed from CSV. NULL if missing/invalid. */
+  coordy_lambert93: number | null;
   raw: Record<string, string>;
 }
 
@@ -371,10 +375,9 @@ async function streamCsvToStaging(
     const parsed = parseFinessRecord(record);
     if (parsed.row) {
       batch.push(parsed.row);
-      // Track ligneacheminement parse failures separately — silent null CP/ville
-      // was the v0.2.0 bug we're fixing, so a re-emergence (DREES layout change)
-      // must be loud.
-      if (parsed.row.code_postal === null && parsed.row.raw.ligneacheminement) {
+      // Track ligneacheminement parse failures — silent null CP/ville was the
+      // v0.2.0 bug, so a re-emergence (DREES layout change) must be loud.
+      if (parsed.ligneAchPresentButUnparsed) {
         parsedNoLigneAch++;
       }
       // Track DREES codes that fall into "autre" — surfaces a nomenclature
@@ -426,8 +429,8 @@ async function streamCsvToStaging(
 type SkipReason = "no_finess_id" | "no_commune" | "bad_dept" | "dom_unsupported";
 
 type ParsedFinessRow =
-  | { row: FinessStagingRow; skipReason?: never }
-  | { row?: never; skipReason: SkipReason };
+  | { row: FinessStagingRow; ligneAchPresentButUnparsed: boolean; skipReason?: never }
+  | { row?: never; ligneAchPresentButUnparsed?: never; skipReason: SkipReason };
 
 /**
  * Match `ligneacheminement` of the form `"08000 CHARLEVILLE MEZIERES CEDEX"`.
@@ -465,6 +468,8 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   const ligneMatch = ligneAch.match(LIGNE_ACHEMINEMENT_REGEX);
   const codePostal = ligneMatch?.[1] ?? null;
   const ville = ligneMatch?.[2]?.trim() ?? null;
+  // Surface to the streamer for monitoring (raw is empty post-V0.4.2).
+  const ligneAchPresentButUnparsed = ligneAch !== "" && !ligneMatch;
 
   // Build full address line: "12 CRS BRIAND" instead of just "BRIAND".
   const numVoie = getNonEmpty(rec, "numvoie");
@@ -472,16 +477,9 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   const voieRaw = getNonEmpty(rec, "voie");
   const voieFull = [numVoie, typVoie, voieRaw].filter(Boolean).join(" ") || null;
 
-  // Geom is populated server-side by ingest_apply_finess_geom_batch which
-  // reads coordxet/coordyet (Lambert 93) from `raw` and reprojects to WGS84.
-  // We deliberately leave geom NULL here — single source of truth = the RPC.
-  // See V0.2 final review (commit 88ebfc0) for the postmortem.
-
-  // Filter raw to only non-empty string entries, for compact JSONB storage.
-  const raw: Record<string, string> = {};
-  for (const [k, v] of Object.entries(rec)) {
-    if (v !== "" && v !== undefined) raw[k] = v;
-  }
+  // geom NULL ici — populé server-side par ingest_apply_finess_geom_batch
+  // qui lit coordx/y_lambert93 et reprojette Lambert 93 → WGS84. SSOT = le RPC.
+  // Postmortem V0.2 : commit 88ebfc0 ; switch typed columns : V0.4.2.
 
   return {
     row: {
@@ -501,12 +499,39 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
       date_ouverture: getNonEmpty(rec, "dateouv"),
       date_maj: getNonEmpty(rec, "datemaj"),
       geom: null,
-      raw,
+      coordx_lambert93: parseLambert93Coord(getNonEmpty(rec, "coordxet")),
+      coordy_lambert93: parseLambert93Coord(getNonEmpty(rec, "coordyet")),
+      // V0.4.2 — colonnes typées remplacent raw->>'coordxet' ; colonne gardée pour rétro-compat.
+      raw: {},
     },
+    ligneAchPresentButUnparsed,
   };
 }
 
-export const __TESTING__ = { parseFinessRecord, isValidDept, LIGNE_ACHEMINEMENT_REGEX };
+/**
+ * Parses a Lambert 93 coordinate from the CSV. Tolerates French decimal
+ * comma ("823923,6") and surrounding whitespace. Returns null when the
+ * input is missing, blank, or NOT a clean numeric literal.
+ *
+ * Strict regex anchor (`^-?\d+(\.\d+)?$`) blocks `Number.parseFloat`'s
+ * silent partial-parse: without it, a CSV column shift placing "12 RUE
+ * DUMAS" into `coordxet` would yield 12, projecting to an ocean point
+ * that silently passes the geom-coverage threshold.
+ */
+export function parseLambert93Coord(raw: string | null): number | null {
+  if (raw === null) return null;
+  const cleaned = raw.replace(",", ".").trim();
+  if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return null;
+  const value = Number.parseFloat(cleaned);
+  return Number.isFinite(value) ? value : null;
+}
+
+export const __TESTING__ = {
+  parseFinessRecord,
+  isValidDept,
+  LIGNE_ACHEMINEMENT_REGEX,
+  parseLambert93Coord,
+};
 
 // Only run main() when this file is executed as a script, not when imported
 // by the test suite or another module. Without this guard, vitest pulls in

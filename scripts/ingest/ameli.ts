@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "./load-env.js";
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { SupabaseClient } from "@supabase/supabase-js";

@@ -175,12 +175,12 @@ describe("getAmeliBySpecialiteDept", () => {
   });
 
   it("rejette un offset négatif ou hors borne avec RangeError", async () => {
-    await expect(
-      getAmeliBySpecialiteDept({ departement: "75", offset: -1 }),
-    ).rejects.toThrow(/offset must be between/);
-    await expect(
-      getAmeliBySpecialiteDept({ departement: "75", offset: 200_000 }),
-    ).rejects.toThrow(/offset must be between/);
+    await expect(getAmeliBySpecialiteDept({ departement: "75", offset: -1 })).rejects.toThrow(
+      /offset must be between/,
+    );
+    await expect(getAmeliBySpecialiteDept({ departement: "75", offset: 200_000 })).rejects.toThrow(
+      /offset must be between/,
+    );
     expect(mockRpc).not.toHaveBeenCalled();
   });
 });

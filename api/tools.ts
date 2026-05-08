@@ -86,9 +86,7 @@ function coerceNumber(v: unknown, paramName: string): number | undefined {
     // RangeError plutôt qu'Error pour cohérence avec les autres validators
     // (clampLimit, validateRadiusKm…). Permet à `api/mcp.ts` de mapper sur
     // JSON-RPC -32602 (Invalid params) au lieu de -32603 (Internal error).
-    throw new RangeError(
-      `${paramName} doit être un nombre fini (reçu : ${JSON.stringify(v)})`,
-    );
+    throw new RangeError(`${paramName} doit être un nombre fini (reçu : ${JSON.stringify(v)})`);
   }
   return n;
 }
@@ -115,9 +113,7 @@ function coerceBoolean(v: unknown, paramName: string): boolean | undefined {
     if (s === "false" || s === "0") return false;
   }
   // RangeError pour cohérence (cf. coerceNumber) → JSON-RPC -32602.
-  throw new RangeError(
-    `${paramName} doit être un booléen (reçu : ${JSON.stringify(v)})`,
-  );
+  throw new RangeError(`${paramName} doit être un booléen (reçu : ${JSON.stringify(v)})`);
 }
 
 /**
@@ -611,7 +607,8 @@ export const TOOLS: McpTool[] = [
         },
         familles: {
           type: "array",
-          description: `Familles FINESS à inclure (24 valeurs disponibles, voir enum). Si omis, toutes catégories.`,
+          description:
+            "Familles FINESS à inclure (24 valeurs disponibles, voir enum). Si omis, toutes catégories.",
           items: { type: "string", enum: [...FINESS_FAMILLE_INPUTS] },
         },
         limit: {
@@ -652,7 +649,7 @@ export const TOOLS: McpTool[] = [
       properties: {
         categorie: {
           type: "string",
-          description: `Famille FINESS recherchée (24 valeurs disponibles, voir enum).`,
+          description: "Famille FINESS recherchée (24 valeurs disponibles, voir enum).",
           enum: [...FINESS_FAMILLE_INPUTS],
         },
         departement: {

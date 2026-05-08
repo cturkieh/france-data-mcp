@@ -30,6 +30,7 @@ export function getNonEmpty(rec: Record<string, string>, name: string): string |
   // string of only control chars / whitespace becomes null. Voluntary
   // spaces inside the value are preserved — we only fix the JSON-breaking
   // \r/\n/\t residues from upstream CSV.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional strip of \x00-\x1f from CSV residues
   const cleaned = raw.replace(/[\x00-\x1f]+/g, " ").trim();
   return cleaned === "" ? null : cleaned;
 }

@@ -128,3 +128,35 @@ ALTER TABLE finess_previous RENAME TO finess;
 ALTER TABLE finess_failed RENAME TO finess_previous;
 COMMIT;
 ```
+
+## V0.4.2 — Conventions à connaître (post-incident 2026-05-08)
+
+**Pourquoi V0.4.2 existe** : sur free tier Supabase (1 GB), la table `annuaire_ameli` a saturé le disque pendant l'ingestion en stockant la ligne CSV brute dans une colonne JSONB `raw` (~70-80 % du poids row × 462 K rows = 561 MB). DB en read-only mode → projet à recréer. Fix : passer en Pro tier 8 GB ET vider le `raw` à l'ingestion. Pour FINESS, la projection Lambert 93 → WGS84 lisait encore `raw->>'coordxet'`, donc on a typé les coords en colonnes dédiées.
+
+### Loading des env vars (`scripts/ingest/load-env.ts`)
+
+`import "dotenv/config"` ne charge QUE `.env`, jamais `.env.local`. Les credentials de dev sont stockés dans `.env.local` (convention Next.js / Vite), donc l'ingestion locale échouait avec `Missing SUPABASE_URL`. Le helper `load-env.ts` charge `.env.local` en priorité avec fallback `.env` non-overriding. À utiliser sur tout nouveau script d'ingestion :
+
+```ts
+import "./load-env.js"; // au lieu de import "dotenv/config"
+```
+
+### Lambert 93 typed columns (FINESS)
+
+Avant V0.4.2 : `coordxet` / `coordyet` du CSV étaient stockées dans `raw` JSONB, lues par le RPC `ingest_apply_finess_geom_batch` via `raw->>'coordxet'` avec cast string→numeric et regex runtime.
+
+Après V0.4.2 :
+- Colonnes typées `coordx_lambert93 / coordy_lambert93 DOUBLE PRECISION` sur `finess` et `finess_staging`.
+- Le parser TS `parseLambert93Coord(raw: string | null): number | null` extrait au parsing, avec **regex stricte** `^-?\d+(\.\d+)?$` qui bloque les partial parses silencieux (`"12 RUE DUMAS" → 12` projetait à un point ocean). Test couvert.
+- `raw` reste dans le schéma pour rétro-compat avec les anciens dumps, mais les nouveaux INSERT laissent `raw = {}`.
+- Le RPC `ingest_apply_finess_geom_batch` filtre désormais `WHERE coordx_lambert93 IS NOT NULL AND coordy_lambert93 IS NOT NULL` au lieu d'une regex JSONB.
+
+Économie : ~150 MB sur la table `finess` (93 K rows). À reproduire sur Ameli si le besoin de stockage `raw` revient.
+
+### Migration as superset
+
+Toute migration qui RECRÉE `ingest_create_finess_staging` ou `ingest_create_annuaire_ameli_staging` DOIT être un **superset strict** de la migration précédente. Le swap atomic remplace ENTIÈREMENT la prod par la staging — toute colonne/index manquant dans la staging est silencieusement perdu post-swap. Vérifier visuellement la parité avant push (cf. mig 21 → mig 09).
+
+### Piège : flag `parsedCoordRejected` non implémenté (backlog)
+
+`MIN_GEOM_COVERAGE = 0.8` catche les régressions massives (>20 % rows sans geom), mais une dérive DREES touchant 5–15 % des coords passe sous le seuil sans alerte. Symétrie attendue avec `parsedNoLigneAch` (qui tracke les ligneacheminement mal parsés). À ajouter en V0.4.3.

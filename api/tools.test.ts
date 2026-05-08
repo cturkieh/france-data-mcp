@@ -421,10 +421,7 @@ describe("dedupe_by_ps", () => {
     vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValueOnce({
       count: 2,
       truncated: false,
-      results: [
-        makePs({ id: 1, civilite: "M" }),
-        makePs({ id: 2, civilite: "Mme" }),
-      ],
+      results: [makePs({ id: 1, civilite: "M" }), makePs({ id: 2, civilite: "Mme" })],
     });
     const tool = findTool("professionnels_in_radius");
     const result = (await tool?.handler({
@@ -504,9 +501,9 @@ describe("dedupe_by_ps", () => {
 
   it("rejette une valeur dedupe_by_ps non-coercible", async () => {
     const tool = findTool("professionnels_in_radius");
-    await expect(
-      tool?.handler({ lon: 4.72, lat: 49.77, dedupe_by_ps: "yes" }),
-    ).rejects.toThrow(/dedupe_by_ps/);
+    await expect(tool?.handler({ lon: 4.72, lat: 49.77, dedupe_by_ps: "yes" })).rejects.toThrow(
+      /dedupe_by_ps/,
+    );
   });
 });
 
@@ -520,19 +517,17 @@ describe("coerceNumber loud-failure (silent default guard)", () => {
     // silencieusement 5 km, masquant la saisie invalide. coerceNumber doit
     // throw, pas fallback.
     const tool = findTool("professionnels_in_radius");
-    await expect(
-      tool?.handler({ lon: 4.7, lat: 49.7, radius_km: "50 km" }),
-    ).rejects.toThrow(/radius_km/);
-    await expect(
-      tool?.handler({ lon: 4.7, lat: 49.7, radius_km: "abc" }),
-    ).rejects.toThrow(/radius_km/);
+    await expect(tool?.handler({ lon: 4.7, lat: 49.7, radius_km: "50 km" })).rejects.toThrow(
+      /radius_km/,
+    );
+    await expect(tool?.handler({ lon: 4.7, lat: 49.7, radius_km: "abc" })).rejects.toThrow(
+      /radius_km/,
+    );
   });
 
   it("rejette un limit non-coercible plutôt que silencieusement défaut 100", async () => {
     const tool = findTool("etablissements_finess_by_categorie");
-    await expect(
-      tool?.handler({ categorie: "ehpad", limit: "abc" }),
-    ).rejects.toThrow(/limit/);
+    await expect(tool?.handler({ categorie: "ehpad", limit: "abc" })).rejects.toThrow(/limit/);
   });
 
   it("garde le default quand le paramètre est absent (undefined/null)", async () => {
