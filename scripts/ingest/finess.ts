@@ -2,13 +2,13 @@ import "dotenv/config";
 import * as fs from "node:fs";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
-import { parseCoordinates } from "../../src/core/coords.js";
 import { requireEnv } from "../../src/storage/supabase.js";
 import {
   IngestError,
   type IngestLogEntry,
   atomicSwapTables,
   downloadCsv,
+  getNonEmpty,
   preValidateFile,
   writeIngestLog,
 } from "./shared.js";
@@ -25,6 +25,21 @@ const MIN_SIZE_BYTES = 30_000_000; // FINESS extract is ~35 MB; 30 MB threshold 
 const MIN_ROWS = 50_000;
 const MAX_ROWS = 200_000;
 const BATCH_SIZE = 500;
+
+/**
+ * How long to wait after `NOTIFY pgrst, 'reload schema'` before issuing the
+ * first insert against the freshly-created staging table. PostgREST polls the
+ * notification on a short interval; ~1-2s is the canonical pause documented
+ * in Supabase's runtime-DDL recipes. Without it, the first insert can race
+ * the schema-cache refresh and fail with "Could not find the table ...".
+ */
+const PGRST_RELOAD_WAIT_MS = 2000;
+
+/** Rows per batched call to `ingest_apply_finess_geom_batch` (PostgREST 60s proxy timeout safe). */
+const GEOM_BATCH_SIZE = 10_000;
+
+/** Hard floor on geocoded-rows ratio. Below this, we suspect a CSV format change. */
+const MIN_GEOM_COVERAGE = 0.8;
 
 interface FinessStagingRow {
   num_finess: string;
@@ -100,9 +115,9 @@ async function main(): Promise<void> {
       throw new IngestError("copy", `Failed to create finess_staging table: ${stagingErr.message}`);
     }
     // The RPC emits NOTIFY pgrst,'reload schema' but PostgREST polls on a
-    // small interval — give it a moment so the next insert finds the table
-    // in the schema cache instead of "Could not find the table 'public.finess_staging'".
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    // small interval — wait so the next insert finds the table in the schema
+    // cache instead of "Could not find the table 'public.finess_staging'".
+    await new Promise((resolve) => setTimeout(resolve, PGRST_RELOAD_WAIT_MS));
 
     const stats = await streamCsvToStaging(downloaded.filePath, supabase);
     log.row_count = stats.inserted;
@@ -124,27 +139,51 @@ async function main(): Promise<void> {
     // 4b. APPLY GEOM (Lambert 93 → WGS84 transform server-side, batched)
     // The CSV uses coordxet/coordyet (EPSG:2154) which were stored in `raw`.
     // We batch the UPDATE to stay under PostgREST's 60s proxy timeout — each
-    // call updates up to BATCH rows that don't yet have a geom, and we loop
-    // until the RPC returns 0 (no more rows to process).
-    const GEOM_BATCH = 10_000;
+    // call updates up to GEOM_BATCH_SIZE rows that don't yet have a geom,
+    // and we loop until the RPC returns fewer rows than requested.
+    // Bounded safety net: 95K rows / 10K batch = 10 iterations max under
+    // healthy operation. We add a generous margin so a slow tail (last batch
+    // tiny) doesn't trip the cap, but a runaway loop (RPC contract regression)
+    // will surface as a clear error instead of hanging the workflow.
+    const maxGeomIterations = Math.ceil(stats.inserted / GEOM_BATCH_SIZE) + 5;
     let updated = 0;
+    let iter = 0;
     while (true) {
+      if (++iter > maxGeomIterations) {
+        throw new IngestError(
+          "validate",
+          `Geom transform did not converge after ${maxGeomIterations} batches — likely RPC contract regression (rows updated but geom still NULL)`,
+        );
+      }
       const { data: batchUpdated, error: geomErr } = await supabase.rpc(
         "ingest_apply_finess_geom_batch",
-        { p_limit: GEOM_BATCH },
+        { p_limit: GEOM_BATCH_SIZE },
       );
       if (geomErr) {
         throw new IngestError("validate", `Failed to apply geom transform: ${geomErr.message}`);
       }
-      const n = (batchUpdated as number | null) ?? 0;
-      updated += n;
-      if (n < GEOM_BATCH) break; // last batch (or no rows left)
+      // Strict type check: the RPC must return a number. A null/string/object
+      // is a PostgREST or Supabase serialization regression that we want to
+      // fail loud, not coerce to 0 (which would silently exit the loop early).
+      if (typeof batchUpdated !== "number") {
+        throw new IngestError(
+          "validate",
+          `ingest_apply_finess_geom_batch returned ${typeof batchUpdated} instead of number — RPC contract regression`,
+        );
+      }
+      updated += batchUpdated;
+      // Exit ONLY on 0 — that's the canonical "no more rows to process"
+      // signal. A short-but-non-zero batch (lock contention, planner choosing
+      // parallel scan that returns slightly fewer than asked) does NOT mean
+      // we're done.
+      if (batchUpdated === 0) break;
     }
     console.log(`[finess] geom transform: ${updated}/${stats.inserted} rows geocoded`);
-    if (updated < stats.inserted * 0.8) {
+    if (updated < stats.inserted * MIN_GEOM_COVERAGE) {
+      const pct = (MIN_GEOM_COVERAGE * 100).toFixed(0);
       throw new IngestError(
         "validate",
-        `Only ${updated}/${stats.inserted} rows have a valid geom (< 80% threshold) — coordxet/coordyet likely missing or malformed`,
+        `Only ${updated}/${stats.inserted} rows have a valid geom (< ${pct}% threshold) — coordxet/coordyet likely missing or malformed`,
       );
     }
 
@@ -219,12 +258,29 @@ async function streamCsvToStaging(
   let inserted = 0;
   let skippedNoFinessId = 0;
   let skippedNoCommune = 0;
+  let firstBatch = true;
 
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
-    const { error } = await supabase.from("finess_staging").insert(batch);
-    if (error) {
-      throw new IngestError("copy", `Insert into finess_staging failed: ${error.message}`);
+    // The first batch can race with PostgREST's schema-cache reload. If it
+    // hits "table not found in schema cache", retry with backoff — usually
+    // PostgREST has caught up within 2-4 more seconds. After the first
+    // successful insert the cache is warm; subsequent batches don't retry.
+    const insert = async () => supabase.from("finess_staging").insert(batch);
+    let result = await insert();
+    if (firstBatch && result.error && /schema cache/i.test(result.error.message)) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const wait = 2000 * attempt;
+        console.warn(`[finess] schema cache miss on first insert, retry ${attempt}/3 in ${wait}ms`);
+        await new Promise((r) => setTimeout(r, wait));
+        result = await insert();
+        if (!result.error) break;
+        if (!/schema cache/i.test(result.error.message)) break;
+      }
+    }
+    firstBatch = false;
+    if (result.error) {
+      throw new IngestError("copy", `Insert into finess_staging failed: ${result.error.message}`);
     }
     inserted += batch.length;
     batch = [];
@@ -249,11 +305,6 @@ type ParsedFinessRow =
   | { row: FinessStagingRow; skipReason?: never }
   | { row?: never; skipReason: "no_finess_id" | "no_commune" };
 
-function getNonEmpty(rec: Record<string, string>, name: string): string | null {
-  const v = rec[name];
-  return v === undefined || v === "" ? null : v;
-}
-
 function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   const numFiness = getNonEmpty(rec, "nofinesset");
   if (!numFiness) return { skipReason: "no_finess_id" };
@@ -261,15 +312,10 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   const codeInsee = getNonEmpty(rec, "commune");
   if (!codeInsee) return { skipReason: "no_commune" };
 
-  // FINESS extract publishes coords as separate `latitude` / `longitude` columns
-  // in the augmented dataset (the raw ANS extract is geocoded by data.gouv).
-  // See https://www.data.gouv.fr/fr/datasets/finess-extraction-du-fichier-des-etablissements/
-  // Fall back to NULL if absent or unparseable.
-  const coords = parseCoordinates(
-    getNonEmpty(rec, "longitude") ?? undefined,
-    getNonEmpty(rec, "latitude") ?? undefined,
-  );
-  const geomWkt = coords ? `SRID=4326;POINT(${coords.lon} ${coords.lat})` : null;
+  // Geom is populated server-side by ingest_apply_finess_geom_batch which
+  // reads coordxet/coordyet (Lambert 93) from `raw` and reprojects to WGS84.
+  // We deliberately leave geom NULL here — single source of truth = the RPC.
+  // See V0.2 final review (commit 88ebfc0) for the postmortem.
 
   // Filter raw to only non-empty string entries, for compact JSONB storage.
   const raw: Record<string, string> = {};
@@ -293,7 +339,7 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
       email: null,
       date_ouverture: getNonEmpty(rec, "dateouv"),
       date_maj: getNonEmpty(rec, "datemaj"),
-      geom: geomWkt,
+      geom: null,
       raw,
     },
   };

@@ -9,6 +9,16 @@ import { getServiceClient } from "../../src/storage/supabase.js";
 
 export type IngestPhase = "download" | "pre_validate" | "copy" | "validate" | "swap";
 
+/**
+ * Read a column from a CSV record, returning `null` if it is missing or empty.
+ * Shared across ingestion scripts (FINESS today, Ameli/IRIS next) so that the
+ * "empty string === absent" convention stays consistent everywhere.
+ */
+export function getNonEmpty(rec: Record<string, string>, name: string): string | null {
+  const v = rec[name];
+  return v === undefined || v === "" ? null : v;
+}
+
 export class IngestError extends Error {
   constructor(
     public readonly phase: IngestPhase,

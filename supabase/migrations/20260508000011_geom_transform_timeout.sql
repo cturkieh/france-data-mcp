@@ -1,12 +1,22 @@
+-- SUPERSEDED by migration 20260508000012_geom_transform_batched.sql
+-- (same hot-fix batch, 2026-05-08). The function defined here,
+-- `ingest_apply_finess_geom()`, is DROP'd in 0012 and replaced with the
+-- batched `ingest_apply_finess_geom_batch(p_limit)`. This file is kept for
+-- the chronological audit trail of what was attempted; it is effectively a
+-- no-op once 0012 has been applied. Do NOT call `ingest_apply_finess_geom()`
+-- from new code — it no longer exists.
+--
+-- Original intent (preserved for the postmortem):
 -- Bump the statement timeout for the geom-transform RPC.
 --
 -- ST_Transform applied to 95K rows in a single UPDATE takes ~15-30s on the
 -- Supabase free tier. The default statement_timeout (8s on anon role, varies
 -- on service_role) cancels it. SET LOCAL inside the function scopes the
--- override to this transaction only — no global change to the cluster.
+-- override to this transaction only, no global change to the cluster.
 --
--- 5 minutes is generous; the UPDATE finishes well under that. Future Ameli
--- (1.5M rows) might need its own RPC with the same pattern.
+-- Why it was insufficient: SET LOCAL fixes Postgres-side cutoffs, but the
+-- PostgREST proxy enforces its own 60s timeout, which still cancelled the
+-- monolithic UPDATE. The fix was to batch client-side (see 0012).
 
 CREATE OR REPLACE FUNCTION ingest_apply_finess_geom()
 RETURNS TABLE (updated_rows INT, total_rows INT)
