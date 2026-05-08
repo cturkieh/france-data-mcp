@@ -1,16 +1,18 @@
 /**
  * FINESS DREES category nomenclature — codes + libellés.
  *
- * Non-exhaustive (FINESS has ~150 EJ + EG categories) — we carry the codes
- * that drive the family classifier plus those needed for hospital / lab /
- * EHPAD / pharmacie / MSP coverage.
+ * Catalogue ~50 codes représentant ~92% du volume FINESS (95K rows total).
+ * Le reliquat ~8% tombe en famille `autre` (codes très rares : thermal,
+ * lieux de vie expérimentaux, structures atypiques).
  *
  * Source: live FINESS extract on data.gouv.fr. Re-verify against the CSV
- * when adding codes — DREES occasionally rotates labels.
+ * when adding codes — DREES occasionally rotates labels (les libellés
+ * sont copiés à l'identique du CSV pour matcher exactement la nomenclature
+ * officielle).
  */
 
 export const FINESS_CATEGORIES = {
-  // Acute-care hospitals (MCO + adjacent)
+  // ─── SANITAIRE — court séjour (MCO + adjacents) ───────────────────────
   "101": "Centre Hospitalier Régional (C.H.R.)",
   "106": "Centre hospitalier",
   "108": "Centre Hospitalier Universitaire (C.H.U.)",
@@ -18,31 +20,53 @@ export const FINESS_CATEGORIES = {
   "115": "Etablissement de Soins du Service de Santé des Armées",
   "128": "Etablissement de Soins Chirurgicaux",
   "129": "Etablissement de Soins Médicaux",
-  "131": "Centre de Lutte Contre le Cancer (CLCC)",
+  "131": "Centre de Lutte Contre le Cancer (C.L.C.C.)",
   "355": "Centre Hospitalier (C.H.)",
   "365": "Etablissement de Soins Pluridisciplinaire",
-  // Psychiatry — out of MCO scope (own family in V0.3)
-  "292": "Centre Hospitalier Spécialisé en lutte contre les maladies mentales",
-  "362": "Centre Hospitalier Spécialisé (CHS) en psychiatrie",
-  "156": "Centre Médico-Psychologique (C.M.P.)",
-  "161": "Maison de Santé pour Maladies Mentales",
-  // SSR
+
+  // ─── SANITAIRE — SSR / SLD / HAD / dialyse ────────────────────────────
   "109": "Etablissement de santé privé autorisé en SSR",
-  // Ambulatoire / soins de proximité
-  "122": "Etablissement Soins Obstétriques Chirurgico-Gynécologiques",
-  "124": "Centre de Santé",
+  "362": "Etablissement de Soins Longue Durée (USLD)",
   "127": "Hospitalisation à Domicile (HAD)",
   "141": "Centre de dialyse",
   "146": "Structure d'Alternative à la dialyse en centre",
-  // Médico-social / domicile (NOT MCO)
-  "295": "Services AEMO et AED",
-  "354": "Service de Soins Infirmiers à Domicile (SSIAD)",
-  "182": "Service d'Éducation Spéciale et de Soins à Domicile (SESSAD)",
-  // EHPAD + senior housing
+
+  // ─── SANITAIRE — psychiatrie ──────────────────────────────────────────
+  "292": "Centre Hospitalier Spécialisé lutte Maladies Mentales",
+  "156": "Centre Médico-Psychologique (C.M.P.)",
+  "161": "Maison de Santé pour Maladies Mentales",
+  "425": "Centre d'Accueil Thérapeutique à temps partiel (C.A.T.T.P.)",
+  "430": "Centre Postcure Malades Mentaux",
+
+  // ─── AMBULATOIRE / soins de ville ─────────────────────────────────────
+  "124": "Centre de Santé",
+  "603": "Maison de santé (L.6223-3)",
+  "604": "Communautés professionnelles territoriales de santé (CPTS)",
+
+  // ─── PHARMACIE / BIO / IMAGERIE ───────────────────────────────────────
+  "611": "Laboratoire de Biologie Médicale",
+  "619": "Cabinet d'imagerie médicale",
+  "620": "Pharmacie d'Officine",
+  "627": "Propharmacie",
+
+  // ─── PERSONNES ÂGÉES — hébergement ────────────────────────────────────
   "500": "Etablissement d'hébergement pour personnes âgées dépendantes (EHPAD)",
   "501": "EHPA percevant des crédits d'assurance maladie",
-  "502": "EHPA ne percevant pas de crédits d'assurance maladie",
-  // Médico-social handicap
+  "502": "EHPA ne percevant pas des crédits d'assurance maladie",
+  "202": "Résidences autonomie",
+
+  // ─── PERSONNES ÂGÉES — accompagnement ─────────────────────────────────
+  "207": "Centre de Jour pour Personnes Agées",
+  "463": "Centres Locaux Information Coordination P.A. (C.L.I.C.)",
+
+  // ─── DOMICILE (médico-social + soins) ─────────────────────────────────
+  "354": "Service de Soins Infirmiers à Domicile (S.S.I.A.D.)",
+  "460": "Service d'Aide et d'Accompagnement à Domicile (S.A.A.D.)",
+  "209": "Service Polyvalent Aide et Soins à Domicile (S.P.A.S.A.D.)",
+  "632": "Structure Dispensatrice à domicile d'Oxygène à usage médical",
+
+  // ─── HANDICAP ENFANTS ─────────────────────────────────────────────────
+  "182": "Service d'Éducation Spéciale et de Soins à Domicile (SESSAD)",
   "183": "Institut Médico-Éducatif (I.M.E.)",
   "186": "Institut Thérapeutique Éducatif et Pédagogique (I.T.E.P.)",
   "188": "Etablissement pour Enfants ou Adolescents Polyhandicapés",
@@ -52,27 +76,72 @@ export const FINESS_CATEGORIES = {
   "194": "Institut pour Déficients Visuels",
   "195": "Institut pour Déficients Auditifs",
   "196": "Institut d'Education Sensorielle Sourd/Aveugle",
+
+  // ─── HANDICAP ADULTES ─────────────────────────────────────────────────
+  "246": "Etablissement et Service d'Aide par le Travail (E.S.A.T.)",
+  "247": "Entreprise adaptée",
+  "252": "Foyer Hébergement Adultes Handicapés",
+  "255": "Maison d'Accueil Spécialisée (M.A.S.)",
+  "382": "Foyer de Vie pour Adultes Handicapés",
+  "437": "Foyer d'Accueil Médicalisé pour Adultes Handicapés (F.A.M.)",
+  "445": "Service d'accompagnement médico-social adultes handicapés (SAMSAH)",
+  "446": "Service d'Accompagnement à la Vie Sociale (S.A.V.S.)",
+  "448": "Etab. Acc. Médicalisé en tout ou partie personnes handicapées",
+  "449": "Etab. Accueil Non Médicalisé pour personnes handicapées",
   "600": "Foyer d'hébergement pour adultes handicapés",
-  // Addictologie / accompagnement
+
+  // ─── ADDICTOLOGIE / accompagnement ────────────────────────────────────
   "165": "Appartement de Coordination Thérapeutique (A.C.T.)",
-  "178": "Centre Accueil/Accomp. Réduc. Risq. Usag. Drogues (CAARUD)",
+  "178": "Centre Accueil/Accomp. Réduc. Risq. Usag. Drogues (C.A.A.R.U.D.)",
   "180": "Lits Halte Soins Santé (L.H.S.S.)",
-  "197": "Centre soins accompagnement prévention addictologie (CSAPA)",
-  // Ambulatoire pluriprofessionnel
-  "603": "Maison de Santé Pluriprofessionnelle (MSP)",
-  "604": "Communauté Professionnelle Territoriale de Santé (CPTS)",
-  // Bio / pharma / imagerie
-  "611": "Laboratoire d'analyses de biologie médicale",
-  "619": "Cabinet d'imagerie médicale",
-  "620": "Pharmacie d'Officine",
-  // Coopération
-  "697": "Groupement de Coopération Sanitaire (GCS)",
-  "698": "Groupement de Coopération Sociale et Médico-Sociale (GCSMS)",
-  // Autres
-  "126": "Etablissement Thermal",
+  "197": "Centre soins accompagnement prévention addictologie (C.S.A.P.A.)",
+  "412": "Appartement Thérapeutique",
+
+  // ─── ENFANCE / PROTECTION ─────────────────────────────────────────────
+  "175": "Foyer de l'Enfance",
+  "177": "Maison d'Enfants à Caractère Social (MECS)",
+  "295": "Services AEMO et AED",
+  "236": "Centre Placement Familial Socio-Educatif (C.P.F.S.E.)",
+  "238": "Centre d'Accueil Familial Spécialisé",
+  "240": "Foyer d'Action Educative — réservé",
+  "241": "Foyer d'Action Educative (F.A.E.)",
+  "440": "Service Investigation Orientation Educative (S.I.O.E.)",
+  "441": "Centre d'Action Educative (C.A.E.)",
+  "378": "Etablissement Expérimental Enfance Protégée",
+
+  // ─── PMI / PETITE ENFANCE / SANTÉ SCOLAIRE ────────────────────────────
+  "223": "Protection Maternelle et Infantile (P.M.I.)",
+  "228": "Centre Planification ou Education Familiale",
+  "230": "Etablissement Consultation Protection Infantile",
+  "268": "Centre Médico-Scolaire",
+
+  // ─── HÉBERGEMENT SOCIAL ───────────────────────────────────────────────
+  "214": "Centre Hébergement & Réinsertion Sociale (C.H.R.S.)",
+  "219": "Autre Centre d'Accueil",
+  "256": "Foyer Travailleurs Migrants non transformé en Résidence Sociale",
+  "257": "Foyer de Jeunes Travailleurs (résidence sociale ou non)",
+  "258": "Maisons Relais - Pensions de Famille",
+  "259": "Autre Résidence Sociale (hors Maison Relais)",
+  "443": "Centre Accueil Demandeurs Asile (C.A.D.A.)",
+  "442": "Centre Provisoire Hébergement (C.P.H.)",
+  "462": "Lieux de vie",
+  "166": "Etablissement d'Accueil Mère-Enfant",
+
+  // ─── PRÉVENTION / SANTÉ PUBLIQUE ──────────────────────────────────────
   "132": "Etablissement de Transfusion Sanguine",
   "142": "Dispensaire Antituberculeux",
   "143": "Centre de Vaccination BCG",
+  "266": "Dispensaire Antivénérien",
+  "347": "Centre d'Examens de Santé",
+  "636": "Centre de soins et de prévention",
+
+  // ─── GROUPEMENTS ──────────────────────────────────────────────────────
+  "696": "Groupement de coopération sanitaire de moyens",
+  "697": "Groupement de coopération sanitaire — Etablissement de santé",
+  "698": "Autre Etablissement Loi Hospitalière",
+
+  // ─── AUTRES (volume marginal, classés "autre" intentionnellement) ─────
+  "126": "Etablissement Thermal",
 } as const satisfies Record<string, string>;
 
 export type FinessCategorieCode = keyof typeof FINESS_CATEGORIES;
@@ -84,75 +153,99 @@ export function libelleCategorieFiness(code: string): string | undefined {
 /**
  * FINESS family taxonomy. Drives the `familles` filter on the MCP tools.
  *
- * V0.2 covered only `mco | ssr | ehpad | autre`. The audit (post-v0.2.0)
- * called for splitting the medico-social and ambulatory categories out of
- * `mco` (which had wrongly absorbed SSIAD/AEMO via mis-labelled codes), and
- * surfacing pharmacie / MSP-CPTS / labos / SSIAD / SESSAD-IME / addictologie
- * as first-class filters. Each family is a precise, query-side tag — callers
- * can compose them via the `familles` array.
+ * Each family is a precise, query-side tag — callers compose them via the
+ * `familles` array. Designed for prospection commerciale santé : labos
+ * ciblent MCO/EHPAD/CSI/MSP/CPTS/MAS/FAM/SLD/HAD, équipementiers ciblent
+ * EHPAD/résidences autonomie, services à domicile ciblent SAAD/SPASAD/SSIAD…
  */
 export type FinessFamille =
+  // Sanitaire
   | "mco"
   | "ssr"
-  | "ehpad"
-  | "psychiatrie"
-  | "ambulatoire"
-  | "ssiad"
+  | "sld"
   | "had"
-  | "handicap_enfants"
-  | "handicap_adultes"
-  | "addictologie"
-  | "msp_cpts"
+  | "psychiatrie"
+  | "dialyse"
+  | "ambulatoire"
+  // Bio / pharma / imagerie
   | "labo"
   | "imagerie"
   | "pharmacie"
+  // Maisons + communautés professionnelles
+  | "msp_cpts"
+  // Personnes âgées
+  | "ehpad"
+  | "residence_autonomie"
+  | "senior_accompagnement"
+  // Domicile
+  | "ssiad"
+  | "aide_domicile"
+  // Handicap
+  | "handicap_enfants"
+  | "handicap_adultes"
+  // Addictologie + précarité sanitaire
+  | "addictologie"
+  // Enfance / protection / PMI
+  | "enfance_protection"
+  | "pmi"
+  // Hébergement social
+  | "hebergement_social"
+  // Prévention / santé publique
+  | "prevention_sante"
+  // Groupements de coopération
+  | "groupement"
+  // Catch-all
   | "autre";
 
 /**
  * Family classification of FINESS DREES category codes.
  *
- *   mco              = Médecine-Chirurgie-Obstétrique (acute-care hospitals).
- *   ssr              = Soins de Suite et Réadaptation.
- *   ehpad            = EHPAD + adjacent senior housing (EHPA).
- *   psychiatrie      = CHS, CMP, structures psychiatriques.
- *   ambulatoire      = HAD, dialyse, soins ambulatoires de proximité.
- *   ssiad            = Services Soins Infirmiers à Domicile (code 354).
- *   had              = Hospitalisation à Domicile (code 127).
- *   handicap_enfants = IME, ITEP, SESSAD, CMPP, CAMSP, IES…
- *   handicap_adultes = Foyer d'hébergement adultes handicapés.
- *   addictologie     = CSAPA, CAARUD, ACT, LHSS.
- *   msp_cpts         = Maisons de Santé Pluri / Communautés Professionnelles.
- *   labo             = Laboratoires de biologie médicale.
- *   imagerie         = Cabinets d'imagerie médicale.
- *   pharmacie        = Officines.
- *
- * `autre` is the catch-all for codes that exist in FINESS_CATEGORIES but don't
- * map cleanly to any of the above (groupements de coopération, AEMO/AED hors
- * scope santé, divers). Callers wanting "everything else" omit the family
+ * `autre` is the catch-all : codes in FINESS_CATEGORIES that don't fit any
+ * specific family (ex. thermal). To get "everything else", omit the family
  * filter and post-filter via `result.categorie.famille`.
  *
- * The `query` subtype excludes "autre" — this is what the MCP tools accept
- * for the `familles` parameter.
+ * The `query` subtype excludes "autre" — the MCP tools accept this set for
+ * the `familles` parameter.
  */
 export type FinessFamilleQuery = Exclude<FinessFamille, "autre">;
 
 export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> = {
-  // Acute-care: CHR/CH/CHU, military hospitals, surgical/medical units, CLCC.
-  // 354 (SSIAD) and 295 (AEMO/AED) explicitly EXCLUDED — audit B2 bis fix.
+  // Sanitaire — court séjour
   mco: ["101", "106", "108", "114", "115", "128", "129", "131", "355", "365"],
   ssr: ["109"],
-  ehpad: ["500", "501", "502"],
-  psychiatrie: ["292", "362", "156", "161"],
-  ambulatoire: ["124", "141", "146"],
-  ssiad: ["354"],
+  sld: ["362"],
   had: ["127"],
-  handicap_enfants: ["182", "183", "186", "188", "189", "190", "192", "194", "195", "196"],
-  handicap_adultes: ["600"],
-  addictologie: ["165", "178", "180", "197"],
-  msp_cpts: ["603", "604"],
+  psychiatrie: ["292", "156", "161", "425", "430"],
+  dialyse: ["141", "146"],
+  ambulatoire: ["124"],
+  // Bio / pharma / imagerie
   labo: ["611"],
   imagerie: ["619"],
-  pharmacie: ["620"],
+  pharmacie: ["620", "627"],
+  // Pluri-pro
+  msp_cpts: ["603", "604"],
+  // Personnes âgées
+  ehpad: ["500", "501", "502"],
+  residence_autonomie: ["202"],
+  senior_accompagnement: ["207", "463"],
+  // Domicile
+  ssiad: ["354"],
+  aide_domicile: ["460", "209", "632"],
+  // Handicap
+  handicap_enfants: ["182", "183", "186", "188", "189", "190", "192", "194", "195", "196"],
+  handicap_adultes: ["246", "247", "252", "255", "382", "437", "445", "446", "448", "449", "600"],
+  // Addictologie + précarité sanitaire
+  addictologie: ["165", "178", "180", "197", "412"],
+  // Enfance / protection
+  enfance_protection: ["175", "177", "236", "238", "240", "241", "295", "378", "440", "441"],
+  // PMI / petite enfance
+  pmi: ["223", "228", "230", "268"],
+  // Hébergement social
+  hebergement_social: ["166", "214", "219", "256", "257", "258", "259", "442", "443", "462"],
+  // Prévention / santé publique
+  prevention_sante: ["132", "142", "143", "266", "347", "636"],
+  // Groupements
+  groupement: ["696", "697", "698"],
 } as const;
 
 const FAMILY_BY_CODE: ReadonlyMap<string, FinessFamilleQuery> = new Map<string, FinessFamilleQuery>(
@@ -168,14 +261,7 @@ const FAMILY_BY_CODE: ReadonlyMap<string, FinessFamilleQuery> = new Map<string, 
  * @internal Test-only export. Runtime code uses `finessFamille()`.
  */
 export const DELIBERATELY_AUTRE = new Set<string>([
-  "122", // Soins Obstétriques Chir.-Gyn. → ambiguous, often part of MCO unit
-  "126", // Etablissement Thermal
-  "132", // Transfusion Sanguine
-  "142", // Dispensaire Antituberculeux
-  "143", // Vaccination BCG
-  "295", // Services AEMO et AED → protection enfance, hors scope santé
-  "697", // GCS — groupement de coopération
-  "698", // GCSMS — groupement
+  "126", // Etablissement Thermal — pas de famille santé/médico-social pertinente
 ]);
 
 /**
@@ -197,16 +283,14 @@ export function finessFamille(code: string | null | undefined): FinessFamille {
 // ──────────────────────────────────────────────────────────────────────────
 
 /**
- * All hospital-grade categories (MCO acute-care + psychiatry).
- *
- * NOTE: the v0.2.0 version of this constant included 354 and 295, which
- * are actually SSIAD (medico-social, home-care) and AEMO/AED (child
- * protection) — NOT hospitals. Those have been removed. If a downstream
- * caller depended on the old set for lab/SSIAD lookups, switch to the
- * dedicated `FINESS_FAMILY_CODES.ssiad` / `FINESS_FAMILY_CODES.labo`.
+ * All hospital-grade categories (MCO acute-care + SSR + SLD + HAD + psy).
+ * Use FINESS_FAMILY_CODES.mco for strict acute-care only.
  */
 export const FINESS_HOPITAUX = [
   ...FINESS_FAMILY_CODES.mco,
+  ...FINESS_FAMILY_CODES.ssr,
+  ...FINESS_FAMILY_CODES.sld,
+  ...FINESS_FAMILY_CODES.had,
   ...FINESS_FAMILY_CODES.psychiatrie,
 ] as const;
 

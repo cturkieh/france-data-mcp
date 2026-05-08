@@ -47,7 +47,7 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 
 ## Outils MCP exposés
 
-### V0.2 — Health establishments (FINESS)
+### V0.3 — Health establishments (FINESS)
 
 | Tool                                  | Description                                                |
 |---------------------------------------|------------------------------------------------------------|
@@ -55,9 +55,29 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 | `etablissements_finess_by_categorie`  | List FINESS establishments by family + optional dept/commune  |
 | `etablissement_by_finess`             | Fetch a single establishment by its 9-digit FINESS number  |
 
-**Familles supportées** (v0.2.1) : `mco`, `ssr`, `ehpad`, `psychiatrie`, `ambulatoire`, `ssiad`, `had`, `handicap_enfants`, `handicap_adultes`, `addictologie`, `msp_cpts`, `labo`, `imagerie`, `pharmacie`.
+**24 familles** couvrant ~92 % du volume FINESS (95 K rows) :
+
+| Famille | Codes inclus | Volumétrie |
+|---|---|---|
+| **Sanitaire** : `mco`, `ssr`, `sld`, `had`, `psychiatrie`, `dialyse`, `ambulatoire` | CHU, CH, CLCC, hôpitaux militaires, USLD, HAD, dialyse, CMP, CATTP, centres de santé | ~13 000 |
+| **Bio / pharma / imagerie** : `labo`, `imagerie`, `pharmacie` | LBM, cabinets imagerie, officines + propharmacies | ~25 000 |
+| **Pluri-pro** : `msp_cpts` | Maisons de Santé Pluriprofessionnelles + CPTS | ~2 700 |
+| **Personnes âgées** : `ehpad`, `residence_autonomie`, `senior_accompagnement` | EHPAD/EHPA, résidences autonomie, centres de jour PA, CLIC | ~10 600 |
+| **Domicile** : `ssiad`, `aide_domicile` | SSIAD, SAAD, SPASAD, oxygénothérapie | ~12 000 |
+| **Handicap** : `handicap_enfants`, `handicap_adultes` | IME, ITEP, SESSAD, CAMSP, MAS, FAM, ESAT, SAVS, SAMSAH | ~11 500 |
+| **Addictologie** : `addictologie` | CSAPA, CAARUD, ACT, LHSS, appartements thérapeutiques | ~1 100 |
+| **Enfance / protection** : `enfance_protection`, `pmi` | MECS, foyers enfance, AEMO/AED, PMI, planning familial, CMS | ~6 100 |
+| **Hébergement social** : `hebergement_social` | CHRS, FJT, maisons relais, CADA, CPH, lieux de vie | ~6 500 |
+| **Prévention** : `prevention_sante` | Transfusion, dispensaires AT/AV, CES, centres de soins préventifs | ~1 100 |
+| **Coopération** : `groupement` | GCS, GCSMS | ~1 900 |
+| `autre` | Codes hors taxonomie ou rares (Etab. Thermal, etc.) | ~7 % résiduel |
 
 Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.md](docs/ingestion.md).
+
+**Limitations connues sur les fiches FINESS** :
+- `email` est toujours `null` (la source DREES ne publie pas les emails — utiliser l'Annuaire Santé Ameli pour les pros libéraux).
+- `distance_km` n'est rempli que sur les retours `etablissements_finess_in_radius` (pas de référence pour `by_categorie` / `by_finess`).
+- Les DOM-COM ne sont pas encore ingérés (v0.3 garde un `code_insee CHAR(5)` strict métropole + Corse ; v0.4 prévoit l'élargissement).
 
 ---
 

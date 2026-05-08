@@ -27,9 +27,11 @@ describe("finessFamille", () => {
   });
 
   it("maps psychiatry codes to 'psychiatrie' (split out of mco in v0.2.1)", () => {
-    expect(finessFamille("292")).toBe("psychiatrie"); // CHS
-    expect(finessFamille("362")).toBe("psychiatrie"); // CH spé psychiatrie
+    expect(finessFamille("292")).toBe("psychiatrie"); // CHS lutte maladies mentales
     expect(finessFamille("156")).toBe("psychiatrie"); // CMP
+    expect(finessFamille("161")).toBe("psychiatrie"); // Maison Santé Maladies Mentales
+    expect(finessFamille("425")).toBe("psychiatrie"); // CATTP
+    expect(finessFamille("430")).toBe("psychiatrie"); // Postcure malades mentaux
   });
 
   it("maps SSIAD (354) to 'ssiad' — NOT 'mco'", () => {
@@ -55,11 +57,77 @@ describe("finessFamille", () => {
     expect(finessFamille("180")).toBe("addictologie"); // LHSS
   });
 
-  it("maps ambulatoire/coordination codes correctly", () => {
+  it("maps ambulatoire / dialyse / pluri-pro codes correctly", () => {
     expect(finessFamille("124")).toBe("ambulatoire"); // Centre de Santé
-    expect(finessFamille("141")).toBe("ambulatoire"); // dialyse
+    expect(finessFamille("141")).toBe("dialyse"); // own family in v0.3.x — Centre de dialyse
+    expect(finessFamille("146")).toBe("dialyse"); // alternative à la dialyse
     expect(finessFamille("603")).toBe("msp_cpts"); // MSP
     expect(finessFamille("604")).toBe("msp_cpts"); // CPTS
+  });
+
+  it("maps SLD / HAD to dedicated families", () => {
+    expect(finessFamille("362")).toBe("sld"); // USLD — corrected (was wrongly "psychiatrie" in old v0.2.1)
+    expect(finessFamille("127")).toBe("had");
+  });
+
+  it("maps handicap_adultes (MAS, FAM, ESAT, SAVS, SAMSAH…)", () => {
+    expect(finessFamille("255")).toBe("handicap_adultes"); // MAS
+    expect(finessFamille("437")).toBe("handicap_adultes"); // FAM
+    expect(finessFamille("246")).toBe("handicap_adultes"); // ESAT
+    expect(finessFamille("445")).toBe("handicap_adultes"); // SAMSAH
+    expect(finessFamille("446")).toBe("handicap_adultes"); // SAVS
+    expect(finessFamille("382")).toBe("handicap_adultes"); // Foyer de vie
+    expect(finessFamille("600")).toBe("handicap_adultes"); // Foyer hébergement
+  });
+
+  it("maps aide_domicile (SAAD, SPASAD, oxygène)", () => {
+    expect(finessFamille("460")).toBe("aide_domicile"); // SAAD
+    expect(finessFamille("209")).toBe("aide_domicile"); // SPASAD
+    expect(finessFamille("632")).toBe("aide_domicile"); // O2 à domicile
+  });
+
+  it("maps PMI / petite enfance", () => {
+    expect(finessFamille("223")).toBe("pmi");
+    expect(finessFamille("228")).toBe("pmi");
+    expect(finessFamille("230")).toBe("pmi");
+    expect(finessFamille("268")).toBe("pmi"); // CMS médico-scolaire
+  });
+
+  it("maps enfance_protection (MECS, AEMO/AED, foyer enfance…)", () => {
+    expect(finessFamille("177")).toBe("enfance_protection"); // MECS
+    expect(finessFamille("175")).toBe("enfance_protection"); // Foyer de l'enfance
+    expect(finessFamille("295")).toBe("enfance_protection"); // AEMO/AED — moved out of `autre` in v0.3.x
+    expect(finessFamille("441")).toBe("enfance_protection"); // CAE
+  });
+
+  it("maps hebergement_social (CHRS, FJT, maisons relais, CADA)", () => {
+    expect(finessFamille("214")).toBe("hebergement_social"); // CHRS
+    expect(finessFamille("257")).toBe("hebergement_social"); // FJT
+    expect(finessFamille("258")).toBe("hebergement_social"); // Maisons relais
+    expect(finessFamille("443")).toBe("hebergement_social"); // CADA
+  });
+
+  it("maps prevention_sante (transfusion, dispensaires, CES)", () => {
+    expect(finessFamille("132")).toBe("prevention_sante"); // Transfusion sanguine
+    expect(finessFamille("142")).toBe("prevention_sante"); // Dispensaire AT
+    expect(finessFamille("347")).toBe("prevention_sante"); // CES
+  });
+
+  it("maps groupements (GCS, GCSMS)", () => {
+    expect(finessFamille("696")).toBe("groupement");
+    expect(finessFamille("697")).toBe("groupement");
+    expect(finessFamille("698")).toBe("groupement");
+  });
+
+  it("maps senior_accompagnement / residence_autonomie", () => {
+    expect(finessFamille("202")).toBe("residence_autonomie");
+    expect(finessFamille("207")).toBe("senior_accompagnement"); // Centre jour PA
+    expect(finessFamille("463")).toBe("senior_accompagnement"); // CLIC
+  });
+
+  it("maps pharmacie famille incl. propharmacies", () => {
+    expect(finessFamille("620")).toBe("pharmacie"); // Officine
+    expect(finessFamille("627")).toBe("pharmacie"); // Propharmacie
   });
 
   it("maps labo / pharmacie / imagerie to dedicated families", () => {
@@ -68,10 +136,11 @@ describe("finessFamille", () => {
     expect(finessFamille("620")).toBe("pharmacie");
   });
 
-  it("maps AEMO/AED (295) to 'autre' — NOT 'mco'", () => {
+  it("maps AEMO/AED (295) to enfance_protection — NOT 'mco' (audit fix)", () => {
     // Audit B2 bis: code 295 is "Services AEMO et AED" (child protection),
-    // not "Établissement Public de Santé" as v0.2.0 claimed.
-    expect(finessFamille("295")).toBe("autre");
+    // not "Établissement Public de Santé" as v0.2.0 claimed. v0.3.x moved
+    // it from `autre` (intermediate fix) to its rightful family.
+    expect(finessFamille("295")).toBe("enfance_protection");
   });
 
   it("returns 'autre' for unknown / non-categorized codes", () => {
