@@ -42,6 +42,20 @@ const GEOM_BATCH_SIZE = 10_000;
 /** Hard floor on geocoded-rows ratio. Below this, we suspect a CSV format change. */
 const MIN_GEOM_COVERAGE = 0.8;
 
+/**
+ * Aborts the run when structural anomalies (missing nofinesset, missing
+ * commune, ligneacheminement format change) cross 1% — those grow rapidly
+ * past 1% on real upstream regressions.
+ */
+const STRUCTURAL_FAIL_THRESHOLD = 0.01;
+
+/**
+ * Aborts the run when `bad_dept` skips cross 5%. Steady state is ~2.5%
+ * (csv-parse `relax_quotes` cannot recover all un-quoted commas in `rs` /
+ * `voie`); a real DREES layout change pushes far past 5%.
+ */
+const BAD_DEPT_NOISE_THRESHOLD = 0.05;
+
 interface FinessStagingRow {
   num_finess: string;
   raison_sociale: string;
@@ -189,29 +203,16 @@ async function main(): Promise<void> {
       );
     }
 
-    // Surface upstream-parsing-bug suspects.
-    //
-    // The 1% blocking threshold is reserved for anomalies that are STRUCTURAL
-    // (DREES rename/remove a required column) — those grow rapidly past 1%
-    // when they happen and need to abort the run. We track:
-    //   - skippedNoFinessId / skippedNoCommune : structural (no fallback)
-    //   - parsedNoLigneAch : DREES format change suspect on the address line
-    //
-    // DOM and bad_dept rows are EXCLUDED from the blocking rate :
-    //   - DOM is a documented architectural limit (V0.3 widens code_insee).
-    //   - bad_dept hits ~2.5% in steady state because csv-parse with
-    //     `relax_quotes:true` cannot perfectly recover from un-quoted commas
-    //     inside `rs` / `voie`. It's noise, not a regression. We still log
-    //     the count and warn if it crosses 5% so a real layout shift gets
-    //     surfaced.
+    // Two anomaly families with distinct semantics — see threshold consts.
+    //   - structural (STRUCTURAL_FAIL_THRESHOLD) : DREES schema change.
+    //   - bad_dept (BAD_DEPT_NOISE_THRESHOLD)    : csv-parse baseline noise.
+    //   - DOM rows are a documented architectural limit, log-only.
     const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
+    const rateOf = (failures: number) =>
+      stats.inserted > 0 ? failures / (stats.inserted + failures) : 0;
     const blockingFailures = stats.skippedNoFinessId + stats.skippedNoCommune;
-    const skipRate =
-      stats.inserted > 0
-        ? (blockingFailures + stats.parsedNoLigneAch) / (stats.inserted + blockingFailures)
-        : 0;
-    const badDeptRate =
-      stats.inserted > 0 ? stats.skippedBadDept / (stats.inserted + stats.skippedBadDept) : 0;
+    const skipRate = rateOf(blockingFailures + stats.parsedNoLigneAch);
+    const badDeptRate = rateOf(stats.skippedBadDept);
     if (stats.skippedDom > 0) {
       console.log(
         `[finess] skipped ${stats.skippedDom} DOM rows (architectural limit — V0.3 widens code_insee to support DOM)`,
@@ -221,10 +222,10 @@ async function main(): Promise<void> {
       console.log(
         `[finess] skipped ${stats.skippedBadDept} bad-dept rows (${fmt(badDeptRate)} — csv-parse column shifts on unquoted commas, baseline noise)`,
       );
-      if (badDeptRate > 0.05) {
+      if (badDeptRate > BAD_DEPT_NOISE_THRESHOLD) {
         throw new IngestError(
           "validate",
-          `Bad-dept rate ${fmt(badDeptRate)} above 5% — beyond the steady-state CSV noise floor, likely a real DREES layout change`,
+          `Bad-dept rate ${fmt(badDeptRate)} above ${fmt(BAD_DEPT_NOISE_THRESHOLD)} — beyond the steady-state CSV noise floor, likely a real DREES layout change`,
         );
       }
     }
@@ -232,10 +233,10 @@ async function main(): Promise<void> {
       console.warn(
         `[finess] structural parsing anomalies (${fmt(skipRate)} of inserted): ${stats.skippedNoFinessId} missing nofinesset, ${stats.skippedNoCommune} missing commune, ${stats.parsedNoLigneAch} ligneacheminement non-match (DREES format change suspect)`,
       );
-      if (skipRate > 0.01) {
+      if (skipRate > STRUCTURAL_FAIL_THRESHOLD) {
         throw new IngestError(
           "validate",
-          `Structural parsing anomaly rate ${fmt(skipRate)} above 1% threshold — likely upstream regression (required column rename/removed or ligneacheminement format change)`,
+          `Structural parsing anomaly rate ${fmt(skipRate)} above ${fmt(STRUCTURAL_FAIL_THRESHOLD)} — likely upstream regression (required column rename/removed or ligneacheminement format change)`,
         );
       }
     }
