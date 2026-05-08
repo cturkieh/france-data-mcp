@@ -57,3 +57,92 @@ export const FINESS_MSP_CPTS = ["603", "604"] as const satisfies readonly Finess
 export function libelleCategorieFiness(code: string): string | undefined {
   return (FINESS_CATEGORIES as Record<string, string>)[code];
 }
+
+export type FinessFamille = "mco" | "ssr" | "ehpad" | "autre";
+
+/**
+ * Family classification of FINESS DREES category codes (see FINESS_CATEGORIES
+ * above for the 3-digit code reference).
+ *
+ *   MCO   = Médecine-Chirurgie-Obstétrique (court séjour). Acute-care hospitals.
+ *   SSR   = Soins de Suite et Réadaptation. Follow-up / rehabilitation.
+ *   EHPAD = Établissements pour personnes âgées dépendantes + adjacent senior housing.
+ *
+ * Anything outside these three families falls back to "autre" for V0.2 scope.
+ *
+ * The query-only subtype excludes "autre" (it would require an inverse-match
+ * which is YAGNI for V0.2 — to get "autre" results, omit the family filter
+ * and post-filter via `result.categorie.famille`).
+ *
+ * MCO deliberately diverges from FINESS_HOPITAUX on two points:
+ *   - excludes 292 (CHS) and 362 (CH spé psychiatrie) — psychiatry is its own
+ *     planned family, NOT acute-care MCO.
+ *   - includes 365 (CLCC = Centre de Lutte Contre le Cancer), which DREES treats
+ *     as acute-care oncology, but FINESS_HOPITAUX (a more "hospitals in general"
+ *     bucket) does not list.
+ * Do NOT replace MCO with FINESS_HOPITAUX — the lists are intentionally different.
+ *
+ * SSR is deliberately conservative for V0.2 — only the unambiguous "109" code.
+ * Code 122 (Centre de cure médicale) overlaps DREES SSR semantically but is
+ * classification-ambiguous; left in DELIBERATELY_AUTRE below.
+ *
+ * EHPAD reuses FINESS_EHPAD as the single source of truth — adding a code there
+ * automatically extends the family.
+ */
+export type FinessFamilleQuery = Exclude<FinessFamille, "autre">;
+
+export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> = {
+  mco: ["108", "355", "354", "295", "365", "106"],
+  ssr: ["109"],
+  ehpad: FINESS_EHPAD,
+} as const;
+
+const MCO_CODES = new Set<string>(FINESS_FAMILY_CODES.mco);
+const SSR_CODES = new Set<string>(FINESS_FAMILY_CODES.ssr);
+const EHPAD_CODES = new Set<string>(FINESS_FAMILY_CODES.ehpad);
+
+/**
+ * Codes present in FINESS_CATEGORIES that are deliberately classified as "autre"
+ * for V0.2 scope. Powers the invariant test that fails when a new code is added
+ * to FINESS_CATEGORIES without an explicit family decision — preventing silent
+ * classification regressions on DREES nomenclature updates.
+ *
+ * @internal Exported solely for the invariant test in finess-categories.test.ts.
+ *           Do not import from runtime code — couple to `finessFamille()` instead.
+ */
+export const DELIBERATELY_AUTRE = new Set<string>([
+  "292", // CHS                      → psychiatrie (out of V0.2 scope)
+  "362", // CH spé psychiatrie       → psychiatrie
+  "120", // Hôpital de jour          → ambiguous (MCO vs autre)
+  "122", // Centre de cure médicale  → DREES classification ambiguous (cure ≈ SSR but not always)
+  "124", // Centre de Santé          → ambulatoire (planned family)
+  "603", // MSP                      → ambulatoire (re-exported as FINESS_MSP_CPTS)
+  "604", // CPTS                     → ambulatoire
+  "611", // Laboratoire              → labo (re-exported as FINESS_LABOS, planned family)
+  "619", // Cabinet d'imagerie       → imagerie (planned family)
+  "620", // Pharmacie                → pharmacie (re-exported as FINESS_PHARMACIES)
+  "697", // GCS                      → groupement de coopération
+  "698", // GCSMS                    → groupement
+  "600", // Foyer handicapés         → médico-social handicap (≠ EHPAD)
+]);
+
+/**
+ * Classify a FINESS category code into a family for query-side filtering.
+ *
+ * Inputs are normalized first: `null`, `undefined`, empty string, and
+ * whitespace-only strings all resolve to "autre". Non-empty inputs are trimmed
+ * before matching against the family Sets, tolerating whitespace artefacts
+ * occasionally present in DREES dumps (e.g. `" 108 "` → "mco").
+ *
+ * Note: empty/whitespace inputs are upstream-parsing-bug suspects (column
+ * shift, header mismatch) but this classifier intentionally has no telemetry
+ * hook — surfacing the empty-rate is the ingest layer's responsibility.
+ */
+export function finessFamille(code: string | null | undefined): FinessFamille {
+  const trimmed = code?.trim();
+  if (!trimmed) return "autre";
+  if (MCO_CODES.has(trimmed)) return "mco";
+  if (SSR_CODES.has(trimmed)) return "ssr";
+  if (EHPAD_CODES.has(trimmed)) return "ehpad";
+  return "autre";
+}

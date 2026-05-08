@@ -7,6 +7,11 @@
  * mais pas exposés dans le serveur MCP V0 sur Vercel serverless.
  */
 
+import {
+  type FinessFamilleQuery,
+  getFinessByCategorie,
+  getFinessInRadius,
+} from "../src/sante/finess-db.js";
 import { haversineDistance } from "../src/sante/finess.js";
 import {
   type SearchEntreprisesResult,
@@ -35,6 +40,55 @@ function asString(v: unknown): string | undefined {
 /** Garde de typage : renvoie la valeur si c'est un number fini, sinon undefined. */
 function asNumber(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/** Familles FINESS exposées en input (sous-ensemble strict — exclut "autre", non queryable). */
+const FINESS_FAMILLE_INPUTS = [
+  "mco",
+  "ssr",
+  "ehpad",
+] as const satisfies readonly FinessFamilleQuery[];
+
+/** Garde de typage : valide qu'une string est une famille FINESS queryable. */
+function asFinessFamille(v: unknown): FinessFamilleQuery | undefined {
+  if (typeof v !== "string") return undefined;
+  return (FINESS_FAMILLE_INPUTS as readonly string[]).includes(v)
+    ? (v as FinessFamilleQuery)
+    : undefined;
+}
+
+/** Parse + valide un tableau de familles FINESS. Throw si une valeur est invalide. */
+function parseFamilles(v: unknown): FinessFamilleQuery[] | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v)) {
+    throw new Error(
+      `familles doit être un tableau (reçu ${typeof v}). Valeurs autorisées : ${FINESS_FAMILLE_INPUTS.join(", ")}.`,
+    );
+  }
+  const parsed: FinessFamilleQuery[] = [];
+  for (const item of v) {
+    const f = asFinessFamille(item);
+    if (!f) {
+      throw new Error(
+        `famille FINESS invalide : "${String(item)}". Valeurs autorisées : ${FINESS_FAMILLE_INPUTS.join(", ")}.`,
+      );
+    }
+    parsed.push(f);
+  }
+  return parsed;
+}
+
+/** Bornes radius_km pour les outils FINESS (cohérent avec les wrappers). */
+const FINESS_RADIUS_MIN_KM = 0.1;
+const FINESS_RADIUS_MAX_KM = 50;
+
+/** Valide radiusKm : throw RangeError si hors [0.1, 50]. */
+function validateFinessRadiusKm(radiusKm: number): void {
+  if (radiusKm < FINESS_RADIUS_MIN_KM || radiusKm > FINESS_RADIUS_MAX_KM) {
+    throw new RangeError(
+      `radius_km doit être dans [${FINESS_RADIUS_MIN_KM}, ${FINESS_RADIUS_MAX_KM}], reçu ${radiusKm}`,
+    );
+  }
 }
 
 /**
@@ -329,6 +383,103 @@ export const TOOLS: McpTool[] = [
     handler: async (args) => {
       if (typeof args.siren !== "string") throw new Error("siren (string) requis");
       return getEntrepriseBySiren(args.siren);
+    },
+  },
+  {
+    name: "etablissements_finess_in_radius",
+    description:
+      "Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles (mco, ssr, ehpad). Source : FINESS / DREES (dump CSV ingéré localement).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lon: { type: "number", description: "Longitude du centre (WGS84)." },
+        lat: { type: "number", description: "Latitude du centre (WGS84)." },
+        radius_km: {
+          type: "number",
+          description: "Rayon en km (0.1-50, défaut 5).",
+          minimum: FINESS_RADIUS_MIN_KM,
+          maximum: FINESS_RADIUS_MAX_KM,
+          default: 5,
+        },
+        familles: {
+          type: "array",
+          description:
+            "Familles FINESS à inclure (mco = court séjour, ssr = soins de suite, ehpad). Si omis, toutes catégories.",
+          items: { type: "string", enum: [...FINESS_FAMILLE_INPUTS] },
+        },
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats (1-500, défaut 100).",
+          minimum: 1,
+          maximum: 500,
+          default: 100,
+        },
+      },
+      required: ["lon", "lat"],
+    },
+    handler: async (args) => {
+      const lon = asNumber(args.lon);
+      const lat = asNumber(args.lat);
+      if (lon === undefined || lat === undefined) {
+        throw new Error("lon et lat (number) requis");
+      }
+      const radiusKm = asNumber(args.radius_km) ?? 5;
+      validateFinessRadiusKm(radiusKm);
+      const familles = parseFamilles(args.familles);
+      const limit = asNumber(args.limit);
+      const input: Parameters<typeof getFinessInRadius>[0] = {
+        center: { lon, lat },
+        radiusKm,
+      };
+      if (familles) input.familles = familles;
+      if (limit !== undefined) input.limit = limit;
+      return getFinessInRadius(input);
+    },
+  },
+  {
+    name: "etablissements_finess_by_categorie",
+    description:
+      "Liste des établissements FINESS par famille (mco, ssr, ehpad), avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. Source : FINESS / DREES.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        categorie: {
+          type: "string",
+          description: "Famille FINESS recherchée (mco, ssr, ehpad).",
+          enum: [...FINESS_FAMILLE_INPUTS],
+        },
+        departement: {
+          type: "string",
+          description:
+            "Code département (2 caractères métropole/Corse, 3 pour DOM/TOM). Optionnel.",
+        },
+        code_insee: {
+          type: "string",
+          description: "Code INSEE de commune (5 caractères). Optionnel.",
+        },
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats (1-500, défaut 100).",
+          minimum: 1,
+          maximum: 500,
+          default: 100,
+        },
+      },
+      required: ["categorie"],
+    },
+    handler: async (args) => {
+      const famille = asFinessFamille(args.categorie);
+      if (!famille) {
+        throw new Error(`categorie (string) requis : ${FINESS_FAMILLE_INPUTS.join(", ")}.`);
+      }
+      const departement = asString(args.departement);
+      const codeInsee = asString(args.code_insee);
+      const limit = asNumber(args.limit);
+      const input: Parameters<typeof getFinessByCategorie>[0] = { famille };
+      if (departement) input.departement = departement;
+      if (codeInsee) input.code_insee = codeInsee;
+      if (limit !== undefined) input.limit = limit;
+      return getFinessByCategorie(input);
     },
   },
 ];
