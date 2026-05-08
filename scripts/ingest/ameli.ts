@@ -492,13 +492,6 @@ export function parseAmeliRecord(rec: Record<string, string>, index: CommuneInde
 
   const geom = `SRID=4326;POINT(${matched.lon} ${matched.lat})`;
 
-  // V0.4.1 — `raw` JSONB stockait la ligne CSV brute (~70-80% du poids row
-  // sur Ameli ~462K rows). Jamais lu côté tools MCP, mais saturait le disque
-  // (incident 2026-05-08). Vidé à l'ingestion pour rester sous quota free tier.
-  // La colonne reste dans le schéma pour rétro-compat (les anciens dumps
-  // peuvent en contenir), mais les nouveaux INSERT n'écrivent plus rien dedans.
-  const raw: Record<string, string> = {};
-
   return {
     row: {
       // Schema NOT NULL — duplicate the present field if one is empty (rare).
@@ -528,7 +521,12 @@ export function parseAmeliRecord(rec: Record<string, string>, index: CommuneInde
       option_tarifaire_libelle: getNonEmpty(rec, "option_tarifaire_libelle"),
       telephone: getNonEmpty(rec, "coordonnees_num_tel"),
       geom,
-      raw,
+      // V0.4.1 — `raw` JSONB stockait la ligne CSV brute (~70-80% du poids row
+      // sur ~462K rows) et saturait le disque sur free tier (incident 2026-05-08).
+      // Jamais lu côté tools MCP. La colonne reste dans le schéma pour
+      // rétro-compat avec les anciens dumps, mais les nouveaux INSERT
+      // n'écrivent plus rien dedans.
+      raw: {},
     },
   };
 }

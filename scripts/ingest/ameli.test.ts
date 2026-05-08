@@ -150,13 +150,13 @@ describe("parseAmeliRecord", () => {
     expect(r.row.code_postal).toBe("75008");
   });
 
-  it("populates raw with non-empty original CSV columns only", () => {
+  it("leaves raw empty by design (V0.4.1 — raw JSONB skipped to keep DB size minimal)", () => {
+    // Avant V0.4.1, `raw` stockait la ligne CSV brute (~70-80% du poids row
+    // sur ~462K rows) — saturait le disque sur free tier (incident 2026-05-08).
+    // Verrouille le contrat : `raw` reste un objet vide à l'ingestion.
     const r = parseAmeliRecord(row(), idx);
     if (!r.row) throw new Error("expected row");
-    expect(r.row.raw.ps_activite_nom).toBe("MAYAUD");
-    // empty columns are stripped
-    expect(r.row.raw.coordonnees_complement).toBeUndefined();
-    expect(r.row.raw.activite_particuliere_code).toBeUndefined();
+    expect(r.row.raw).toEqual({});
   });
 
   it("returns null for optional fields when CSV column is empty", () => {
