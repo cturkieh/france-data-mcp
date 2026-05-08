@@ -1,5 +1,11 @@
 import { getAnonClient } from "../storage/supabase.js";
-import { clampLimit, formatRpcError, trimOrNull, validateCoords } from "./db-helpers.js";
+import {
+  clampLimit,
+  formatRpcError,
+  trimOrNull,
+  validateCoords,
+  validateRadiusKm,
+} from "./db-helpers.js";
 import {
   FINESS_FAMILY_CODES,
   type FinessFamille,
@@ -62,6 +68,11 @@ function familiesToCodes(familles: FinessFamilleQuery[] | undefined): string[] {
 export async function getFinessInRadius(input: InRadiusInput): Promise<FinessQueryResult> {
   const limit = clampLimit(input.limit);
   validateCoords(input.center.lat, input.center.lon);
+  // Avant V0.4.1, le DB layer n'avait aucune validation de rayon — un caller
+  // direct (lib npm, pas le MCP) pouvait passer `radiusKm: 1000` et faire
+  // tourner ST_DWithin sur 95K rows pour rien. Le tool layer plafonnait, mais
+  // le DB layer doit aussi se protéger : c'est lui le boundary public.
+  validateRadiusKm(input.radiusKm);
 
   const supabase = getAnonClient();
   const { data, error } = await supabase.rpc("finess_in_radius", {

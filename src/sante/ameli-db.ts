@@ -10,7 +10,14 @@
  */
 
 import { getAnonClient } from "../storage/supabase.js";
-import { clampLimit, formatRpcError, trimOrNull, validateCoords } from "./db-helpers.js";
+import {
+  clampLimit,
+  clampOffset,
+  formatRpcError,
+  trimOrNull,
+  validateCoords,
+  validateRadiusKm,
+} from "./db-helpers.js";
 
 export interface AmeliResult {
   id: number;
@@ -60,6 +67,12 @@ export interface AmeliBySpecialiteDeptInput {
   /** Code type PS — facultatif. */
   typePsCode?: string;
   limit?: number;
+  /**
+   * Décalage de pagination (≥ 0, défaut 0). Permet d'énumérer un département
+   * à fort effectif (ex: Paris IDE > 1000) en re-paginant tant que
+   * `truncated=true`.
+   */
+  offset?: number;
 }
 
 export interface AmeliQueryResult {
@@ -68,24 +81,18 @@ export interface AmeliQueryResult {
   results: AmeliResult[];
 }
 
-const MAX_RADIUS_KM = 50;
-
-function validateRadiusKm(radiusKm: number): void {
-  if (!Number.isFinite(radiusKm) || radiusKm <= 0 || radiusKm > MAX_RADIUS_KM) {
-    throw new RangeError(
-      `[france-data-mcp] radiusKm must be in (0, ${MAX_RADIUS_KM}], got ${radiusKm}`,
-    );
-  }
-}
-
 function validateDepartement(dept: string): void {
   // Accepts "01"-"95" (excl "20"), "2A"/"2B", "971"-"978", "984"-"988".
-  // Inlined to keep `Error` (not RangeError) for backward-compat with
-  // callers and tests that match `/must be a valid INSEE code/`.
+  // RangeError plutôt que Error pour cohérence avec les autres validators
+  // (clampLimit, clampOffset, validateCoords, validateRadiusKm) — permet
+  // au boundary MCP de mapper sur JSON-RPC -32602 (Invalid params) au lieu
+  // de -32603 (Internal error). Tests existants matchent sur le message
+  // (`/must be a valid INSEE code/`), pas sur la classe — RangeError étend
+  // Error, donc compat totale.
   if (dept === "2A" || dept === "2B") return;
   if (/^\d{2}$/.test(dept) && dept !== "20") return;
   if (/^(97[1-8]|98[4-8])$/.test(dept)) return;
-  throw new Error(`[france-data-mcp] departement must be a valid INSEE code, got "${dept}"`);
+  throw new RangeError(`[france-data-mcp] departement must be a valid INSEE code, got "${dept}"`);
 }
 
 /** Find PS within a geographic radius. */
@@ -108,11 +115,12 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   return buildAmeliQueryResult(data, limit);
 }
 
-/** List PS by department (+ optional specialty / type filter). */
+/** List PS by department (+ optional specialty / type filter, optional offset). */
 export async function getAmeliBySpecialiteDept(
   input: AmeliBySpecialiteDeptInput,
 ): Promise<AmeliQueryResult> {
   const limit = clampLimit(input.limit);
+  const offset = clampOffset(input.offset);
   validateDepartement(input.departement);
 
   const supabase = getAnonClient();
@@ -121,6 +129,7 @@ export async function getAmeliBySpecialiteDept(
     p_specialite_code: input.specialiteCode ?? (null as unknown as string),
     p_type_ps_code: input.typePsCode ?? (null as unknown as string),
     p_limit: limit + 1,
+    p_offset: offset,
   });
 
   if (error) throw new Error(formatRpcError("ameli_by_specialite_dept", error));

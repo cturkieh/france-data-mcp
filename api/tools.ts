@@ -7,7 +7,13 @@
  * npm pour les usages hors serveur MCP.
  */
 
-import { getAmeliBySpecialiteDept, getAmeliInRadius } from "../src/sante/ameli-db.js";
+import {
+  type AmeliQueryResult,
+  type AmeliResult,
+  getAmeliBySpecialiteDept,
+  getAmeliInRadius,
+} from "../src/sante/ameli-db.js";
+import { RADIUS_MAX_KM, RADIUS_MIN_KM } from "../src/sante/db-helpers.js";
 import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
 import {
   type FinessFamilleQuery,
@@ -41,9 +47,77 @@ function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
-/** Garde de typage : renvoie la valeur si c'est un number fini, sinon undefined. */
+/**
+ * Garde de typage tolérante : accepte un number direct OU une string
+ * numérique (`"49.7724"`). Beaucoup de clients MCP sérialisent les nombres
+ * comme strings au passage par leur transport JSON-RPC, donc rejeter
+ * `typeof !== "number"` strict bloque des callers parfaitement légitimes
+ * (audit empirique 2026-05-08 sur le client Claude Code).
+ *
+ * Renvoie `undefined` pour tout ce qui n'est pas un nombre fini après
+ * coercition — booleans, objets, NaN, `Infinity`, strings non-numériques,
+ * absent. Confond donc "absent" et "invalide" : préférer `coerceNumber`
+ * dans les call-sites qui ont un fallback `?? default`, sinon une saisie
+ * erronée (`radius_km: "50 km"`) tomberait silencieusement sur le default.
+ */
 function asNumber(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Variante stricte de `asNumber` : throw sur input invalide non-absent.
+ * Renvoie `undefined` UNIQUEMENT si l'argument est absent (`undefined`/`null`).
+ *
+ * À utiliser pour tout paramètre qui a un fallback (`?? default`) ou qui
+ * forward `undefined` à un wrapper qui défaut. Sans cette discrimination,
+ * `asNumber("abc") ?? 5` retourne 5 silencieusement et masque la saisie
+ * invalide — silent failure que CLAUDE.md interdit explicitement.
+ */
+function coerceNumber(v: unknown, paramName: string): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  const n = asNumber(v);
+  if (n === undefined) {
+    // RangeError plutôt qu'Error pour cohérence avec les autres validators
+    // (clampLimit, validateRadiusKm…). Permet à `api/mcp.ts` de mapper sur
+    // JSON-RPC -32602 (Invalid params) au lieu de -32603 (Internal error).
+    throw new RangeError(
+      `${paramName} doit être un nombre fini (reçu : ${JSON.stringify(v)})`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Coercition booléenne tolérante. Mêmes raisons que `asNumber` : les transports
+ * MCP peuvent stringifier `true` → `"true"`. Sans ce helper, `dedupe_by_ps:
+ * "true"` côté client retourne silencieusement le résultat non-dédupliqué,
+ * variante du même silent failure que `asNumber("50 km") ?? 5`.
+ *
+ * Reconnu : `true`/`false`, `"true"`/`"false"` (insensible casse), `"1"`/`"0"`,
+ * `1`/`0`. Tout autre input est rejeté avec throw — pas de fallback silencieux.
+ */
+function coerceBoolean(v: unknown, paramName: string): boolean | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") {
+    if (v === 1) return true;
+    if (v === 0) return false;
+  }
+  if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "true" || s === "1") return true;
+    if (s === "false" || s === "0") return false;
+  }
+  // RangeError pour cohérence (cf. coerceNumber) → JSON-RPC -32602.
+  throw new RangeError(
+    `${paramName} doit être un booléen (reçu : ${JSON.stringify(v)})`,
+  );
 }
 
 /**
@@ -85,19 +159,6 @@ function parseFamilles(v: unknown): FinessFamilleQuery[] | undefined {
   return parsed;
 }
 
-/** Bornes radius_km pour les outils FINESS (cohérent avec les wrappers). */
-const FINESS_RADIUS_MIN_KM = 0.1;
-const FINESS_RADIUS_MAX_KM = 50;
-
-/** Valide radiusKm : throw RangeError si hors [0.1, 50]. */
-function validateFinessRadiusKm(radiusKm: number): void {
-  if (radiusKm < FINESS_RADIUS_MIN_KM || radiusKm > FINESS_RADIUS_MAX_KM) {
-    throw new RangeError(
-      `radius_km doit être dans [${FINESS_RADIUS_MIN_KM}, ${FINESS_RADIUS_MAX_KM}], reçu ${radiusKm}`,
-    );
-  }
-}
-
 /**
  * Parse un tableau de strings depuis l'input MCP. Throw si l'argument n'est
  * pas un tableau, contient une chaîne vide, ou un élément non-string.
@@ -128,27 +189,30 @@ function parseStringArray(v: unknown, paramName: string): string[] | undefined {
   return v as string[];
 }
 
-/** Bornes radius_km Ameli (cohérent avec validateRadiusKm dans ameli-db.ts). */
-const AMELI_RADIUS_MIN_KM = 0.1;
-const AMELI_RADIUS_MAX_KM = 50;
-
-/** Valide radiusKm Ameli côté tool-layer pour un message d'erreur clair (cohérent avec FINESS). */
-function validateAmeliRadiusKm(radiusKm: number): void {
-  if (radiusKm < AMELI_RADIUS_MIN_KM || radiusKm > AMELI_RADIUS_MAX_KM) {
-    throw new RangeError(
-      `radius_km doit être dans [${AMELI_RADIUS_MIN_KM}, ${AMELI_RADIUS_MAX_KM}], reçu ${radiusKm}`,
-    );
-  }
-}
-
 /**
  * Mention CGU obligatoire pour la réutilisation des données Annuaire Santé
  * Ameli (art. L.1461-2 CSP). Affichée dans la description de chaque tool
  * Ameli pour que tout caller MCP la voie avant d'invoquer.
+ *
+ * `AMELI_SCOPE_WARNING` cadre le périmètre exact de la source amont. Le piège
+ * récurrent (audit Charleville 2026-05-08) : un caller voit "Annuaire Santé
+ * Ameli" et croit à un répertoire exhaustif des PS — alors que c'est UNIQUEMENT
+ * les libéraux conventionnés. Les hospitaliers salariés, biologistes médicaux
+ * salariés en LBM, anatomopathologistes hospitaliers, médecins du travail et
+ * médecine légale en sont absents par construction. Pour un référentiel tous
+ * statuts, il faut RPPS / Annuaire Santé ANS (esante.gouv.fr) — non couvert
+ * par ce serveur en v0.4.
  */
 const AMELI_CGU =
   "Source : Annuaire santé Ameli (Assurance Maladie), MAJ hebdomadaire. " +
   "Réutilisation soumise à l'art. L.1461-2 CSP — citer la source et la date de sync.";
+
+const AMELI_SCOPE_WARNING =
+  "PÉRIMÈTRE : libéraux conventionnés UNIQUEMENT. " +
+  "HORS PÉRIMÈTRE : médecins exclusivement hospitaliers/salariés, " +
+  "biologistes médicaux salariés en LBM, anatomopathologistes hospitaliers, " +
+  "médecins du travail, médecine légale. " +
+  "Pour effectifs tous statuts, voir Annuaire Santé ANS (RPPS, esante.gouv.fr) — non couvert par ce serveur.";
 
 /**
  * Réponse enrichie du fallback `naf + center+radiusKm` (limite API DINUM).
@@ -180,6 +244,97 @@ type EntreprisesInRadiusFallbackResult = SearchEntreprisesResult & {
  * dans `src/territoire/dept-codes.ts` (consolidation V0.4).
  */
 export const deptFromCommune = deptFromCodeInsee;
+
+/**
+ * Site d'exercice d'un PS dédupliqué — sous-ensemble par-site de `AmeliResult`.
+ * `Pick` lie le shape à la source canonique : ajouter un champ par-site dans
+ * `AmeliResult` (ex: `horaires_ouverture`) propagera ici via compile-error,
+ * pas via silencieux drop. Plus robuste qu'une duplication manuelle.
+ */
+type AmeliPsSite = Pick<
+  AmeliResult,
+  "id" | "adresse" | "coords" | "distance_km" | "telephone" | "conventions"
+>;
+
+/** Praticien dédupliqué — identité partagée + tableau des sites d'exercice. */
+type AmeliPsDedup = Pick<AmeliResult, "identite" | "specialite" | "type_ps"> & {
+  sites: AmeliPsSite[];
+};
+
+/**
+ * Sortie du dédupe Ameli. Champ `count` = nombre de **praticiens distincts**
+ * (≠ raw `count` qui compte les **entrées** Ameli, une par site).
+ *
+ * `rawCount` propage le décompte amont AVANT regroupement pour qu'un caller
+ * paginant en mode dédupe puisse calculer correctement le `nextOffset` :
+ * `nextOffset = previousOffset + rawCount` (PAS `+ count` qui sous-estime
+ * et fait sauter des entrées sur les pages suivantes).
+ *
+ * `warning` est posé si la dédup tourne sur un résultat tronqué : le même PS
+ * peut occuper deux pages, et apparaîtra alors comme deux praticiens distincts
+ * — la dédup est partielle. Pattern aligné sur `entreprises_in_radius`
+ * `fallback.warning` qui surface honnêtement les limites côté caller.
+ */
+type AmeliDedupedResult = {
+  count: number;
+  rawCount: number;
+  truncated: boolean;
+  results: AmeliPsDedup[];
+  warning?: string;
+};
+
+const DEDUPE_TRUNCATED_WARNING =
+  "Dédup partielle : appliquée sur un résultat tronqué amont. " +
+  "Un même praticien à cheval sur deux pages apparaîtra comme deux entrées distinctes. " +
+  "Re-paginer (offset + rawCount) jusqu'à truncated=false avant de cumuler les counts uniques.";
+
+/**
+ * Regroupe les entrées Ameli par praticien (clé : nom + prenom + civilite +
+ * specialite_code + type_ps_code + raison_sociale). Les sites multiples du
+ * même PS sont listés dans `sites[]` au lieu d'occuper N entrées séparées.
+ *
+ * Pourquoi cette clé : (nom, prenom) seuls collisionnent (3 "DUPONT JEAN" en
+ * France). Ajouter civilité + spécialité + raison sociale réduit à un taux de
+ * collision négligeable. La source publique n'expose pas RPPS/ADELI (commentaire
+ * de la migration `20260508000016`), donc on ne peut pas faire mieux côté
+ * serveur ; un caller voulant une dédup parfaite doit cross-référencer avec
+ * un autre référentiel (ANS RPPS).
+ *
+ * Note `Array.prototype.join` : null/undefined dans les éléments du tableau
+ * sont coerced en chaîne vide automatiquement (ES1 spec) — pas besoin de
+ * `?? ""` défensif.
+ */
+function dedupeAmeliByPs(result: AmeliQueryResult): AmeliDedupedResult {
+  const grouped = new Map<string, AmeliPsDedup>();
+  // Iteration order = input order, which is already sorted by distance/name
+  // upstream — preserve it to keep the output deterministic.
+  for (const row of result.results) {
+    const key = [
+      row.identite.nom,
+      row.identite.prenom,
+      row.identite.civilite,
+      row.identite.raison_sociale,
+      row.specialite.code,
+      row.type_ps.code,
+    ].join("|");
+    const { identite, specialite, type_ps, ...site } = row;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.sites.push(site);
+    } else {
+      grouped.set(key, { identite, specialite, type_ps, sites: [site] });
+    }
+  }
+  const results = Array.from(grouped.values());
+  const out: AmeliDedupedResult = {
+    count: results.length,
+    rawCount: result.count,
+    truncated: result.truncated,
+    results,
+  };
+  if (result.truncated) out.warning = DEDUPE_TRUNCATED_WARNING;
+  return out;
+}
 
 /**
  * Contourne la limitation API DINUM : `activite_principale + lat/long/radius`
@@ -283,7 +438,7 @@ export const TOOLS: McpTool[] = [
       const nom = asString(args.nom);
       const codePostal = asString(args.codePostal);
       const code = asString(args.code);
-      const limit = asNumber(args.limit);
+      const limit = coerceNumber(args.limit, "limit");
       if (nom) opts.nom = nom;
       if (codePostal) opts.codePostal = codePostal;
       if (code) opts.code = code;
@@ -391,11 +546,15 @@ export const TOOLS: McpTool[] = [
       const q = asString(args.q);
       const codePostal = asString(args.codePostal);
       const departement = asString(args.departement);
-      const perPage = asNumber(args.perPage);
-      const page = asNumber(args.page);
-      const lon = asNumber(args.lon);
-      const lat = asNumber(args.lat);
-      const radiusKm = asNumber(args.radiusKm);
+      // coerceNumber (vs asNumber) : un caller passant `radiusKm: "50 km"`
+      // tomberait silencieusement sur "pas de filtre géo" au lieu de signaler
+      // la saisie. Même silent-failure shape que le bug Charleville sur
+      // `professionnels_in_radius` corrigé en V0.4.1 — propagé ici par cohérence.
+      const perPage = coerceNumber(args.perPage, "perPage");
+      const page = coerceNumber(args.page, "page");
+      const lon = coerceNumber(args.lon, "lon");
+      const lat = coerceNumber(args.lat, "lat");
+      const radiusKm = coerceNumber(args.radiusKm, "radiusKm");
       const hasCoords = lon !== undefined && lat !== undefined && radiusKm !== undefined;
 
       // Cas qui pose problème côté API DINUM : `naf + lat/long/radius`. L'API
@@ -437,7 +596,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_in_radius",
-    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement).`,
+    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public).`,
     inputSchema: {
       type: "object",
       properties: {
@@ -446,14 +605,13 @@ export const TOOLS: McpTool[] = [
         radius_km: {
           type: "number",
           description: "Rayon en km (0.1-50, défaut 5).",
-          minimum: FINESS_RADIUS_MIN_KM,
-          maximum: FINESS_RADIUS_MAX_KM,
+          minimum: RADIUS_MIN_KM,
+          maximum: RADIUS_MAX_KM,
           default: 5,
         },
         familles: {
           type: "array",
-          description:
-            "Familles FINESS à inclure (mco = court séjour, ssr = soins de suite, ehpad). Si omis, toutes catégories.",
+          description: `Familles FINESS à inclure (24 valeurs disponibles, voir enum). Si omis, toutes catégories.`,
           items: { type: "string", enum: [...FINESS_FAMILLE_INPUTS] },
         },
         limit: {
@@ -467,15 +625,16 @@ export const TOOLS: McpTool[] = [
       required: ["lon", "lat"],
     },
     handler: async (args) => {
-      const lon = asNumber(args.lon);
-      const lat = asNumber(args.lat);
+      const lon = coerceNumber(args.lon, "lon");
+      const lat = coerceNumber(args.lat, "lat");
       if (lon === undefined || lat === undefined) {
         throw new Error("lon et lat (number) requis");
       }
-      const radiusKm = asNumber(args.radius_km) ?? 5;
-      validateFinessRadiusKm(radiusKm);
+      const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
+      // Bornes radius validées au DB layer (validateRadiusKm dans
+      // finess-db.ts/ameli-db.ts via db-helpers) — source unique.
       const familles = parseFamilles(args.familles);
-      const limit = asNumber(args.limit);
+      const limit = coerceNumber(args.limit, "limit");
       const input: Parameters<typeof getFinessInRadius>[0] = {
         center: { lon, lat },
         radiusKm,
@@ -487,13 +646,13 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_by_categorie",
-    description: `Liste des établissements FINESS par famille (${FAMILLES_LIST}), avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. Source : FINESS / DREES.`,
+    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public).`,
     inputSchema: {
       type: "object",
       properties: {
         categorie: {
           type: "string",
-          description: "Famille FINESS recherchée (mco, ssr, ehpad).",
+          description: `Famille FINESS recherchée (24 valeurs disponibles, voir enum).`,
           enum: [...FINESS_FAMILLE_INPUTS],
         },
         departement: {
@@ -522,7 +681,7 @@ export const TOOLS: McpTool[] = [
       }
       const departement = asString(args.departement);
       const codeInsee = asString(args.code_insee);
-      const limit = asNumber(args.limit);
+      const limit = coerceNumber(args.limit, "limit");
       const input: Parameters<typeof getFinessByCategorie>[0] = { famille };
       if (departement) input.departement = departement;
       if (codeInsee) input.code_insee = codeInsee;
@@ -533,7 +692,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "etablissement_by_finess",
     description:
-      "Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Renvoie null si introuvable. Source : FINESS / DREES.",
+      "Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Renvoie null si introuvable. Source : FINESS / DREES. Note : champ `email` toujours `null` (non exposé par FINESS public).",
     inputSchema: {
       type: "object",
       properties: {
@@ -552,7 +711,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_in_radius",
-    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). Filtres optionnels : codes spécialité Ameli (ex: '01' MG, '03' cardio, '06' dermato) et codes type PS ('1' médecin, '2' IDE, '3' sage-femme, '4' chir-dentiste, '5' pharmacien, '8' kiné, etc.). ${AMELI_CGU}`,
+    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). Filtres optionnels : codes spécialité Ameli (ex: '01' MG, '03' cardio, '06' dermato) et codes type PS ('1' médecin, '2' IDE, '3' sage-femme, '4' chir-dentiste, '5' pharmacien, '8' kiné, etc.). Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -561,8 +720,8 @@ export const TOOLS: McpTool[] = [
         radius_km: {
           type: "number",
           description: "Rayon en km (0.1-50, défaut 5).",
-          minimum: 0.1,
-          maximum: 50,
+          minimum: RADIUS_MIN_KM,
+          maximum: RADIUS_MAX_KM,
           default: 5,
         },
         specialite_codes: {
@@ -579,25 +738,32 @@ export const TOOLS: McpTool[] = [
         },
         limit: {
           type: "number",
-          description: "Nombre max de résultats (1-500, défaut 100).",
+          description: "Nombre max de résultats (1-500, défaut 100). Appliqué AVANT déduplication.",
           minimum: 1,
           maximum: 500,
           default: 100,
+        },
+        dedupe_by_ps: {
+          type: "boolean",
+          description:
+            "Regrouper les entrées par praticien (nom + prénom + code spécialité) et lister chaque adresse d'exercice dans `sites[]`. Défaut false (comportement V0.4 historique : un PS multi-sites = N entrées).",
+          default: false,
         },
       },
       required: ["lon", "lat"],
     },
     handler: async (args) => {
-      const lon = asNumber(args.lon);
-      const lat = asNumber(args.lat);
+      const lon = coerceNumber(args.lon, "lon");
+      const lat = coerceNumber(args.lat, "lat");
       if (lon === undefined || lat === undefined) {
         throw new Error("lon et lat (number) requis");
       }
-      const radiusKm = asNumber(args.radius_km) ?? 5;
-      validateAmeliRadiusKm(radiusKm);
+      const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
+      // Bornes radius validées au DB layer (cf. ameli-db.ts) — source unique.
       const specialiteCodes = parseStringArray(args.specialite_codes, "specialite_codes");
       const typePsCodes = parseStringArray(args.type_ps_codes, "type_ps_codes");
-      const limit = asNumber(args.limit);
+      const limit = coerceNumber(args.limit, "limit");
+      const dedupe = coerceBoolean(args.dedupe_by_ps, "dedupe_by_ps") === true;
       const input: Parameters<typeof getAmeliInRadius>[0] = {
         center: { lon, lat },
         radiusKm,
@@ -605,12 +771,13 @@ export const TOOLS: McpTool[] = [
       if (specialiteCodes) input.specialiteCodes = specialiteCodes;
       if (typePsCodes) input.typePsCodes = typePsCodes;
       if (limit !== undefined) input.limit = limit;
-      return getAmeliInRadius(input);
+      const result = await getAmeliInRadius(input);
+      return dedupe ? dedupeAmeliByPs(result) : result;
     },
   },
   {
     name: "professionnels_par_specialite_dept",
-    description: `Liste des professionnels de santé libéraux conventionnés d'un département, avec filtres optionnels par spécialité ou type de PS. Pour énumération administrative — pas de rayon. ${AMELI_CGU}`,
+    description: `Liste des professionnels de santé libéraux conventionnés d'un département, avec filtres optionnels par spécialité ou type de PS. Pour énumération administrative — pas de rayon. Pagination : utiliser \`offset\` pour récupérer les pages suivantes quand \`truncated=true\`. Multi-sites : utiliser \`dedupe_by_ps=true\` pour regrouper par praticien. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -629,10 +796,23 @@ export const TOOLS: McpTool[] = [
         },
         limit: {
           type: "number",
-          description: "Nombre max de résultats (1-500, défaut 100).",
+          description: "Nombre max de résultats (1-500, défaut 100). Appliqué AVANT déduplication.",
           minimum: 1,
           maximum: 500,
           default: 100,
+        },
+        offset: {
+          type: "number",
+          description:
+            "Décalage de pagination (≥ 0, défaut 0). Combiner avec `limit` pour énumérer un département à fort effectif. Re-paginer tant que `truncated=true`.",
+          minimum: 0,
+          default: 0,
+        },
+        dedupe_by_ps: {
+          type: "boolean",
+          description:
+            "Regrouper les entrées par praticien (nom + prénom + code spécialité) et lister chaque adresse d'exercice dans `sites[]`. Défaut false.",
+          default: false,
         },
       },
       required: ["departement"],
@@ -642,12 +822,16 @@ export const TOOLS: McpTool[] = [
       if (!departement) throw new Error("departement (string) requis");
       const specialiteCode = asString(args.specialite_code);
       const typePsCode = asString(args.type_ps_code);
-      const limit = asNumber(args.limit);
+      const limit = coerceNumber(args.limit, "limit");
+      const offset = coerceNumber(args.offset, "offset");
+      const dedupe = coerceBoolean(args.dedupe_by_ps, "dedupe_by_ps") === true;
       const input: Parameters<typeof getAmeliBySpecialiteDept>[0] = { departement };
       if (specialiteCode) input.specialiteCode = specialiteCode;
       if (typePsCode) input.typePsCode = typePsCode;
       if (limit !== undefined) input.limit = limit;
-      return getAmeliBySpecialiteDept(input);
+      if (offset !== undefined) input.offset = offset;
+      const result = await getAmeliBySpecialiteDept(input);
+      return dedupe ? dedupeAmeliByPs(result) : result;
     },
   },
 ];

@@ -293,4 +293,256 @@ describe("professionnels_par_specialite_dept (MCP tool)", () => {
       typePsCode: "2",
     });
   });
+
+  it("forwarde offset au wrapper DB pour pagination", async () => {
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliBySpecialiteDept")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_par_specialite_dept");
+    await tool?.handler({ departement: "75", limit: 100, offset: 200 });
+    expect(spy).toHaveBeenCalledWith({
+      departement: "75",
+      limit: 100,
+      offset: 200,
+    });
+  });
+
+  it("inclut périmètre Ameli libéraux conventionnés dans la description", () => {
+    const tool = findTool("professionnels_par_specialite_dept");
+    expect(tool?.description).toContain("libéraux conventionnés");
+    expect(tool?.description).toContain("HORS PÉRIMÈTRE");
+  });
+});
+
+describe("coercition tolérante des nombres (asNumber)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("accepte les coordonnées passées en string par certains clients MCP", async () => {
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliInRadius")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_in_radius");
+    // Cf. audit empirique 2026-05-08 : le client Claude Code transmet les
+    // nombres comme strings via son transport JSON-RPC. La régression observée
+    // ("lon et lat (number) requis") doit rester corrigée.
+    await tool?.handler({ lon: "4.7203", lat: "49.7724", radius_km: "5" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        center: { lon: 4.7203, lat: 49.7724 },
+        radiusKm: 5,
+      }),
+    );
+  });
+
+  it("rejette toujours les valeurs vraiment non-numériques", async () => {
+    const tool = findTool("professionnels_in_radius");
+    // Message actionnable précis (avec le nom du paramètre + valeur reçue) au
+    // lieu du `/lon et lat/` générique : permet au caller MCP de diagnostiquer
+    // la saisie fautive plutôt que deviner laquelle des 2 coords est en cause.
+    await expect(tool?.handler({ lon: "abc", lat: "49.7" })).rejects.toThrow(/lon doit être/);
+    await expect(tool?.handler({ lon: true, lat: 49.7 })).rejects.toThrow(/lon doit être/);
+    await expect(tool?.handler({ lon: {}, lat: 49.7 })).rejects.toThrow(/lon doit être/);
+  });
+});
+
+describe("dedupe_by_ps", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makePs(
+    overrides: Partial<{
+      id: number;
+      nom: string;
+      prenom: string;
+      civilite: string;
+      specCode: string;
+      voie: string;
+    }>,
+  ) {
+    const o = {
+      id: overrides.id ?? 1,
+      nom: overrides.nom ?? "DUPONT",
+      prenom: overrides.prenom ?? "JEAN",
+      civilite: overrides.civilite ?? "M",
+      specCode: overrides.specCode ?? "01",
+      voie: overrides.voie ?? "RUE 1",
+    };
+    return {
+      id: o.id,
+      identite: { nom: o.nom, prenom: o.prenom, civilite: o.civilite, raison_sociale: null },
+      specialite: { code: o.specCode, libelle: "Médecin généraliste" },
+      type_ps: { code: "1", libelle: "Médecin" },
+      adresse: {
+        voie: o.voie,
+        code_postal: "08000",
+        ville: "CHARLEVILLE",
+        code_departement: "08",
+        code_insee: "08105",
+      },
+      coords: { lat: 49.77, lon: 4.72 },
+      distance_km: null,
+      telephone: null,
+      conventions: {
+        secteur_code: "1",
+        secteur_libelle: "Secteur 1",
+        nature_exercice_code: null,
+        nature_exercice_libelle: null,
+        option_tarifaire_code: null,
+        option_tarifaire_libelle: null,
+      },
+    };
+  }
+
+  it("regroupe les sites multiples d'un même praticien (rayon)", async () => {
+    vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValueOnce({
+      count: 3,
+      truncated: false,
+      results: [
+        makePs({ id: 1, voie: "RUE 1" }),
+        makePs({ id: 2, voie: "RUE 2" }),
+        makePs({ id: 3, nom: "MARTIN", prenom: "PAUL", voie: "RUE 3" }),
+      ],
+    });
+    const tool = findTool("professionnels_in_radius");
+    const result = (await tool?.handler({
+      lon: 4.72,
+      lat: 49.77,
+      dedupe_by_ps: true,
+    })) as { count: number; results: { sites: unknown[] }[] };
+    expect(result.count).toBe(2); // DUPONT JEAN + MARTIN PAUL
+    expect(result.results[0]?.sites).toHaveLength(2); // 2 adresses pour DUPONT
+    expect(result.results[1]?.sites).toHaveLength(1); // 1 adresse pour MARTIN
+  });
+
+  it("différencie deux PS à même nom/prenom mais civilités distinctes", async () => {
+    vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValueOnce({
+      count: 2,
+      truncated: false,
+      results: [
+        makePs({ id: 1, civilite: "M" }),
+        makePs({ id: 2, civilite: "Mme" }),
+      ],
+    });
+    const tool = findTool("professionnels_in_radius");
+    const result = (await tool?.handler({
+      lon: 4.72,
+      lat: 49.77,
+      dedupe_by_ps: true,
+    })) as { count: number };
+    expect(result.count).toBe(2);
+  });
+
+  it("ne dédoublonne pas quand dedupe_by_ps est false ou omis", async () => {
+    vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValue({
+      count: 2,
+      truncated: false,
+      results: [makePs({ id: 1 }), makePs({ id: 2 })],
+    });
+    const tool = findTool("professionnels_in_radius");
+    const without = (await tool?.handler({ lon: 4.72, lat: 49.77 })) as { count: number };
+    const explicit = (await tool?.handler({
+      lon: 4.72,
+      lat: 49.77,
+      dedupe_by_ps: false,
+    })) as { count: number };
+    expect(without.count).toBe(2);
+    expect(explicit.count).toBe(2);
+  });
+
+  it("propage truncated, expose rawCount, et ajoute un warning quand tronqué", async () => {
+    // Cas réel : la dédup tourne sur un résultat tronqué amont. Le même PS
+    // peut être à cheval sur 2 pages → faux positif côté unicité. Le warning
+    // doit être surfacé pour que le caller paginate avant de cumuler.
+    vi.spyOn(ameliDb, "getAmeliBySpecialiteDept").mockResolvedValueOnce({
+      count: 100,
+      truncated: true,
+      results: [makePs({ id: 1 }), makePs({ id: 2 })],
+    });
+    const tool = findTool("professionnels_par_specialite_dept");
+    const result = (await tool?.handler({ departement: "75", dedupe_by_ps: true })) as {
+      count: number;
+      rawCount: number;
+      truncated: boolean;
+      warning?: string;
+    };
+    expect(result.truncated).toBe(true);
+    expect(result.count).toBe(1); // 2 entrées, même PS dédupliqué
+    expect(result.rawCount).toBe(100); // décompte amont préservé pour offset + rawCount
+    expect(result.warning).toMatch(/Dédup partielle/);
+  });
+
+  it("n'ajoute pas de warning quand le résultat amont n'est pas tronqué", async () => {
+    vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValueOnce({
+      count: 1,
+      truncated: false,
+      results: [makePs({ id: 1 })],
+    });
+    const tool = findTool("professionnels_in_radius");
+    const result = (await tool?.handler({ lon: 4.72, lat: 49.77, dedupe_by_ps: true })) as {
+      warning?: string;
+    };
+    expect(result.warning).toBeUndefined();
+  });
+
+  it("active la dédup avec une string 'true' (transport MCP qui stringifie les booleans)", async () => {
+    vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValueOnce({
+      count: 2,
+      truncated: false,
+      results: [makePs({ id: 1, voie: "RUE 1" }), makePs({ id: 2, voie: "RUE 2" })],
+    });
+    const tool = findTool("professionnels_in_radius");
+    const result = (await tool?.handler({
+      lon: 4.72,
+      lat: 49.77,
+      dedupe_by_ps: "true",
+    })) as { count: number };
+    expect(result.count).toBe(1); // dédup activé via "true" string
+  });
+
+  it("rejette une valeur dedupe_by_ps non-coercible", async () => {
+    const tool = findTool("professionnels_in_radius");
+    await expect(
+      tool?.handler({ lon: 4.72, lat: 49.77, dedupe_by_ps: "yes" }),
+    ).rejects.toThrow(/dedupe_by_ps/);
+  });
+});
+
+describe("coerceNumber loud-failure (silent default guard)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejette explicitement un radius_km non-coercible plutôt que tomber sur le default", async () => {
+    // Audit silent-failure-hunter : `asNumber("50 km") ?? 5` substituait
+    // silencieusement 5 km, masquant la saisie invalide. coerceNumber doit
+    // throw, pas fallback.
+    const tool = findTool("professionnels_in_radius");
+    await expect(
+      tool?.handler({ lon: 4.7, lat: 49.7, radius_km: "50 km" }),
+    ).rejects.toThrow(/radius_km/);
+    await expect(
+      tool?.handler({ lon: 4.7, lat: 49.7, radius_km: "abc" }),
+    ).rejects.toThrow(/radius_km/);
+  });
+
+  it("rejette un limit non-coercible plutôt que silencieusement défaut 100", async () => {
+    const tool = findTool("etablissements_finess_by_categorie");
+    await expect(
+      tool?.handler({ categorie: "ehpad", limit: "abc" }),
+    ).rejects.toThrow(/limit/);
+  });
+
+  it("garde le default quand le paramètre est absent (undefined/null)", async () => {
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliInRadius")
+      .mockResolvedValue({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_in_radius");
+    await tool?.handler({ lon: 4.72, lat: 49.77 });
+    await tool?.handler({ lon: 4.72, lat: 49.77, radius_km: null });
+    expect(spy).toHaveBeenNthCalledWith(1, expect.objectContaining({ radiusKm: 5 }));
+    expect(spy).toHaveBeenNthCalledWith(2, expect.objectContaining({ radiusKm: 5 }));
+  });
 });

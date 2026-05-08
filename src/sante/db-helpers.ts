@@ -11,6 +11,22 @@
 
 export const DEFAULT_LIMIT = 100;
 export const MAX_LIMIT = 500;
+/**
+ * Plafond OFFSET : 100K. Au-delà, Postgres scan une part énorme de la table
+ * pour atteindre le row N — donc soit le caller paginate à un volume qu'il
+ * ne devrait pas (re-design : filtrer plus en amont), soit c'est une faute
+ * de saisie (5 zéros au lieu de 4). Throw plutôt que clamp silencieux,
+ * cohérent avec `clampLimit`.
+ */
+export const MAX_OFFSET = 100_000;
+/**
+ * Bornes radius_km homogènes pour toutes les recherches géographiques (FINESS,
+ * Ameli, futurs IRIS). Source unique pour empêcher la dérive entre layers
+ * (avant V0.4.1, FINESS DB n'avait aucune validation et acceptait `radiusKm:
+ * 1000` côté boundary alors que le tool layer plafonnait à 50).
+ */
+export const RADIUS_MIN_KM = 0.1;
+export const RADIUS_MAX_KM = 50;
 
 /**
  * Validates and returns a row limit. Throws RangeError outside [1, 500].
@@ -26,6 +42,36 @@ export function clampLimit(limit: number | undefined): number {
     );
   }
   return limit;
+}
+
+/**
+ * Validates and returns a pagination offset. Default 0. Throws RangeError if
+ * negative, non-finite, or above MAX_OFFSET. Same loud-failure philosophy as
+ * `clampLimit` — silently zeroing a -1 offset would mask a caller bug that
+ * iterates downward thinking it's going forward.
+ */
+export function clampOffset(offset: number | undefined): number {
+  if (offset === undefined) return 0;
+  if (!Number.isFinite(offset) || offset < 0 || offset > MAX_OFFSET) {
+    throw new RangeError(
+      `[france-data-mcp] offset must be between 0 and ${MAX_OFFSET}, got ${offset}`,
+    );
+  }
+  return Math.floor(offset);
+}
+
+/**
+ * Validates a search radius in kilometres. Bounds [0.1, 50] : 0.1 km est le
+ * plus petit rayon utile (≈ rue), 50 km couvre une aire d'attraction urbaine.
+ * Au-delà, ST_DWithin sur 95K rows commence à coûter sans valeur ajoutée
+ * (le caller devrait passer en query par département à la place).
+ */
+export function validateRadiusKm(radiusKm: number): void {
+  if (!Number.isFinite(radiusKm) || radiusKm < RADIUS_MIN_KM || radiusKm > RADIUS_MAX_KM) {
+    throw new RangeError(
+      `[france-data-mcp] radiusKm must be in [${RADIUS_MIN_KM}, ${RADIUS_MAX_KM}], got ${radiusKm}`,
+    );
+  }
 }
 
 /**

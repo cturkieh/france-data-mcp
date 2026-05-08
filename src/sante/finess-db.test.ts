@@ -76,6 +76,21 @@ describe("getFinessInRadius input validation", () => {
       }),
     ).rejects.toThrow(/limit must be between/);
   });
+
+  it("rejects radiusKm out of [0.1, 50] (V0.4.1 — DB layer alignment with Ameli)", async () => {
+    // Avant V0.4.1, le DB layer FINESS n'avait aucune validation et acceptait
+    // radiusKm: 1000 → ST_DWithin sur 95K rows pour rien. Cas régressif à
+    // verrouiller : tout caller direct (lib npm) doit voir RangeError.
+    await expect(
+      getFinessInRadius({ center: { lat: 49.7, lon: 4.7 }, radiusKm: 51 }),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      getFinessInRadius({ center: { lat: 49.7, lon: 4.7 }, radiusKm: 0.05 }),
+    ).rejects.toThrow(/radiusKm must be in/);
+    await expect(
+      getFinessInRadius({ center: { lat: 49.7, lon: 4.7 }, radiusKm: -1 }),
+    ).rejects.toThrow(/radiusKm must be in/);
+  });
 });
 
 describe("getFinessByCategorie input validation", () => {

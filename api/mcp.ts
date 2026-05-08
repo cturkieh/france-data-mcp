@@ -169,7 +169,15 @@ async function handleRpc(request: JsonRpcRequest): Promise<JsonRpcSuccess | Json
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[france-data-mcp] handler error on ${request.method}: ${message}`);
-    return error(id, -32603, `Internal error: ${message}`);
+    // JSON-RPC 2.0 §5.1 distingue Invalid params (-32602, faute du caller) de
+    // Internal error (-32603, faute serveur). Les validators (clampLimit /
+    // clampOffset / validateCoords / validateRadiusKm / validateDepartement)
+    // throw RangeError pour signaler un input client invalide. Sans ce mapping,
+    // un client typé voit -32603 et conclut "panne serveur, retry plus tard"
+    // alors qu'il faut juste corriger sa saisie. Le message reste verbatim
+    // donc le caller MCP a toujours le diagnostic actionnable.
+    const code = err instanceof RangeError ? -32602 : -32603;
+    return error(id, code, message);
   }
 }
 

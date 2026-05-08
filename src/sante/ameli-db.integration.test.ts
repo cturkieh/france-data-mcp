@@ -111,4 +111,22 @@ describe("getAmeliBySpecialiteDept", () => {
     const result = await getAmeliBySpecialiteDept({ departement: "75" });
     expect(result.results).toEqual([]);
   });
+
+  it("paginates via offset to skip the first page", async () => {
+    // Seed has 11 PS in dept 08. limit=5 + offset=5 should return rows 6-10
+    // (page 2 of 3), and offset=10 returns the last single row.
+    const page1 = await getAmeliBySpecialiteDept({ departement: "08", limit: 5 });
+    const page2 = await getAmeliBySpecialiteDept({ departement: "08", limit: 5, offset: 5 });
+    const page3 = await getAmeliBySpecialiteDept({ departement: "08", limit: 5, offset: 10 });
+    expect(page1.results).toHaveLength(5);
+    expect(page2.results).toHaveLength(5);
+    expect(page3.results).toHaveLength(1);
+    // No duplicate ids across pages — confirms ORDER BY is deterministic.
+    const ids = new Set([
+      ...page1.results.map((r) => r.id),
+      ...page2.results.map((r) => r.id),
+      ...page3.results.map((r) => r.id),
+    ]);
+    expect(ids.size).toBe(11);
+  });
 });

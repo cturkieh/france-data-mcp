@@ -79,6 +79,31 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 - `distance_km` n'est rempli que sur les retours `etablissements_finess_in_radius` (pas de référence pour `by_categorie` / `by_finess`).
 - Les DOM-COM ne sont pas encore ingérés (v0.3 garde un `code_insee CHAR(5)` strict métropole + Corse ; v0.4 prévoit l'élargissement).
 
+### V0.4 — Health professionals (Annuaire Santé Ameli)
+
+| Tool                                  | Description                                                |
+|---------------------------------------|------------------------------------------------------------|
+| `professionnels_in_radius`            | Search PS within a radius, filter by spécialité / type PS  |
+| `professionnels_par_specialite_dept`  | List PS by département with optional pagination (`offset`) |
+
+**⚠️ Périmètre — à lire avant de construire un comptage**
+
+L'Annuaire Santé Ameli répertorie **uniquement les professionnels de santé libéraux conventionnés** par l'Assurance Maladie. C'est une source riche pour la prospection commerciale et la cartographie d'offre libérale, mais elle n'est PAS un référentiel exhaustif des PS en France.
+
+**Hors périmètre** :
+- Médecins exclusivement hospitaliers / salariés (CH, CHU, cliniques privées non conventionnées en libéral)
+- Biologistes médicaux salariés en LBM (les LBM eux-mêmes sont dans FINESS)
+- Anatomopathologistes hospitaliers, médecins du travail, médecins légistes
+- Tout PS dont l'activité libérale n'est pas enregistrée auprès de la CNAM
+
+Pour un comptage tous statuts (libéraux + salariés + retraités inscrits), il faut le **RPPS / Annuaire Santé ANS** (esante.gouv.fr) — non couvert par ce serveur en v0.4. Le piège récurrent : voir « 41 anesthésistes département 08 » côté Ameli et conclure « il n'y a que 41 anesthésistes dans les Ardennes » alors que les hospitaliers sont absents par construction.
+
+**Caractéristiques techniques** :
+- **Précision géo** : centroïde commune (~3 km en moyenne), pas le numéro de rue. Adapté à l'analyse de densité, pas au géocodage adresse.
+- **Multi-sites** : un PS exerçant sur N adresses apparaît N fois. Utiliser `dedupe_by_ps=true` pour regrouper par praticien et lister les sites en sous-objet. La source publique n'expose pas RPPS/ADELI, donc la dédup serveur se base sur `(nom, prenom, civilite, specialite_code, type_ps_code)`.
+- **Pagination** : `professionnels_par_specialite_dept` accepte un `offset` (≥0, max 100 000) pour énumérer un département à fort effectif. Re-paginer tant que `truncated=true`.
+- **CGU** : art. L.1461-2 CSP — toute application publique doit afficher « Source : Annuaire santé Ameli, Assurance Maladie » et la date de sync.
+
 ---
 
 ## Installation

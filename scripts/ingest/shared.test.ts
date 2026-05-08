@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { IngestError, type PreValidateConfig, preValidateFile } from "./shared.js";
+import { IngestError, type PreValidateConfig, getNonEmpty, preValidateFile } from "./shared.js";
 
 function tempFileWith(content: string): string {
   const file = path.join(
@@ -51,5 +51,38 @@ describe("IngestError", () => {
     expect(err.phase).toBe("pre_validate");
     expect(err.cause).toBe(cause);
     expect(err.message).toBe("msg");
+  });
+});
+
+describe("getNonEmpty", () => {
+  it("returns null for missing or empty values", () => {
+    expect(getNonEmpty({}, "x")).toBeNull();
+    expect(getNonEmpty({ x: "" }, "x")).toBeNull();
+  });
+
+  it("returns the value untouched when no control chars present", () => {
+    expect(getNonEmpty({ x: "Hello World" }, "x")).toBe("Hello World");
+    expect(getNonEmpty({ x: "Dr DUPONT  Jean" }, "x")).toBe("Dr DUPONT  Jean");
+  });
+
+  it("strips ASCII control characters that break JSON serialization", () => {
+    // Real cases observed in upstream CSV: \r leftover from Windows line
+    // endings inside a quoted cell, \n inside a multi-line raison_sociale.
+    expect(getNonEmpty({ x: "AVENUE\rDE PARIS" }, "x")).toBe("AVENUE DE PARIS");
+    expect(getNonEmpty({ x: "DR\nDUPONT" }, "x")).toBe("DR DUPONT");
+    expect(getNonEmpty({ x: "CABINET\tMEDICAL" }, "x")).toBe("CABINET MEDICAL");
+    expect(getNonEmpty({ x: "TEXT\x01CTRL\x1FCHAR" }, "x")).toBe("TEXT CTRL CHAR");
+    expect(getNonEmpty({ x: "TEXTCTRL" }, "x")).toBe("TEXT CTRL");
+  });
+
+  it("collapses runs of control chars into a single space", () => {
+    expect(getNonEmpty({ x: "AVENUE\r\nDE PARIS" }, "x")).toBe("AVENUE DE PARIS");
+    expect(getNonEmpty({ x: "A\r\n\r\nB" }, "x")).toBe("A B");
+  });
+
+  it("trims surrounding whitespace and returns null when empty after cleanup", () => {
+    expect(getNonEmpty({ x: "  spaced  " }, "x")).toBe("spaced");
+    expect(getNonEmpty({ x: "\r\n\t" }, "x")).toBeNull();
+    expect(getNonEmpty({ x: "   " }, "x")).toBeNull();
   });
 });

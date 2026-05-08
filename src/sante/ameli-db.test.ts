@@ -135,6 +135,7 @@ describe("getAmeliBySpecialiteDept", () => {
       p_specialite_code: "03",
       p_type_ps_code: null,
       p_limit: 101,
+      p_offset: 0,
     });
     expect(out.count).toBe(1);
     expect(out.results[0]?.distance_km).toBeNull();
@@ -157,5 +158,29 @@ describe("getAmeliBySpecialiteDept", () => {
     await expect(getAmeliBySpecialiteDept({ departement: "" })).rejects.toThrow(
       /must be a valid INSEE code/,
     );
+  });
+
+  it("forwarde offset au RPC pour énumérer un département à fort effectif", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    await getAmeliBySpecialiteDept({ departement: "75", limit: 100, offset: 200 });
+    // Strict matcher : un refactor qui transposerait p_specialite_code et
+    // p_type_ps_code dans le code-path offset doit être détecté.
+    expect(mockRpc).toHaveBeenCalledWith("ameli_by_specialite_dept", {
+      p_departement: "75",
+      p_specialite_code: null,
+      p_type_ps_code: null,
+      p_limit: 101,
+      p_offset: 200,
+    });
+  });
+
+  it("rejette un offset négatif ou hors borne avec RangeError", async () => {
+    await expect(
+      getAmeliBySpecialiteDept({ departement: "75", offset: -1 }),
+    ).rejects.toThrow(/offset must be between/);
+    await expect(
+      getAmeliBySpecialiteDept({ departement: "75", offset: 200_000 }),
+    ).rejects.toThrow(/offset must be between/);
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 });

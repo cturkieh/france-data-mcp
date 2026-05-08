@@ -14,10 +14,24 @@ export type IngestPhase = "download" | "pre_validate" | "copy" | "validate" | "s
  * Read a column from a CSV record, returning `null` if it is missing or empty.
  * Shared across ingestion scripts (FINESS today, Ameli/IRIS next) so that the
  * "empty string === absent" convention stays consistent everywhere.
+ *
+ * Aussi : strippe les caractères de contrôle ASCII (\x00-\x1F) qui peuvent
+ * survivre au parser CSV (typiquement `\r` dans une cellule mal échappée
+ * côté upstream). Sans ce strip, ces chars finissent en clair dans des
+ * strings JSON sérialisées par PostgREST → tout client JSON-strict
+ * (Python json.loads, jq) tombe avec "Invalid control character".
+ * Reproduit en empirique 2026-05-08 sur des raisons sociales FINESS et
+ * des voies Ameli.
  */
 export function getNonEmpty(rec: Record<string, string>, name: string): string | null {
-  const v = rec[name];
-  return v === undefined || v === "" ? null : v;
+  const raw = rec[name];
+  if (raw === undefined || raw === "") return null;
+  // Strip control chars (each run collapsed to a single space). Trim so a
+  // string of only control chars / whitespace becomes null. Voluntary
+  // spaces inside the value are preserved — we only fix the JSON-breaking
+  // \r/\n/\t residues from upstream CSV.
+  const cleaned = raw.replace(/[\x00-\x1f]+/g, " ").trim();
+  return cleaned === "" ? null : cleaned;
 }
 
 export class IngestError extends Error {
