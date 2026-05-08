@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
+import { finessFamille } from "../../src/sante/finess-categories.js";
 import { requireEnv } from "../../src/storage/supabase.js";
 import {
   IngestError,
@@ -241,6 +242,28 @@ async function main(): Promise<void> {
       }
     }
 
+    // 4d. NOMENCLATURE DRIFT — surface DREES codes that fell into "autre".
+    // Catalogue covers ~92% of FINESS volume by design. If `autre` overshoots
+    // its expected envelope, DREES probably introduced a new code at scale
+    // (new structure type 2026, etc.). Logged as warning, not blocker.
+    if (stats.unknownCategorieCounts.size > 0) {
+      const totalAutre = [...stats.unknownCategorieCounts.values()].reduce((a, b) => a + b, 0);
+      const autreRate = stats.inserted > 0 ? totalAutre / stats.inserted : 0;
+      const top = [...stats.unknownCategorieCounts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([code, count]) => `${code}=${count}`)
+        .join(", ");
+      console.log(
+        `[finess] ${stats.unknownCategorieCounts.size} codes catégorie en famille "autre" (${fmt(autreRate)} du volume). Top: ${top}`,
+      );
+      if (autreRate > 0.15) {
+        console.warn(
+          `[finess] ⚠️ "autre" rate ${fmt(autreRate)} above 15% expected envelope — DREES nomenclature drift suspect, consider extending FINESS_CATEGORIES`,
+        );
+      }
+    }
+
     // 5. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "finess" });
 
@@ -273,6 +296,13 @@ interface IngestStreamStats {
   skippedBadDept: number;
   skippedDom: number;
   parsedNoLigneAch: number;
+  /**
+   * Codes catégorie that finessFamille() classified as "autre" together with
+   * the count of rows. Surfaces a DREES nomenclature drift early — if a new
+   * code lands at high volume, the operator can decide to add it to
+   * FINESS_CATEGORIES + a family in one PR.
+   */
+  unknownCategorieCounts: Map<string, number>;
 }
 
 async function streamCsvToStaging(
@@ -300,6 +330,7 @@ async function streamCsvToStaging(
   let skippedBadDept = 0;
   let skippedDom = 0;
   let parsedNoLigneAch = 0;
+  const unknownCategorieCounts = new Map<string, number>();
   let firstBatch = true;
 
   // PGRST205 = PostgREST's canonical code for "Could not find the table in
@@ -348,6 +379,12 @@ async function streamCsvToStaging(
       if (parsed.row.code_postal === null && parsed.row.raw.ligneacheminement) {
         parsedNoLigneAch++;
       }
+      // Track DREES codes that fall into "autre" — surfaces a nomenclature
+      // drift (new code at high volume) so it can be added to a family in one PR.
+      const code = parsed.row.categorie_code;
+      if (code && finessFamille(code) === "autre") {
+        unknownCategorieCounts.set(code, (unknownCategorieCounts.get(code) ?? 0) + 1);
+      }
     } else {
       // Exhaustive switch: a new SkipReason without a counter triggers a TS
       // compile error via the `never` check, preventing silent drops.
@@ -380,6 +417,7 @@ async function streamCsvToStaging(
     skippedBadDept,
     skippedDom,
     parsedNoLigneAch,
+    unknownCategorieCounts,
   };
 }
 

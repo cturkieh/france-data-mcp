@@ -63,7 +63,6 @@ export const FINESS_CATEGORIES = {
   "354": "Service de Soins Infirmiers à Domicile (S.S.I.A.D.)",
   "460": "Service d'Aide et d'Accompagnement à Domicile (S.A.A.D.)",
   "209": "Service Polyvalent Aide et Soins à Domicile (S.P.A.S.A.D.)",
-  "632": "Structure Dispensatrice à domicile d'Oxygène à usage médical",
 
   // ─── HANDICAP ENFANTS ─────────────────────────────────────────────────
   "182": "Service d'Éducation Spéciale et de Soins à Domicile (SESSAD)",
@@ -103,7 +102,6 @@ export const FINESS_CATEGORIES = {
   "295": "Services AEMO et AED",
   "236": "Centre Placement Familial Socio-Educatif (C.P.F.S.E.)",
   "238": "Centre d'Accueil Familial Spécialisé",
-  "240": "Foyer d'Action Educative — réservé",
   "241": "Foyer d'Action Educative (F.A.E.)",
   "440": "Service Investigation Orientation Educative (S.I.O.E.)",
   "441": "Centre d'Action Educative (C.A.E.)",
@@ -138,10 +136,11 @@ export const FINESS_CATEGORIES = {
   // ─── GROUPEMENTS ──────────────────────────────────────────────────────
   "696": "Groupement de coopération sanitaire de moyens",
   "697": "Groupement de coopération sanitaire — Etablissement de santé",
-  "698": "Autre Etablissement Loi Hospitalière",
 
-  // ─── AUTRES (volume marginal, classés "autre" intentionnellement) ─────
+  // ─── HORS TAXONOMIE (voir DELIBERATELY_AUTRE pour la justification) ───
   "126": "Etablissement Thermal",
+  "632": "Structure Dispensatrice à domicile d'Oxygène à usage médical",
+  "698": "Autre Etablissement Loi Hospitalière",
 } as const satisfies Record<string, string>;
 
 export type FinessCategorieCode = keyof typeof FINESS_CATEGORIES;
@@ -230,14 +229,14 @@ export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> 
   senior_accompagnement: ["207", "463"],
   // Domicile
   ssiad: ["354"],
-  aide_domicile: ["460", "209", "632"],
+  aide_domicile: ["460", "209"],
   // Handicap
   handicap_enfants: ["182", "183", "186", "188", "189", "190", "192", "194", "195", "196"],
   handicap_adultes: ["246", "247", "252", "255", "382", "437", "445", "446", "448", "449", "600"],
   // Addictologie + précarité sanitaire
   addictologie: ["165", "178", "180", "197", "412"],
   // Enfance / protection
-  enfance_protection: ["175", "177", "236", "238", "240", "241", "295", "378", "440", "441"],
+  enfance_protection: ["175", "177", "236", "238", "241", "295", "378", "440", "441"],
   // PMI / petite enfance
   pmi: ["223", "228", "230", "268"],
   // Hébergement social
@@ -245,7 +244,7 @@ export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> 
   // Prévention / santé publique
   prevention_sante: ["132", "142", "143", "266", "347", "636"],
   // Groupements
-  groupement: ["696", "697", "698"],
+  groupement: ["696", "697"],
 } as const;
 
 const FAMILY_BY_CODE: ReadonlyMap<string, FinessFamilleQuery> = new Map<string, FinessFamilleQuery>(
@@ -262,6 +261,11 @@ const FAMILY_BY_CODE: ReadonlyMap<string, FinessFamilleQuery> = new Map<string, 
  */
 export const DELIBERATELY_AUTRE = new Set<string>([
   "126", // Etablissement Thermal — pas de famille santé/médico-social pertinente
+  "632", // Oxygénothérapie à domicile = PSAD (prestataire de santé à domicile,
+  // dispositif médical), pas une aide à domicile au sens SAAD/SPASAD.
+  // Volume marginal (<1%), pas de famille dédiée pour 1 code.
+  "698", // "Autre Etablissement Loi Hospitalière" — fourre-tout DREES
+  // hospitalier, pas un groupement (≠ GCS/GCSMS). Mieux vaut autre.
 ]);
 
 /**

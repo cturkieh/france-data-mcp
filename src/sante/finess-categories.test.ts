@@ -80,10 +80,12 @@ describe("finessFamille", () => {
     expect(finessFamille("600")).toBe("handicap_adultes"); // Foyer hébergement
   });
 
-  it("maps aide_domicile (SAAD, SPASAD, oxygène)", () => {
+  it("maps aide_domicile (SAAD, SPASAD)", () => {
     expect(finessFamille("460")).toBe("aide_domicile"); // SAAD
     expect(finessFamille("209")).toBe("aide_domicile"); // SPASAD
-    expect(finessFamille("632")).toBe("aide_domicile"); // O2 à domicile
+    // 632 (PSAD oxygène) deliberately left out of aide_domicile — see
+    // DELIBERATELY_AUTRE.
+    expect(finessFamille("632")).toBe("autre");
   });
 
   it("maps PMI / petite enfance", () => {
@@ -113,10 +115,12 @@ describe("finessFamille", () => {
     expect(finessFamille("347")).toBe("prevention_sante"); // CES
   });
 
-  it("maps groupements (GCS, GCSMS)", () => {
-    expect(finessFamille("696")).toBe("groupement");
-    expect(finessFamille("697")).toBe("groupement");
-    expect(finessFamille("698")).toBe("groupement");
+  it("maps groupements GCS — but NOT 698 (fourre-tout hospitalier)", () => {
+    expect(finessFamille("696")).toBe("groupement"); // GCS de moyens
+    expect(finessFamille("697")).toBe("groupement"); // GCS — Etab de santé
+    // 698 is "Autre Etablissement Loi Hospitalière" — explicitly NOT a
+    // groupement de coopération despite an early-v0.3 misclassification.
+    expect(finessFamille("698")).toBe("autre");
   });
 
   it("maps senior_accompagnement / residence_autonomie", () => {
