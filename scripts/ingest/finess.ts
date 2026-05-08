@@ -99,6 +99,11 @@ async function main(): Promise<void> {
     if (stagingErr) {
       throw new IngestError("copy", `Failed to create finess_staging table: ${stagingErr.message}`);
     }
+    // The RPC emits NOTIFY pgrst,'reload schema' but PostgREST polls on a
+    // small interval — give it a moment so the next insert finds the table
+    // in the schema cache instead of "Could not find the table 'public.finess_staging'".
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+
     const stats = await streamCsvToStaging(downloaded.filePath, supabase);
     log.row_count = stats.inserted;
 
