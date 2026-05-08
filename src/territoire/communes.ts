@@ -120,6 +120,27 @@ export async function getCommuneByCode(
   return results[0] ?? null;
 }
 
+/**
+ * Récupère TOUTES les communes de France en un seul appel (~35 000 communes,
+ * ~4 Mo de JSON). Inclut métropole, Corse, DOM-TOM. À utiliser pour bâtir un
+ * cache local pour l'ingestion (ex: matching CP+ville → centroïde lors de
+ * l'ingestion Annuaire Ameli).
+ *
+ * ⚠️ NE PAS APPELER depuis un endpoint serverless / un cold start MCP : le
+ * download fait 4 Mo et la déserialisation construit un objet de 35 000
+ * entrées. C'est conçu pour les workflows d'ingestion (cron GitHub Actions),
+ * pas pour le runtime de requête.
+ */
+export async function fetchAllCommunes(signal?: AbortSignal): Promise<Commune[]> {
+  const params = new URLSearchParams();
+  params.set("fields", DEFAULT_FIELDS);
+  params.set("format", "json");
+  params.set("geometry", "centre");
+  const url = `${BASE_URL}/communes?${params.toString()}`;
+  const data = await fetchJson<ApiCommune[]>(url, { signal });
+  return data.map(toCommune);
+}
+
 function toCommune(api: ApiCommune): Commune {
   const centre = api.centre?.coordinates
     ? { lon: api.centre.coordinates[0], lat: api.centre.coordinates[1] }

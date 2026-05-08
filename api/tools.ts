@@ -1,12 +1,13 @@
 /**
  * Définition des outils MCP exposés par le serveur france-data-mcp.
  *
- * Stratégie V0 : on n'expose que les outils utilisables sans dump local
- * (territoire + DINUM live). FINESS et Annuaire Santé Ameli demandent un cache
- * local volumineux (~35 Mo et ~146 Mo) → ils sont disponibles dans la lib npm
- * mais pas exposés dans le serveur MCP V0 sur Vercel serverless.
+ * V0.4 : 11 tools exposés. Territoire + DINUM (live), FINESS (Supabase
+ * dump bimestriel, V0.2), Annuaire Santé Ameli (Supabase dump hebdo, V0.4).
+ * Les CSV bruts (FINESS 35 Mo, Ameli 154 Mo) restent disponibles dans la lib
+ * npm pour les usages hors serveur MCP.
  */
 
+import { getAmeliBySpecialiteDept, getAmeliInRadius } from "../src/sante/ameli-db.js";
 import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
 import {
   type FinessFamilleQuery,
@@ -20,6 +21,7 @@ import {
   getEntrepriseBySiren,
   searchEntreprises,
 } from "../src/sante/index.js";
+import { deptFromCodeInsee } from "../src/territoire/dept-codes.js";
 import {
   geocode,
   getCommuneByCode,
@@ -97,6 +99,58 @@ function validateFinessRadiusKm(radiusKm: number): void {
 }
 
 /**
+ * Parse un tableau de strings depuis l'input MCP. Throw si l'argument n'est
+ * pas un tableau, contient une chaîne vide, ou un élément non-string.
+ * Renvoie `undefined` si l'argument est absent OU si le tableau est vide
+ * — les deux signifient sémantiquement "pas de filtre", donc on les
+ * normalise au même output pour éviter qu'un tableau vide accidentel
+ * (`["foo"].filter(predicateThatRejectsAll) → []`) ne devienne un filtre
+ * silencieusement vide côté SQL.
+ */
+function parseStringArray(v: unknown, paramName: string): string[] | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v)) {
+    throw new Error(`${paramName} doit être un tableau de strings (reçu ${typeof v}).`);
+  }
+  if (v.length === 0) return undefined;
+  for (const item of v) {
+    if (typeof item !== "string") {
+      throw new Error(
+        `${paramName}: chaque élément doit être une string (reçu ${typeof item} dans le tableau).`,
+      );
+    }
+    if (item === "") {
+      throw new Error(
+        `${paramName}: la chaîne vide n'est pas autorisée — passer le tableau sans cet élément ou omettre le paramètre pour ne pas filtrer.`,
+      );
+    }
+  }
+  return v as string[];
+}
+
+/** Bornes radius_km Ameli (cohérent avec validateRadiusKm dans ameli-db.ts). */
+const AMELI_RADIUS_MIN_KM = 0.1;
+const AMELI_RADIUS_MAX_KM = 50;
+
+/** Valide radiusKm Ameli côté tool-layer pour un message d'erreur clair (cohérent avec FINESS). */
+function validateAmeliRadiusKm(radiusKm: number): void {
+  if (radiusKm < AMELI_RADIUS_MIN_KM || radiusKm > AMELI_RADIUS_MAX_KM) {
+    throw new RangeError(
+      `radius_km doit être dans [${AMELI_RADIUS_MIN_KM}, ${AMELI_RADIUS_MAX_KM}], reçu ${radiusKm}`,
+    );
+  }
+}
+
+/**
+ * Mention CGU obligatoire pour la réutilisation des données Annuaire Santé
+ * Ameli (art. L.1461-2 CSP). Affichée dans la description de chaque tool
+ * Ameli pour que tout caller MCP la voie avant d'invoquer.
+ */
+const AMELI_CGU =
+  "Source : Annuaire santé Ameli (Assurance Maladie), MAJ hebdomadaire. " +
+  "Réutilisation soumise à l'art. L.1461-2 CSP — citer la source et la date de sync.";
+
+/**
  * Réponse enrichie du fallback `naf + center+radiusKm` (limite API DINUM).
  *
  * Le champ `fallback` documente la stratégie ET signale honnêtement quand la
@@ -122,19 +176,10 @@ type EntreprisesInRadiusFallbackResult = SearchEntreprisesResult & {
 
 /**
  * Extrait le code département d'un code commune INSEE.
- *
- * - Métropole + Corse (`08105` → `08`, `2A004` → `2A`) : 2 caractères.
- * - DOM (`974xx` → `974`, `971xx` → `971`) : 3 caractères, codes commençant par `97` ou `98`.
- *
- * Renvoie `undefined` si le codeCommune est trop court ou vide.
+ * Alias historique conservé pour la compat des callers — la logique vit
+ * dans `src/territoire/dept-codes.ts` (consolidation V0.4).
  */
-export function deptFromCommune(codeCommune: string | undefined): string | undefined {
-  if (!codeCommune || codeCommune.length < 2) return undefined;
-  if (codeCommune.startsWith("97") || codeCommune.startsWith("98")) {
-    return codeCommune.length >= 3 ? codeCommune.slice(0, 3) : undefined;
-  }
-  return codeCommune.slice(0, 2);
-}
+export const deptFromCommune = deptFromCodeInsee;
 
 /**
  * Contourne la limitation API DINUM : `activite_principale + lat/long/radius`
@@ -503,6 +548,106 @@ export const TOOLS: McpTool[] = [
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new Error("num_finess (string, 9 chiffres) requis");
       return getFinessByNumFiness(numFiness);
+    },
+  },
+  {
+    name: "professionnels_in_radius",
+    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). Filtres optionnels : codes spécialité Ameli (ex: '01' MG, '03' cardio, '06' dermato) et codes type PS ('1' médecin, '2' IDE, '3' sage-femme, '4' chir-dentiste, '5' pharmacien, '8' kiné, etc.). ${AMELI_CGU}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        lon: { type: "number", description: "Longitude du centre (WGS84)." },
+        lat: { type: "number", description: "Latitude du centre (WGS84)." },
+        radius_km: {
+          type: "number",
+          description: "Rayon en km (0.1-50, défaut 5).",
+          minimum: 0.1,
+          maximum: 50,
+          default: 5,
+        },
+        specialite_codes: {
+          type: "array",
+          description:
+            "Liste de codes spécialité Ameli (ex: ['01'] MG, ['03'] cardio). Si omis, toutes spécialités.",
+          items: { type: "string" },
+        },
+        type_ps_codes: {
+          type: "array",
+          description:
+            "Liste de codes type PS (ex: ['1'] médecins, ['2'] IDE). Si omis, tous types.",
+          items: { type: "string" },
+        },
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats (1-500, défaut 100).",
+          minimum: 1,
+          maximum: 500,
+          default: 100,
+        },
+      },
+      required: ["lon", "lat"],
+    },
+    handler: async (args) => {
+      const lon = asNumber(args.lon);
+      const lat = asNumber(args.lat);
+      if (lon === undefined || lat === undefined) {
+        throw new Error("lon et lat (number) requis");
+      }
+      const radiusKm = asNumber(args.radius_km) ?? 5;
+      validateAmeliRadiusKm(radiusKm);
+      const specialiteCodes = parseStringArray(args.specialite_codes, "specialite_codes");
+      const typePsCodes = parseStringArray(args.type_ps_codes, "type_ps_codes");
+      const limit = asNumber(args.limit);
+      const input: Parameters<typeof getAmeliInRadius>[0] = {
+        center: { lon, lat },
+        radiusKm,
+      };
+      if (specialiteCodes) input.specialiteCodes = specialiteCodes;
+      if (typePsCodes) input.typePsCodes = typePsCodes;
+      if (limit !== undefined) input.limit = limit;
+      return getAmeliInRadius(input);
+    },
+  },
+  {
+    name: "professionnels_par_specialite_dept",
+    description: `Liste des professionnels de santé libéraux conventionnés d'un département, avec filtres optionnels par spécialité ou type de PS. Pour énumération administrative — pas de rayon. ${AMELI_CGU}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        departement: {
+          type: "string",
+          description:
+            "Code département INSEE : 2 caractères métropole/Corse ('01'-'95', '2A'/'2B'), 3 caractères DOM ('971'-'978').",
+        },
+        specialite_code: {
+          type: "string",
+          description: "Code spécialité Ameli (ex: '03' cardio). Optionnel.",
+        },
+        type_ps_code: {
+          type: "string",
+          description: "Code type PS (ex: '1' médecin). Optionnel.",
+        },
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats (1-500, défaut 100).",
+          minimum: 1,
+          maximum: 500,
+          default: 100,
+        },
+      },
+      required: ["departement"],
+    },
+    handler: async (args) => {
+      const departement = asString(args.departement);
+      if (!departement) throw new Error("departement (string) requis");
+      const specialiteCode = asString(args.specialite_code);
+      const typePsCode = asString(args.type_ps_code);
+      const limit = asNumber(args.limit);
+      const input: Parameters<typeof getAmeliBySpecialiteDept>[0] = { departement };
+      if (specialiteCode) input.specialiteCode = specialiteCode;
+      if (typePsCode) input.typePsCode = typePsCode;
+      if (limit !== undefined) input.limit = limit;
+      return getAmeliBySpecialiteDept(input);
     },
   },
 ];

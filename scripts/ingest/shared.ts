@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { DEFAULT_USER_AGENT } from "../../src/core/http.js";
-import { getServiceClient } from "../../src/storage/supabase.js";
+import { getServiceClient, requireEnv } from "../../src/storage/supabase.js";
 
 export type IngestPhase = "download" | "pre_validate" | "copy" | "validate" | "swap";
 
@@ -148,5 +149,54 @@ export async function atomicSwapTables(input: AtomicSwapInput): Promise<void> {
       "swap",
       `Atomic swap failed for table "${input.prodTable}": ${error.message}`,
     );
+  }
+}
+
+/**
+ * Best-effort serialize an `IngestLogEntry` for the stderr fallback.
+ * `JSON.stringify` itself can throw on a circular ref or BigInt — and the
+ * fallback line is the LAST resort if `writeIngestLog` already failed.
+ * If JSON throws, we still emit a flat key=value string so the operator
+ * sees something parseable in the GitHub Actions log.
+ */
+export function safeSerializeIngestLog(log: IngestLogEntry): string {
+  try {
+    return JSON.stringify(log);
+  } catch (err) {
+    // We're already in a "log of last resort" path — JSON.stringify failing
+    // means there's a circular ref / BigInt / non-enumerable in `log`. Emit
+    // a console.warn so the failure mode is auditable, then return the
+    // flat serialization so the caller still gets a parseable line.
+    console.warn("[france-data-mcp] safeSerializeIngestLog: JSON.stringify failed:", err);
+    const flat = Object.entries(log)
+      .map(([k, v]) => `${k}=${String(v)}`)
+      .join(" ");
+    return `[serialize-fallback err=${err instanceof Error ? err.message : String(err)}] ${flat}`;
+  }
+}
+
+/**
+ * Build an UNTYPED Supabase service-role client for ingestion scripts. The
+ * generated `Database` type only knows about prod tables; staging tables are
+ * dropped/recreated each run via RPC, so they can't appear in the generated
+ * types. Using an untyped client at this boundary avoids `as any` casts on
+ * the insert payload while preserving the rest of the type safety in
+ * downstream code.
+ *
+ * Reuses `requireEnv` so empty-string env vars (e.g. unscoped GitHub Secret)
+ * are diagnosed the same way as in the typed clients — caught early instead
+ * of failing later with an opaque PostgREST error.
+ *
+ * @param source — short tag like "ameli", "finess" used in console.error
+ *   prefixes to disambiguate which ingester logged the failure.
+ */
+export function getUntypedServiceClient(source: string): SupabaseClient {
+  try {
+    const url = requireEnv("SUPABASE_URL");
+    const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+    return createClient(url, key, { auth: { persistSession: false } });
+  } catch (err) {
+    console.error(`[${source}] failed to build service client:`, err);
+    throw new IngestError("copy", err instanceof Error ? err.message : String(err), err);
   }
 }

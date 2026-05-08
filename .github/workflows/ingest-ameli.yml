@@ -1,0 +1,67 @@
+# .github/workflows/ingest-ameli.yml
+name: Ingest Annuaire Sante Ameli
+
+on:
+  schedule:
+    # Mondays 04:00 UTC. Ameli regenerates the dump weekly (typically over
+    # the weekend); Monday morning catches the freshest version while
+    # leaving FINESS its own slot on the 1st/15th.
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+# Never run on pull_request - secrets are not available there, by design.
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ingest-ameli
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # Ameli is ~154 MB CSV / ~1.5 M rows + 35 K commune fetch. A full
+    # ingestion runs in ~5-8 minutes locally; 30 minutes leaves head room
+    # for slow data.gouv days and PostgREST contention.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22 for native WebSocket - same reason as FINESS workflow.
+          # See ingest-finess.yml for the full postmortem.
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Ameli ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: pnpm ingest:ameli
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[ingestion-failure] Ameli run failed (run #${context.runId})`,
+              body: `The Annuaire Sante Ameli ingestion workflow failed.\n\n` +
+                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                    `Check the \`ingest_log\` table for the latest \`failed\` row (source = 'ameli_ps') to see error_phase and error_message. ` +
+                    `Common failure modes: AMELI_PS_CSV_URL stale (resource id rotated), unmatched_locality > 5% (INSEE drift), structural anomaly > 1% (column rename).`,
+              labels: ['ingestion-failure', 'ameli'],
+            })

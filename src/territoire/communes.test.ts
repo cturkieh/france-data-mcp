@@ -98,3 +98,29 @@ describe("getCommuneByCode", () => {
     expect(commune?.nom).toBe("Reims");
   });
 });
+
+describe("fetchAllCommunes", () => {
+  it("appelle /communes sans paramètre de recherche, avec geometry=centre", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse([
+        {
+          nom: "Charleville-Mézières",
+          code: "08105",
+          codesPostaux: ["08000"],
+          centre: { type: "Point", coordinates: [4.7203, 49.7724] },
+          codeDepartement: "08",
+        },
+      ]),
+    );
+    const { fetchAllCommunes } = await import("./communes.js");
+    const all = await fetchAllCommunes();
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ code: "08105", codeDepartement: "08" });
+    expect(all[0]?.centre).toEqual({ lon: 4.7203, lat: 49.7724 });
+    const calledUrl = fetchMock.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain("/communes?");
+    expect(calledUrl).toContain("geometry=centre");
+    expect(calledUrl).not.toContain("nom=");
+    expect(calledUrl).not.toContain("codePostal=");
+  });
+});

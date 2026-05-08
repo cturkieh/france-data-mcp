@@ -34,6 +34,94 @@ export type Database = {
   }
   public: {
     Tables: {
+      annuaire_ameli: {
+        Row: {
+          activite_particuliere_code: string | null
+          activite_particuliere_libelle: string | null
+          adresse: string | null
+          civilite: string | null
+          code_departement: string
+          code_insee: string | null
+          code_postal: string | null
+          created_at: string | null
+          geog: unknown
+          geom: unknown
+          id: number
+          nature_exercice_code: string | null
+          nature_exercice_libelle: string | null
+          nom: string
+          option_tarifaire_code: string | null
+          option_tarifaire_libelle: string | null
+          prenom: string
+          raison_sociale: string | null
+          raw: Json | null
+          secteur_conventionnel_code: string | null
+          secteur_conventionnel_libelle: string | null
+          specialite_code: string | null
+          specialite_libelle: string | null
+          telephone: string | null
+          type_ps_code: string | null
+          type_ps_libelle: string | null
+          ville: string | null
+        }
+        Insert: {
+          activite_particuliere_code?: string | null
+          activite_particuliere_libelle?: string | null
+          adresse?: string | null
+          civilite?: string | null
+          code_departement: string
+          code_insee?: string | null
+          code_postal?: string | null
+          created_at?: string | null
+          geom?: unknown
+          id?: number
+          nature_exercice_code?: string | null
+          nature_exercice_libelle?: string | null
+          nom: string
+          option_tarifaire_code?: string | null
+          option_tarifaire_libelle?: string | null
+          prenom: string
+          raison_sociale?: string | null
+          raw?: Json | null
+          secteur_conventionnel_code?: string | null
+          secteur_conventionnel_libelle?: string | null
+          specialite_code?: string | null
+          specialite_libelle?: string | null
+          telephone?: string | null
+          type_ps_code?: string | null
+          type_ps_libelle?: string | null
+          ville?: string | null
+        }
+        Update: {
+          activite_particuliere_code?: string | null
+          activite_particuliere_libelle?: string | null
+          adresse?: string | null
+          civilite?: string | null
+          code_departement?: string
+          code_insee?: string | null
+          code_postal?: string | null
+          created_at?: string | null
+          geom?: unknown
+          id?: number
+          nature_exercice_code?: string | null
+          nature_exercice_libelle?: string | null
+          nom?: string
+          option_tarifaire_code?: string | null
+          option_tarifaire_libelle?: string | null
+          prenom?: string
+          raison_sociale?: string | null
+          raw?: Json | null
+          secteur_conventionnel_code?: string | null
+          secteur_conventionnel_libelle?: string | null
+          specialite_code?: string | null
+          specialite_libelle?: string | null
+          telephone?: string | null
+          type_ps_code?: string | null
+          type_ps_libelle?: string | null
+          ville?: string | null
+        }
+        Relationships: []
+      }
       finess: {
         Row: {
           categorie_code: string | null
@@ -366,6 +454,74 @@ export type Database = {
         | { Args: { table_name: string }; Returns: string }
       enablelongtransactions: { Args: never; Returns: string }
       equals: { Args: { geom1: unknown; geom2: unknown }; Returns: boolean }
+      ameli_by_specialite_dept: {
+        Args: {
+          p_departement: string
+          p_limit: number
+          p_specialite_code: string
+          p_type_ps_code: string
+        }
+        Returns: {
+          adresse: string
+          civilite: string
+          code_departement: string
+          code_insee: string
+          code_postal: string
+          distance_meters: number
+          geom: Json
+          id: number
+          nature_exercice_code: string
+          nature_exercice_libelle: string
+          nom: string
+          option_tarifaire_code: string
+          option_tarifaire_libelle: string
+          prenom: string
+          raison_sociale: string
+          secteur_conventionnel_code: string
+          secteur_conventionnel_libelle: string
+          specialite_code: string
+          specialite_libelle: string
+          telephone: string
+          type_ps_code: string
+          type_ps_libelle: string
+          ville: string
+        }[]
+      }
+      ameli_in_radius: {
+        Args: {
+          p_lat: number
+          p_limit: number
+          p_lon: number
+          p_radius_meters: number
+          p_specialite_codes: string[]
+          p_type_ps_codes: string[]
+        }
+        Returns: {
+          adresse: string
+          civilite: string
+          code_departement: string
+          code_insee: string
+          code_postal: string
+          distance_meters: number
+          geom: Json
+          id: number
+          nature_exercice_code: string
+          nature_exercice_libelle: string
+          nom: string
+          option_tarifaire_code: string
+          option_tarifaire_libelle: string
+          prenom: string
+          raison_sociale: string
+          secteur_conventionnel_code: string
+          secteur_conventionnel_libelle: string
+          specialite_code: string
+          specialite_libelle: string
+          telephone: string
+          type_ps_code: string
+          type_ps_libelle: string
+          ville: string
+        }[]
+      }
       finess_by_categorie: {
         Args: {
           p_code_insee: string
@@ -531,6 +687,7 @@ export type Database = {
       geomfromewkt: { Args: { "": string }; Returns: unknown }
       gettransactionid: { Args: never; Returns: unknown }
       ingest_atomic_swap: { Args: { p_prod_table: string }; Returns: undefined }
+      ingest_create_annuaire_ameli_staging: { Args: never; Returns: undefined }
       ingest_create_finess_staging: { Args: never; Returns: undefined }
       longtransactionsenabled: { Args: never; Returns: boolean }
       populate_geometry_columns:

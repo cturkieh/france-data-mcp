@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as ameliDb from "../src/sante/ameli-db.js";
 import * as finessDb from "../src/sante/finess-db.js";
 import { deptFromCommune, findTool } from "./tools.js";
 
@@ -165,6 +166,131 @@ describe("etablissements_finess_by_categorie (MCP tool)", () => {
     expect(spy).toHaveBeenCalledWith({
       famille: "mco",
       code_insee: "08105",
+    });
+  });
+});
+
+describe("professionnels_in_radius (MCP tool)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré et expose lon/lat comme requis", () => {
+    const tool = findTool("professionnels_in_radius");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["lon", "lat"]);
+    expect(tool?.description).toContain("L.1461-2"); // mention CGU obligatoire
+  });
+
+  it("rejette les appels sans lon/lat", async () => {
+    const tool = findTool("professionnels_in_radius");
+    await expect(tool?.handler({})).rejects.toThrow(/lon et lat/);
+    await expect(tool?.handler({ lon: 4.7 })).rejects.toThrow(/lon et lat/);
+  });
+
+  it("délègue à getAmeliInRadius avec radius default 5km et tableaux mappés", async () => {
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliInRadius")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_in_radius");
+    await tool?.handler({
+      lon: 4.7203,
+      lat: 49.7724,
+      radius_km: 10,
+      specialite_codes: ["01", "03"],
+      type_ps_codes: ["1"],
+      limit: 50,
+    });
+    expect(spy).toHaveBeenCalledWith({
+      center: { lon: 4.7203, lat: 49.7724 },
+      radiusKm: 10,
+      specialiteCodes: ["01", "03"],
+      typePsCodes: ["1"],
+      limit: 50,
+    });
+  });
+
+  it("applique radius_km par défaut à 5 quand omis", async () => {
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliInRadius")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_in_radius");
+    await tool?.handler({ lon: 4.72, lat: 49.77 });
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ radiusKm: 5 }));
+  });
+
+  it("rejette specialite_codes non-tableau ou avec élément non-string", async () => {
+    const tool = findTool("professionnels_in_radius");
+    await expect(tool?.handler({ lon: 4.7, lat: 49.7, specialite_codes: "01" })).rejects.toThrow(
+      /specialite_codes/,
+    );
+    await expect(tool?.handler({ lon: 4.7, lat: 49.7, specialite_codes: [1, 2] })).rejects.toThrow(
+      /string/,
+    );
+  });
+
+  it("rejette une chaîne vide dans specialite_codes (silent-failure guard)", async () => {
+    const tool = findTool("professionnels_in_radius");
+    await expect(
+      tool?.handler({ lon: 4.7, lat: 49.7, specialite_codes: ["", "01"] }),
+    ).rejects.toThrow(/chaîne vide/);
+  });
+
+  it("normalise un tableau vide à 'no filter' au lieu de 'filter-out-everything'", async () => {
+    // Lock the V0.4 contract: `[]` → forwarded as undefined → wrapper falls
+    // back to []. Net SQL behavior: no filter (cardinality=0 branch). A
+    // future regression that forwards [] literally would silently match
+    // nothing instead of everything.
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliInRadius")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_in_radius");
+    await tool?.handler({ lon: 4.7, lat: 49.7, specialite_codes: [], type_ps_codes: [] });
+    const callArgs = spy.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(callArgs?.specialiteCodes).toBeUndefined();
+    expect(callArgs?.typePsCodes).toBeUndefined();
+  });
+});
+
+describe("professionnels_par_specialite_dept (MCP tool)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré et expose departement comme requis", () => {
+    const tool = findTool("professionnels_par_specialite_dept");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["departement"]);
+    expect(tool?.description).toContain("L.1461-2");
+  });
+
+  it("rejette les appels sans departement", async () => {
+    const tool = findTool("professionnels_par_specialite_dept");
+    await expect(tool?.handler({})).rejects.toThrow(/departement/);
+  });
+
+  it("délègue à getAmeliBySpecialiteDept avec filtres optionnels", async () => {
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliBySpecialiteDept")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_par_specialite_dept");
+    await tool?.handler({ departement: "08", specialite_code: "03", limit: 200 });
+    expect(spy).toHaveBeenCalledWith({
+      departement: "08",
+      specialiteCode: "03",
+      limit: 200,
+    });
+  });
+
+  it("délègue avec type_ps_code seul", async () => {
+    const spy = vi
+      .spyOn(ameliDb, "getAmeliBySpecialiteDept")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("professionnels_par_specialite_dept");
+    await tool?.handler({ departement: "75", type_ps_code: "2" });
+    expect(spy).toHaveBeenCalledWith({
+      departement: "75",
+      typePsCode: "2",
     });
   });
 });

@@ -1,4 +1,5 @@
 import { getAnonClient } from "../storage/supabase.js";
+import { clampLimit, formatRpcError, trimOrNull, validateCoords } from "./db-helpers.js";
 import {
   FINESS_FAMILY_CODES,
   type FinessFamille,
@@ -45,51 +46,9 @@ export interface FinessQueryResult {
   results: FinessResult[];
 }
 
-const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 500;
-
-function clampLimit(limit: number | undefined): number {
-  if (limit === undefined) return DEFAULT_LIMIT;
-  if (limit < 1 || limit > MAX_LIMIT) {
-    throw new RangeError(
-      `[france-data-mcp] limit must be between 1 and ${MAX_LIMIT}, got ${limit}`,
-    );
-  }
-  return limit;
-}
-
-function validateCoords(lat: number, lon: number): void {
-  // PostGIS accepts any number, so a caller swapping lat/lon (e.g. lat=2.6,
-  // lon=49.7) silently returns 0 results — indistinguishable from "no FINESS
-  // here". Validate the WGS84 bounds so the failure is loud.
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
-    throw new RangeError(`[france-data-mcp] lat must be in [-90, 90], got ${lat}`);
-  }
-  if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
-    throw new RangeError(`[france-data-mcp] lon must be in [-180, 180], got ${lon}`);
-  }
-}
-
 function familiesToCodes(familles: FinessFamilleQuery[] | undefined): string[] {
   if (!familles || familles.length === 0) return [];
   return familles.flatMap((f) => [...FINESS_FAMILY_CODES[f]]);
-}
-
-/**
- * Format a Supabase RPC error into a single string preserving the postgres
- * code, hint, and details — losing those fields turned a "permission denied"
- * incident in v0.2.0 into a 30-minute investigation. SFH review caught the
- * regression. Always include `error.code` so the operator can grep PgError
- * tables (PGRST205 / 42703 / etc.) directly.
- */
-function formatRpcError(
-  rpc: string,
-  error: { code?: string; message: string; hint?: string; details?: string },
-): string {
-  const code = error.code ? ` (${error.code})` : "";
-  const hint = error.hint ? ` — hint: ${error.hint}` : "";
-  const details = error.details ? ` — details: ${error.details}` : "";
-  return `[france-data-mcp] ${rpc}${code}: ${error.message}${details}${hint}`;
 }
 
 /**
@@ -198,17 +157,6 @@ interface RawFinessRow {
   email: string | null;
   geom: { type: "Point"; coordinates: [number, number] } | null;
   distance_meters?: number; // present only on RPC result
-}
-
-/**
- * Trim CHAR-padded fields. Postgres CHAR(N) right-pads with spaces, so a
- * dept "08" stored as CHAR(3) comes back as "08 ". Tools/clients shouldn't
- * have to special-case the padding — strip it once at the boundary.
- */
-function trimOrNull(s: string | null | undefined): string | null {
-  if (s === null || s === undefined) return null;
-  const trimmed = s.trim();
-  return trimmed === "" ? null : trimmed;
 }
 
 function toFinessResult(row: RawFinessRow): FinessResult {

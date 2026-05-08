@@ -7,6 +7,7 @@ How the FINESS data flows from the government source into the public MCP server.
 | Source | Frequency | Workflow                        | Cron               |
 |--------|-----------|---------------------------------|--------------------|
 | FINESS | bimonthly | `.github/workflows/ingest-finess.yml` | `0 4 1,15 * *` UTC |
+| Annuaire Santé Ameli (PS libéraux) | weekly | `.github/workflows/ingest-ameli.yml` | `0 4 * * 1` UTC (Mondays) |
 
 ## Pipeline (5 steps)
 
@@ -18,6 +19,44 @@ How the FINESS data flows from the government source into the public MCP server.
 6. **Atomic swap** — single PL/pgSQL transaction renames `finess_staging` → `finess` and keeps the previous version as `finess_previous`.
 
 If any step fails, the production `finess` table is **not** mutated and an issue is auto-opened on the repository.
+
+## Pipeline Ameli (V0.4 phase 1)
+
+Even shape as FINESS, with two key differences:
+
+1. **No GPS coords in the CSV** — geocoding is computed from the **commune centroid** via `geo.api.gouv.fr/communes` (~35 K communes fetched once at run start, ~4 MB JSON). Match by `(coordonnees_code_postal, coordonnees_ville)` with fallback CP-unique guarded against false positives via `byCpRawCount` (the raw count of communes for a CP includes filtered ones, so a hidden ambiguity refuses the fallback). Precision is commune-level (~3 km mean), suitable for density analysis.
+2. **No stable identifier** in the public CSV (RPPS / ADELI absent), so the synthetic `BIGSERIAL id` is the PK and idempotence relies on the swap rename, not on `ON CONFLICT`.
+
+Steps :
+
+1. **Download** — `https://www.data.gouv.fr/api/1/datasets/r/432983b9-2e6f-473a-b35a-20403c300a5f` (override via `AMELI_PS_CSV_URL` env when bisecting).
+2. **Pre-validate** — file size ≥ 100 MB (CSV ~154 MB), required headers present, delimiter `;`, BOM-aware.
+3. **Build commune index** — single `geo.api.gouv` call. Throws if > 1 % communes are unindexable (centre absent, out of FR bbox).
+4. **Copy → staging** — stream-parse, geocode each row via the commune index, batch-insert (size 500). Schema-cache miss retry on the first batch (3 attempts, linear backoff) preserves the full Supabase error in `cause` if all retries fail.
+5. **Validate** — row count 1 M–2.5 M, structural skip rate < 1 %, unmatched-locality rate < 5 %, denominator > 0 (defense-in-depth against an empty pipeline).
+6. **Atomic swap** — same `ingest_atomic_swap` RPC.
+
+## Ameli thresholds (constantes nommées dans `scripts/ingest/ameli.ts`)
+
+| Constant | Default | Behaviour |
+|---|---|---|
+| `MIN_SIZE_BYTES` | 100 MB | Aborts if downloaded CSV is smaller (truncated transfer) |
+| `MIN_ROWS` / `MAX_ROWS` | 1 M / 2.5 M | Aborts if row count escapes the band |
+| `STRUCTURAL_FAIL_THRESHOLD` | 0.01 (1 %) | Aborts if `no_identity + no_locality` exceeds — column rename / format change suspect |
+| `UNMATCHED_LOCALITY_THRESHOLD` | 0.05 (5 %) | Aborts if `unmatched_locality` exceeds — INSEE commune drift, refresh `geo.api.gouv` index |
+| `SAMPLE_CAP` | 200 | Distinct (cp, ville) keys tracked for the unmatched top-N report; once saturated, hits are still counted on known keys but new distinct keys are dropped (logged via `unmatchedDistinctKeysDropped`) |
+
+## Skip reasons (Ameli)
+
+Exhaustive switch with TypeScript `never` check at compile time :
+
+- `no_identity` — both `nom` and `prenom` empty (row unusable).
+- `no_locality` — both `coordonnees_code_postal` and `coordonnees_ville` empty.
+- `unmatched_locality` — CP+ville not found in the commune index. `sampleKey = "${cp}|${ville}"` collected for the top-N report.
+
+## Failure trace (both ingesters)
+
+The ingester writes an `ingest_log` row before `process.exit(1)`. If `writeIngestLog` itself silently fails (RLS, network, table missing), the top-level catch also dumps the structured log payload on stderr with prefix `[<source>][ingest_log_fallback]` for grep-survival in the GitHub Actions output. The auto-issue script can be enhanced later to embed those lines in the issue body.
 
 ## Thresholds (constantes nommées dans `scripts/ingest/finess.ts`)
 

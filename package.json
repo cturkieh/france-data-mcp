@@ -72,7 +72,8 @@
     "db:reset": "supabase db reset",
     "db:push": "supabase db push",
     "db:types": "supabase gen types typescript --local > src/storage/supabase-types.ts",
-    "ingest:finess": "tsx scripts/ingest/finess.ts"
+    "ingest:finess": "tsx scripts/ingest/finess.ts",
+    "ingest:ameli": "tsx scripts/ingest/ameli.ts"
   },
   "engines": {
     "node": ">=22"

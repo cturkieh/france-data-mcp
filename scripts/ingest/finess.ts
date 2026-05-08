@@ -1,17 +1,19 @@
 import "dotenv/config";
 import * as fs from "node:fs";
 import { fileURLToPath } from "node:url";
-import { type SupabaseClient, createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
 import { finessFamille } from "../../src/sante/finess-categories.js";
-import { requireEnv } from "../../src/storage/supabase.js";
+import { isValidDept } from "../../src/territoire/dept-codes.js";
 import {
   IngestError,
   type IngestLogEntry,
   atomicSwapTables,
   downloadCsv,
   getNonEmpty,
+  getUntypedServiceClient,
   preValidateFile,
+  safeSerializeIngestLog,
   writeIngestLog,
 } from "./shared.js";
 
@@ -85,28 +87,6 @@ interface FinessStagingRow {
   raw: Record<string, string>;
 }
 
-/**
- * Untyped Supabase client used to insert into the runtime-created
- * `finess_staging` table. The generated `Database` type only knows about prod
- * tables; staging is dropped/recreated each run via the
- * `ingest_create_finess_staging()` RPC, so it can't appear in the generated
- * types. Using an untyped client for staging inserts is the most honest option
- * and avoids `as any` casts on the payload.
- */
-function getUntypedServiceClient(): SupabaseClient {
-  // Reuse the shared `requireEnv` helper so empty-string env vars are
-  // diagnosed the same way as in the typed clients (catches misconfigured
-  // GitHub Secrets early — see SFH-1 round 2 audit).
-  try {
-    const url = requireEnv("SUPABASE_URL");
-    const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
-    return createClient(url, key, { auth: { persistSession: false } });
-  } catch (err) {
-    console.error("[finess] failed to build service client:", err);
-    throw new IngestError("copy", err instanceof Error ? err.message : String(err), err);
-  }
-}
-
 async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
   const log: IngestLogEntry = {
@@ -133,7 +113,7 @@ async function main(): Promise<void> {
     });
 
     // 3. COPY → STAGING
-    const supabase = getUntypedServiceClient();
+    const supabase = getUntypedServiceClient("finess");
     const { error: stagingErr } = await supabase.rpc("ingest_create_finess_staging");
     if (stagingErr) {
       throw new IngestError("copy", `Failed to create finess_staging table: ${stagingErr.message}`);
@@ -282,15 +262,26 @@ async function main(): Promise<void> {
     console.log(`[finess] success: ${stats.inserted} rows ingested in ${elapsedSec}s`);
   } catch (err) {
     console.error("[finess] ingestion failed:", err);
+    // Wrap non-IngestError as `validate` (programming bug catch-all) — using
+    // "download" by default mis-attributes a TypeError thrown during swap
+    // as "CSV download failure". Same pattern as Ameli (V0.4).
     const ingestErr =
       err instanceof IngestError
         ? err
-        : new IngestError("download", err instanceof Error ? err.message : String(err), err);
+        : new IngestError(
+            "validate",
+            `unexpected non-IngestError (programming bug): ${err instanceof Error ? err.message : String(err)}`,
+            err,
+          );
     log.status = "failed";
     log.error_phase = ingestErr.phase;
     log.error_message = ingestErr.message;
     log.finished_at = new Date().toISOString();
     await writeIngestLog(log);
+    // Stderr fallback ensures the failure stays diagnosable even when
+    // writeIngestLog silently fails (table missing, RLS, etc.). Same
+    // [ingest_log_fallback] prefix as Ameli for grep consistency.
+    console.error(`[finess][ingest_log_fallback] ${safeSerializeIngestLog(log)}`);
     console.error(`[finess] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
     process.exit(1);
   }
@@ -394,8 +385,12 @@ async function streamCsvToStaging(
       }
     } else {
       // Exhaustive switch: a new SkipReason without a counter triggers a TS
-      // compile error via the `never` check, preventing silent drops.
-      switch (parsed.skipReason) {
+      // compile error via the `never` check, preventing silent drops. We
+      // assign the discriminant to a local variable so TypeScript narrows
+      // `reason` to `never` in the default branch — narrowing through a
+      // property access expression (`parsed.skipReason`) doesn't work here.
+      const reason = parsed.skipReason;
+      switch (reason) {
         case "no_finess_id":
           skippedNoFinessId++;
           break;
@@ -409,7 +404,7 @@ async function streamCsvToStaging(
           skippedDom++;
           break;
         default: {
-          const _exhaustive: never = parsed.skipReason;
+          const _exhaustive: never = reason;
           throw new Error(`unreachable skipReason: ${String(_exhaustive)}`);
         }
       }
@@ -441,25 +436,9 @@ type ParsedFinessRow =
  */
 const LIGNE_ACHEMINEMENT_REGEX = /^(\d{5})\s+(.+?)(?:\s+CEDEX(?:\s+\d+)?)?$/;
 
-/**
- * Validates a FINESS `departement` cell. Accepts:
- *  - 2-char metropole codes ("01"–"95", excluding "20" — Corse uses 2A/2B)
- *  - "2A" / "2B" (Corse)
- *  - 3-char DOM/COM codes : 971-978 (DROM) and 984-988 (COM)
- *
- * Note: 970, 979, 989 and other 9X0 / 9X9 codes are NOT valid INSEE
- * departments — review-1 caught a too-permissive `/^9[78]\d$/` regex that
- * was accepting them. Tightened to the exact INSEE-published ranges.
- *
- * Anything else is a malformed CSV row (column shift, dirty data) and gets
- * dropped at parse time so we never insert garbage into `code_insee`.
- */
-function isValidDept(dept: string): boolean {
-  if (dept === "2A" || dept === "2B") return true;
-  if (/^\d{2}$/.test(dept)) return dept !== "20"; // Corse must use 2A/2B
-  if (/^(97[1-8]|98[4-8])$/.test(dept)) return true;
-  return false;
-}
+// Note: `isValidDept` was moved to `src/territoire/dept-codes.ts` (V0.4
+// consolidation) — single source of truth shared with Ameli, commune-index,
+// and the MCP tools layer. Imported above.
 
 function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   const numFiness = getNonEmpty(rec, "nofinesset");
