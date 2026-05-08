@@ -32,9 +32,16 @@ const AMELI_PS_CSV_URL =
 
 /** ~154 Mo CSV; 100 Mo floor catches truncations without missing legitimate weekly variations. */
 const MIN_SIZE_BYTES = 100_000_000;
-/** Annuaire holds ~1.4-1.6 M libéraux conventionnés; tight bounds catch a partial parse / format change. */
-const MIN_ROWS = 1_000_000;
-const MAX_ROWS = 2_500_000;
+/**
+ * Real volume confirmed on first prod run (2026-05-08): ~462 K rows from
+ * a 153.6 MB CSV (≈ 333 bytes/ligne moyenne, cohérent avec 24 colonnes
+ * Ameli + adresse). Annuaire Ameli ne couvre QUE les PS libéraux
+ * conventionnés (sous-ensemble du RPPS), donc bien plus petit que les
+ * 1.5 M initialement supposés. Bounds 300 K – 800 K avec marge pour
+ * absorber les variations hebdomadaires (entrées/sorties conventionnement).
+ */
+const MIN_ROWS = 300_000;
+const MAX_ROWS = 800_000;
 const BATCH_SIZE = 500;
 
 /**

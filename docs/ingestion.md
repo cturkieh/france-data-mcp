@@ -41,7 +41,7 @@ Steps :
 | Constant | Default | Behaviour |
 |---|---|---|
 | `MIN_SIZE_BYTES` | 100 MB | Aborts if downloaded CSV is smaller (truncated transfer) |
-| `MIN_ROWS` / `MAX_ROWS` | 1 M / 2.5 M | Aborts if row count escapes the band |
+| `MIN_ROWS` / `MAX_ROWS` | 300 K / 800 K | Aborts if row count escapes the band. Calibration: 1st prod run (2026-05-08) ingested 462 K rows from 153.6 MB CSV — Ameli covers only PS libéraux conventionnés (subset of RPPS), not the full 1.5 M I initially estimated |
 | `STRUCTURAL_FAIL_THRESHOLD` | 0.01 (1 %) | Aborts if `no_identity + no_locality` exceeds — column rename / format change suspect |
 | `UNMATCHED_LOCALITY_THRESHOLD` | 0.05 (5 %) | Aborts if `unmatched_locality` exceeds — INSEE commune drift, refresh `geo.api.gouv` index |
 | `SAMPLE_CAP` | 200 | Distinct (cp, ville) keys tracked for the unmatched top-N report; once saturated, hits are still counted on known keys but new distinct keys are dropped (logged via `unmatchedDistinctKeysDropped`) |
