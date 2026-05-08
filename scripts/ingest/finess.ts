@@ -57,6 +57,13 @@ const STRUCTURAL_FAIL_THRESHOLD = 0.01;
  */
 const BAD_DEPT_NOISE_THRESHOLD = 0.05;
 
+/**
+ * Expected envelope for the "autre" famille. Catalogue covers ~92% of
+ * FINESS volume by design; above 15%, DREES likely introduced a new code
+ * at scale and FINESS_CATEGORIES needs extending. Warning, not blocker.
+ */
+const AUTRE_FAMILY_DRIFT_THRESHOLD = 0.15;
+
 interface FinessStagingRow {
   num_finess: string;
   raison_sociale: string;
@@ -257,9 +264,9 @@ async function main(): Promise<void> {
       console.log(
         `[finess] ${stats.unknownCategorieCounts.size} codes catégorie en famille "autre" (${fmt(autreRate)} du volume). Top: ${top}`,
       );
-      if (autreRate > 0.15) {
+      if (autreRate > AUTRE_FAMILY_DRIFT_THRESHOLD) {
         console.warn(
-          `[finess] ⚠️ "autre" rate ${fmt(autreRate)} above 15% expected envelope — DREES nomenclature drift suspect, consider extending FINESS_CATEGORIES`,
+          `[finess] ⚠️ "autre" rate ${fmt(autreRate)} above ${fmt(AUTRE_FAMILY_DRIFT_THRESHOLD)} expected envelope — DREES nomenclature drift suspect, consider extending FINESS_CATEGORIES`,
         );
       }
     }
