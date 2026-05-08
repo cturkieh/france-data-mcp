@@ -370,10 +370,9 @@ async function streamCsvToStaging(
   for await (const record of parser as AsyncIterable<Record<string, string>>) {
     const parsed = parseFinessRecord(record);
     if (parsed.row) {
-      batch.push(parsed.row);
       // Track ligneacheminement parse failures separately — silent null CP/ville
       // was the v0.2.0 bug we're fixing, so a re-emergence (DREES layout change)
-      // must be loud.
+      // must be loud. Done BEFORE stripping `raw` ci-dessous.
       if (parsed.row.code_postal === null && parsed.row.raw.ligneacheminement) {
         parsedNoLigneAch++;
       }
@@ -383,6 +382,12 @@ async function streamCsvToStaging(
       if (code && finessFamille(code) === "autre") {
         unknownCategorieCounts.set(code, (unknownCategorieCounts.get(code) ?? 0) + 1);
       }
+      // V0.4.1 — `raw` JSONB stockait la ligne CSV brute (~60-80% du poids row).
+      // Jamais lu côté tools MCP, mais saturait le disque (incident 2026-05-08).
+      // Vidé avant push pour rester sous quota — les checks de tracking ci-dessus
+      // s'appuient sur la version pleine côté parsing, mais la DB n'en a plus besoin.
+      parsed.row.raw = {};
+      batch.push(parsed.row);
     } else {
       // Exhaustive switch: a new SkipReason without a counter triggers a TS
       // compile error via the `never` check, preventing silent drops. We

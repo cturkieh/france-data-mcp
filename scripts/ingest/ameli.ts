@@ -492,11 +492,12 @@ export function parseAmeliRecord(rec: Record<string, string>, index: CommuneInde
 
   const geom = `SRID=4326;POINT(${matched.lon} ${matched.lat})`;
 
-  // Filter raw to non-empty entries only, for compact JSONB storage.
+  // V0.4.1 — `raw` JSONB stockait la ligne CSV brute (~70-80% du poids row
+  // sur Ameli ~462K rows). Jamais lu côté tools MCP, mais saturait le disque
+  // (incident 2026-05-08). Vidé à l'ingestion pour rester sous quota free tier.
+  // La colonne reste dans le schéma pour rétro-compat (les anciens dumps
+  // peuvent en contenir), mais les nouveaux INSERT n'écrivent plus rien dedans.
   const raw: Record<string, string> = {};
-  for (const [k, v] of Object.entries(rec)) {
-    if (v !== "" && v !== undefined) raw[k] = v;
-  }
 
   return {
     row: {
