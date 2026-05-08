@@ -121,20 +121,30 @@ async function main(): Promise<void> {
       );
     }
 
-    // 4b. APPLY GEOM (Lambert 93 → WGS84 transform server-side)
+    // 4b. APPLY GEOM (Lambert 93 → WGS84 transform server-side, batched)
     // The CSV uses coordxet/coordyet (EPSG:2154) which were stored in `raw`.
-    // ST_Transform converts them to WGS84 and writes to the geom column.
-    const { data: geomStats, error: geomErr } = await supabase.rpc("ingest_apply_finess_geom");
-    if (geomErr) {
-      throw new IngestError("validate", `Failed to apply geom transform: ${geomErr.message}`);
+    // We batch the UPDATE to stay under PostgREST's 60s proxy timeout — each
+    // call updates up to BATCH rows that don't yet have a geom, and we loop
+    // until the RPC returns 0 (no more rows to process).
+    const GEOM_BATCH = 10_000;
+    let updated = 0;
+    while (true) {
+      const { data: batchUpdated, error: geomErr } = await supabase.rpc(
+        "ingest_apply_finess_geom_batch",
+        { p_limit: GEOM_BATCH },
+      );
+      if (geomErr) {
+        throw new IngestError("validate", `Failed to apply geom transform: ${geomErr.message}`);
+      }
+      const n = (batchUpdated as number | null) ?? 0;
+      updated += n;
+      if (n < GEOM_BATCH) break; // last batch (or no rows left)
     }
-    const updated = (geomStats?.[0]?.updated_rows as number | undefined) ?? 0;
-    const total = (geomStats?.[0]?.total_rows as number | undefined) ?? stats.inserted;
-    console.log(`[finess] geom transform: ${updated}/${total} rows geocoded`);
-    if (updated < total * 0.8) {
+    console.log(`[finess] geom transform: ${updated}/${stats.inserted} rows geocoded`);
+    if (updated < stats.inserted * 0.8) {
       throw new IngestError(
         "validate",
-        `Only ${updated}/${total} rows have a valid geom (< 80% threshold) — coordxet/coordyet likely missing or malformed`,
+        `Only ${updated}/${stats.inserted} rows have a valid geom (< 80% threshold) — coordxet/coordyet likely missing or malformed`,
       );
     }
 
