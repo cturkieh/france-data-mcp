@@ -85,6 +85,38 @@ describe("parseAmeliRecord", () => {
     ).toBe("no_identity");
   });
 
+  it("skip type_ps_code=3 (Laboratoires) — they belong to FINESS not Ameli", () => {
+    const r = parseAmeliRecord(
+      row({
+        ps_activite_raison_sociale: "LABO BIO ARDENNES",
+        type_ps_code: "3",
+        type_ps_libelle: "Laboratoires",
+      }),
+      idx,
+    );
+    expect(r.skipReason).toBe("personne_morale");
+  });
+
+  it("skip type_ps_code=4 (pharmacies, transporteurs, fournisseurs) — they belong to FINESS", () => {
+    const r = parseAmeliRecord(
+      row({
+        ps_activite_nom: "",
+        ps_activite_prenom: "",
+        ps_activite_raison_sociale: "PHARMACIE DE LA GARE",
+        type_ps_code: "4",
+        type_ps_libelle: "Non conventionnés",
+      }),
+      idx,
+    );
+    expect(r.skipReason).toBe("personne_morale");
+  });
+
+  it("garde type_ps_code=1 (médecins) et 2 (autres PS personnes physiques)", () => {
+    expect(parseAmeliRecord(row({ type_ps_code: "1" }), idx).row).toBeDefined();
+    expect(parseAmeliRecord(row({ type_ps_code: "2" }), idx).row).toBeDefined();
+    expect(parseAmeliRecord(row({ type_ps_code: "5" }), idx).row).toBeDefined();
+  });
+
   it("falls back to prenom when nom is missing (keeps NOT NULL constraint happy)", () => {
     const r = parseAmeliRecord(row({ ps_activite_nom: "" }), idx);
     if (!r.row) throw new Error("expected row");

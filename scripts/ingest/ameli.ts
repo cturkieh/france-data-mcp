@@ -33,24 +33,36 @@ const AMELI_PS_CSV_URL =
 /** ~154 Mo CSV; 100 Mo floor catches truncations without missing legitimate weekly variations. */
 const MIN_SIZE_BYTES = 100_000_000;
 /**
- * Real volume confirmed on first prod run (2026-05-08): ~462 K rows from
- * a 153.6 MB CSV (≈ 333 bytes/ligne moyenne, cohérent avec 24 colonnes
- * Ameli + adresse). Annuaire Ameli ne couvre QUE les PS libéraux
- * conventionnés (sous-ensemble du RPPS), donc bien plus petit que les
- * 1.5 M initialement supposés. Bounds 300 K – 800 K avec marge pour
- * absorber les variations hebdomadaires (entrées/sorties conventionnement).
+ * CSV brut : 549 222 lignes au 2026-05-08 (153.6 MB), répartis en :
+ *  - 251 K "Autres PS" (IDE, kinés, sages-femmes, orthophonistes…)
+ *  - 189 K médecins
+ *  - 59 K personnes morales non conventionnées (pharmacies, transporteurs) ← skip
+ *  - 45 K dentistes
+ *  - 4.6 K laboratoires ← skip
+ * Sémantique : Ameli = personnes physiques. Personnes morales (labos,
+ * pharmacies, transporteurs) skippées car elles ont leur place dans FINESS.
+ * Volume attendu inséré : ~485 K (549 K brut − 63 K personnes morales) ;
+ * bounds 400 K – 600 K. Cf. PERSONNE_MORALE_TYPE_PS_CODES plus bas.
  */
-const MIN_ROWS = 300_000;
-const MAX_ROWS = 800_000;
+const MIN_ROWS = 400_000;
+const MAX_ROWS = 600_000;
+
 const BATCH_SIZE = 500;
+
+/** Distinct (cp,ville) keys tracked in the unmatched top-N report (memory bound). */
+const SAMPLE_CAP = 200;
 
 /**
  * Maximum tolerated rate of CP+ville combinations that fail to match a known
  * INSEE commune (geo.api.gouv). Above this, suspect an INSEE drift (new
  * communes nouvelles not in geo.api yet, Ameli re-spelling) and abort the
  * run — partial matching would silently drop populated areas.
+ *
+ * Calibration 1st prod run : 24 K rows skippées sur 485 K rows ayant
+ * CP+ville → 4.9 % steady state. Bumpé de 5 % à 8 % pour absorber la
+ * variabilité observée sans hairtrigger.
  */
-const UNMATCHED_LOCALITY_THRESHOLD = 0.05;
+const UNMATCHED_LOCALITY_THRESHOLD = 0.08;
 
 /**
  * Maximum tolerated rate of structural anomalies (missing nom AND prénom,
@@ -161,6 +173,13 @@ async function main(): Promise<void> {
     log.row_count = stats.inserted;
 
     // 5. VALIDATE COHERENCE
+    // Always log the skip breakdown FIRST so the operator can diagnose a
+    // failure even when the row-count check fires. Without this, throwing
+    // on MIN_ROWS hides the counters that explain WHY we're below threshold.
+    console.log(
+      `[ameli] insert summary: inserted=${stats.inserted}, personne_morale=${stats.skippedPersonneMorale} (FINESS scope), no_identity=${stats.skippedNoIdentity}, no_locality=${stats.skippedNoLocality}, unmatched_locality=${stats.skippedUnmatchedLocality}`,
+    );
+
     if (stats.inserted < MIN_ROWS) {
       throw new IngestError(
         "validate",
@@ -272,6 +291,13 @@ async function main(): Promise<void> {
 
 interface IngestStreamStats {
   inserted: number;
+  /**
+   * Personnes morales (labos, pharmacies, transporteurs) skippées car
+   * elles relèvent de FINESS, pas de l'annuaire Ameli des PS personnes
+   * physiques. ~63 K en steady state — c'est la majorité du skip volume,
+   * et c'est attendu (pas une anomalie).
+   */
+  skippedPersonneMorale: number;
   skippedNoIdentity: number;
   skippedNoLocality: number;
   skippedUnmatchedLocality: number;
@@ -305,13 +331,13 @@ async function streamCsvToStaging(
 
   let batch: AmeliStagingRow[] = [];
   let inserted = 0;
+  let skippedPersonneMorale = 0;
   let skippedNoIdentity = 0;
   let skippedNoLocality = 0;
   let skippedUnmatchedLocality = 0;
   let unmatchedDistinctKeysDropped = 0;
   const unmatchedSampleCounts = new Map<string, number>();
   let firstBatch = true;
-  const SAMPLE_CAP = 200;
 
   // PGRST205 = PostgREST canonical "table not in schema cache" code. Typed
   // contract beats regex-against-localizable-message (FINESS V0.2 lesson).
@@ -365,6 +391,9 @@ async function streamCsvToStaging(
       // doesn't work in nested-property accesses.
       const reason = parsed.skipReason;
       switch (reason) {
+        case "personne_morale":
+          skippedPersonneMorale++;
+          break;
         case "no_identity":
           skippedNoIdentity++;
           break;
@@ -399,6 +428,7 @@ async function streamCsvToStaging(
   await flush();
   return {
     inserted,
+    skippedPersonneMorale,
     skippedNoIdentity,
     skippedNoLocality,
     skippedUnmatchedLocality,
@@ -407,11 +437,21 @@ async function streamCsvToStaging(
   };
 }
 
-type SkipReason = "no_identity" | "no_locality" | "unmatched_locality";
+/**
+ * Codes type_ps Ameli correspondant aux PERSONNES MORALES (entités
+ * juridiques conventionnées). Skippées à l'ingestion car elles ont leur
+ * place dans FINESS (catégories 611 labo, 620 pharmacie, etc.), pas dans
+ * l'index Ameli des PS personnes physiques.
+ *   - "3" = Laboratoires
+ *   - "4" = Non conventionnés (pharmacies, fournisseurs de matériel, transporteurs)
+ */
+const PERSONNE_MORALE_TYPE_PS_CODES = new Set(["3", "4"]);
+
+type SkipReason = "personne_morale" | "no_identity" | "no_locality" | "unmatched_locality";
 
 type ParsedAmeliRow =
   | { row: AmeliStagingRow; skipReason?: never; sampleKey?: never }
-  | { row?: never; skipReason: "no_identity" | "no_locality"; sampleKey?: never }
+  | { row?: never; skipReason: Exclude<SkipReason, "unmatched_locality">; sampleKey?: never }
   | { row?: never; skipReason: "unmatched_locality"; sampleKey: string };
 
 /**
@@ -420,6 +460,10 @@ type ParsedAmeliRow =
  * caller counts and threshold-aborts on.
  */
 export function parseAmeliRecord(rec: Record<string, string>, index: CommuneIndex): ParsedAmeliRow {
+  const typePsCode = getNonEmpty(rec, "type_ps_code");
+  if (typePsCode && PERSONNE_MORALE_TYPE_PS_CODES.has(typePsCode)) {
+    return { skipReason: "personne_morale" };
+  }
   const nom = getNonEmpty(rec, "ps_activite_nom") ?? "";
   const prenom = getNonEmpty(rec, "ps_activite_prenom") ?? "";
   if (!nom && !prenom) return { skipReason: "no_identity" };
@@ -456,13 +500,14 @@ export function parseAmeliRecord(rec: Record<string, string>, index: CommuneInde
 
   return {
     row: {
-      nom: nom || prenom, // Falls back to prénom if nom missing — keeps NOT NULL constraint happy
+      // Schema NOT NULL — duplicate the present field if one is empty (rare).
+      nom: nom || prenom,
       prenom: prenom || nom,
       civilite: getNonEmpty(rec, "ps_activite_civilite"),
       raison_sociale: getNonEmpty(rec, "ps_activite_raison_sociale"),
       specialite_code: getNonEmpty(rec, "specialite_code"),
       specialite_libelle: getNonEmpty(rec, "specialite_libelle"),
-      type_ps_code: getNonEmpty(rec, "type_ps_code"),
+      type_ps_code: typePsCode,
       type_ps_libelle: getNonEmpty(rec, "type_ps_libelle"),
       activite_particuliere_code: getNonEmpty(rec, "activite_particuliere_code"),
       activite_particuliere_libelle: getNonEmpty(rec, "activite_particuliere_libelle"),
