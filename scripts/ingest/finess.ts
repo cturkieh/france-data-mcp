@@ -260,27 +260,37 @@ async function streamCsvToStaging(
   let skippedNoCommune = 0;
   let firstBatch = true;
 
+  // PGRST205 = PostgREST's canonical code for "Could not find the table in
+  // the schema cache" — typed contract beats regex against a localizable
+  // human message.
+  const isSchemaCacheMiss = (err: { code?: string } | null): boolean => err?.code === "PGRST205";
+
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
-    // The first batch can race with PostgREST's schema-cache reload. If it
-    // hits "table not found in schema cache", retry with backoff — usually
-    // PostgREST has caught up within 2-4 more seconds. After the first
-    // successful insert the cache is warm; subsequent batches don't retry.
-    const insert = async () => supabase.from("finess_staging").insert(batch);
-    let result = await insert();
-    if (firstBatch && result.error && /schema cache/i.test(result.error.message)) {
-      for (let attempt = 1; attempt <= 3; attempt++) {
+    // The first batch can race with PostgREST's schema-cache reload after the
+    // RPC created `finess_staging`. Retry with linear backoff (2s/4s/6s)
+    // ONLY on the first batch and ONLY on the schema-cache error. After the
+    // first successful insert the cache is warm; subsequent batches don't
+    // retry (failure there is a real problem, not a transient race).
+    const maxAttempts = firstBatch ? 4 : 1; // 1 initial + 3 retries on cold cache
+    let lastErr: { message: string; code?: string } | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) {
         const wait = 2000 * attempt;
-        console.warn(`[finess] schema cache miss on first insert, retry ${attempt}/3 in ${wait}ms`);
+        console.warn(`[finess] schema cache miss, retry ${attempt}/3 in ${wait}ms`);
         await new Promise((r) => setTimeout(r, wait));
-        result = await insert();
-        if (!result.error) break;
-        if (!/schema cache/i.test(result.error.message)) break;
       }
+      const { error } = await supabase.from("finess_staging").insert(batch);
+      if (!error) {
+        lastErr = null;
+        break;
+      }
+      lastErr = error;
+      if (!isSchemaCacheMiss(error)) break; // non-cache errors fail immediately
     }
     firstBatch = false;
-    if (result.error) {
-      throw new IngestError("copy", `Insert into finess_staging failed: ${result.error.message}`);
+    if (lastErr) {
+      throw new IngestError("copy", `Insert into finess_staging failed: ${lastErr.message}`);
     }
     inserted += batch.length;
     batch = [];
