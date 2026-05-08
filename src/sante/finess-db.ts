@@ -16,6 +16,7 @@ export interface FinessResult {
     voie: string | null;
     code_postal: string | null;
     ville: string | null;
+    code_departement: string | null;
     code_insee: string;
   };
   coords: { lat: number; lon: number } | null;
@@ -75,6 +76,23 @@ function familiesToCodes(familles: FinessFamilleQuery[] | undefined): string[] {
 }
 
 /**
+ * Format a Supabase RPC error into a single string preserving the postgres
+ * code, hint, and details — losing those fields turned a "permission denied"
+ * incident in v0.2.0 into a 30-minute investigation. SFH review caught the
+ * regression. Always include `error.code` so the operator can grep PgError
+ * tables (PGRST205 / 42703 / etc.) directly.
+ */
+function formatRpcError(
+  rpc: string,
+  error: { code?: string; message: string; hint?: string; details?: string },
+): string {
+  const code = error.code ? ` (${error.code})` : "";
+  const hint = error.hint ? ` — hint: ${error.hint}` : "";
+  const details = error.details ? ` — details: ${error.details}` : "";
+  return `[france-data-mcp] ${rpc}${code}: ${error.message}${details}${hint}`;
+}
+
+/**
  * Find FINESS establishments within a geographic radius. Spatial query uses
  * PostGIS ST_DWithin on the geography type for accurate kilometers.
  *
@@ -96,7 +114,7 @@ export async function getFinessInRadius(input: InRadiusInput): Promise<FinessQue
   });
 
   if (error) {
-    throw new Error(`[france-data-mcp] finess_in_radius RPC failed: ${error.message}`);
+    throw new Error(formatRpcError("finess_in_radius", error));
   }
   return buildFinessQueryResult(data, limit);
 }
@@ -116,9 +134,41 @@ export async function getFinessByCategorie(input: ByCategorieInput): Promise<Fin
     p_limit: limit + 1,
   });
   if (error) {
-    throw new Error(`[france-data-mcp] finess_by_categorie failed: ${error.message}`);
+    throw new Error(formatRpcError("finess_by_categorie", error));
   }
   return buildFinessQueryResult(data, limit);
+}
+
+/**
+ * Fetch a single FINESS establishment by its 9-digit FINESS number.
+ * Returns null if not found. The audit (B3) flagged the absence of this
+ * lookup — the radius/categorie tools couldn't be paired with a "give me
+ * the full record" call.
+ */
+export async function getFinessByNumFiness(numFiness: string): Promise<FinessResult | null> {
+  if (!/^\d{9}$/.test(numFiness)) {
+    throw new Error(`[france-data-mcp] num_finess must be 9 digits, got "${numFiness}"`);
+  }
+  const supabase = getAnonClient();
+  const { data, error } = await supabase.rpc("finess_by_num_finess", {
+    p_num_finess: numFiness,
+  });
+  if (error) {
+    throw new Error(formatRpcError("finess_by_num_finess", error));
+  }
+  const rows = (data ?? []) as RawFinessRow[];
+  if (rows.length > 1) {
+    // The RPC has a `LIMIT 1` clause, but defense-in-depth: if a deploy
+    // glitch removed it, or if the table somehow had duplicate num_finess
+    // (PK is enforced by `finess_staging` but rename-swap relies on
+    // discipline), surface the violation loud instead of silently picking
+    // the first row.
+    console.warn(
+      `[france-data-mcp] finess_by_num_finess(${numFiness}): RPC returned ${rows.length} rows (expected ≤ 1) — picking the first. Investigate finess table for duplicate num_finess.`,
+    );
+  }
+  const first = rows[0];
+  return first ? toFinessResult(first) : null;
 }
 
 // --- internals -------------------------------------------------------------
@@ -141,12 +191,24 @@ interface RawFinessRow {
   categorie_libelle: string | null;
   voie: string | null;
   code_postal: string | null;
+  code_departement: string | null;
   code_insee: string;
   ville: string | null;
   telephone: string | null;
   email: string | null;
   geom: { type: "Point"; coordinates: [number, number] } | null;
   distance_meters?: number; // present only on RPC result
+}
+
+/**
+ * Trim CHAR-padded fields. Postgres CHAR(N) right-pads with spaces, so a
+ * dept "08" stored as CHAR(3) comes back as "08 ". Tools/clients shouldn't
+ * have to special-case the padding — strip it once at the boundary.
+ */
+function trimOrNull(s: string | null | undefined): string | null {
+  if (s === null || s === undefined) return null;
+  const trimmed = s.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 function toFinessResult(row: RawFinessRow): FinessResult {
@@ -163,16 +225,17 @@ function toFinessResult(row: RawFinessRow): FinessResult {
     },
     adresse: {
       voie: row.voie,
-      code_postal: row.code_postal,
+      code_postal: trimOrNull(row.code_postal),
       ville: row.ville,
-      code_insee: row.code_insee,
+      code_departement: trimOrNull(row.code_departement),
+      code_insee: row.code_insee.trim(),
     },
     coords,
     distance_km:
       typeof row.distance_meters === "number"
         ? Math.round((row.distance_meters / 1000) * 100) / 100
         : null,
-    telephone: row.telephone,
+    telephone: trimOrNull(row.telephone),
     email: row.email,
   };
 }

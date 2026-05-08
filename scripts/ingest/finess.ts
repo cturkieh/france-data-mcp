@@ -1,5 +1,6 @@
 import "dotenv/config";
 import * as fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
 import { requireEnv } from "../../src/storage/supabase.js";
@@ -50,6 +51,7 @@ interface FinessStagingRow {
   type_voie: string | null;
   voie: string | null;
   code_postal: string | null;
+  code_departement: string;
   code_insee: string;
   ville: string | null;
   telephone: string | null;
@@ -187,20 +189,34 @@ async function main(): Promise<void> {
       );
     }
 
-    // Surface upstream-parsing-bug suspects: rows dropped due to missing
-    // required fields. Threshold of 1% of inserted rows is the same alarm
-    // bar discussed in the V0.2 final review (SFH-5).
-    const skippedTotal = stats.skippedNoFinessId + stats.skippedNoCommune;
-    const skipRate = stats.inserted > 0 ? skippedTotal / (stats.inserted + skippedTotal) : 0;
-    if (skippedTotal > 0) {
-      const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
+    // Surface upstream-parsing-bug suspects. Threshold of 1% of inserted rows
+    // is the same alarm bar discussed in the V0.2 final review (SFH-5).
+    //
+    // bad_dept and ligne-no-match are included in the rate — they almost
+    // always indicate a CSV column shift or layout change. DOM rows are
+    // EXCLUDED (documented architectural limitation, not a regression) but
+    // still logged so the operator can confirm the count is in line with
+    // prior runs.
+    const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
+    const skipParseFailures =
+      stats.skippedNoFinessId + stats.skippedNoCommune + stats.skippedBadDept;
+    const skipRate =
+      stats.inserted > 0
+        ? (skipParseFailures + stats.parsedNoLigneAch) / (stats.inserted + skipParseFailures)
+        : 0;
+    if (stats.skippedDom > 0) {
+      console.log(
+        `[finess] skipped ${stats.skippedDom} DOM rows (architectural limit — V0.3 widens code_insee to support DOM)`,
+      );
+    }
+    if (skipParseFailures > 0 || stats.parsedNoLigneAch > 0) {
       console.warn(
-        `[finess] skipped ${skippedTotal} rows (${fmt(skipRate)}): ${stats.skippedNoFinessId} missing nofinesset, ${stats.skippedNoCommune} missing commune`,
+        `[finess] parsing anomalies (${fmt(skipRate)} of inserted): ${stats.skippedNoFinessId} missing nofinesset, ${stats.skippedNoCommune} missing commune, ${stats.skippedBadDept} bad dept (column shift suspect), ${stats.parsedNoLigneAch} ligneacheminement non-match (DREES format change suspect)`,
       );
       if (skipRate > 0.01) {
         throw new IngestError(
           "validate",
-          `Skip rate ${fmt(skipRate)} above 1% threshold — likely upstream parsing regression (column rename/shift)`,
+          `Parsing anomaly rate ${fmt(skipRate)} above 1% threshold — likely upstream regression (column rename/shift or ligneacheminement format change)`,
         );
       }
     }
@@ -234,6 +250,9 @@ interface IngestStreamStats {
   inserted: number;
   skippedNoFinessId: number;
   skippedNoCommune: number;
+  skippedBadDept: number;
+  skippedDom: number;
+  parsedNoLigneAch: number;
 }
 
 async function streamCsvToStaging(
@@ -258,6 +277,9 @@ async function streamCsvToStaging(
   let inserted = 0;
   let skippedNoFinessId = 0;
   let skippedNoCommune = 0;
+  let skippedBadDept = 0;
+  let skippedDom = 0;
+  let parsedNoLigneAch = 0;
   let firstBatch = true;
 
   // PGRST205 = PostgREST's canonical code for "Could not find the table in
@@ -300,27 +322,111 @@ async function streamCsvToStaging(
     const parsed = parseFinessRecord(record);
     if (parsed.row) {
       batch.push(parsed.row);
-    } else if (parsed.skipReason === "no_finess_id") {
-      skippedNoFinessId++;
-    } else if (parsed.skipReason === "no_commune") {
-      skippedNoCommune++;
+      // Track ligneacheminement parse failures separately — silent null CP/ville
+      // was the v0.2.0 bug we're fixing, so a re-emergence (DREES layout change)
+      // must be loud.
+      if (parsed.row.code_postal === null && parsed.row.raw.ligneacheminement) {
+        parsedNoLigneAch++;
+      }
+    } else {
+      // Exhaustive switch: a new SkipReason without a counter triggers a TS
+      // compile error via the `never` check, preventing silent drops.
+      switch (parsed.skipReason) {
+        case "no_finess_id":
+          skippedNoFinessId++;
+          break;
+        case "no_commune":
+          skippedNoCommune++;
+          break;
+        case "bad_dept":
+          skippedBadDept++;
+          break;
+        case "dom_unsupported":
+          skippedDom++;
+          break;
+        default: {
+          const _exhaustive: never = parsed.skipReason;
+          throw new Error(`unreachable skipReason: ${String(_exhaustive)}`);
+        }
+      }
     }
     if (batch.length >= BATCH_SIZE) await flush();
   }
   await flush();
-  return { inserted, skippedNoFinessId, skippedNoCommune };
+  return {
+    inserted,
+    skippedNoFinessId,
+    skippedNoCommune,
+    skippedBadDept,
+    skippedDom,
+    parsedNoLigneAch,
+  };
 }
+
+type SkipReason = "no_finess_id" | "no_commune" | "bad_dept" | "dom_unsupported";
 
 type ParsedFinessRow =
   | { row: FinessStagingRow; skipReason?: never }
-  | { row?: never; skipReason: "no_finess_id" | "no_commune" };
+  | { row?: never; skipReason: SkipReason };
+
+/**
+ * Match `ligneacheminement` of the form `"08000 CHARLEVILLE MEZIERES CEDEX"`.
+ * Extracts a leading 5-digit postal code followed by the city name.
+ * The trailing "CEDEX"/"CEDEX 02"/etc. suffix is stripped from the city name.
+ */
+const LIGNE_ACHEMINEMENT_REGEX = /^(\d{5})\s+(.+?)(?:\s+CEDEX(?:\s+\d+)?)?$/;
+
+/**
+ * Validates a FINESS `departement` cell. Accepts:
+ *  - 2-char metropole codes ("01"–"95", excluding "20" — Corse uses 2A/2B)
+ *  - "2A" / "2B" (Corse)
+ *  - 3-char DOM/COM codes : 971-978 (DROM) and 984-988 (COM)
+ *
+ * Note: 970, 979, 989 and other 9X0 / 9X9 codes are NOT valid INSEE
+ * departments — review-1 caught a too-permissive `/^9[78]\d$/` regex that
+ * was accepting them. Tightened to the exact INSEE-published ranges.
+ *
+ * Anything else is a malformed CSV row (column shift, dirty data) and gets
+ * dropped at parse time so we never insert garbage into `code_insee`.
+ */
+function isValidDept(dept: string): boolean {
+  if (dept === "2A" || dept === "2B") return true;
+  if (/^\d{2}$/.test(dept)) return dept !== "20"; // Corse must use 2A/2B
+  if (/^(97[1-8]|98[4-8])$/.test(dept)) return true;
+  return false;
+}
 
 function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   const numFiness = getNonEmpty(rec, "nofinesset");
   if (!numFiness) return { skipReason: "no_finess_id" };
 
-  const codeInsee = getNonEmpty(rec, "commune");
-  if (!codeInsee) return { skipReason: "no_commune" };
+  const codeCommuneRaw = getNonEmpty(rec, "commune");
+  const codeDepartementRaw = getNonEmpty(rec, "departement");
+  if (!codeCommuneRaw || !codeDepartementRaw) return { skipReason: "no_commune" };
+
+  const codeDepartement = codeDepartementRaw.trim();
+  if (!isValidDept(codeDepartement)) return { skipReason: "bad_dept" };
+
+  // FINESS stores commune as the 3-char code WITHIN the department.
+  // Reconstruct canonical 5-char INSEE: "08" + "105" = "08105".
+  // Schema is CHAR(5) → DOM (dept 3 chars) is skipped until V0.3 widens it.
+  if (codeDepartement.length === 3) return { skipReason: "dom_unsupported" };
+  const codeInsee = `${codeDepartement}${codeCommuneRaw.trim().padStart(3, "0")}`;
+
+  // `ligneacheminement` is the canonical source for postal code + real city
+  // name (e.g. "08005 CHARLEVILLE MEZIERES CEDEX"). The previous parser used
+  // `libdepartement` ("ARDENNES") as `ville`, which was wrong. CEDEX suffix
+  // is stripped from the city name; the postal code keeps its CEDEX form.
+  const ligneAch = getNonEmpty(rec, "ligneacheminement") ?? "";
+  const ligneMatch = ligneAch.match(LIGNE_ACHEMINEMENT_REGEX);
+  const codePostal = ligneMatch?.[1] ?? null;
+  const ville = ligneMatch?.[2]?.trim() ?? null;
+
+  // Build full address line: "12 CRS BRIAND" instead of just "BRIAND".
+  const numVoie = getNonEmpty(rec, "numvoie");
+  const typVoie = getNonEmpty(rec, "typvoie");
+  const voieRaw = getNonEmpty(rec, "voie");
+  const voieFull = [numVoie, typVoie, voieRaw].filter(Boolean).join(" ") || null;
 
   // Geom is populated server-side by ingest_apply_finess_geom_batch which
   // reads coordxet/coordyet (Lambert 93) from `raw` and reprojects to WGS84.
@@ -339,12 +445,13 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
       raison_sociale: getNonEmpty(rec, "rs") ?? "",
       categorie_code: getNonEmpty(rec, "categetab"),
       categorie_libelle: getNonEmpty(rec, "libcategetab"),
-      num_voie: getNonEmpty(rec, "numvoie"),
-      type_voie: getNonEmpty(rec, "typvoie"),
-      voie: getNonEmpty(rec, "voie"),
-      code_postal: null, // FINESS embeds postal in `ligneacheminement`; left for V0.3 to extract
+      num_voie: numVoie,
+      type_voie: typVoie,
+      voie: voieFull,
+      code_postal: codePostal,
+      code_departement: codeDepartement,
       code_insee: codeInsee,
-      ville: getNonEmpty(rec, "libdepartement"),
+      ville,
       telephone: getNonEmpty(rec, "telephone"),
       email: null,
       date_ouverture: getNonEmpty(rec, "dateouv"),
@@ -355,4 +462,19 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   };
 }
 
-await main();
+export const __TESTING__ = { parseFinessRecord, isValidDept, LIGNE_ACHEMINEMENT_REGEX };
+
+// Only run main() when this file is executed as a script, not when imported
+// by the test suite or another module. Without this guard, vitest pulls in
+// the module to test the pure helpers and immediately tries to connect to
+// Supabase via `main()` — failing with "Missing SUPABASE_URL" before any
+// test runs.
+//
+// Use `fileURLToPath` instead of string-comparing `import.meta.url` against
+// `file://${process.argv[1]}` — the latter URL-encodes spaces/accents while
+// `process.argv[1]` is the raw path, so the literal comparison breaks
+// silently when the repo lives under e.g. "/Users/My Name/...". Caught by
+// the v0.2.1 review.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  await main();
+}

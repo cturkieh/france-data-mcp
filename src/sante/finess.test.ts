@@ -123,7 +123,7 @@ describe("loadFiness", () => {
     expect(index).toHaveLength(2);
     expect(index[0]?.raisonSociale).toBe("EHPAD Charleville");
     expect(index[0]?.categorieLibelle).toBe(
-      "EHPAD (Établissement Hébergeant des Personnes Âgées Dépendantes)",
+      "Etablissement d'hébergement pour personnes âgées dépendantes (EHPAD)",
     );
     expect(index[0]?.point).toEqual({ lon: 4.72, lat: 49.77 });
   });

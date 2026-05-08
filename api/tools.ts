@@ -7,9 +7,11 @@
  * mais pas exposés dans le serveur MCP V0 sur Vercel serverless.
  */
 
+import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
 import {
   type FinessFamilleQuery,
   getFinessByCategorie,
+  getFinessByNumFiness,
   getFinessInRadius,
 } from "../src/sante/finess-db.js";
 import { haversineDistance } from "../src/sante/finess.js";
@@ -42,12 +44,15 @@ function asNumber(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
-/** Familles FINESS exposées en input (sous-ensemble strict — exclut "autre", non queryable). */
-const FINESS_FAMILLE_INPUTS = [
-  "mco",
-  "ssr",
-  "ehpad",
-] as const satisfies readonly FinessFamilleQuery[];
+/**
+ * Familles FINESS exposées en input. Dérivé directement des clés de
+ * `FINESS_FAMILY_CODES` pour avoir une seule source de vérité — ajouter une
+ * famille là-bas l'expose automatiquement ici.
+ */
+const FINESS_FAMILLE_INPUTS = Object.keys(FINESS_FAMILY_CODES) as readonly FinessFamilleQuery[];
+
+/** Liste des familles formatée pour les descriptions des tools MCP. */
+const FAMILLES_LIST = FINESS_FAMILLE_INPUTS.join(", ");
 
 /** Garde de typage : valide qu'une string est une famille FINESS queryable. */
 function asFinessFamille(v: unknown): FinessFamilleQuery | undefined {
@@ -387,8 +392,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_in_radius",
-    description:
-      "Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles (mco, ssr, ehpad). Source : FINESS / DREES (dump CSV ingéré localement).",
+    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement).`,
     inputSchema: {
       type: "object",
       properties: {
@@ -438,8 +442,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_by_categorie",
-    description:
-      "Liste des établissements FINESS par famille (mco, ssr, ehpad), avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. Source : FINESS / DREES.",
+    description: `Liste des établissements FINESS par famille (${FAMILLES_LIST}), avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. Source : FINESS / DREES.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -480,6 +483,26 @@ export const TOOLS: McpTool[] = [
       if (codeInsee) input.code_insee = codeInsee;
       if (limit !== undefined) input.limit = limit;
       return getFinessByCategorie(input);
+    },
+  },
+  {
+    name: "etablissement_by_finess",
+    description:
+      "Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Renvoie null si introuvable. Source : FINESS / DREES.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: {
+          type: "string",
+          description: "Numéro FINESS exact (9 chiffres).",
+        },
+      },
+      required: ["num_finess"],
+    },
+    handler: async (args) => {
+      const numFiness = asString(args.num_finess);
+      if (!numFiness) throw new Error("num_finess (string, 9 chiffres) requis");
+      return getFinessByNumFiness(numFiness);
     },
   },
 ];

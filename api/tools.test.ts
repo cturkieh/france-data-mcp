@@ -87,8 +87,25 @@ describe("etablissements_finess_in_radius (MCP tool)", () => {
   it("rejette une famille invalide", async () => {
     const tool = findTool("etablissements_finess_in_radius");
     await expect(
-      tool?.handler({ lon: 4.7, lat: 49.7, familles: ["psychiatrie"] }),
+      tool?.handler({ lon: 4.7, lat: 49.7, familles: ["famille_inexistante"] }),
     ).rejects.toThrow();
+  });
+
+  it("accepte les nouvelles familles étendues (v0.2.1)", async () => {
+    const spy = vi
+      .spyOn(finessDb, "getFinessInRadius")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("etablissements_finess_in_radius");
+    await tool?.handler({
+      lon: 4.72,
+      lat: 49.77,
+      familles: ["pharmacie", "msp_cpts", "labo", "ssiad"],
+    });
+    expect(spy).toHaveBeenCalledWith({
+      center: { lon: 4.72, lat: 49.77 },
+      radiusKm: 5,
+      familles: ["pharmacie", "msp_cpts", "labo", "ssiad"],
+    });
   });
 });
 
@@ -110,7 +127,16 @@ describe("etablissements_finess_by_categorie (MCP tool)", () => {
 
   it("rejette une categorie inconnue", async () => {
     const tool = findTool("etablissements_finess_by_categorie");
-    await expect(tool?.handler({ categorie: "psychiatrie" })).rejects.toThrow(/categorie/);
+    await expect(tool?.handler({ categorie: "famille_inexistante" })).rejects.toThrow(/categorie/);
+  });
+
+  it("accepte les nouvelles familles étendues (v0.2.1)", async () => {
+    const spy = vi
+      .spyOn(finessDb, "getFinessByCategorie")
+      .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    const tool = findTool("etablissements_finess_by_categorie");
+    await tool?.handler({ categorie: "pharmacie", departement: "08" });
+    expect(spy).toHaveBeenCalledWith({ famille: "pharmacie", departement: "08" });
   });
 
   it("délègue à getFinessByCategorie avec departement + limit", async () => {

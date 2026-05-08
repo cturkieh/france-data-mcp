@@ -48,6 +48,7 @@ export {
 
 export {
   FINESS_CATEGORIES,
+  FINESS_FAMILY_CODES,
   FINESS_HOPITAUX,
   FINESS_LABOS,
   FINESS_PHARMACIES,
@@ -62,6 +63,7 @@ export {
 export {
   getFinessInRadius,
   getFinessByCategorie,
+  getFinessByNumFiness,
   type FinessResult,
   type FinessQueryResult,
   type InRadiusInput,

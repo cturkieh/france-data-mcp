@@ -317,6 +317,16 @@ export async function searchEntreprises(
  *    établissements supplémentaires (déduplication par SIRET).
  * 3. `nombreEtablissements` / `nombreEtablissementsOuverts` reflètent toujours
  *    le total réel SIRENE (non limité par l'API DINUM).
+ *
+ * **Limitation indexation DINUM** : certaines entreprises pourtant actives à
+ * l'INSEE/SIRENE ne sont PAS indexées par `recherche-entreprises.api.gouv.fr`
+ * (statut de diffusion partielle au sens INSEE — `statut_diffusion ∈ {P,N}` —
+ * ou exclusion sectorielle/légale). Ces SIREN reviennent `null` ici alors
+ * qu'ils existent réellement. L'audit post-v0.2.0 a vérifié ce comportement
+ * sur le SIREN 787120435 (Bio Ard'Aisne, SAS Rethel) : présent dans SIRENE
+ * via la "fabrique social.gouv" mais absent de l'API DINUM publique.
+ * Pour ce cas d'usage, fallback : interroger SIRENE INSEE directement (avec
+ * authentification API), ou utiliser `entreprises_in_radius` par zone géo.
  */
 export async function getEntrepriseBySiren(
   siren: string,
@@ -328,10 +338,18 @@ export async function getEntrepriseBySiren(
   const result = await searchEntreprises({ q: siren, perPage: 5, onlyActive: false, signal });
   const match = result.entreprises.find((e) => e.siren === siren);
   if (!match && result.entreprises.length > 0) {
+    // L'API a renvoyé des résultats mais aucun ne matche le SIREN exact —
+    // bizarre, peut signaler une régression côté DINUM (recherche full-text
+    // qui matche sur autre chose que le SIREN). À surveiller.
     console.warn(
       `[france-data-mcp] getEntrepriseBySiren(${siren}): l'API a renvoyé ${result.entreprises.length} résultat(s) sans match exact du SIREN.`,
     );
   }
+  // null = "pas indexé par DINUM" — pas forcément "n'existe pas dans SIRENE".
+  // C'est le comportement normal pour les SIREN en diffusion partielle (cf.
+  // JSDoc ci-dessus, cas Bio Ard'Aisne). On ne logge pas pour éviter le
+  // spam quand un caller énumère des SIREN — la doc + le retour null
+  // explicite suffisent à signaler la limitation.
   if (!match) return null;
 
   // Trouve le siège : on préfère le SIRET déclaré comme siège plutôt que

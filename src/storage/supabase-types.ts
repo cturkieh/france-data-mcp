@@ -376,6 +376,25 @@ export type Database = {
         Returns: {
           categorie_code: string
           categorie_libelle: string
+          code_departement: string
+          code_insee: string
+          code_postal: string
+          distance_meters: number
+          email: string
+          geom: Json
+          num_finess: string
+          raison_sociale: string
+          telephone: string
+          ville: string
+          voie: string
+        }[]
+      }
+      finess_by_num_finess: {
+        Args: { p_num_finess: string }
+        Returns: {
+          categorie_code: string
+          categorie_libelle: string
+          code_departement: string
           code_insee: string
           code_postal: string
           distance_meters: number
@@ -399,6 +418,7 @@ export type Database = {
         Returns: {
           categorie_code: string
           categorie_libelle: string
+          code_departement: string
           code_insee: string
           code_postal: string
           distance_meters: number

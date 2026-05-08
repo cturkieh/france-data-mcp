@@ -53,6 +53,9 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 |---------------------------------------|------------------------------------------------------------|
 | `etablissements_finess_in_radius`     | Find FINESS establishments within a radius (filter by family) |
 | `etablissements_finess_by_categorie`  | List FINESS establishments by family + optional dept/commune  |
+| `etablissement_by_finess`             | Fetch a single establishment by its 9-digit FINESS number  |
+
+**Familles supportées** (v0.2.1) : `mco`, `ssr`, `ehpad`, `psychiatrie`, `ambulatoire`, `ssiad`, `had`, `handicap_enfants`, `handicap_adultes`, `addictologie`, `msp_cpts`, `labo`, `imagerie`, `pharmacie`.
 
 Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.md](docs/ingestion.md).
 

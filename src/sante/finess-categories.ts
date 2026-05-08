@@ -1,129 +1,181 @@
 /**
- * Catégories FINESS les plus utiles pour l'analyse territoriale santé.
+ * FINESS DREES category nomenclature — codes + libellés.
  *
- * Liste non exhaustive (FINESS contient ~150 catégories EJ + EG). Focus sur
- * celles qui ont du sens pour de l'intelligence d'implantation, de la
- * cartographie de réseau de soins et de la prospection médico-sociale.
+ * Non-exhaustive (FINESS has ~150 EJ + EG categories) — we carry the codes
+ * that drive the family classifier plus those needed for hospital / lab /
+ * EHPAD / pharmacie / MSP coverage.
  *
- * Source : nomenclature FINESS publiée par la DREES.
+ * Source: live FINESS extract on data.gouv.fr. Re-verify against the CSV
+ * when adding codes — DREES occasionally rotates labels.
  */
 
 export const FINESS_CATEGORIES = {
-  "108": "Centre Hospitalier Universitaire (CHU)",
-  "355": "Centre Hospitalier (CH)",
-  "365": "Centre de Lutte Contre le Cancer (CLCC)",
-  "362": "Centre Hospitalier Spécialisé en psychiatrie",
-  "292": "Centre Hospitalier Spécialisé (CHS)",
-  "106": "Hôpital local",
-  "109": "Établissement de Soins de Suite et de Réadaptation (SSR)",
-  "120": "Hôpital de jour",
-  "122": "Centre de cure médicale",
+  // Acute-care hospitals (MCO + adjacent)
+  "101": "Centre Hospitalier Régional (C.H.R.)",
+  "106": "Centre hospitalier",
+  "108": "Centre Hospitalier Universitaire (C.H.U.)",
+  "114": "Hôpital des armées",
+  "115": "Etablissement de Soins du Service de Santé des Armées",
+  "128": "Etablissement de Soins Chirurgicaux",
+  "129": "Etablissement de Soins Médicaux",
+  "131": "Centre de Lutte Contre le Cancer (CLCC)",
+  "355": "Centre Hospitalier (C.H.)",
+  "365": "Etablissement de Soins Pluridisciplinaire",
+  // Psychiatry — out of MCO scope (own family in V0.3)
+  "292": "Centre Hospitalier Spécialisé en lutte contre les maladies mentales",
+  "362": "Centre Hospitalier Spécialisé (CHS) en psychiatrie",
+  "156": "Centre Médico-Psychologique (C.M.P.)",
+  "161": "Maison de Santé pour Maladies Mentales",
+  // SSR
+  "109": "Etablissement de santé privé autorisé en SSR",
+  // Ambulatoire / soins de proximité
+  "122": "Etablissement Soins Obstétriques Chirurgico-Gynécologiques",
   "124": "Centre de Santé",
-  "295": "Établissement Public de Santé",
-  "354": "Hôpital privé",
-  "500": "EHPAD (Établissement Hébergeant des Personnes Âgées Dépendantes)",
-  "501": "Maison de retraite",
-  "502": "Logement-foyer",
+  "127": "Hospitalisation à Domicile (HAD)",
+  "141": "Centre de dialyse",
+  "146": "Structure d'Alternative à la dialyse en centre",
+  // Médico-social / domicile (NOT MCO)
+  "295": "Services AEMO et AED",
+  "354": "Service de Soins Infirmiers à Domicile (SSIAD)",
+  "182": "Service d'Éducation Spéciale et de Soins à Domicile (SESSAD)",
+  // EHPAD + senior housing
+  "500": "Etablissement d'hébergement pour personnes âgées dépendantes (EHPAD)",
+  "501": "EHPA percevant des crédits d'assurance maladie",
+  "502": "EHPA ne percevant pas de crédits d'assurance maladie",
+  // Médico-social handicap
+  "183": "Institut Médico-Éducatif (I.M.E.)",
+  "186": "Institut Thérapeutique Éducatif et Pédagogique (I.T.E.P.)",
+  "188": "Etablissement pour Enfants ou Adolescents Polyhandicapés",
+  "189": "Centre Médico-Psycho-Pédagogique (C.M.P.P.)",
+  "190": "Centre Action Médico-Sociale Précoce (C.A.M.S.P.)",
+  "192": "Institut d'éducation motrice",
+  "194": "Institut pour Déficients Visuels",
+  "195": "Institut pour Déficients Auditifs",
+  "196": "Institut d'Education Sensorielle Sourd/Aveugle",
   "600": "Foyer d'hébergement pour adultes handicapés",
+  // Addictologie / accompagnement
+  "165": "Appartement de Coordination Thérapeutique (A.C.T.)",
+  "178": "Centre Accueil/Accomp. Réduc. Risq. Usag. Drogues (CAARUD)",
+  "180": "Lits Halte Soins Santé (L.H.S.S.)",
+  "197": "Centre soins accompagnement prévention addictologie (CSAPA)",
+  // Ambulatoire pluriprofessionnel
   "603": "Maison de Santé Pluriprofessionnelle (MSP)",
   "604": "Communauté Professionnelle Territoriale de Santé (CPTS)",
+  // Bio / pharma / imagerie
   "611": "Laboratoire d'analyses de biologie médicale",
   "619": "Cabinet d'imagerie médicale",
   "620": "Pharmacie d'Officine",
+  // Coopération
   "697": "Groupement de Coopération Sanitaire (GCS)",
-  "698": "Groupement de Coopération Sociale et Médico-Sociale",
+  "698": "Groupement de Coopération Sociale et Médico-Sociale (GCSMS)",
+  // Autres
+  "126": "Etablissement Thermal",
+  "132": "Etablissement de Transfusion Sanguine",
+  "142": "Dispensaire Antituberculeux",
+  "143": "Centre de Vaccination BCG",
 } as const satisfies Record<string, string>;
 
 export type FinessCategorieCode = keyof typeof FINESS_CATEGORIES;
-
-export const FINESS_HOPITAUX = [
-  "108",
-  "355",
-  "362",
-  "292",
-  "106",
-  "354",
-  "295",
-] as const satisfies readonly FinessCategorieCode[];
-
-export const FINESS_LABOS = ["611"] as const satisfies readonly FinessCategorieCode[];
-
-export const FINESS_PHARMACIES = ["620"] as const satisfies readonly FinessCategorieCode[];
-
-export const FINESS_EHPAD = ["500", "501", "502"] as const satisfies readonly FinessCategorieCode[];
-
-export const FINESS_MSP_CPTS = ["603", "604"] as const satisfies readonly FinessCategorieCode[];
 
 export function libelleCategorieFiness(code: string): string | undefined {
   return (FINESS_CATEGORIES as Record<string, string>)[code];
 }
 
-export type FinessFamille = "mco" | "ssr" | "ehpad" | "autre";
+/**
+ * FINESS family taxonomy. Drives the `familles` filter on the MCP tools.
+ *
+ * V0.2 covered only `mco | ssr | ehpad | autre`. The audit (post-v0.2.0)
+ * called for splitting the medico-social and ambulatory categories out of
+ * `mco` (which had wrongly absorbed SSIAD/AEMO via mis-labelled codes), and
+ * surfacing pharmacie / MSP-CPTS / labos / SSIAD / SESSAD-IME / addictologie
+ * as first-class filters. Each family is a precise, query-side tag — callers
+ * can compose them via the `familles` array.
+ */
+export type FinessFamille =
+  | "mco"
+  | "ssr"
+  | "ehpad"
+  | "psychiatrie"
+  | "ambulatoire"
+  | "ssiad"
+  | "had"
+  | "handicap_enfants"
+  | "handicap_adultes"
+  | "addictologie"
+  | "msp_cpts"
+  | "labo"
+  | "imagerie"
+  | "pharmacie"
+  | "autre";
 
 /**
- * Family classification of FINESS DREES category codes (see FINESS_CATEGORIES
- * above for the 3-digit code reference).
+ * Family classification of FINESS DREES category codes.
  *
- *   MCO   = Médecine-Chirurgie-Obstétrique (court séjour). Acute-care hospitals.
- *   SSR   = Soins de Suite et Réadaptation. Follow-up / rehabilitation.
- *   EHPAD = Établissements pour personnes âgées dépendantes + adjacent senior housing.
+ *   mco              = Médecine-Chirurgie-Obstétrique (acute-care hospitals).
+ *   ssr              = Soins de Suite et Réadaptation.
+ *   ehpad            = EHPAD + adjacent senior housing (EHPA).
+ *   psychiatrie      = CHS, CMP, structures psychiatriques.
+ *   ambulatoire      = HAD, dialyse, soins ambulatoires de proximité.
+ *   ssiad            = Services Soins Infirmiers à Domicile (code 354).
+ *   had              = Hospitalisation à Domicile (code 127).
+ *   handicap_enfants = IME, ITEP, SESSAD, CMPP, CAMSP, IES…
+ *   handicap_adultes = Foyer d'hébergement adultes handicapés.
+ *   addictologie     = CSAPA, CAARUD, ACT, LHSS.
+ *   msp_cpts         = Maisons de Santé Pluri / Communautés Professionnelles.
+ *   labo             = Laboratoires de biologie médicale.
+ *   imagerie         = Cabinets d'imagerie médicale.
+ *   pharmacie        = Officines.
  *
- * Anything outside these three families falls back to "autre" for V0.2 scope.
+ * `autre` is the catch-all for codes that exist in FINESS_CATEGORIES but don't
+ * map cleanly to any of the above (groupements de coopération, AEMO/AED hors
+ * scope santé, divers). Callers wanting "everything else" omit the family
+ * filter and post-filter via `result.categorie.famille`.
  *
- * The query-only subtype excludes "autre" (it would require an inverse-match
- * which is YAGNI for V0.2 — to get "autre" results, omit the family filter
- * and post-filter via `result.categorie.famille`).
- *
- * MCO deliberately diverges from FINESS_HOPITAUX on two points:
- *   - excludes 292 (CHS) and 362 (CH spé psychiatrie) — psychiatry is its own
- *     planned family, NOT acute-care MCO.
- *   - includes 365 (CLCC = Centre de Lutte Contre le Cancer), which DREES treats
- *     as acute-care oncology, but FINESS_HOPITAUX (a more "hospitals in general"
- *     bucket) does not list.
- * Do NOT replace MCO with FINESS_HOPITAUX — the lists are intentionally different.
- *
- * SSR is deliberately conservative for V0.2 — only the unambiguous "109" code.
- * Code 122 (Centre de cure médicale) overlaps DREES SSR semantically but is
- * classification-ambiguous; left in DELIBERATELY_AUTRE below.
- *
- * EHPAD reuses FINESS_EHPAD as the single source of truth — adding a code there
- * automatically extends the family.
+ * The `query` subtype excludes "autre" — this is what the MCP tools accept
+ * for the `familles` parameter.
  */
 export type FinessFamilleQuery = Exclude<FinessFamille, "autre">;
 
 export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> = {
-  mco: ["108", "355", "354", "295", "365", "106"],
+  // Acute-care: CHR/CH/CHU, military hospitals, surgical/medical units, CLCC.
+  // 354 (SSIAD) and 295 (AEMO/AED) explicitly EXCLUDED — audit B2 bis fix.
+  mco: ["101", "106", "108", "114", "115", "128", "129", "131", "355", "365"],
   ssr: ["109"],
-  ehpad: FINESS_EHPAD,
+  ehpad: ["500", "501", "502"],
+  psychiatrie: ["292", "362", "156", "161"],
+  ambulatoire: ["124", "141", "146"],
+  ssiad: ["354"],
+  had: ["127"],
+  handicap_enfants: ["182", "183", "186", "188", "189", "190", "192", "194", "195", "196"],
+  handicap_adultes: ["600"],
+  addictologie: ["165", "178", "180", "197"],
+  msp_cpts: ["603", "604"],
+  labo: ["611"],
+  imagerie: ["619"],
+  pharmacie: ["620"],
 } as const;
 
-const MCO_CODES = new Set<string>(FINESS_FAMILY_CODES.mco);
-const SSR_CODES = new Set<string>(FINESS_FAMILY_CODES.ssr);
-const EHPAD_CODES = new Set<string>(FINESS_FAMILY_CODES.ehpad);
+const FAMILY_BY_CODE: ReadonlyMap<string, FinessFamilleQuery> = new Map<string, FinessFamilleQuery>(
+  (Object.keys(FINESS_FAMILY_CODES) as FinessFamilleQuery[]).flatMap((fam) =>
+    FINESS_FAMILY_CODES[fam].map((code) => [code, fam] as const),
+  ),
+);
 
 /**
- * Codes present in FINESS_CATEGORIES that are deliberately classified as "autre"
- * for V0.2 scope. Powers the invariant test that fails when a new code is added
- * to FINESS_CATEGORIES without an explicit family decision — preventing silent
- * classification regressions on DREES nomenclature updates.
+ * Codes intentionally left in "autre" — checked by the invariant test so a
+ * new FINESS_CATEGORIES entry without a family decision fails CI loudly.
  *
- * @internal Exported solely for the invariant test in finess-categories.test.ts.
- *           Do not import from runtime code — couple to `finessFamille()` instead.
+ * @internal Test-only export. Runtime code uses `finessFamille()`.
  */
 export const DELIBERATELY_AUTRE = new Set<string>([
-  "292", // CHS                      → psychiatrie (out of V0.2 scope)
-  "362", // CH spé psychiatrie       → psychiatrie
-  "120", // Hôpital de jour          → ambiguous (MCO vs autre)
-  "122", // Centre de cure médicale  → DREES classification ambiguous (cure ≈ SSR but not always)
-  "124", // Centre de Santé          → ambulatoire (planned family)
-  "603", // MSP                      → ambulatoire (re-exported as FINESS_MSP_CPTS)
-  "604", // CPTS                     → ambulatoire
-  "611", // Laboratoire              → labo (re-exported as FINESS_LABOS, planned family)
-  "619", // Cabinet d'imagerie       → imagerie (planned family)
-  "620", // Pharmacie                → pharmacie (re-exported as FINESS_PHARMACIES)
-  "697", // GCS                      → groupement de coopération
-  "698", // GCSMS                    → groupement
-  "600", // Foyer handicapés         → médico-social handicap (≠ EHPAD)
+  "122", // Soins Obstétriques Chir.-Gyn. → ambiguous, often part of MCO unit
+  "126", // Etablissement Thermal
+  "132", // Transfusion Sanguine
+  "142", // Dispensaire Antituberculeux
+  "143", // Vaccination BCG
+  "295", // Services AEMO et AED → protection enfance, hors scope santé
+  "697", // GCS — groupement de coopération
+  "698", // GCSMS — groupement
 ]);
 
 /**
@@ -131,18 +183,34 @@ export const DELIBERATELY_AUTRE = new Set<string>([
  *
  * Inputs are normalized first: `null`, `undefined`, empty string, and
  * whitespace-only strings all resolve to "autre". Non-empty inputs are trimmed
- * before matching against the family Sets, tolerating whitespace artefacts
- * occasionally present in DREES dumps (e.g. `" 108 "` → "mco").
- *
- * Note: empty/whitespace inputs are upstream-parsing-bug suspects (column
- * shift, header mismatch) but this classifier intentionally has no telemetry
- * hook — surfacing the empty-rate is the ingest layer's responsibility.
+ * before matching, tolerating whitespace artefacts occasionally present in
+ * DREES dumps (e.g. `" 108 "` → "mco").
  */
 export function finessFamille(code: string | null | undefined): FinessFamille {
   const trimmed = code?.trim();
   if (!trimmed) return "autre";
-  if (MCO_CODES.has(trimmed)) return "mco";
-  if (SSR_CODES.has(trimmed)) return "ssr";
-  if (EHPAD_CODES.has(trimmed)) return "ehpad";
-  return "autre";
+  return FAMILY_BY_CODE.get(trimmed) ?? "autre";
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Stable convenience exports — used by lib consumers, kept for back-compat.
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * All hospital-grade categories (MCO acute-care + psychiatry).
+ *
+ * NOTE: the v0.2.0 version of this constant included 354 and 295, which
+ * are actually SSIAD (medico-social, home-care) and AEMO/AED (child
+ * protection) — NOT hospitals. Those have been removed. If a downstream
+ * caller depended on the old set for lab/SSIAD lookups, switch to the
+ * dedicated `FINESS_FAMILY_CODES.ssiad` / `FINESS_FAMILY_CODES.labo`.
+ */
+export const FINESS_HOPITAUX = [
+  ...FINESS_FAMILY_CODES.mco,
+  ...FINESS_FAMILY_CODES.psychiatrie,
+] as const;
+
+export const FINESS_LABOS = FINESS_FAMILY_CODES.labo;
+export const FINESS_PHARMACIES = FINESS_FAMILY_CODES.pharmacie;
+export const FINESS_EHPAD = FINESS_FAMILY_CODES.ehpad;
+export const FINESS_MSP_CPTS = FINESS_FAMILY_CODES.msp_cpts;
