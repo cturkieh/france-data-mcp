@@ -120,6 +120,24 @@ async function main(): Promise<void> {
         `Row count ${stats.inserted} above maximum ${MAX_ROWS} — suspected format change`,
       );
     }
+
+    // 4b. APPLY GEOM (Lambert 93 → WGS84 transform server-side)
+    // The CSV uses coordxet/coordyet (EPSG:2154) which were stored in `raw`.
+    // ST_Transform converts them to WGS84 and writes to the geom column.
+    const { data: geomStats, error: geomErr } = await supabase.rpc("ingest_apply_finess_geom");
+    if (geomErr) {
+      throw new IngestError("validate", `Failed to apply geom transform: ${geomErr.message}`);
+    }
+    const updated = (geomStats?.[0]?.updated_rows as number | undefined) ?? 0;
+    const total = (geomStats?.[0]?.total_rows as number | undefined) ?? stats.inserted;
+    console.log(`[finess] geom transform: ${updated}/${total} rows geocoded`);
+    if (updated < total * 0.8) {
+      throw new IngestError(
+        "validate",
+        `Only ${updated}/${total} rows have a valid geom (< 80% threshold) — coordxet/coordyet likely missing or malformed`,
+      );
+    }
+
     // Surface upstream-parsing-bug suspects: rows dropped due to missing
     // required fields. Threshold of 1% of inserted rows is the same alarm
     // bar discussed in the V0.2 final review (SFH-5).
