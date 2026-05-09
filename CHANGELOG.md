@@ -21,7 +21,18 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   matched FINESS, geo coverage 74,13 %) mais le swap atomic a fail au
   timeout 60s default — DDL (RENAME table + 14 RENAME INDEX en cascade) sur
   2,23 M rows avec geog GIST gigantesque dépasse le timeout. Scope limité
-  à la fonction (les autres RPCs gardent 60s). (+77 % de couverture
+  à la fonction (les autres RPCs gardent 60s).
+- `rpps_par_specialite_dept` perf fix (mig
+  `20260510T000000_rpps_par_specialite_dept_perf_fix.sql`). 3 facteurs
+  cumulés diagnostiqués au smoke test des 17 tools MCP : (1) mismatch type
+  CHAR(3) vs param TEXT cassait l'usage de l'index B-tree dept (seq scan
+  2,2 M rows) → fix var locale typée `CHAR(3)` ; (2) helper
+  `rpps_categorie_match($codes)` empêchait l'évaluation au planning
+  (`cardinality($codes) = 0` runtime) → fix 2 branches plpgsql avec filtre
+  catégorie inliné comme literal ; (3) plan generic plpgsql STABLE refuse
+  d'utiliser l'index optimal même avec les fixes 1 et 2 → mitigation
+  pragmatique `statement_timeout = '15s'` scope local. Tuning fin au
+  backlog (MV par dept ou réécriture exec_plan_cache). (+77 % de couverture
 ingérée vs V0.5.0). Le 1er run V0.5.0 (run GH `25607546400`) avait skippé 43 %
 des PS car le parser exigeait une adresse de structure matchée sur l'index
 commune INSEE — exactement la valeur ajoutée du RPPS vs Ameli (étudiants,
