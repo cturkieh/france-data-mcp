@@ -61,8 +61,18 @@ LANGUAGE plpgsql STABLE
 SET search_path = public, extensions
 AS $$
 DECLARE
-  v_dept CHAR(3) := p_departement::CHAR(3);
+  v_dept CHAR(3);
 BEGIN
+  -- Defense en profondeur : `p_departement::CHAR(3)` truncate silencieusement
+  -- toute valeur > 3 chars (ex: "0758" → "075") et ferait remonter des
+  -- résultats du dept 075. Le caller TS valide déjà via `assertValidDept`,
+  -- mais un caller direct PostgREST passerait outre — on raise loud côté SQL.
+  IF length(p_departement) NOT IN (2, 3) THEN
+    RAISE EXCEPTION 'p_departement must be 2 or 3 chars (got: %)', p_departement
+      USING ERRCODE = '22023';
+  END IF;
+  v_dept := p_departement::CHAR(3);
+
   IF cardinality(p_categorie_codes) = 0 THEN
     RETURN QUERY
     SELECT
