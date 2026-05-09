@@ -8,13 +8,20 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 **Hotfix RPPS — récupère les ~970 K PS skippés par V0.5.0**
 
-### Corrigé après le 1er run V0.5.1
+### Corrigé après les 1ers runs V0.5.1
 - Retry schema-cache miss étendu à `PGRST204` (column not found) en plus de
   `PGRST205` (table not found). Le 1er run V0.5.1 (run GH 25611048725) a fail
   à 33s sur la colonne `geom_source` fraîchement ajoutée — PostgREST n'avait
   pas encore propagé le `NOTIFY 'reload schema'` au moment du 1er INSERT. Les
   2 codes signalent le même phénomène, le retry exponentiel les couvre tous
-  les deux désormais. (+77 % de couverture
+  les deux désormais.
+- `statement_timeout` étendu à 10 min sur `ingest_atomic_swap` (mig
+  `20260509T220000_atomic_swap_extended_timeout.sql`). Le 2e run (GH
+  25611148383) a tout réussi côté pipeline (2,23 M rows ingérées, 391 K
+  matched FINESS, geo coverage 74,13 %) mais le swap atomic a fail au
+  timeout 60s default — DDL (RENAME table + 14 RENAME INDEX en cascade) sur
+  2,23 M rows avec geog GIST gigantesque dépasse le timeout. Scope limité
+  à la fonction (les autres RPCs gardent 60s). (+77 % de couverture
 ingérée vs V0.5.0). Le 1er run V0.5.0 (run GH `25607546400`) avait skippé 43 %
 des PS car le parser exigeait une adresse de structure matchée sur l'index
 commune INSEE — exactement la valeur ajoutée du RPPS vs Ameli (étudiants,
