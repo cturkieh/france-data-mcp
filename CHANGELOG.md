@@ -6,7 +6,15 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [0.5.1] — 2026-05-09
 
-**Hotfix RPPS — récupère les ~970 K PS skippés par V0.5.0** (+77 % de couverture
+**Hotfix RPPS — récupère les ~970 K PS skippés par V0.5.0**
+
+### Corrigé après le 1er run V0.5.1
+- Retry schema-cache miss étendu à `PGRST204` (column not found) en plus de
+  `PGRST205` (table not found). Le 1er run V0.5.1 (run GH 25611048725) a fail
+  à 33s sur la colonne `geom_source` fraîchement ajoutée — PostgREST n'avait
+  pas encore propagé le `NOTIFY 'reload schema'` au moment du 1er INSERT. Les
+  2 codes signalent le même phénomène, le retry exponentiel les couvre tous
+  les deux désormais. (+77 % de couverture
 ingérée vs V0.5.0). Le 1er run V0.5.0 (run GH `25607546400`) avait skippé 43 %
 des PS car le parser exigeait une adresse de structure matchée sur l'index
 commune INSEE — exactement la valeur ajoutée du RPPS vs Ameli (étudiants,
