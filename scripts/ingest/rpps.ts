@@ -437,7 +437,12 @@ async function streamCsvToStaging(
   let skippedNoIdentity = 0;
   let firstBatch = true;
 
-  const isSchemaCacheMiss = (err: { code?: string } | null): boolean => err?.code === "PGRST205";
+  // PGRST204 = column not found in schema cache (ex: `geom_source` ajouté
+  // récemment), PGRST205 = table not found. Les deux signalent le même
+  // phénomène — PostgREST n'a pas encore propagé le NOTIFY 'reload schema'
+  // posté par la RPC SECURITY DEFINER. Retry exponentiel couvre les 2.
+  const isSchemaCacheMiss = (err: { code?: string } | null): boolean =>
+    err?.code === "PGRST204" || err?.code === "PGRST205";
 
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
