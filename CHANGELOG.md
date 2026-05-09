@@ -4,6 +4,39 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.4.6] — 2026-05-09
+
+Patch post-test live V0.4.5 (claude.ai a relancé les 13 tools, 7/10 ✅,
+1 ❌ B3, 2 ⚠️ contrat).
+
+### B3 — UPDATE SQL one-shot sur les données prod existantes
+
+Le `collapseWhitespace` ajouté en V0.4.4 vit dans le parser d'ingestion ;
+les ~93K rows déjà en table `finess` (ingérées avant V0.4.4) gardaient
+leurs doubles espaces. Audit : **2493 rows polluées** sur 93403 (2.7%) —
+2201 `raison_sociale` + 301 `voie`. UPDATE appliqué :
+
+```sql
+UPDATE finess
+SET raison_sociale = regexp_replace(trim(raison_sociale), '\s+', ' ', 'g'),
+    ville = regexp_replace(trim(ville), '\s+', ' ', 'g'),
+    voie = regexp_replace(trim(voie), '\s+', ' ', 'g')
+WHERE raison_sociale ~ '\s{2,}' OR ville ~ '\s{2,}' OR voie ~ '\s{2,}';
+```
+
+Vérification post-UPDATE : 0 row polluée, BIO ARD'AISNE 4 sites tous propres
+(`"LBM BIO ARD'AISNE"`). Idempotent (regex ne match plus après application),
+appliqué en prod via MCP Supabase. Le fix V0.4.4 côté parser garantit que
+les futures ingestions n'ont plus le problème.
+
+### `siren_source: "dinum"` par défaut sur retour DINUM
+
+Avant V0.4.6, le champ `siren_source` n'était émis que sur le path fallback
+INSEE V3 (`"insee_v3"`). Le caller MCP ne pouvait pas distinguer "DINUM a
+répondu" de "champ pas implémenté" → retour ambigu. Maintenant le contrat
+est cohérent : **toujours présent**, valeur explicite (`"dinum"` ou
+`"insee_v3"`).
+
 ## [0.4.5] — 2026-05-09
 
 Correctif d'auth INSEE SIRENE découvert post-merge V0.4.4 : le portail INSEE

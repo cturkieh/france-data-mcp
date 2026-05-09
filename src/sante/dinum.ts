@@ -567,6 +567,9 @@ function toEntreprise(api: ApiEntreprise): Entreprise {
     dirigeants: (api.dirigeants ?? []).map(toDirigeant),
     etablissements,
     actif: (api.etat_administratif ?? "A") === "A",
+    // Toujours présent côté retour DINUM pour cohérence du contrat caller :
+    // distingue explicitement "DINUM a répondu" du fallback "insee_v3".
+    siren_source: "dinum",
     ...pickDefined({
       siretSiege: api.siege?.siret,
       naf: api.activite_principale,

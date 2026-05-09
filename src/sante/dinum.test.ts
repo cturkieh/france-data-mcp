@@ -252,6 +252,9 @@ describe("getEntrepriseBySiren", () => {
     if (e.found) {
       expect(e.siren).toBe("787120435");
       expect(e.nomComplet).toBe("RENAULT");
+      // siren_source: "dinum" toujours présent sur retour DINUM pour cohérence
+      // du contrat caller (distingue explicitement DINUM du fallback insee_v3).
+      expect(e.siren_source).toBe("dinum");
     }
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
