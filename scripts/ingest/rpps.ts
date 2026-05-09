@@ -331,7 +331,13 @@ async function streamCsvToStaging(
       delimiter: "|",
       columns: true,
       skip_empty_lines: true,
-      relax_quotes: true,
+      // Désactive complètement le mode RFC 4180 — le CSV ANS est pipe-delimited
+      // pur où `"` n'est pas un caractère de quoting structurel mais du contenu
+      // libre (apostrophes typographiques, transcriptions, etc.). Sans ça, le
+      // parser échoue sur `CSV_NON_TRIMABLE_CHAR_AFTER_CLOSING_QUOTE` (1er run
+      // 2026-05-09 line 10775, colonne "Complément destinataire").
+      quote: false,
+      relax_column_count: true,
       trim: true,
       bom: true,
     }),
