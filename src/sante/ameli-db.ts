@@ -11,9 +11,9 @@
 
 import { metersToKm } from "../core/numbers.js";
 import {
+  type QueryMetadata,
   ameliDeptMetadata,
   ameliRadiusMetadata,
-  type QueryMetadata,
 } from "../core/query-metadata.js";
 import { getAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";

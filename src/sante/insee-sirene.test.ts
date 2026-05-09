@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  type ApiInseePeriode,
-  getInseeApiKey,
-  lookupSirenViaInsee,
-} from "./insee-sirene.js";
+import { type ApiInseePeriode, getInseeApiKey, lookupSirenViaInsee } from "./insee-sirene.js";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -234,7 +230,11 @@ describe("lookupSirenViaInsee", () => {
         uniteLegale: {
           siren: "787120435",
           periodesUniteLegale: [
-            { dateFin: "2023-12-31", denominationUniteLegale: "ANCIEN", etatAdministratifUniteLegale: "A" },
+            {
+              dateFin: "2023-12-31",
+              denominationUniteLegale: "ANCIEN",
+              etatAdministratifUniteLegale: "A",
+            },
             { dateFin: null, denominationUniteLegale: "ACTUEL", etatAdministratifUniteLegale: "A" },
           ],
         },
@@ -253,7 +253,11 @@ describe("lookupSirenViaInsee", () => {
         uniteLegale: {
           siren: "999000111",
           periodesUniteLegale: [
-            { dateFin: "2020-01-01", denominationUniteLegale: "CESSÉE", etatAdministratifUniteLegale: "C" },
+            {
+              dateFin: "2020-01-01",
+              denominationUniteLegale: "CESSÉE",
+              etatAdministratifUniteLegale: "C",
+            },
           ],
         },
       }),

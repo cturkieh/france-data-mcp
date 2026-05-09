@@ -1,13 +1,9 @@
-import {
-  type LookupResult,
-  lookupFound,
-  lookupNotFound,
-} from "../core/lookup-result.js";
+import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { metersToKm } from "../core/numbers.js";
 import {
+  type QueryMetadata,
   finessByCategorieMetadata,
   finessRadiusMetadata,
-  type QueryMetadata,
 } from "../core/query-metadata.js";
 import { getAnonClient } from "../storage/supabase.js";
 import {
@@ -142,9 +138,7 @@ export async function getFinessByCategorie(input: ByCategorieInput): Promise<Fin
  * Pattern aligné sur `getEntrepriseBySiren` et `getCommuneByCode`
  * (cf. `src/core/lookup-result.ts`).
  */
-export async function getFinessByNumFiness(
-  numFiness: string,
-): Promise<LookupResult<FinessResult>> {
+export async function getFinessByNumFiness(numFiness: string): Promise<LookupResult<FinessResult>> {
   if (!/^\d{9}$/.test(numFiness)) {
     throw new Error(`[france-data-mcp] num_finess must be 9 digits, got "${numFiness}"`);
   }

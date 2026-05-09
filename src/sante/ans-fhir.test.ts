@@ -102,7 +102,7 @@ describe("lookupPractitionerByRpps", () => {
     expect(String(url)).toContain("810009647990");
     const headers = (init?.headers ?? {}) as Record<string, string>;
     expect(headers["ESANTE-API-KEY"]).toBe("test-key-uuid");
-    expect(headers["Accept"]).toBe("application/fhir+json");
+    expect(headers.Accept).toBe("application/fhir+json");
   });
 
   it("retourne null quand le Bundle est vide", async () => {

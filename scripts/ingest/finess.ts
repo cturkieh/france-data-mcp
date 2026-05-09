@@ -557,8 +557,7 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   // Drift signal V0.4.3 : présent dans le CSV mais rejeté par la regex stricte.
   // Catche les column shifts 5-15% que MIN_GEOM_COVERAGE=0.8 laisse passer.
   const coordPresentButUnparsed =
-    (coordxRaw !== null && coordxParsed === null) ||
-    (coordyRaw !== null && coordyParsed === null);
+    (coordxRaw !== null && coordxParsed === null) || (coordyRaw !== null && coordyParsed === null);
 
   // DREES émet parfois des doubles espaces dans `rs` ("LBM  BIO ARD'AISNE"),
   // ce qui crée des doublons logiques côté equality / search_text. getNonEmpty

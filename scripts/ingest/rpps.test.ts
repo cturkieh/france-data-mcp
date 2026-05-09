@@ -122,10 +122,7 @@ describe("parseRppsRecord", () => {
   });
 
   it("skip no_locality quand CP ET ville vides", () => {
-    const result = parseRppsRecord(
-      row({ [COL.CODE_POSTAL]: "", [COL.LIBELLE_COMMUNE]: "" }),
-      idx,
-    );
+    const result = parseRppsRecord(row({ [COL.CODE_POSTAL]: "", [COL.LIBELLE_COMMUNE]: "" }), idx);
     expect(result.skipReason).toBe("no_locality");
   });
 

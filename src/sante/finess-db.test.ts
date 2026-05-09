@@ -8,11 +8,7 @@ vi.mock("../storage/supabase.js", () => ({
   getAnonClient: () => ({ rpc: mockRpc }),
 }));
 
-import {
-  getFinessByCategorie,
-  getFinessByNumFiness,
-  getFinessInRadius,
-} from "./finess-db.js";
+import { getFinessByCategorie, getFinessByNumFiness, getFinessInRadius } from "./finess-db.js";
 
 // Pure unit tests for the input-validation guards. No DB / Supabase Local
 // needed — the RangeError throws before any RPC call. Locks the SFH-7
@@ -180,7 +176,10 @@ describe("getFinessByNumFiness LookupResult (V0.4.3 migration)", () => {
       email: null,
       geom: null,
     };
-    mockRpc.mockResolvedValue({ data: [row, { ...row, raison_sociale: "DUPLICATE B" }], error: null });
+    mockRpc.mockResolvedValue({
+      data: [row, { ...row, raison_sociale: "DUPLICATE B" }],
+      error: null,
+    });
     const out = await getFinessByNumFiness("080010101");
     expect(out.found).toBe(true);
     if (out.found) {

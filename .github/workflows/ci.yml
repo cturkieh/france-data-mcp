@@ -37,6 +37,7 @@ jobs:
         run: pnpm test:unit
 
       - name: Setup Supabase CLI
+        id: setup-supabase
         uses: supabase/setup-cli@v1
         with:
           version: latest
@@ -57,5 +58,8 @@ jobs:
         run: pnpm test:integration
 
       - name: Stop Supabase
-        if: always()
+        # Ne stoppe que si la CLI a bien été installée. Sans ce guard, un lint
+        # ou typecheck failed plus haut skip Setup Supabase CLI mais le `Stop`
+        # avec `if: always()` essaie quand même → `supabase: command not found`.
+        if: always() && steps.setup-supabase.outcome == 'success'
         run: supabase stop

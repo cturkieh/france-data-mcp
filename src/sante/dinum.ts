@@ -17,11 +17,7 @@
 
 import { parseCoordinates } from "../core/coords.js";
 import { fetchJson } from "../core/http.js";
-import {
-  type LookupResult,
-  lookupFound,
-  lookupNotFound,
-} from "../core/lookup-result.js";
+import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
@@ -536,11 +532,7 @@ function toEntreprise(api: ApiEntreprise): Entreprise {
         // signal "non déclaré DINUM/RNE" (audit SELARL pharma 2026-05-09). Si
         // ca est undefined OU resultatNet est <= 0/undefined, on considère
         // l'absence ou le 0 comme fiable (entreprise dormante plausible).
-        const caFiable = !(
-          fin.ca === 0 &&
-          fin.resultat_net !== undefined &&
-          fin.resultat_net > 0
-        );
+        const caFiable = !(fin.ca === 0 && fin.resultat_net !== undefined && fin.resultat_net > 0);
         const f: Finance = { annee, caFiable };
         if (fin.ca !== undefined) f.ca = fin.ca;
         if (fin.resultat_net !== undefined) f.resultatNet = fin.resultat_net;

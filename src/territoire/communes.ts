@@ -8,11 +8,7 @@
  */
 
 import { fetchJson } from "../core/http.js";
-import {
-  type LookupResult,
-  lookupFound,
-  lookupNotFound,
-} from "../core/lookup-result.js";
+import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";

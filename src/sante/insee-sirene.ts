@@ -130,9 +130,7 @@ export async function lookupSirenViaInsee(siren: string): Promise<Entreprise | n
 
   const ul = data.uniteLegale;
   if (!ul) {
-    console.warn(
-      `[france-data-mcp] INSEE SIRENE response missing uniteLegale for siren=${siren}`,
-    );
+    console.warn(`[france-data-mcp] INSEE SIRENE response missing uniteLegale for siren=${siren}`);
     return null;
   }
 

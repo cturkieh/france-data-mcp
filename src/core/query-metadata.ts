@@ -87,11 +87,9 @@ export const finessRadiusMetadata = (): QueryMetadata =>
 export const finessByCategorieMetadata = (): QueryMetadata =>
   buildMetadata("lambert93_natif_finess", false);
 
-export const rppsRadiusMetadata = (): QueryMetadata =>
-  buildMetadata("centroide_commune_ans", true);
+export const rppsRadiusMetadata = (): QueryMetadata => buildMetadata("centroide_commune_ans", true);
 
-export const rppsDeptMetadata = (): QueryMetadata =>
-  buildMetadata("centroide_commune_ans", false);
+export const rppsDeptMetadata = (): QueryMetadata => buildMetadata("centroide_commune_ans", false);
 
 export const rppsEtablissementMetadata = (): QueryMetadata =>
   buildMetadata("structure_finess", false);

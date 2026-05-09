@@ -196,10 +196,7 @@ async function main(): Promise<void> {
     const supabase = getUntypedServiceClient("rpps");
     const { error: stagingErr } = await supabase.rpc("ingest_create_rpps_staging");
     if (stagingErr) {
-      throw new IngestError(
-        "copy",
-        `Failed to create rpps_staging table: ${stagingErr.message}`,
-      );
+      throw new IngestError("copy", `Failed to create rpps_staging table: ${stagingErr.message}`);
     }
     // Pas de sleep avant le 1er INSERT : `flush()` retry sur PGRST205 (schema
     // cache miss) avec backoff exponentiel — couvre déjà le cas. Plus le
@@ -235,7 +232,7 @@ async function main(): Promise<void> {
     if (denominator === 0) {
       throw new IngestError(
         "validate",
-        `Pipeline produced zero parser events. Refuse to swap an empty table into prod.`,
+        "Pipeline produced zero parser events. Refuse to swap an empty table into prod.",
       );
     }
     const rateOf = (failures: number) => failures / denominator;
@@ -439,10 +436,7 @@ type ParsedRppsRow =
  * d'identité, locality unmatched, etc.) sont retournés comme skipReason
  * pour que le caller threshold-aborte le run global si trop fréquents.
  */
-export function parseRppsRecord(
-  rec: Record<string, string>,
-  index: CommuneIndex,
-): ParsedRppsRow {
+export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex): ParsedRppsRow {
   const rppsId = getNonEmpty(rec, COL.RPPS_ID);
   const nom = getNonEmpty(rec, COL.NOM) ?? "";
   const prenom = getNonEmpty(rec, COL.PRENOM) ?? "";
