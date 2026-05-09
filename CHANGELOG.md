@@ -32,7 +32,11 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   catégorie inliné comme literal ; (3) plan generic plpgsql STABLE refuse
   d'utiliser l'index optimal même avec les fixes 1 et 2 → mitigation
   pragmatique `statement_timeout = '15s'` scope local. Tuning fin au
-  backlog (MV par dept ou réécriture exec_plan_cache). (+77 % de couverture
+  backlog (MV par dept ou réécriture exec_plan_cache).
+- Garde anti-truncation côté SQL sur `p_departement` : `::CHAR(3)` truncate
+  silencieusement "0758" → "075". `RAISE EXCEPTION` si `length` ∉ {2, 3} pour
+  defense en profondeur (le caller TS valide déjà via `assertValidDept` mais
+  un caller direct PostgREST passerait outre). (+77 % de couverture
 ingérée vs V0.5.0). Le 1er run V0.5.0 (run GH `25607546400`) avait skippé 43 %
 des PS car le parser exigeait une adresse de structure matchée sur l'index
 commune INSEE — exactement la valeur ajoutée du RPPS vs Ameli (étudiants,
