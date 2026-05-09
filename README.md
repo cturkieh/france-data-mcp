@@ -2,9 +2,9 @@
 
 > Boîte à outils pour interroger les données publiques françaises depuis Claude, Cursor et toute application TypeScript. Un serveur MCP prêt à brancher + une bibliothèque npm.
 
-[![npm](https://img.shields.io/npm/v/france-data-mcp.svg)](https://www.npmjs.com/package/france-data-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
+[![MCP](https://img.shields.io/badge/MCP-live-success)](https://france-data-mcp.vercel.app/mcp)
 
 🇫🇷 Documentation principale en français. [English version →](README.en.md)
 
@@ -45,15 +45,31 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 
 ---
 
-## Outils MCP exposés
+## Outils MCP exposés (13 tools — V0.4.6)
 
-### V0.3 — Health establishments (FINESS)
+### 🗺️ Territoire (4 tools)
 
-| Tool                                  | Description                                                |
-|---------------------------------------|------------------------------------------------------------|
-| `etablissements_finess_in_radius`     | Find FINESS establishments within a radius (filter by family) |
-| `etablissements_finess_by_categorie`  | List FINESS establishments by family + optional dept/commune  |
-| `etablissement_by_finess`             | Fetch a single establishment by its 9-digit FINESS number  |
+| Tool | Description | Source |
+|---|---|---|
+| `autocomplete_commune` | Autocomplétion de commune par nom / CP / code INSEE | geo.api.gouv.fr |
+| `get_commune_by_code` | Fiche complète d'une commune par code INSEE (5 chars) | geo.api.gouv.fr |
+| `geocode_adresse` | Adresse → coordonnées GPS (avec score de confiance) | IGN Géoplateforme |
+| `reverse_geocode` | Coordonnées GPS → adresse postale + commune | IGN Géoplateforme |
+
+### 🏢 Entreprises (2 tools)
+
+| Tool | Description | Source |
+|---|---|---|
+| `entreprises_in_radius` | Recherche d'entreprises dans un rayon par code(s) NAF | DINUM Recherche Entreprises (+ fallback Haversine côté client) |
+| `entreprise_by_siren` | Fiche complète d'une entreprise par SIREN (sites, finances, dirigeants) | DINUM (+ fallback INSEE SIRENE V3.11 pour les SIREN diffusion partielle) |
+
+### 🏥 Établissements de santé — FINESS (3 tools)
+
+| Tool | Description |
+|---|---|
+| `etablissements_finess_in_radius` | Établissements FINESS dans un rayon, filtrage par famille |
+| `etablissements_finess_by_categorie` | Liste FINESS par famille (+ département / commune optionnels) |
+| `etablissement_by_finess` | Fiche d'un établissement par numéro FINESS 9 chiffres |
 
 **24 familles** couvrant ~92 % du volume FINESS (95 K rows) :
 
@@ -82,12 +98,14 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 
 **Métadonnées de réponse (v0.4.3)** : les retours `etablissements_finess_in_radius` / `etablissements_finess_by_categorie` exposent un champ `query_metadata` documentant la précision géo (`lambert93_natif_finess`), le type de distance (`haversine_postgis`) et les notes actionnables (latence DREES, distance non-routière). À lire pour ne pas surinterpréter les résultats.
 
-### V0.4 — Health professionals (Annuaire Santé Ameli)
+### 👨‍⚕️ Professionnels de santé — Annuaire Ameli (4 tools)
 
-| Tool                                  | Description                                                |
-|---------------------------------------|------------------------------------------------------------|
-| `professionnels_in_radius`            | Search PS within a radius, filter by spécialité / type PS  |
-| `professionnels_par_specialite_dept`  | List PS by département with optional pagination (`offset`) |
+| Tool | Description |
+|---|---|
+| `professionnels_in_radius` | Recherche de PS dans un rayon, filtrage par spécialité / type PS |
+| `professionnels_par_specialite_dept` | Liste de PS par département (pagination via `offset`) |
+| `lister_specialites_ameli` | Nomenclature live des spécialités (avec `libelle_clarifie` quand un libellé est partagé entre plusieurs codes) |
+| `lister_types_ps_ameli` | Nomenclature live des types de PS (médecin, chirurgien-dentiste, auxiliaires médicaux) |
 
 **⚠️ Périmètre — à lire avant de construire un comptage**
 
@@ -118,38 +136,33 @@ Pour un comptage tous statuts (libéraux + salariés + retraités inscrits), il 
 
 ## Installation
 
-### En tant que serveur MCP (le plus simple)
+### En tant que serveur MCP (recommandé)
 
-Ajoute ce serveur à Claude Desktop, claude.ai, Cursor, Claude Code, ou tout client MCP compatible :
+Le serveur est déployé en production sur Vercel et s'ajoute en 3 clics à n'importe quel client MCP compatible (claude.ai, Claude Desktop, Cursor, Claude Code) :
 
-**URL publique hébergée** : `https://france-data-mcp.vercel.app/mcp` _(déploiement à venir)_
+**URL publique** : `https://france-data-mcp.vercel.app/mcp`
 
-Voir [docs/installation-claude.md](docs/installation-claude.md) pour le pas-à-pas (3 clics).
+Voir [docs/installation-claude.md](docs/installation-claude.md) pour le pas-à-pas client par client.
 
-### En tant que bibliothèque TypeScript
+### En tant que bibliothèque TypeScript (à venir sur npm)
 
-```bash
-npm install france-data-mcp
-```
+Le code est utilisable directement depuis le repo (`pnpm install` puis `pnpm build`). La publication sur npm interviendra quand un cas d'usage hors-MCP en aura besoin — pour l'instant, le serveur MCP couvre 99 % des cas. Si tu en as besoin, ouvre une issue.
+
+Exemple d'usage en TypeScript :
 
 ```typescript
 import { searchCommunes, geocode } from "france-data-mcp/territoire";
 import { searchProfessionnels, searchEtablissements } from "france-data-mcp/sante";
 
-// Trouver une commune
 const villes = await searchCommunes({ nom: "Charleville", limit: 5 });
-
-// Géocoder une adresse
 const point = await geocode("64 Cours Aristide Briand 08000 Charleville-Mézières");
 
-// Tous les médecins généralistes dans 5 km autour de ce point
 const mg = await searchProfessionnels({
   specialite: "Médecin généraliste",
   center: point,
   radiusKm: 5,
 });
 
-// Tous les EHPAD dans la même zone
 const ehpad = await searchEtablissements({
   categorie: "EHPAD",
   center: point,
@@ -161,16 +174,24 @@ const ehpad = await searchEtablissements({
 
 ## État du projet
 
-🚧 **Version 0.1.0 — en développement actif.** Le repo est public dès le premier commit pour suivre la progression. Les premières fonctions stables seront disponibles à partir de la v0.2.
+✅ **Version 0.4.6 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 13 tools. ~95 K établissements FINESS et ~462 K professionnels Ameli ingérés et géocodés en WGS84. 332 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo).
 
-Roadmap rapide :
+### Fait
 
-- [x] Setup monorepo, TypeScript, build tsup
-- [ ] `territoire` : geo.api.gouv + IGN géocodage
-- [ ] `sante` : FINESS + Annuaire Santé Ameli + DINUM
-- [ ] Serveur MCP HTTP déployé sur Vercel
-- [ ] Documentation complète + exemple Charleville reproductible
-- [ ] Publication npm v0.2 + annonce communauté
+- [x] `territoire` — geo.api.gouv + IGN géocodage (4 tools)
+- [x] `entreprises` — DINUM Recherche Entreprises + fallback INSEE SIRENE V3.11 (2 tools)
+- [x] `FINESS` — ingestion data.gouv → Supabase + PostGIS, 24 familles, atomic swap, canary post-swap (3 tools)
+- [x] `Annuaire Santé Ameli` — pipeline weekly, géocodage centroïde commune, libellés data-driven (4 tools)
+- [x] Pipeline ingestion durci — SHA256 short-circuit, threshold parsedCoordRejected, atomic swap reversible
+- [x] Serveur MCP HTTP déployé sur Vercel
+- [x] Documentation Charleville-Mézières reproductible (`examples/charleville.ts`)
+
+### Roadmap
+
+- [ ] **V0.5 phase 2 — RPPS / Annuaire Santé ANS** (~2,23 M PS, libéraux + salariés, ID national stable, lien PS ↔ structure d'exercice). Architecture : ingestion CSV mensuel data.gouv dans Supabase + fallback live FHIR ANS via clé API (`gateway.api.esante.gouv.fr/fhir/v2`, libre depuis avril 2025).
+- [ ] **V0.5 phase 3 — INSEE Melodi** (séries macro communales sans clé, dénominateur population pour les densités).
+- [ ] **V0.6 — Tools composites santé** (`panorama_sante_territoire`, `densite_PS_par_specialite_commune`, `etablissements_avec_PS`, etc.) : combinaisons FINESS + Ameli + RPPS + Melodi en un seul appel pour faciliter la vie aux LLM.
+- [ ] **V0.7+** — INSEE IRIS (démographie infra-communale), CNAM dept-level, DVF immobilier.
 
 ---
 

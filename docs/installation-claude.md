@@ -2,7 +2,7 @@
 
 Ce guide explique comment ajouter le serveur MCP `france-data-mcp` à différents clients Claude.
 
-> ⚠️ Le serveur public hébergé n'est pas encore déployé. Cette documentation est anticipée. Section _self-hosting_ disponible dès maintenant.
+> ✅ Le serveur public est déployé et opérationnel sur `https://france-data-mcp.vercel.app/mcp`. Tu peux le brancher directement, ou héberger ton propre fork (section _self-hosting_ en bas de page).
 
 ---
 
@@ -19,7 +19,7 @@ Ce guide explique comment ajouter le serveur MCP `france-data-mcp` à différent
 3. Bouton **Add custom connector**
 4. Renseigne :
    - **Name** : `France Data` (ou ce que tu veux)
-   - **Remote MCP server URL** : `https://france-data-mcp.vercel.app/mcp` _(à venir — ou ton URL self-hostée)_
+   - **Remote MCP server URL** : `https://france-data-mcp.vercel.app/mcp` (ou ton URL self-hostée)
    - **Authentication** : laisse "None"
 5. Clique **Save**.
 6. Dans une conversation, active le connecteur via l'icône **Connectors** sous le composer.
@@ -83,13 +83,14 @@ Tu obtiens alors une URL `https://<ton-projet>.vercel.app/mcp` que tu peux branc
 
 ---
 
-## Outils exposés (à venir)
+## Outils exposés (13 — V0.4.6)
 
-- `autocomplete_commune(query, limit)` — recherche de communes
-- `geocode_adresse(adresse)` — coordonnées GPS d'une adresse
-- `professionnels_in_radius(center, radiusKm, specialite?)` — professionnels de santé dans un rayon
-- `etablissements_finess_in_radius(center, radiusKm, categorie?)` — établissements de santé dans un rayon
-- `entreprises_naf_in_radius(naf, center, radiusKm)` — entreprises d'un code NAF dans un rayon
-- `population_iris(communeOrPoint)` — données démographiques IRIS
+**🗺️ Territoire** : `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
 
-Détails dans [docs/sante.md](sante.md) et [docs/territoire.md](territoire.md).
+**🏢 Entreprises** : `entreprises_in_radius`, `entreprise_by_siren`
+
+**🏥 Établissements FINESS** : `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
+
+**👨‍⚕️ Professionnels Ameli** : `professionnels_in_radius`, `professionnels_par_specialite_dept`, `lister_specialites_ameli`, `lister_types_ps_ameli`
+
+Voir le [README](../README.md#outils-mcp-exposés-13-tools--v046) pour la description détaillée de chaque tool.
