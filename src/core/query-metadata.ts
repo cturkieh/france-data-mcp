@@ -23,7 +23,11 @@
  *   `geo.api.gouv.fr/communes`). Précision ~3 km moyenne — adapté à
  *   l'analyse de densité, PAS au géocodage adresse.
  */
-export type GeoPrecision = "lambert93_natif_finess" | "centroide_commune_ameli";
+export type GeoPrecision =
+  | "lambert93_natif_finess"
+  | "centroide_commune_ameli"
+  | "centroide_commune_ans"
+  | "structure_finess";
 
 /**
  * Méthode de calcul des distances exposées dans `distance_km`.
@@ -47,6 +51,10 @@ const SOURCE_NOTE: Record<GeoPrecision, string> = {
     "Coordonnées Ameli = centroïde commune (~3 km moyenne). Adapté à l'analyse de densité médicale, pas au géocodage adresse.",
   lambert93_natif_finess:
     "FINESS DREES (sync bimestrielle) — référentiel peut avoir 1-2 mois de retard sur le terrain pour les structures émergentes (CPTS récentes, MSP en agrément). Cross-check ARS / Service Public si nécessaire.",
+  centroide_commune_ans:
+    "Coordonnées RPPS/ANS = centroïde commune (~3 km moyenne). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour une précision adresse, croiser num_finess avec etablissement_by_finess.",
+  structure_finess:
+    "Liste rattachée à un FINESS site. Le mode_exercice révèle la nature du lien (libéral / salarié). Couverture RPPS quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts.",
 };
 
 const HAVERSINE_NOTE =
@@ -78,3 +86,12 @@ export const finessRadiusMetadata = (): QueryMetadata =>
 
 export const finessByCategorieMetadata = (): QueryMetadata =>
   buildMetadata("lambert93_natif_finess", false);
+
+export const rppsRadiusMetadata = (): QueryMetadata =>
+  buildMetadata("centroide_commune_ans", true);
+
+export const rppsDeptMetadata = (): QueryMetadata =>
+  buildMetadata("centroide_commune_ans", false);
+
+export const rppsEtablissementMetadata = (): QueryMetadata =>
+  buildMetadata("structure_finess", false);

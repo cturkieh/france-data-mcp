@@ -3,8 +3,10 @@
  *
  * Sources :
  *  - DINUM Recherche Entreprises → entreprises secteur santé (live API)
- *  - FINESS (data.gouv) → établissements sanitaires et médico-sociaux (dump CSV)
- *  - Annuaire Santé Ameli (data.gouv/CNAM) → professionnels de santé libéraux (dump CSV)
+ *  - FINESS (data.gouv) → établissements sanitaires et médico-sociaux (dump CSV bimestriel)
+ *  - Annuaire Santé Ameli (data.gouv/CNAM) → PS libéraux conventionnés (dump CSV hebdo)
+ *  - RPPS / Annuaire Santé ANS (data.gouv) → tous les PS (libéraux + salariés), ID stable, dump CSV mensuel
+ *  - FHIR ANS live → fallback fraîcheur quotidienne pour lookup individuel par RPPS ID
  */
 
 export {
@@ -73,4 +75,26 @@ export {
   type FinessFamilleQuery,
 } from "./finess-db.js";
 
-export const SANTE_VERSION = "0.2.0-pre";
+export {
+  getRppsInRadius,
+  getRppsParSpecialiteDept,
+  getRppsDansEtablissement,
+  getRppsById,
+  type RppsResult,
+  type RppsLookupResult,
+  type RppsQueryResult,
+  type RppsInRadiusInput,
+  type RppsParSpecialiteDeptInput,
+  type RppsDansEtablissementInput,
+} from "./rpps-db.js";
+
+export { RPPS_CGU_NOTICE, RPPS_MODE_EXERCICE } from "./rpps-types.js";
+
+export {
+  getAnsFhirApiKey,
+  getAnsFhirBaseUrl,
+  lookupPractitionerByRpps,
+  type AnsFhirPractitioner,
+} from "./ans-fhir.js";
+
+export const SANTE_VERSION = "0.5.0";

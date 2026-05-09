@@ -1,7 +1,7 @@
 {
   "name": "france-data-mcp",
-  "version": "0.4.6",
-  "description": "Boîte à outils MCP et TypeScript pour interroger les données publiques françaises (INSEE, FINESS, Annuaire Santé Ameli, IGN géocodage, geo.api.gouv.fr, DINUM Recherche Entreprises). Conçu pour Claude, Cursor et toute application qui veut exploiter l'open data territorial français.",
+  "version": "0.5.0",
+  "description": "Boîte à outils MCP et TypeScript pour interroger les données publiques françaises (INSEE, FINESS, RPPS / Annuaire Santé ANS, Annuaire Santé Ameli, IGN géocodage, geo.api.gouv.fr, DINUM Recherche Entreprises). Conçu pour Claude, Cursor et toute application qui veut exploiter l'open data territorial français.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -73,7 +73,8 @@
     "db:push": "supabase db push",
     "db:types": "supabase gen types typescript --local > src/storage/supabase-types.ts",
     "ingest:finess": "tsx scripts/ingest/finess.ts",
-    "ingest:ameli": "tsx scripts/ingest/ameli.ts"
+    "ingest:ameli": "tsx scripts/ingest/ameli.ts",
+    "ingest:rpps": "tsx scripts/ingest/rpps.ts"
   },
   "engines": {
     "node": ">=22"

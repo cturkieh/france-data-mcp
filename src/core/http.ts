@@ -105,6 +105,23 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
         console.error(`[france-data-mcp] invalid JSON response from ${url}: ${lastError.message}`);
         throw lastError;
       }
+      // Si le caller a annulé via AbortSignal, ne pas tenter de retry — un
+      // signal déjà aborté ne peut plus être ré-utilisé. Sans ce shortcircuit,
+      // les 3 retries restants se feraient contre `signal.aborted=true` avec
+      // attentes setTimeout cumulées qui dépasseraient le timeout caller.
+      // Log différencié : "vraie" AbortError (signal.aborted ET err name match)
+      // vs erreur réseau survenue juste avant l'abort (race) — sans ça, un
+      // ENOTFOUND in-flight pourrait être silencé sous le label "abort".
+      if (lastError.name === "AbortError") {
+        console.warn(`[france-data-mcp] fetch aborted (caller signal) on ${url}`);
+        throw lastError;
+      }
+      if (signal?.aborted) {
+        console.warn(
+          `[france-data-mcp] fetch aborted on ${url} (signal already aborted) — last error: ${lastError.message}`,
+        );
+        throw lastError;
+      }
       const isFinalAttempt = attempt === maxRetries;
       const log = isFinalAttempt ? console.error : console.warn;
       log(

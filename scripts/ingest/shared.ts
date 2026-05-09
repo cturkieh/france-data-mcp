@@ -154,7 +154,7 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
 }
 
 /** Sources supportées dans `ingest_log.source` (utile pour `getLastSuccessChecksum`). */
-export type IngestSource = "finess" | "ameli_ps";
+export type IngestSource = "finess" | "ameli_ps" | "rpps";
 
 export interface IngestLogEntry {
   source: string;

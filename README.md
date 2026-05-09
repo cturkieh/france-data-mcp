@@ -45,7 +45,7 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 
 ---
 
-## Outils MCP exposés (13 tools — V0.4.6)
+## Outils MCP exposés (17 tools — V0.5.0)
 
 ### 🗺️ Territoire (4 tools)
 
@@ -98,7 +98,7 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 
 **Métadonnées de réponse (v0.4.3)** : les retours `etablissements_finess_in_radius` / `etablissements_finess_by_categorie` exposent un champ `query_metadata` documentant la précision géo (`lambert93_natif_finess`), le type de distance (`haversine_postgis`) et les notes actionnables (latence DREES, distance non-routière). À lire pour ne pas surinterpréter les résultats.
 
-### 👨‍⚕️ Professionnels de santé — Annuaire Ameli (4 tools)
+### 👨‍⚕️ Professionnels de santé libéraux — Annuaire Ameli (4 tools)
 
 | Tool | Description |
 |---|---|
@@ -106,6 +106,19 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 | `professionnels_par_specialite_dept` | Liste de PS par département (pagination via `offset`) |
 | `lister_specialites_ameli` | Nomenclature live des spécialités (avec `libelle_clarifie` quand un libellé est partagé entre plusieurs codes) |
 | `lister_types_ps_ameli` | Nomenclature live des types de PS (médecin, chirurgien-dentiste, auxiliaires médicaux) |
+
+> Couverture Ameli : libéraux **conventionnés uniquement** (~462 K). Pour les salariés (hospitaliers, salariés en LBM/cabinet), voir RPPS ci-dessous.
+
+### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (4 tools — V0.5.0)
+
+| Tool | Description |
+|---|---|
+| `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice |
+| `professionnels_rpps_par_dept` | Listing départemental + pagination. Idéal pour compter ou lister tout le monde (vs Ameli libéraux uniquement) |
+| `rpps_dans_etablissement` | **Killer feature** — répond à *"qui travaille dans ce labo / hôpital ?"*. Filtre par numéro FINESS site |
+| `professionnel_by_rpps` | Fiche par identifiant national (11 chars). Fallback live FHIR ANS si non trouvé en base locale |
+
+> Couverture RPPS : **2,23 M PS** (libéraux + salariés + remplaçants + retraités). ID national stable, lien vers structure d'exercice (`num_finess`) — permet le pivot PS↔FINESS. Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
 
 **⚠️ Périmètre — à lire avant de construire un comptage**
 
@@ -174,7 +187,7 @@ const ehpad = await searchEtablissements({
 
 ## État du projet
 
-✅ **Version 0.4.6 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 13 tools. ~95 K établissements FINESS et ~462 K professionnels Ameli ingérés et géocodés en WGS84. 332 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo).
+✅ **Version 0.5.0 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et ~2,23 M PS RPPS ingérés et géocodés en WGS84. 362 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
 
 ### Fait
 
@@ -182,14 +195,14 @@ const ehpad = await searchEtablissements({
 - [x] `entreprises` — DINUM Recherche Entreprises + fallback INSEE SIRENE V3.11 (2 tools)
 - [x] `FINESS` — ingestion data.gouv → Supabase + PostGIS, 24 familles, atomic swap, canary post-swap (3 tools)
 - [x] `Annuaire Santé Ameli` — pipeline weekly, géocodage centroïde commune, libellés data-driven (4 tools)
+- [x] **`RPPS / Annuaire Santé ANS`** — pipeline mensuel ~2,23 M PS, ID national stable, pivot PS↔FINESS, fallback live FHIR ANS (4 tools, V0.5.0)
 - [x] Pipeline ingestion durci — SHA256 short-circuit, threshold parsedCoordRejected, atomic swap reversible
 - [x] Serveur MCP HTTP déployé sur Vercel
 - [x] Documentation Charleville-Mézières reproductible (`examples/charleville.ts`)
 
 ### Roadmap
 
-- [ ] **V0.5 phase 2 — RPPS / Annuaire Santé ANS** (~2,23 M PS, libéraux + salariés, ID national stable, lien PS ↔ structure d'exercice). Architecture : ingestion CSV mensuel data.gouv dans Supabase + fallback live FHIR ANS via clé API (`gateway.api.esante.gouv.fr/fhir/v2`, libre depuis avril 2025).
-- [ ] **V0.5 phase 3 — INSEE Melodi** (séries macro communales sans clé, dénominateur population pour les densités).
+- [ ] **V0.5.x — INSEE Melodi** (séries macro communales sans clé, dénominateur population pour les densités).
 - [ ] **V0.6 — Tools composites santé** (`panorama_sante_territoire`, `densite_PS_par_specialite_commune`, `etablissements_avec_PS`, etc.) : combinaisons FINESS + Ameli + RPPS + Melodi en un seul appel pour faciliter la vie aux LLM.
 - [ ] **V0.7+** — INSEE IRIS (démographie infra-communale), CNAM dept-level, DVF immobilier.
 

@@ -4,6 +4,84 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.0] — 2026-05-09
+
+**Phase 2 RPPS / Annuaire Santé ANS** — la pièce qui complète le triangle de
+couverture santé. Là où Ameli ne couvre que les libéraux conventionnés (~462 K),
+RPPS couvre **tous les PS** : libéraux + salariés (hospitaliers, salariés en
+LBM/cabinet) + remplaçants + retraités inscrits. Volume : ~2,23 M lignes.
+Apporte aussi un identifiant national stable (`rpps_id` / IDNPS) qui permet
+le pivot PS↔FINESS (lien `num_finess` exposé sur chaque row).
+
+### 🆕 4 nouveaux tools MCP
+
+- `professionnels_rpps_in_radius` — recherche dans un rayon, filtres par
+  profession (nomenclature ANS), savoir-faire (DES/DESC), mode d'exercice
+  (libéral / salarié / mixte / remplaçant / volontariat).
+- `professionnels_rpps_par_dept` — listing départemental + pagination via
+  `offset`. Préférer Ameli pour les libéraux conventionnés ; cet outil sert
+  surtout à compter ou lister les salariés / l'effectif total.
+- `rpps_dans_etablissement` — **killer feature** qui répond enfin à
+  *"qui travaille dans ce labo / hôpital / clinique ?"*. Filtre indexé sur
+  `num_finess`, retourne tous les PS rattachés (libéraux vacataires +
+  salariés). Couverture salariés CH/CHU/cliniques excellente.
+- `professionnel_by_rpps` — fiche par identifiant national (11 chars). Si non
+  trouvé en base locale (snapshot mensuel J-30 max), tente automatiquement
+  un **fallback live FHIR ANS** (`gateway.api.esante.gouv.fr/fhir/v2`).
+  Le champ `source` distingue `db` / `ans_fhir`.
+
+Total tools MCP exposés : **17** (V0.4.6 = 13 + 4 RPPS).
+
+### Pipeline d'ingestion mensuel
+
+- Source : data.gouv `annuaire-sante-extractions-...-rpps`, fichier
+  `ps-libreacces-personne-activite.txt` (~803 Mo, ~2,23 M lignes, Licence
+  Ouverte v2.0). MAJ mensuelle côté ANS.
+- Cron : `0 4 5 * *` UTC (le 5 du mois — laisse le temps à ANS de publier
+  l'extract autour du 1er-3 sans cogner FINESS / Ameli).
+- Pipeline ETL réutilise les patterns FINESS/Ameli : SHA256 short-circuit,
+  threshold parsedCoordRejected, atomic swap, canary post-swap, threshold
+  unmatched-locality (8%) + structural-fail (1%).
+- Format : pipe-delimited (`|`), UTF-8. BATCH_SIZE 1000 (vs 500 Ameli) pour
+  économiser ~2200 round-trips Supabase sur les 2,23M rows.
+- Géocodage : centroïde commune (comme Ameli). Le caller peut enrichir vers
+  une coord adresse en croisant le `num_finess` exposé avec
+  `etablissement_by_finess`.
+
+### Fallback FHIR ANS live
+
+- Nouveau module `src/sante/ans-fhir.ts`. Pattern miroir de `insee-sirene.ts`
+  (V0.4.5) : header `ESANTE-API-KEY`, no-op gracieux sans clé, log différencié
+  404 (warn) vs 401/403/5xx (error), timeout 60s avec AbortController.
+- Endpoint : `GET /Practitioner?identifier=urn:oid:1.2.250.1.71.4.2.1|<rpps_id>`.
+- Nouvelle env var **optionnelle** `ANS_FHIR_API_KEY` (UUID gratuit obtenu via
+  inscription Gravitee sur portal.api.esante.gouv.fr).
+- API publique en libre accès depuis avril 2025, pas de quota documenté
+  pendant la bêta — limites annoncées « après fin 2025 ».
+
+### Migration SQL
+
+- Table `rpps` (BIGSERIAL PK, 28 colonnes incluant `rpps_id` indexé,
+  `num_finess` indexé, `mode_exercice_code` indexé, geog GENERATED).
+- 4 RPCs : `rpps_in_radius`, `rpps_par_specialite_dept`, `rpps_dans_etablissement`,
+  `rpps_lookup_by_id`. SECURITY INVOKER (anon read uniquement).
+- 1 RPC SECURITY DEFINER : `ingest_create_rpps_staging` (pattern Ameli/FINESS).
+
+### Discipline post-fix
+
+- 24 nouveaux tests unitaires (12 ans-fhir + 12 parser RPPS).
+- **362 tests verts** au total (hors integration qui requièrent Supabase Local).
+- tsc clean (tsconfig.json + tsconfig.api.json).
+- 1 helper ajouté `getUntypedAnonClient()` (pendant côté read du
+  `getUntypedServiceClient` ingest existant) — utilisé temporairement par
+  `rpps-db.ts` en attendant la régénération de `Database` types post-merge.
+
+### Volumétrie projetée
+
+- DB Supabase : ~480 MB FINESS+Ameli aujourd'hui → ~930 MB après RPPS
+  (~450 MB ajoutés). Marge confortable sur Pro tier 8 GB.
+- Coût d'ingestion : ~15-25 min/run mensuel.
+
 ## [0.4.6] — 2026-05-09
 
 Patch post-test live V0.4.5 (claude.ai a relancé les 13 tools, 7/10 ✅,

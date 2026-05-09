@@ -3,6 +3,7 @@ import type { Database } from "./supabase-types.js";
 
 let anonClient: SupabaseClient<Database> | null = null;
 let serviceClient: SupabaseClient<Database> | null = null;
+let untypedAnonClient: SupabaseClient | null = null;
 
 /**
  * Read a required environment variable, distinguishing "absent" from "set
@@ -58,8 +59,28 @@ export function getServiceClient(): SupabaseClient<Database> {
   return serviceClient;
 }
 
+/**
+ * Read-only client SANS typage Database — utilisé pour les RPCs ajoutées par
+ * une migration qui n'a pas encore été suivie d'un `pnpm db:types` (donc
+ * absentes du type généré). Bypass purement TypeScript : runtime identique au
+ * client typé. Caller responsable du typage des params + du retour.
+ *
+ * Pattern miroir de `getUntypedServiceClient` côté `scripts/ingest/shared.ts`
+ * pour les staging tables. À utiliser temporairement le temps qu'une regen
+ * de types soit faite post-merge.
+ */
+export function getUntypedAnonClient(): SupabaseClient {
+  if (!untypedAnonClient) {
+    const url = requireEnv("SUPABASE_URL");
+    const key = requireEnv("SUPABASE_ANON_KEY");
+    untypedAnonClient = createClient(url, key, { auth: { persistSession: false } });
+  }
+  return untypedAnonClient;
+}
+
 /** Test-only helper: forces clients to be re-created on next call. */
 export function __resetClientsForTesting(): void {
   anonClient = null;
   serviceClient = null;
+  untypedAnonClient = null;
 }

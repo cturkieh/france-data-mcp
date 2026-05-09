@@ -1,10 +1,10 @@
 /**
  * Définition des outils MCP exposés par le serveur france-data-mcp.
  *
- * V0.4 : 11 tools exposés. Territoire + DINUM (live), FINESS (Supabase
- * dump bimestriel, V0.2), Annuaire Santé Ameli (Supabase dump hebdo, V0.4).
- * Les CSV bruts (FINESS 35 Mo, Ameli 154 Mo) restent disponibles dans la lib
- * npm pour les usages hors serveur MCP.
+ * V0.5 : 17 tools exposés. Territoire + DINUM (live), FINESS (Supabase
+ * dump bimestriel, V0.2), Annuaire Santé Ameli (Supabase dump hebdo, V0.4),
+ * RPPS / Annuaire Santé ANS (Supabase dump mensuel + fallback FHIR live, V0.5).
+ * Les CSV bruts restent disponibles dans la lib pour les usages hors MCP.
  */
 
 import {
@@ -15,6 +15,7 @@ import {
   listAmeliSpecialites,
   listAmeliTypesPs,
 } from "../src/sante/ameli-db.js";
+import { lookupPractitionerByRpps } from "../src/sante/ans-fhir.js";
 import { RADIUS_MAX_KM, RADIUS_MIN_KM } from "../src/sante/db-helpers.js";
 import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
 import {
@@ -29,6 +30,13 @@ import {
   getEntrepriseBySiren,
   searchEntreprises,
 } from "../src/sante/index.js";
+import {
+  getRppsById,
+  getRppsDansEtablissement,
+  getRppsInRadius,
+  getRppsParSpecialiteDept,
+} from "../src/sante/rpps-db.js";
+import { RPPS_CGU_NOTICE, RPPS_MODE_EXERCICE } from "../src/sante/rpps-types.js";
 import { deptFromCodeInsee } from "../src/territoire/dept-codes.js";
 import {
   geocode,
@@ -36,6 +44,9 @@ import {
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
+
+/** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
+const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
 
 export type McpTool = {
   name: string;
@@ -915,6 +926,138 @@ export const TOOLS: McpTool[] = [
     handler: async () => {
       const typesPs = await listAmeliTypesPs();
       return { count: typesPs.length, results: typesPs };
+    },
+  },
+  // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
+  {
+    name: "professionnels_rpps_in_radius",
+    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. ${RPPS_CGU_NOTICE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        center: {
+          type: "object",
+          properties: {
+            lat: { type: "number" },
+            lon: { type: "number" },
+          },
+          required: ["lat", "lon"],
+        },
+        radius_km: { type: "number", minimum: RADIUS_MIN_KM, maximum: RADIUS_MAX_KM },
+        profession_codes: { type: "array", items: { type: "string" } },
+        savoir_faire_codes: { type: "array", items: { type: "string" } },
+        mode_exercice_codes: { type: "array", items: { type: "string" } },
+        limit: { type: "number" },
+      },
+      required: ["center", "radius_km"],
+    },
+    handler: async (args) => {
+      const center = args.center as { lat: number; lon: number } | undefined;
+      if (!center) throw new Error("center {lat, lon} requis");
+      const radiusKm = coerceNumber(args.radius_km, "radius_km");
+      if (radiusKm === undefined) throw new Error("radius_km (number) requis");
+      const limit = coerceNumber(args.limit, "limit");
+      const professionCodes = parseStringArray(args.profession_codes, "profession_codes");
+      const savoirFaireCodes = parseStringArray(args.savoir_faire_codes, "savoir_faire_codes");
+      const modeExerciceCodes = parseStringArray(args.mode_exercice_codes, "mode_exercice_codes");
+      const input: Parameters<typeof getRppsInRadius>[0] = { center, radiusKm };
+      if (professionCodes) input.professionCodes = professionCodes;
+      if (savoirFaireCodes) input.savoirFaireCodes = savoirFaireCodes;
+      if (modeExerciceCodes) input.modeExerciceCodes = modeExerciceCodes;
+      if (limit !== undefined) input.limit = limit;
+      return await getRppsInRadius(input);
+    },
+  },
+  {
+    name: "professionnels_rpps_par_dept",
+    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_CGU_NOTICE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        departement: { type: "string" },
+        profession_code: { type: "string" },
+        savoir_faire_code: { type: "string" },
+        mode_exercice_code: { type: "string" },
+        limit: { type: "number" },
+        offset: { type: "number" },
+      },
+      required: ["departement"],
+    },
+    handler: async (args) => {
+      const departement = asString(args.departement);
+      if (!departement) throw new Error("departement (string) requis");
+      const professionCode = asString(args.profession_code);
+      const savoirFaireCode = asString(args.savoir_faire_code);
+      const modeExerciceCode = asString(args.mode_exercice_code);
+      const limit = coerceNumber(args.limit, "limit");
+      const offset = coerceNumber(args.offset, "offset");
+      const input: Parameters<typeof getRppsParSpecialiteDept>[0] = { departement };
+      if (professionCode) input.professionCode = professionCode;
+      if (savoirFaireCode) input.savoirFaireCode = savoirFaireCode;
+      if (modeExerciceCode) input.modeExerciceCode = modeExerciceCode;
+      if (limit !== undefined) input.limit = limit;
+      if (offset !== undefined) input.offset = offset;
+      return await getRppsParSpecialiteDept(input);
+    },
+  },
+  {
+    name: "rpps_dans_etablissement",
+    description: `Liste les professionnels de santé rattachés à un établissement FINESS (par numéro FINESS site, 9 chiffres). C'est le pivot RPPS↔FINESS — répond à "qui travaille dans ce labo / hôpital / clinique ?". Le \`mode_exercice\` distingue les libéraux exerçant sur place (vacations) des salariés. Couverture : RPPS expose ce lien quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts. ${RPPS_CGU_NOTICE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: { type: "string", pattern: "^\\d{9}$" },
+        limit: { type: "number" },
+      },
+      required: ["num_finess"],
+    },
+    handler: async (args) => {
+      const numFiness = asString(args.num_finess);
+      if (!numFiness) throw new Error("num_finess (string, 9 chiffres) requis");
+      const limit = coerceNumber(args.limit, "limit");
+      const input: Parameters<typeof getRppsDansEtablissement>[0] = { numFiness };
+      if (limit !== undefined) input.limit = limit;
+      return await getRppsDansEtablissement(input);
+    },
+  },
+  {
+    name: "professionnel_by_rpps",
+    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 chiffres exactement). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). ${RPPS_CGU_NOTICE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        rpps_id: { type: "string", pattern: "^\\s*\\d{11}\\s*$" },
+      },
+      required: ["rpps_id"],
+    },
+    handler: async (args) => {
+      const rppsId = asString(args.rpps_id)?.trim();
+      if (!rppsId) throw new RangeError("rpps_id (string) requis");
+      const sites = await getRppsById(rppsId);
+      if (sites.length > 0) {
+        return { found: true, source: "db", rpps_id: rppsId, count: sites.length, sites };
+      }
+      // Fallback live — ne renvoie QU'un summary identité (pas les sites). Le
+      // FHIR retourne un Practitioner sans les PractitionerRole (qui portent
+      // les rattachements site) ; pour la richesse complète, faire un suivi
+      // par appels FHIR PractitionerRole. V0.5 expose juste l'existence + nom.
+      const fhir = await lookupPractitionerByRpps(rppsId);
+      if (fhir) {
+        return {
+          found: true,
+          source: "ans_fhir",
+          rpps_id: rppsId,
+          fhir,
+          message:
+            "Trouvé via fallback FHIR ANS live ; aucun site rattaché en base locale (snapshot mensuel J-30). Pour la liste des structures d'exercice live, requêter PractitionerRole côté ANS.",
+        };
+      }
+      return {
+        found: false,
+        rpps_id: rppsId,
+        message:
+          "rpps_id introuvable en base locale ET via fallback FHIR ANS. Vérifier le format (11 chars chiffres) ou consulter annuaire.sante.fr.",
+      };
     },
   },
 ];
