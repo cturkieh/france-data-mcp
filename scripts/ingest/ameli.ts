@@ -14,11 +14,14 @@ import {
   type IngestLogEntry,
   atomicSwapTables,
   downloadCsv,
+  getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
   preValidateFile,
+  runAndRecordCanary,
   runIfMain,
   safeSerializeIngestLog,
+  shortCircuitIfSameChecksum,
   writeIngestLog,
 } from "./shared.js";
 
@@ -111,9 +114,19 @@ async function main(): Promise<void> {
   };
 
   try {
-    // 1. DOWNLOAD
-    const downloaded = await downloadCsv(AMELI_PS_CSV_URL, "annuaire-sante-ameli-ps.csv");
+    // 1. DOWNLOAD + lookup last success checksum en parallèle. Le checksum
+    // précédent ne dépend pas du download courant — Promise.all économise un
+    // RTT Supabase. Ameli regenerates l'extract hebdomadaire ; sur 154 MB un
+    // build sans nouveau PS conventionné peut produire un CSV byte-identique.
+    // Skip COPY/VALIDATE/SWAP économise plusieurs min (~485K rows + index).
+    const [downloaded, lastSha] = await Promise.all([
+      downloadCsv(AMELI_PS_CSV_URL, "annuaire-sante-ameli-ps.csv"),
+      getLastSuccessChecksum("ameli_ps"),
+    ]);
     log.csv_size_bytes = downloaded.sizeBytes;
+    log.csv_sha256 = downloaded.sha256;
+
+    if (await shortCircuitIfSameChecksum(log, lastSha, downloaded.sha256, "ameli")) return;
 
     // 2. PRE-VALIDATE
     await preValidateFile(downloaded.filePath, {
@@ -251,6 +264,12 @@ async function main(): Promise<void> {
 
     // 6. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "annuaire_ameli" });
+
+    // 6b. CANARY POST-SWAP — non-bloquant. La table `ingest_canary_targets`
+    // n'a pas encore de cibles seedées pour `ameli_ps` ; tant qu'elle est vide
+    // côté Ameli, le RPC retourne `[]` et le canary est inactif sans bruit.
+    // Une migration corrective ajoutera des cibles stables (ex: MG 75 + IDE 13).
+    await runAndRecordCanary(supabase, "ameli_ps", log, "ameli");
 
     // SUCCESS
     log.status = "success";

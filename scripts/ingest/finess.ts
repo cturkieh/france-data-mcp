@@ -9,11 +9,14 @@ import {
   type IngestLogEntry,
   atomicSwapTables,
   downloadCsv,
+  getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
   preValidateFile,
+  runAndRecordCanary,
   runIfMain,
   safeSerializeIngestLog,
+  shortCircuitIfSameChecksum,
   writeIngestLog,
 } from "./shared.js";
 
@@ -102,9 +105,19 @@ async function main(): Promise<void> {
   };
 
   try {
-    // 1. DOWNLOAD
-    const downloaded = await downloadCsv(FINESS_CSV_URL, "finess.csv");
+    // 1. DOWNLOAD + lookup last success checksum en parallèle. Le checksum
+    // précédent ne dépend pas du download courant — Promise.all économise un
+    // RTT Supabase sur le chemin nominal. DREES regenerates le FINESS extract
+    // hebdomadaire mais le contenu peut être byte-identique entre 2 runs ; on
+    // skip COPY/VALIDATE/SWAP dans ce cas (économise plusieurs min Postgres).
+    const [downloaded, lastSha] = await Promise.all([
+      downloadCsv(FINESS_CSV_URL, "finess.csv"),
+      getLastSuccessChecksum("finess"),
+    ]);
     log.csv_size_bytes = downloaded.sizeBytes;
+    log.csv_sha256 = downloaded.sha256;
+
+    if (await shortCircuitIfSameChecksum(log, lastSha, downloaded.sha256, "finess")) return;
 
     // 2. PRE-VALIDATE
     await preValidateFile(downloaded.filePath, {
@@ -275,6 +288,11 @@ async function main(): Promise<void> {
 
     // 5. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "finess" });
+
+    // 5b. CANARY POST-SWAP — non-bloquant. Vérifie que les num_finess
+    // hardcodés dans `ingest_canary_targets` sont bien présents en prod après
+    // le swap. Si l'un disparaît, on logue dans `canary_failures` sans rollback.
+    await runAndRecordCanary(supabase, "finess", log, "finess");
 
     // SUCCESS
     log.status = "success";
@@ -508,18 +526,26 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   // name (e.g. "08005 CHARLEVILLE MEZIERES CEDEX"). The previous parser used
   // `libdepartement` ("ARDENNES") as `ville`, which was wrong. CEDEX suffix
   // is stripped from the city name; the postal code keeps its CEDEX form.
+  // collapseWhitespace : DREES upstream émet parfois des doubles espaces
+  // ("08000  CHARLEVILLE  MEZIERES") qui produisent des doublons logiques
+  // côté equality matching avec/sans normalisation.
   const ligneAch = getNonEmpty(rec, "ligneacheminement") ?? "";
   const ligneMatch = ligneAch.match(LIGNE_ACHEMINEMENT_REGEX);
   const codePostal = ligneMatch?.[1] ?? null;
-  const ville = ligneMatch?.[2]?.trim() ?? null;
+  const ville = ligneMatch?.[2] ? collapseWhitespace(ligneMatch[2]) : null;
   // Surface to the streamer for monitoring (raw is empty post-V0.4.2).
   const ligneAchPresentButUnparsed = ligneAch !== "" && !ligneMatch;
 
   // Build full address line: "12 CRS BRIAND" instead of just "BRIAND".
+  // collapseWhitespace après concat : si `numVoie` est null mais typVoie/voie
+  // présents, `filter(Boolean).join(" ")` produit déjà un seul espace entre
+  // les deux mots, mais l'un d'eux peut contenir des doubles-espaces internes
+  // hérités du CSV brut DREES — on normalise ici.
   const numVoie = getNonEmpty(rec, "numvoie");
   const typVoie = getNonEmpty(rec, "typvoie");
   const voieRaw = getNonEmpty(rec, "voie");
-  const voieFull = [numVoie, typVoie, voieRaw].filter(Boolean).join(" ") || null;
+  const voieFullRaw = [numVoie, typVoie, voieRaw].filter(Boolean).join(" ");
+  const voieFull = voieFullRaw === "" ? null : collapseWhitespace(voieFullRaw);
 
   // geom NULL ici — populé server-side par ingest_apply_finess_geom_batch
   // qui lit coordx/y_lambert93 et reprojette Lambert 93 → WGS84. SSOT = le RPC.
@@ -534,10 +560,16 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
     (coordxRaw !== null && coordxParsed === null) ||
     (coordyRaw !== null && coordyParsed === null);
 
+  // DREES émet parfois des doubles espaces dans `rs` ("LBM  BIO ARD'AISNE"),
+  // ce qui crée des doublons logiques côté equality / search_text. getNonEmpty
+  // strippe les control chars mais préserve les espaces internes — on collapse ici.
+  const raisonSocialeRaw = getNonEmpty(rec, "rs") ?? "";
+  const raisonSociale = raisonSocialeRaw === "" ? "" : collapseWhitespace(raisonSocialeRaw);
+
   return {
     row: {
       num_finess: numFiness,
-      raison_sociale: getNonEmpty(rec, "rs") ?? "",
+      raison_sociale: raisonSociale,
       categorie_code: getNonEmpty(rec, "categetab"),
       categorie_libelle: getNonEmpty(rec, "libcategetab"),
       num_voie: numVoie,
@@ -563,6 +595,19 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
 }
 
 /**
+ * Collapse runs of whitespace (\s+) into a single ASCII space, then trim.
+ * Used to normalize DREES upstream artifacts like "LBM  BIO ARD'AISNE".
+ *
+ * NB. `getNonEmpty` strips control chars (0x00-0x1f) and trims outer
+ * whitespace, but preserves internal spaces. `collapseWhitespace` is applied
+ * only on fields where double-spaces are unambiguous upstream noise
+ * (raison_sociale, ville, voie).
+ */
+export function collapseWhitespace(raw: string): string {
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+/**
  * Parses a Lambert 93 coordinate from the CSV. Tolerates French decimal
  * comma ("823923,6") and surrounding whitespace. Returns null when the
  * input is missing, blank, or NOT a clean numeric literal.
@@ -585,6 +630,7 @@ export const __TESTING__ = {
   isValidDept,
   LIGNE_ACHEMINEMENT_REGEX,
   parseLambert93Coord,
+  collapseWhitespace,
 };
 
 // Only run main() when this file is executed as a script, not when imported

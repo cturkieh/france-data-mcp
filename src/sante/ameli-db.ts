@@ -104,14 +104,22 @@ export interface AmeliQueryResult {
 export interface AmeliSpecialiteEntry {
   /** Code spécialité Ameli (ex : "01" MG, "24" Infirmier, "26" Kiné). */
   code: string;
-  /** Libellé natif Ameli — toujours clair côté spécialité. */
+  /** Libellé natif Ameli — peut être partagé par plusieurs codes (ex : "Médecin généraliste" pour 01/22/23). */
   libelle: string;
+  /**
+   * Libellé désambiguïsé : identique à `libelle` quand le libellé est unique,
+   * suffixé `" (code {code}, {count_compact})"` quand ≥ 2 codes le partagent.
+   * Calculé côté SQL via window function — robuste aux MAJ Ameli (data-driven).
+   */
+  libelle_clarifie: string;
   /** Type de PS auquel cette spécialité est rattachée. */
   type_ps_code: string;
   /** Libellé natif Ameli du type_ps (peut être ambigu, cf. clarifyTypePsLibelle). */
   type_ps_libelle: string;
   /** Nombre d'entrées en base pour ce couple (specialite, type_ps). */
   count: number;
+  /** True ssi au moins 2 codes spécialité partagent le même `libelle`. */
+  is_libelle_partage: boolean;
 }
 
 /**
@@ -304,9 +312,16 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
 interface RawSpecialiteRow {
   code: string | null;
   libelle: string | null;
+  /**
+   * Optionnel pour rester rétro-compatible avec un RPC pas encore migré : on
+   * tombe alors sur `libelle` brut côté mapping.
+   */
+  libelle_clarifie?: string | null;
   type_ps_code: string | null;
   type_ps_libelle: string | null;
   count: number | string | null;
+  /** True ssi ≥ 2 codes partagent le même `libelle`. */
+  is_libelle_partage?: boolean | null;
 }
 
 interface RawSpecialiteAggInTypePs {
@@ -351,12 +366,18 @@ export async function listAmeliSpecialites(): Promise<AmeliSpecialiteEntry[]> {
   const out: AmeliSpecialiteEntry[] = [];
   for (const row of rows) {
     if (!row.code || !row.type_ps_code) continue;
+    const libelle = row.libelle ?? "";
     out.push({
       code: row.code,
-      libelle: row.libelle ?? "",
+      libelle,
+      // Fallback sur `libelle` si le RPC n'est pas encore migré (colonne
+      // absente) ou si la valeur est null. Garantit toujours une string.
+      libelle_clarifie: row.libelle_clarifie ?? libelle,
       type_ps_code: row.type_ps_code,
       type_ps_libelle: row.type_ps_libelle ?? "",
       count: coerceCount(row.count),
+      // Strict `=== true` : null/undefined/0/string traités comme false.
+      is_libelle_partage: row.is_libelle_partage === true,
     });
   }
   return out;

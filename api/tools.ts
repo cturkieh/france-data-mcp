@@ -234,13 +234,18 @@ const AMELI_TYPE_PS_HELP =
  * réponse peut être incomplète (`truncated: true` quand l'API a renvoyé plus
  * d'entreprises NAF dans le département qu'on n'a pu en évaluer).
  *
- * - `total` : nombre d'entreprises dans le rayon (post-filtrage Haversine).
+ * - `total` : nombre d'entreprises dans le rayon (post-filtrage Haversine, AVANT
+ *   troncature `perPage`). Le caller voit le décompte réel, pas l'estimation
+ *   tronquée — important pour ne pas sous-estimer une zone à la prospection.
+ * - `truncated_by_per_page` : true quand `total > perPage` et que la liste
+ *   `entreprises` est tronquée à `perPage`. Signal explicite, pas implicite.
  * - `fallback.totalInDepartement` : nombre total NAF dans le département (avant Haversine).
  * - `fallback.evaluees` : nombre d'entreprises effectivement évaluées (max 25).
  * - `fallback.truncated` : true si on a évalué moins que `totalInDepartement`.
  * - `fallback.warning` : message actionnable pour le caller, présent uniquement quand truncated.
  */
 type EntreprisesInRadiusFallbackResult = SearchEntreprisesResult & {
+  truncated_by_per_page?: boolean;
   fallback: {
     strategy: string;
     departementUtilise: string;
@@ -367,8 +372,26 @@ async function searchByNafInRadius(params: {
   naf: string;
   center: { lon: number; lat: number };
   radiusKm: number;
+  /**
+   * Troncature finale appliquée APRÈS le filtre Haversine. Défaut 10 (cohérent
+   * avec le schéma MCP). L'API DINUM amont fixe son `per_page` à 25 (max) pour
+   * maximiser la couverture du département avant filtrage géo — `perPage` ici
+   * ne contrôle QUE la troncature de la sortie au caller MCP.
+   */
+  perPage?: number;
 }): Promise<EntreprisesInRadiusFallbackResult> {
   const { naf, center, radiusKm } = params;
+  // Défaut 10 aligné sur le schéma `perPage` du tool MCP. Sans cette troncature
+  // finale, un caller demandant `perPage: 3` recevait silencieusement le post-
+  // filtre Haversine entier (jusqu'à 25). Validation explicite : entier dans
+  // [1, 25]. Throw plutôt qu'un clamp silencieux — règle "afficher le critère
+  // manquant" plutôt que masquer une saisie invalide (CLAUDE.md error handling).
+  const perPage = params.perPage ?? 10;
+  if (!Number.isInteger(perPage) || perPage < 1 || perPage > 25) {
+    throw new RangeError(
+      `entreprises_in_radius: perPage doit être un entier entre 1 et 25 (reçu: ${perPage}).`,
+    );
+  }
 
   let reverse: Awaited<ReturnType<typeof reverseGeocode>>;
   try {
@@ -415,13 +438,20 @@ async function searchByNafInRadius(params: {
     fallback.warning = `Seules ${evaluees}/${totalInDepartement} entreprises NAF ${naf} du département ${fallbackDept} ont été évaluées (limite API DINUM 25 par page). Le résultat peut sous-estimer le nombre réel d'entreprises dans le rayon. Pour exhaustivité, restreindre par 'codePostal' précis ou utiliser un 'q' textuel avec center+radiusKm.`;
   }
 
-  return {
+  // total annoncé = filtered.length (décompte réel post-Haversine, AVANT
+  // troncature `perPage`). La troncature est explicite via `truncated_by_per_page`
+  // pour qu'un caller voyant `entreprises.length < total` comprenne pourquoi.
+  const truncatedByPerPage = filtered.length > perPage;
+  const out: EntreprisesInRadiusFallbackResult = {
     ...result,
-    entreprises: filtered,
+    entreprises: truncatedByPerPage ? filtered.slice(0, perPage) : filtered,
     total: filtered.length,
-    totalPages: 1,
+    perPage,
+    totalPages: Math.max(1, Math.ceil(filtered.length / perPage)),
     fallback,
   };
+  if (truncatedByPerPage) out.truncated_by_per_page = true;
+  return out;
 }
 
 export const TOOLS: McpTool[] = [
@@ -578,8 +608,16 @@ export const TOOLS: McpTool[] = [
       // Cas qui pose problème côté API DINUM : `naf + lat/long/radius`. L'API
       // exige que les coords soient accompagnées d'un `q` textuel. On contourne
       // via reverseGeocode + filtrage Haversine, géré dans `searchByNafInRadius`.
+      // `perPage` propagé pour que la troncature finale honore le contrat MCP —
+      // sans propagation, le filtre Haversine peut retourner > perPage matches.
       if (naf && hasCoords && !q && !departement && !codePostal) {
-        return searchByNafInRadius({ naf, center: { lon, lat }, radiusKm });
+        const fallbackParams: Parameters<typeof searchByNafInRadius>[0] = {
+          naf,
+          center: { lon, lat },
+          radiusKm,
+        };
+        if (perPage !== undefined) fallbackParams.perPage = perPage;
+        return searchByNafInRadius(fallbackParams);
       }
 
       const opts: Parameters<typeof searchEntreprises>[0] = {};
@@ -857,7 +895,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "lister_specialites_ameli",
-    description: `Liste les codes spécialité Ameli effectivement présents en base, avec leur libellé natif, leur \`type_ps_code\` de rattachement et leur count. Triés par fréquence décroissante. Utile pour découvrir la nomenclature avant de filtrer un \`professionnels_in_radius\` ou \`professionnels_par_specialite_dept\`. Les libellés spécialité Ameli sont clairs (ex: "Infirmier", "Cardiologue") — c'est la dimension recommandée pour cibler une profession précise. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Liste les codes spécialité Ameli effectivement présents en base, avec leur libellé natif, leur \`type_ps_code\` de rattachement et leur count. Triés par fréquence décroissante. Utile pour découvrir la nomenclature avant de filtrer un \`professionnels_in_radius\` ou \`professionnels_par_specialite_dept\`. Le champ \`libelle_clarifie\` désambigüise les libellés partagés par plusieurs codes (ex: "Médecin généraliste" regroupe les codes 01/22/23, "Chirurgien-dentiste" 19/53/54, "Psychiatre" 33/75, "Gynécologue / Obstétricien" 07/70/77/79). Format quand partagé : \`'{libelle} (code {code}, {count_compact})'\` (ex: "Médecin généraliste (code 01, 55K)"). Sinon identique à \`libelle\`. \`is_libelle_partage: true\` quand au moins 2 codes utilisent le même libellé — utiliser ce flag côté caller pour décider d'afficher le code à l'utilisateur. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {},

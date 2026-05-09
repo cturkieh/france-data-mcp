@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as ameliDb from "../src/sante/ameli-db.js";
 import * as finessDb from "../src/sante/finess-db.js";
+import * as dinum from "../src/sante/index.js";
+import * as geocode from "../src/territoire/geocode.js";
 import { deptFromCommune, findTool } from "./tools.js";
 
 describe("deptFromCommune", () => {
@@ -360,9 +362,11 @@ describe("lister_specialites_ameli (MCP tool)", () => {
       {
         code: "24",
         libelle: "Infirmier",
+        libelle_clarifie: "Infirmier",
         type_ps_code: "2",
         type_ps_libelle: "Autres PS (...)",
         count: 104041,
+        is_libelle_partage: false,
       },
     ]);
     const tool = findTool("lister_specialites_ameli");
@@ -595,6 +599,112 @@ describe("dedupe_by_ps", () => {
     await expect(tool?.handler({ lon: 4.72, lat: 49.77, dedupe_by_ps: "yes" })).rejects.toThrow(
       /dedupe_by_ps/,
     );
+  });
+});
+
+describe("entreprises_in_radius — perPage propagation (B5 fix)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Forge un mini Entreprise avec un seul établissement géolocalisé près du
+   * centre testé (Charleville-Mézières, ~49.7672/4.7192). Toutes les entreprises
+   * forgées passent le filtre Haversine 5 km par construction (lat/lon ≈ centre).
+   */
+  function makeEntreprise(siren: string): dinum.Entreprise {
+    return {
+      siren,
+      nomComplet: `LABO ${siren}`,
+      finances: [],
+      dirigeants: [],
+      actif: true,
+      etablissements: [
+        {
+          siret: `${siren}00010`,
+          adresse: "10 Rue Foch 08000 Charleville-Mézières",
+          actif: true,
+          point: { lon: 4.7192, lat: 49.7672 },
+        },
+      ],
+    };
+  }
+
+  it("propage perPage:3 et tronque la sortie à 3 résultats malgré 8 matches Haversine", async () => {
+    vi.spyOn(geocode, "reverseGeocode").mockResolvedValue({
+      point: { lon: 4.7192, lat: 49.7672 },
+      label: "10 Rue Foch 08000 Charleville-Mézières",
+      score: 0.95,
+      codeCommune: "08105",
+      type: "housenumber",
+    });
+    const eight: dinum.Entreprise[] = Array.from({ length: 8 }, (_, i) =>
+      makeEntreprise(String(100000000 + i).padStart(9, "0")),
+    );
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 8,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: eight,
+    });
+
+    const tool = findTool("entreprises_in_radius");
+    const result = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.7192,
+      lat: 49.7672,
+      radiusKm: 5,
+      perPage: 3,
+    })) as {
+      total: number;
+      perPage: number;
+      entreprises: unknown[];
+      truncated_by_per_page?: boolean;
+    };
+
+    expect(result.entreprises).toHaveLength(3);
+    expect(result.total).toBe(8); // post-Haversine, AVANT troncature perPage
+    expect(result.perPage).toBe(3);
+    expect(result.truncated_by_per_page).toBe(true);
+  });
+
+  it("perPage omis → défaut 10 (cohérent avec le schéma MCP)", async () => {
+    vi.spyOn(geocode, "reverseGeocode").mockResolvedValue({
+      point: { lon: 4.7192, lat: 49.7672 },
+      label: "10 Rue Foch 08000 Charleville-Mézières",
+      score: 0.95,
+      codeCommune: "08105",
+      type: "housenumber",
+    });
+    const five = Array.from({ length: 5 }, (_, i) =>
+      makeEntreprise(String(200000000 + i).padStart(9, "0")),
+    );
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 5,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: five,
+    });
+
+    const tool = findTool("entreprises_in_radius");
+    const result = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.7192,
+      lat: 49.7672,
+      radiusKm: 5,
+    })) as {
+      total: number;
+      perPage: number;
+      entreprises: unknown[];
+      truncated_by_per_page?: boolean;
+    };
+
+    // 5 résultats < défaut 10 → pas de troncature
+    expect(result.entreprises).toHaveLength(5);
+    expect(result.perPage).toBe(10);
+    expect(result.truncated_by_per_page).toBeUndefined();
   });
 });
 

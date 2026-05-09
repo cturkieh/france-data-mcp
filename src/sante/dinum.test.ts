@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LookupResult } from "../core/lookup-result.js";
 import { getEntrepriseBySiren, searchEntreprises } from "./dinum.js";
+import { __resetInseeTokenCacheForTesting } from "./insee-sirene.js";
 
 /**
  * Test helper : narrow `LookupResult<T>` vers le cas `found: true` ou throw.
@@ -20,10 +21,19 @@ const fetchMock = vi.fn<typeof fetch>();
 beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
+  // Isolation : assure que les tests DINUM ne déclenchent pas le fallback
+  // INSEE par accident si les env vars sont héritées de la machine dev.
+  vi.stubEnv("INSEE_SIRENE_CLIENT_ID", "");
+  vi.stubEnv("INSEE_SIRENE_CLIENT_SECRET", "");
+  // Le cache token INSEE est un module-level singleton — un test précédent
+  // qui a obtenu un token le verrait persister sur le test suivant et
+  // sauterait le mock /token (consomme un mock fetch de moins). Reset systématique.
+  __resetInseeTokenCacheForTesting();
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 function apiResponse(
@@ -214,7 +224,7 @@ describe("getEntrepriseBySiren", () => {
     if (!e.found) {
       expect(e.key).toBe("999999999");
       expect(e.lookupStatus).toBe("not_found");
-      expect(e.message).toMatch(/non indexé|diffusion partielle/i);
+      expect(e.message).toMatch(/non trouvé via DINUM|diffusion partielle/i);
     }
   });
 
@@ -547,5 +557,205 @@ describe("getEntrepriseBySiren", () => {
   it("rejette les SIREN invalides sans appeler l'API", async () => {
     await expect(getEntrepriseBySiren("123")).rejects.toThrow(/SIREN invalide/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("getEntrepriseBySiren — fallback SIRENE INSEE V3 (audit 2026-05-09)", () => {
+  it("DINUM not_found + INSEE configuré + INSEE 200 → found:true avec siren_source=insee_v3", async () => {
+    vi.stubEnv("INSEE_SIRENE_CLIENT_ID", "test_client_id");
+    vi.stubEnv("INSEE_SIRENE_CLIENT_SECRET", "test_client_secret");
+
+    fetchMock
+      // 1. DINUM /search → 0 résultats (SIREN en diffusion partielle)
+      .mockResolvedValueOnce(apiResponse({ results: [] }))
+      // 2. INSEE /token → bearer token
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ access_token: "fake-token", expires_in: 604800 }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      // 3. INSEE /siren/787120435 → uniteLegale
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            uniteLegale: {
+              siren: "787120435",
+              denominationUniteLegale: "BIO ARD'AISNE",
+              activitePrincipaleUniteLegale: "86.90B",
+              etatAdministratifUniteLegale: "A",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+    const e = await getEntrepriseBySiren("787120435");
+    expect(e.found).toBe(true);
+    if (e.found) {
+      expect(e.siren).toBe("787120435");
+      expect(e.nomComplet).toBe("BIO ARD'AISNE");
+      expect(e.naf).toBe("86.90B");
+      expect(e.actif).toBe(true);
+      expect(e.siren_source).toBe("insee_v3");
+      expect(e.etablissements).toHaveLength(0);
+    }
+  });
+
+  it("DINUM not_found + pas de creds INSEE → not_found avec message explicite", async () => {
+    fetchMock.mockResolvedValueOnce(apiResponse({ results: [] }));
+    const e = await getEntrepriseBySiren("888888888");
+    expect(e.found).toBe(false);
+    if (!e.found) {
+      expect(e.message).toMatch(/non configuré/);
+      expect(e.message).toMatch(/INSEE_SIRENE_CLIENT_ID/);
+    }
+  });
+
+  it("DINUM not_found + INSEE configuré + INSEE 404 → not_found avec message 'a aussi retourné null'", async () => {
+    vi.stubEnv("INSEE_SIRENE_CLIENT_ID", "test_id");
+    vi.stubEnv("INSEE_SIRENE_CLIENT_SECRET", "test_secret");
+
+    fetchMock
+      .mockResolvedValueOnce(apiResponse({ results: [] }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ access_token: "fake-token", expires_in: 604800 }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 404 }));
+
+    const e = await getEntrepriseBySiren("999999998");
+    expect(e.found).toBe(false);
+    if (!e.found) {
+      expect(e.message).toMatch(/a aussi retourné null/);
+    }
+  });
+});
+
+describe("Finance.caFiable (B6 SELARL pharma audit 2026-05-09)", () => {
+  it("ca=0 + resultatNet>0 → caFiable=false (pattern SELARL pharma non déclaré)", async () => {
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 1,
+        results: [
+          {
+            siren: "100000001",
+            nom_complet: "PHARMA SELARL",
+            etat_administratif: "A",
+            finances: {
+              "2024": { ca: 0, resultat_net: 100000 },
+            },
+          },
+        ],
+      }),
+    );
+    const e = assertFound(await getEntrepriseBySiren("100000001"));
+    expect(e.finances).toHaveLength(1);
+    expect(e.finances[0]?.ca).toBe(0);
+    expect(e.finances[0]?.resultatNet).toBe(100000);
+    expect(e.finances[0]?.caFiable).toBe(false);
+  });
+
+  it("ca>0 + resultatNet>0 → caFiable=true (cas nominal)", async () => {
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 1,
+        results: [
+          {
+            siren: "100000002",
+            nom_complet: "BIOLAB SAS",
+            etat_administratif: "A",
+            finances: {
+              "2024": { ca: 21735564, resultat_net: 2754396 },
+            },
+          },
+        ],
+      }),
+    );
+    const e = assertFound(await getEntrepriseBySiren("100000002"));
+    expect(e.finances[0]?.caFiable).toBe(true);
+  });
+
+  it("ca=0 + resultatNet=0 → caFiable=true (entreprise dormante, vrai 0)", async () => {
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 1,
+        results: [
+          {
+            siren: "100000003",
+            nom_complet: "DORMANTE SAS",
+            etat_administratif: "A",
+            finances: {
+              "2024": { ca: 0, resultat_net: 0 },
+            },
+          },
+        ],
+      }),
+    );
+    const e = assertFound(await getEntrepriseBySiren("100000003"));
+    expect(e.finances[0]?.caFiable).toBe(true);
+  });
+
+  it("ca=0 + resultatNet absent → caFiable=true (pas assez de signal pour suspecter)", async () => {
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 1,
+        results: [
+          {
+            siren: "100000004",
+            nom_complet: "PARTIAL SAS",
+            etat_administratif: "A",
+            finances: {
+              "2024": { ca: 0 },
+            },
+          },
+        ],
+      }),
+    );
+    const e = assertFound(await getEntrepriseBySiren("100000004"));
+    expect(e.finances[0]?.caFiable).toBe(true);
+  });
+
+  it("ca absent + resultatNet>0 → caFiable=true (ca non dispo, pas un faux 0)", async () => {
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 1,
+        results: [
+          {
+            siren: "100000005",
+            nom_complet: "NO CA SAS",
+            etat_administratif: "A",
+            finances: {
+              "2024": { resultat_net: 50000 },
+            },
+          },
+        ],
+      }),
+    );
+    const e = assertFound(await getEntrepriseBySiren("100000005"));
+    expect(e.finances[0]?.ca).toBeUndefined();
+    expect(e.finances[0]?.caFiable).toBe(true);
+  });
+
+  it("ca=0 + resultatNet<0 → caFiable=true (entreprise déficitaire, vrai 0 plausible)", async () => {
+    fetchMock.mockResolvedValue(
+      apiResponse({
+        total_results: 1,
+        results: [
+          {
+            siren: "100000006",
+            nom_complet: "DEFICIT SAS",
+            etat_administratif: "A",
+            finances: {
+              "2024": { ca: 0, resultat_net: -5000 },
+            },
+          },
+        ],
+      }),
+    );
+    const e = assertFound(await getEntrepriseBySiren("100000006"));
+    expect(e.finances[0]?.caFiable).toBe(true);
   });
 });

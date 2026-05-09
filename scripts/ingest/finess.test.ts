@@ -15,8 +15,9 @@
 
 import { describe, expect, it } from "vitest";
 import { __TESTING__ } from "./finess.js";
+import { runCanaryCheck } from "./shared.js";
 
-const { parseFinessRecord, isValidDept, parseLambert93Coord } = __TESTING__;
+const { parseFinessRecord, isValidDept, parseLambert93Coord, collapseWhitespace } = __TESTING__;
 
 const charlevilleEhpadRow: Record<string, string> = {
   nofinesset: "080000235",
@@ -297,5 +298,169 @@ describe("parseFinessRecord (V0.4.3 — coordPresentButUnparsed drift signal)", 
     const row = { ...charlevilleEhpadRow, coordyet: "ABC" };
     const out = parseFinessRecord(row);
     expect(out.coordPresentButUnparsed).toBe(true);
+  });
+});
+
+// V0.4.4 — B1 audit Charleville 2026-05-09 : DREES upstream emits double
+// whitespace dans rs/ville/voie. On normalise au parse pour éviter des
+// doublons logiques côté search/equality matching ("LBM  BIO" vs "LBM BIO").
+describe("parseFinessRecord (V0.4.4 — whitespace normalization)", () => {
+  it("collapse les double-espaces dans raison_sociale (audit BIO ARD'AISNE)", () => {
+    const row = { ...charlevilleEhpadRow, rs: "LBM  BIO ARD'AISNE" };
+    const out = parseFinessRecord(row);
+    expect(out.row?.raison_sociale).toBe("LBM BIO ARD'AISNE");
+  });
+
+  it("collapse runs of whitespace (3+ spaces, tabs) dans raison_sociale", () => {
+    const row = { ...charlevilleEhpadRow, rs: "LBM\t  BIO   ARD" };
+    const out = parseFinessRecord(row);
+    expect(out.row?.raison_sociale).toBe("LBM BIO ARD");
+  });
+
+  it("préserve les espaces simples voulus dans raison_sociale", () => {
+    const row = { ...charlevilleEhpadRow, rs: "EHPAD JEAN JAURES" };
+    const out = parseFinessRecord(row);
+    expect(out.row?.raison_sociale).toBe("EHPAD JEAN JAURES");
+  });
+
+  it("collapse les double-espaces dans ville extraite via ligneacheminement", () => {
+    const row = { ...charlevilleEhpadRow, ligneacheminement: "08000  CHARLEVILLE  MEZIERES" };
+    const out = parseFinessRecord(row);
+    expect(out.row?.code_postal).toBe("08000");
+    expect(out.row?.ville).toBe("CHARLEVILLE MEZIERES");
+  });
+
+  it("collapse les double-espaces dans voie concaténée (numvoie + typvoie + voie)", () => {
+    // Si typvoie est présent mais voie a un double-espace interne, le full
+    // concat doit être normalisé.
+    const row = { ...charlevilleEhpadRow, voie: "BRIAND  ANNEXE" };
+    const out = parseFinessRecord(row);
+    expect(out.row?.voie).toBe("12 CRS BRIAND ANNEXE");
+  });
+
+  it("retourne voie=null quand tous les champs sont vides (rétrocompat)", () => {
+    const row = { ...charlevilleEhpadRow, numvoie: "", typvoie: "", voie: "" };
+    const out = parseFinessRecord(row);
+    expect(out.row?.voie).toBeNull();
+  });
+
+  it("audit cas exact Charleville 080010234 — input pollué + ville pollué", () => {
+    // Cas remonté par l'audit Claude.ai 2026-05-09 :
+    // raison_sociale="LBM  BIO ARD'AISNE" + ligneacheminement avec double-espace.
+    const row: Record<string, string> = {
+      nofinesset: "X",
+      rs: "LBM  BIO  ARD",
+      commune: "105",
+      departement: "08",
+      ligneacheminement: "08000  CHARLEVILLE  MEZIERES",
+    };
+    const out = parseFinessRecord(row);
+    expect(out.row?.raison_sociale).toBe("LBM BIO ARD");
+    expect(out.row?.ville).toBe("CHARLEVILLE MEZIERES");
+  });
+});
+
+describe("collapseWhitespace (V0.4.4)", () => {
+  it("collapse les runs de whitespace en un seul espace", () => {
+    expect(collapseWhitespace("a  b")).toBe("a b");
+    expect(collapseWhitespace("a   b   c")).toBe("a b c");
+    expect(collapseWhitespace("a\t\tb")).toBe("a b");
+    expect(collapseWhitespace("a \t\nb")).toBe("a b");
+  });
+
+  it("trim les whitespace en bord", () => {
+    expect(collapseWhitespace("  hello  ")).toBe("hello");
+    expect(collapseWhitespace("\thello\n")).toBe("hello");
+  });
+
+  it("retourne string vide pour input only-whitespace", () => {
+    expect(collapseWhitespace("   ")).toBe("");
+    expect(collapseWhitespace("\t\n")).toBe("");
+    expect(collapseWhitespace("")).toBe("");
+  });
+
+  it("préserve le contenu sans whitespace multiple", () => {
+    expect(collapseWhitespace("hello world")).toBe("hello world");
+    expect(collapseWhitespace("hello")).toBe("hello");
+  });
+});
+
+// V0.4.4 — B3 canary post-swap. Le canary est non-bloquant : RPC retourne
+// la liste des cibles canary attendues mais introuvables en prod après le
+// swap. On vérifie que l'helper :
+//  1. transmet bien la valeur retournée par le RPC.
+//  2. ne throw PAS sur erreur RPC (renvoie sentinelle `__rpc_error__`).
+//  3. défense profondeur : si le RPC retourne null/non-array, on retombe sur [].
+describe("runCanaryCheck (V0.4.4 — non-blocking canary)", () => {
+  it("retourne le tableau des keys manquantes quand le RPC en signale", async () => {
+    const fakeSupabase = {
+      rpc: async (_fn: string, _args: { p_source: string }) => ({
+        data: ["080010085", "080010093"],
+        error: null,
+      }),
+    };
+    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    expect(missing).toEqual(["080010085", "080010093"]);
+  });
+
+  it("retourne [] quand le RPC indique 0 cibles manquantes (canary OK)", async () => {
+    const fakeSupabase = {
+      rpc: async (_fn: string, _args: { p_source: string }) => ({
+        data: [],
+        error: null,
+      }),
+    };
+    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    expect(missing).toEqual([]);
+  });
+
+  it("ne throw PAS et retourne ['__rpc_error__'] sur erreur RPC", async () => {
+    const fakeSupabase = {
+      rpc: async (_fn: string, _args: { p_source: string }) => ({
+        data: null,
+        error: { message: "function does not exist" },
+      }),
+    };
+    // Le canary est non-bloquant by contract : la swap est déjà committée,
+    // on alerte sans rollback. process.exit(1) ne doit JAMAIS être appelé
+    // depuis cet helper — on vérifie juste qu'il retourne le sentinelle.
+    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    expect(missing).toEqual(["__rpc_error__"]);
+  });
+
+  it("retombe sur [] quand le RPC retourne null (defense-in-depth)", async () => {
+    const fakeSupabase = {
+      rpc: async (_fn: string, _args: { p_source: string }) => ({
+        data: null,
+        error: null,
+      }),
+    };
+    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    expect(missing).toEqual([]);
+  });
+
+  it("filtre les non-strings du tableau RPC (defense-in-depth)", async () => {
+    const fakeSupabase = {
+      rpc: async (_fn: string, _args: { p_source: string }) => ({
+        // PostgREST ne devrait jamais retourner ça avec un TEXT[] côté SQL,
+        // mais on défend explicitement.
+        data: ["080010085", null, 42, "080010093"],
+        error: null,
+      }),
+    };
+    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    expect(missing).toEqual(["080010085", "080010093"]);
+  });
+
+  it("appelle le RPC avec p_source aligné sur la source passée", async () => {
+    let captured: { fn: string; args: unknown } | null = null;
+    const fakeSupabase = {
+      rpc: async (fn: string, args: { p_source: string }) => {
+        captured = { fn, args };
+        return { data: [], error: null };
+      },
+    };
+    await runCanaryCheck(fakeSupabase, "ameli_ps");
+    expect(captured).toEqual({ fn: "check_ingest_canary", args: { p_source: "ameli_ps" } });
   });
 });

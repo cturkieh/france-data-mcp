@@ -25,6 +25,7 @@ import {
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
+import { getInseeSirenCredentials, lookupSirenViaInsee } from "./insee-sirene.js";
 
 const BASE_URL = "https://recherche-entreprises.api.gouv.fr/search";
 
@@ -53,6 +54,13 @@ export type Finance = {
   annee: number;
   ca?: number;
   resultatNet?: number;
+  /**
+   * Signal de fiabilité du `ca`. `false` quand `ca===0` ET `resultatNet>0` :
+   * pattern observé à 100% sur les SELARL pharma (NAF 47.73Z) qui ne déclarent
+   * pas leur CA au RNE — il ne faut pas l'afficher comme un vrai 0. Vraie
+   * dormance (`resultatNet<=0` ou undefined) reste `caFiable: true`.
+   */
+  caFiable: boolean;
 };
 
 export type Dirigeant = {
@@ -73,6 +81,9 @@ export type Dirigeant = {
  *   `enrichmentWarning` contient le message d'erreur.
  */
 export type EnrichmentStatus = "not_attempted" | "success" | "partial" | "failed";
+
+/** Source d'origine du lookup d'une `Entreprise`. Voir champ `siren_source` ci-dessous. */
+export type EntrepriseSirenSource = "dinum" | "insee_v3";
 
 export type Entreprise = {
   /** SIREN 9 chiffres */
@@ -119,6 +130,14 @@ export type Entreprise = {
   enrichmentStatus?: EnrichmentStatus;
   /** Message d'aide quand `enrichmentStatus` ∈ {"partial", "failed"}. */
   enrichmentWarning?: string;
+  /**
+   * Source effective du lookup. `"dinum"` (défaut implicite) = retour de l'API
+   * recherche-entreprises.api.gouv.fr. `"insee_v3"` = fallback SIRENE INSEE V3
+   * activé quand DINUM ne connaît pas le SIREN (cas diffusion partielle). En
+   * mode insee_v3, finances/dirigeants/etablissements sont vides — l'API
+   * /siren/{siren} ne les expose pas sans appels supplémentaires /siret.
+   */
+  siren_source?: EntrepriseSirenSource;
   /** Statut administratif global */
   actif: boolean;
 };
@@ -358,11 +377,15 @@ export async function getEntrepriseBySiren(
     }
     // "pas indexé par DINUM" ≠ "n'existe pas dans SIRENE". Comportement
     // normal pour les SIREN en diffusion partielle (cf. JSDoc ci-dessus, cas
-    // Bio Ard'Aisne). Le caller voit explicitement `found: false` et un
-    // message orientant vers les alternatives.
+    // Bio Ard'Aisne). On tente le fallback SIRENE INSEE V3 si configuré.
+    const inseeMatch = await lookupSirenViaInsee(siren);
+    if (inseeMatch) return lookupFound(inseeMatch);
+    const inseeSuffix = getInseeSirenCredentials()
+      ? "Fallback SIRENE INSEE V3 a aussi retourné null (SIREN absent de SIRENE, auth cassée, ou panne API — voir logs)."
+      : "Fallback SIRENE INSEE V3 non configuré (env vars INSEE_SIRENE_CLIENT_ID/INSEE_SIRENE_CLIENT_SECRET absentes).";
     return lookupNotFound(
       siren,
-      `SIREN ${siren} non indexé par recherche-entreprises.api.gouv.fr. Cause probable : entreprise en diffusion partielle INSEE (statut_diffusion ∈ {P,N}), exclusion sectorielle, ou SIREN inexistant. Pour confirmation : interroger SIRENE INSEE directement (API authentifiée).`,
+      `SIREN ${siren} non trouvé via DINUM (statut diffusion partielle probable). ${inseeSuffix}`,
     );
   }
 
@@ -509,7 +532,16 @@ function toEntreprise(api: ApiEntreprise): Entreprise {
     for (const [year, fin] of Object.entries(api.finances)) {
       const annee = Number.parseInt(year, 10);
       if (Number.isFinite(annee)) {
-        const f: Finance = { annee };
+        // caFiable: false uniquement quand `ca === 0 && resultatNet > 0` —
+        // signal "non déclaré DINUM/RNE" (audit SELARL pharma 2026-05-09). Si
+        // ca est undefined OU resultatNet est <= 0/undefined, on considère
+        // l'absence ou le 0 comme fiable (entreprise dormante plausible).
+        const caFiable = !(
+          fin.ca === 0 &&
+          fin.resultat_net !== undefined &&
+          fin.resultat_net > 0
+        );
+        const f: Finance = { annee, caFiable };
         if (fin.ca !== undefined) f.ca = fin.ca;
         if (fin.resultat_net !== undefined) f.resultatNet = fin.resultat_net;
         finances.push(f);

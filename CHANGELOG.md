@@ -4,6 +4,83 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.4.4] — 2026-05-09
+
+Audit Claude.ai sur les 13 tools MCP : 4 bugs identifiés (B3/B5/B6/B7) +
+2 garde-fous d'observabilité ingestion + 1 fallback API live (SIRENE INSEE V3).
+
+### Tools MCP
+
+- **`entreprises_in_radius`** : `perPage` propagé dans le fallback
+  `naf + lat/lon/radius` (validation stricte 1–25, RangeError sinon). Sans
+  cela, `perPage: 3` retournait jusqu'à 25 résultats post-filtre Haversine.
+- **`lister_specialites_ameli`** : 2 nouvelles colonnes `libelle_clarifie`
+  (désambiguïsation des libellés partagés calculée en SQL via sous-requête
+  scalaire `COUNT(DISTINCT code)`) et `is_libelle_partage`. Format compact
+  via le helper SQL `format_count_human` (sortie stable indépendante du
+  `lc_numeric` de session). Robuste à un nouveau code dupliqué Ameli.
+
+### Données ingérées
+
+- **FINESS `raison_sociale` / `ville` / `voie`** : `collapseWhitespace`
+  appliqué à l'ingestion (DREES émet parfois des doubles espaces qui
+  produisent des doublons logiques côté equality matching).
+
+### Type lib npm
+
+- `Finance.caFiable: boolean` exposé sur les retours DINUM. `false` quand
+  `ca === 0 && resultatNet > 0` (pattern observé à 100% sur les SELARL
+  pharma 47.73Z qui ne déclarent pas leur CA au RNE). Vraie dormance reste
+  `caFiable: true`.
+- Nouveau type `EntrepriseSirenSource = "dinum" | "insee_v3"` (champ
+  `Entreprise.siren_source`).
+
+### Fallback API live — SIRENE INSEE V3.11
+
+Nouveau module `src/sante/insee-sirene.ts` : quand DINUM
+`recherche-entreprises.api.gouv.fr` ne connaît pas un SIREN (statut
+diffusion partielle), `getEntrepriseBySiren` tente automatiquement un
+lookup via SIRENE INSEE V3.11. No-op gracieux si les credentials
+`INSEE_SIRENE_CLIENT_ID` / `INSEE_SIRENE_CLIENT_SECRET` ne sont pas
+configurées. OAuth2 client_credentials avec cache token + invalidation sur
+401/403 (rotation creds server-side). `fetchJson` réutilisé pour bénéficier
+des retries 429/5xx.
+
+### Observabilité ingestion
+
+- **Checksum SHA-256 du CSV téléchargé** : tracé dans `ingest_log.csv_sha256`
+  + short-circuit `same_checksum` quand le fichier est byte-identique au
+  dernier success → skip COPY/VALIDATE/SWAP (économise plusieurs minutes
+  Postgres + IOPS).
+- **Canary post-swap** : nouvelle table `ingest_canary_targets` (5 cibles
+  FINESS hardcodées : 3 LBM BIO ARD'AISNE Charleville + AP-HP Pitié-Salpêtrière
+  + AP-HM Timone). RPC `check_ingest_canary(p_source)` appelé après
+  l'atomic swap, missing keys écrits dans `ingest_log.canary_failures`
+  sans rollback. Ameli reste sans cibles seedées (canary inactif jusqu'à
+  identification de cibles stables).
+
+### Robustesse
+
+- `format_count_human(BIGINT)` defensive sur `n < 0`.
+- INSEE timeout 60s (couvre les retries fetchJson cumulés).
+- Validation stricte `perPage` (RangeError plutôt que clamp silencieux).
+
+### Migrations SQL
+
+- `20260509T140000_ingest_log_checksum_and_canary.sql`
+- `20260509T140200_rpc_ameli_lister_specialites_clarifie.sql`
+
+### .env.example
+
+Ajout des 2 variables `INSEE_SIRENE_CLIENT_ID` / `INSEE_SIRENE_CLIENT_SECRET`
+optionnelles (inscription gratuite sur https://portail-api.insee.fr).
+
+### Tests
+
+- 334 tests unitaires verts (+ ~22 nouveaux : 17 fallback INSEE, 3 SHA256
+  + canary, 2 perPage).
+- Aucun changement de comportement hors scope des chantiers.
+
 ## [0.4.3] — 2026-05-09
 
 ### ⚠️ Breaking — surface lib npm

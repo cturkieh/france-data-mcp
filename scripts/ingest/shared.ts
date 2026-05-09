@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -60,6 +61,34 @@ export interface DownloadResult {
   filePath: string;
   sizeBytes: number;
   url: string;
+  /**
+   * Hex-encoded SHA-256 of the downloaded file content. Used to short-circuit
+   * the ingestion pipeline when the upstream CSV is byte-identical to the
+   * previous successful run (skipping COPY → VALIDATE → SWAP saves several
+   * minutes of Postgres CPU + free-tier IOPS).
+   */
+  sha256: string;
+}
+
+/**
+ * Stream a file through SHA-256 to avoid loading the whole CSV (~150 MB for
+ * Ameli) into memory. Hex output keeps `ingest_log.csv_sha256` human-readable
+ * and CHAR(64) compatible.
+ */
+export async function computeSha256(filePath: string): Promise<string> {
+  const hash = crypto.createHash("sha256");
+  const stream = fs.createReadStream(filePath);
+  await pipeline(stream, hash);
+  return hash.digest("hex");
+}
+
+/**
+ * Synchronous-Buffer variant of `computeSha256` — exposed for unit testing
+ * with a known-vector input. The async version takes a path to support
+ * the multi-hundred-MB CSVs without loading them into memory.
+ */
+export function computeSha256Buffer(buf: Buffer): string {
+  return crypto.createHash("sha256").update(buf).digest("hex");
 }
 
 /** Download a CSV with retry-on-failure (3 attempts, exponential backoff). */
@@ -77,7 +106,10 @@ export async function downloadCsv(url: string, destFilename: string): Promise<Do
       // biome-ignore lint/suspicious/noExplicitAny: Node's Readable.fromWeb expects the DOM ReadableStream type, not the lib.dom one.
       await pipeline(Readable.fromWeb(res.body as any), fileStream);
       const stat = await fsp.stat(filePath);
-      return { filePath, sizeBytes: stat.size, url };
+      // Compute checksum BEFORE returning so the caller never sees a partial
+      // download — if we fail to read the file back, the attempt is retried.
+      const sha256 = await computeSha256(filePath);
+      return { filePath, sizeBytes: stat.size, url, sha256 };
     } catch (err) {
       lastErr = err;
       console.error(
@@ -121,26 +153,164 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
   }
 }
 
+/** Sources supportées dans `ingest_log.source` (utile pour `getLastSuccessChecksum`). */
+export type IngestSource = "finess" | "ameli_ps";
+
 export interface IngestLogEntry {
   source: string;
   started_at: string;
   finished_at?: string;
   status: "success" | "partial" | "failed";
-  row_count?: number;
+  row_count?: number | null;
   csv_size_bytes?: number;
   csv_url?: string;
   error_phase?: IngestPhase;
   error_message?: string;
   github_run_url?: string;
+  /** SHA-256 hex (CHAR(64)) du CSV téléchargé. Permet le short-circuit "même fichier qu'avant". */
+  csv_sha256?: string;
+  /**
+   * Raison textuelle d'un run sans ingestion réelle. Aujourd'hui une seule
+   * valeur : `"same_checksum"` (CSV byte-identique au dernier success). Champ
+   * libre pour distinguer d'autres no-ops futurs (ex: `"upstream_unchanged"`).
+   */
+  skip_reason?: string;
+  /**
+   * Liste des `key_value` canary attendus mais introuvables après le swap
+   * en prod. Vide ou absent = canary OK. Non-bloquant — alerte douce, pas
+   * de rollback.
+   */
+  canary_failures?: string[];
+}
+
+/**
+ * Untyped service client pour `ingest_log`. Le type généré `Database` ne
+ * connaît pas encore les colonnes ajoutées par la migration B2/B3
+ * (csv_sha256, skip_reason, canary_failures) tant que `pnpm db:types` n'a
+ * pas été relancé après la migration. Plutôt qu'un cast `as any`, on utilise
+ * un client untyped pour ce point d'écriture précis — même pattern que
+ * `getUntypedServiceClient` pour les staging tables.
+ */
+function getIngestLogClient(): SupabaseClient {
+  const url = requireEnv("SUPABASE_URL");
+  const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key, { auth: { persistSession: false } });
 }
 
 export async function writeIngestLog(entry: IngestLogEntry): Promise<void> {
-  const supabase = getServiceClient();
+  const supabase = getIngestLogClient();
   const { error } = await supabase.from("ingest_log").insert(entry);
   if (error) {
     // We don't throw — failing to log shouldn't override the original ingest failure.
     console.error(`[france-data-mcp] failed to write ingest_log: ${error.message}`);
   }
+}
+
+/**
+ * Retourne le checksum SHA-256 du dernier run `success` pour cette source,
+ * ou `null` si aucun run réussi (premier run, table vidée). Utilisé par
+ * `finess.ts` et `ameli.ts` pour court-circuiter les étapes COPY → SWAP
+ * quand le CSV upstream n'a pas changé d'un poil.
+ *
+ * Erreurs Supabase loggées via `console.error` (pas de throw) — un échec de
+ * lecture du log ne doit pas bloquer l'ingestion : on retombe sur le chemin
+ * "pas de checksum connu, ingest normal".
+ */
+export async function getLastSuccessChecksum(source: IngestSource): Promise<string | null> {
+  const supabase = getIngestLogClient();
+  const { data, error } = await supabase
+    .from("ingest_log")
+    .select("csv_sha256")
+    .eq("source", source)
+    .eq("status", "success")
+    .order("started_at", { ascending: false })
+    .limit(1);
+  if (error) {
+    console.error(
+      `[france-data-mcp] getLastSuccessChecksum(${source}) failed: ${error.message} — falling back to full ingest`,
+    );
+    return null;
+  }
+  if (!data || data.length === 0) return null;
+  // PostgREST renvoie l'objet brut; le champ peut être null (run pré-B2).
+  const row = data[0] as { csv_sha256?: string | null };
+  return row.csv_sha256 ?? null;
+}
+
+/**
+ * Court-circuite l'ingestion quand le CSV téléchargé est byte-identique au
+ * dernier run `success` pour cette source. Renseigne `log` (skip_reason +
+ * status success), écrit l'entrée dans `ingest_log`, log un message console.
+ * Le caller fait `if (await shortCircuitIfSameChecksum(...)) return;` pour
+ * sortir tôt et éviter COPY/VALIDATE/SWAP coûteux.
+ *
+ * Retourne `true` si le short-circuit s'est déclenché, `false` sinon.
+ */
+export async function shortCircuitIfSameChecksum(
+  log: IngestLogEntry,
+  lastSha: string | null,
+  currentSha: string,
+  tag: string,
+): Promise<boolean> {
+  if (!lastSha || lastSha !== currentSha) return false;
+  log.status = "success";
+  log.skip_reason = "same_checksum";
+  log.row_count = null;
+  log.finished_at = new Date().toISOString();
+  await writeIngestLog(log);
+  console.log(
+    `[${tag}] same checksum as last success (${currentSha.slice(0, 8)}…) — skipping ingestion`,
+  );
+  return true;
+}
+
+/**
+ * Lance le canary post-swap, écrit le résultat dans `log.canary_failures` si
+ * non-vide et logue un warn. Helper non-bloquant (la swap est déjà committée).
+ * Encapsule le pattern dupliqué entre finess.ts et ameli.ts.
+ */
+export async function runAndRecordCanary(
+  supabase: Pick<SupabaseClient, "rpc">,
+  source: IngestSource,
+  log: IngestLogEntry,
+  tag: string,
+): Promise<void> {
+  const missing = await runCanaryCheck(supabase, source);
+  if (missing.length === 0) return;
+  log.canary_failures = missing;
+  console.warn(`[${tag}] canary missing: ${missing.join(", ")} — investigate (no rollback)`);
+}
+
+/**
+ * Appel post-swap du RPC `check_ingest_canary(p_source)`. Retourne la liste
+ * des `key_value` canary attendus mais introuvables en prod après le swap.
+ * Vide = canary OK.
+ *
+ * Non-bloquant par contrat : la swap est déjà committée, on alerte sans
+ * rollback. Une erreur RPC réseau renvoie le sentinelle `["__rpc_error__"]`
+ * pour que le caller puisse l'écrire dans `log.canary_failures` et que
+ * l'opérateur sache distinguer "canary missing" de "canary check unavailable".
+ *
+ * Le client est injecté pour faciliter le test unitaire (mock RPC). En prod,
+ * passer `getUntypedServiceClient(...)` car `check_ingest_canary` n'est pas
+ * dans la `Database` typée tant que `pnpm db:types` n'a pas été regénéré.
+ */
+export async function runCanaryCheck(
+  supabase: Pick<SupabaseClient, "rpc">,
+  source: IngestSource,
+): Promise<string[]> {
+  const { data, error } = await supabase.rpc("check_ingest_canary", { p_source: source });
+  if (error) {
+    console.error(
+      `[france-data-mcp] check_ingest_canary(${source}) RPC failed: ${error.message} — non-blocking, swap already committed`,
+    );
+    return ["__rpc_error__"];
+  }
+  // Le RPC retourne TEXT[] (jamais NULL grâce au COALESCE côté SQL) — mais
+  // on défend quand même contre une régression PostgREST qui renverrait
+  // null/undefined. Type-narrow strict pour éviter `as string[]`.
+  if (!Array.isArray(data)) return [];
+  return data.filter((v): v is string => typeof v === "string");
 }
 
 export interface AtomicSwapInput {

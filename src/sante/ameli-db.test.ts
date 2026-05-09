@@ -208,16 +208,20 @@ describe("listAmeliSpecialites", () => {
         {
           code: "24",
           libelle: "Infirmier",
+          libelle_clarifie: "Infirmier",
           type_ps_code: "2",
           type_ps_libelle: "Autres PS (...)",
           count: "104041",
+          is_libelle_partage: false,
         },
         {
           code: "01",
           libelle: "Médecin généraliste",
+          libelle_clarifie: "Médecin généraliste (code 01, 55K)",
           type_ps_code: "1",
           type_ps_libelle: "Médecins généralistes et spécialistes",
           count: 55381,
+          is_libelle_partage: true,
         },
       ],
       error: null,
@@ -227,19 +231,105 @@ describe("listAmeliSpecialites", () => {
     expect(out).toHaveLength(2);
     expect(out[0]?.code).toBe("24");
     expect(out[0]?.count).toBe(104041); // string BIGINT coerced to number
+    expect(out[0]?.libelle_clarifie).toBe("Infirmier"); // unique → identique au libelle
+    expect(out[0]?.is_libelle_partage).toBe(false);
     expect(out[1]?.count).toBe(55381); // number passes through
+    expect(out[1]?.libelle_clarifie).toBe("Médecin généraliste (code 01, 55K)");
+    expect(out[1]?.is_libelle_partage).toBe(true);
+  });
+
+  it("propage libelle_clarifie pour les libellés partagés (V0.4.4 — Bug B7)", async () => {
+    // Cas réel : 3 codes différents partagent le libellé "Médecin généraliste".
+    // Le RPC SQL calcule libelle_clarifie via window function PARTITION BY libelle.
+    mockRpc.mockResolvedValue({
+      data: [
+        {
+          code: "01",
+          libelle: "Médecin généraliste",
+          libelle_clarifie: "Médecin généraliste (code 01, 55K)",
+          type_ps_code: "1",
+          type_ps_libelle: "Médecins",
+          count: 55381,
+          is_libelle_partage: true,
+        },
+        {
+          code: "22",
+          libelle: "Médecin généraliste",
+          libelle_clarifie: "Médecin généraliste (code 22, 5.8K)",
+          type_ps_code: "1",
+          type_ps_libelle: "Médecins",
+          count: 5808,
+          is_libelle_partage: true,
+        },
+        {
+          code: "03",
+          libelle: "Cardiologue",
+          libelle_clarifie: "Cardiologue",
+          type_ps_code: "1",
+          type_ps_libelle: "Médecins",
+          count: 7000,
+          is_libelle_partage: false,
+        },
+      ],
+      error: null,
+    });
+    const out = await listAmeliSpecialites();
+    expect(out).toHaveLength(3);
+    // Les 2 "Médecin généraliste" sont désambiguïsés via leur code et count.
+    const mg01 = out.find((s) => s.code === "01");
+    const mg22 = out.find((s) => s.code === "22");
+    expect(mg01?.libelle_clarifie).toBe("Médecin généraliste (code 01, 55K)");
+    expect(mg01?.is_libelle_partage).toBe(true);
+    expect(mg22?.libelle_clarifie).toBe("Médecin généraliste (code 22, 5.8K)");
+    expect(mg22?.is_libelle_partage).toBe(true);
+    // Le libellé unique reste inchangé.
+    const cardio = out.find((s) => s.code === "03");
+    expect(cardio?.libelle_clarifie).toBe("Cardiologue");
+    expect(cardio?.is_libelle_partage).toBe(false);
+  });
+
+  it("fallback sur libelle si le RPC est pré-V0.4.4 (libelle_clarifie absent)", async () => {
+    // Si la migration SQL n'est pas encore appliquée, le RPC ne renvoie pas
+    // les nouvelles colonnes — le code TS doit fallback sur `libelle` brut
+    // sans planter ni produire de "undefined" côté caller.
+    mockRpc.mockResolvedValue({
+      data: [
+        {
+          code: "01",
+          libelle: "Médecin généraliste",
+          type_ps_code: "1",
+          type_ps_libelle: "Médecins",
+          count: 55381,
+        },
+      ],
+      error: null,
+    });
+    const out = await listAmeliSpecialites();
+    expect(out).toHaveLength(1);
+    expect(out[0]?.libelle_clarifie).toBe("Médecin généraliste");
+    expect(out[0]?.is_libelle_partage).toBe(false);
   });
 
   it("filtre les rows sans code (defensive)", async () => {
     mockRpc.mockResolvedValue({
       data: [
-        { code: null, libelle: "x", type_ps_code: "1", type_ps_libelle: "y", count: 1 },
+        {
+          code: null,
+          libelle: "x",
+          libelle_clarifie: "x",
+          type_ps_code: "1",
+          type_ps_libelle: "y",
+          count: 1,
+          is_libelle_partage: false,
+        },
         {
           code: "01",
           libelle: "MG",
+          libelle_clarifie: "MG",
           type_ps_code: "1",
           type_ps_libelle: "Médecins",
           count: 100,
+          is_libelle_partage: false,
         },
       ],
       error: null,
