@@ -270,3 +270,32 @@ describe("isValidDept (v0.2.1)", () => {
     expect(isValidDept("0123")).toBe(false); // 4 digits
   });
 });
+
+describe("parseFinessRecord (V0.4.3 — coordPresentButUnparsed drift signal)", () => {
+  it("retourne coordPresentButUnparsed=false quand les 2 coords sont valides", () => {
+    const out = parseFinessRecord(charlevilleEhpadRow);
+    expect(out.coordPresentButUnparsed).toBe(false);
+  });
+
+  it("retourne coordPresentButUnparsed=false quand les 2 coords sont absentes", () => {
+    const row = { ...charlevilleEhpadRow, coordxet: "", coordyet: "" };
+    const out = parseFinessRecord(row);
+    expect(out.coordPresentButUnparsed).toBe(false);
+    expect(out.row?.coordx_lambert93).toBeNull();
+    expect(out.row?.coordy_lambert93).toBeNull();
+  });
+
+  it("retourne coordPresentButUnparsed=true quand coordxet est présent mais non-numérique", () => {
+    // Cas typique d'un column shift : "12 CRS BRIAND" écrit dans coordxet.
+    const row = { ...charlevilleEhpadRow, coordxet: "12 CRS BRIAND" };
+    const out = parseFinessRecord(row);
+    expect(out.coordPresentButUnparsed).toBe(true);
+    expect(out.row?.coordx_lambert93).toBeNull();
+  });
+
+  it("retourne coordPresentButUnparsed=true quand seulement coordyet est invalide", () => {
+    const row = { ...charlevilleEhpadRow, coordyet: "ABC" };
+    const out = parseFinessRecord(row);
+    expect(out.coordPresentButUnparsed).toBe(true);
+  });
+});

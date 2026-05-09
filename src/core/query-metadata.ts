@@ -1,0 +1,80 @@
+/**
+ * Métadonnées de requête exposées dans les réponses des tools de listing.
+ *
+ * Pourquoi : le caller MCP (Claude.ai, Cursor, agent LLM) ne peut pas deviner
+ * la nature du calcul de distance ni la précision géographique en lisant un
+ * `distance_km: 2.67`. Or les sources varient : FINESS expose des coords
+ * Lambert93 reprojetées en WGS84 (précision adresse), Ameli ne fournit que
+ * le centroïde commune (~3 km moyenne). Sans cette transparence, un caller
+ * peut prendre des décisions logistiques fausses (ex: "le LBM est à 2.67 km
+ * vol d'oiseau" — mais la distance routière fait facilement +20-30%).
+ *
+ * Pattern aligné sur le bloc `fallback` déjà présent dans
+ * `entreprises_in_radius` (cf. `api/tools.ts`) qui surface honnêtement la
+ * stratégie de fallback API DINUM.
+ */
+
+/**
+ * Précision géographique des coordonnées exposées dans les résultats.
+ *
+ * - `lambert93_natif_finess` : coords FINESS DREES (Lambert 93 reprojeté
+ *   WGS84 à l'ingestion). Précision adresse ~10 m côté DREES.
+ * - `centroide_commune_ameli` : coords Ameli (centroïde commune via
+ *   `geo.api.gouv.fr/communes`). Précision ~3 km moyenne — adapté à
+ *   l'analyse de densité, PAS au géocodage adresse.
+ */
+export type GeoPrecision = "lambert93_natif_finess" | "centroide_commune_ameli";
+
+/**
+ * Méthode de calcul des distances exposées dans `distance_km`.
+ *
+ * - `haversine_postgis` : ST_Distance sur le type `geography` PostGIS.
+ *   Distance vol d'oiseau, pas routière. Pour la distance routière,
+ *   intégrer un service externe (OSRM, ORS) côté caller.
+ */
+export type DistanceType = "haversine_postgis";
+
+export interface QueryMetadata {
+  geo_precision: GeoPrecision;
+  /** Présent uniquement quand la requête expose `distance_km` (radius). */
+  distance_type?: DistanceType;
+  /** Notes actionnables pour le caller (précision attendue, cross-checks…). */
+  notes: string[];
+}
+
+const SOURCE_NOTE: Record<GeoPrecision, string> = {
+  centroide_commune_ameli:
+    "Coordonnées Ameli = centroïde commune (~3 km moyenne). Adapté à l'analyse de densité médicale, pas au géocodage adresse.",
+  lambert93_natif_finess:
+    "FINESS DREES (sync bimestrielle) — référentiel peut avoir 1-2 mois de retard sur le terrain pour les structures émergentes (CPTS récentes, MSP en agrément). Cross-check ARS / Service Public si nécessaire.",
+};
+
+const HAVERSINE_NOTE =
+  "Distance calculée en vol d'oiseau (haversine PostGIS). Pour la distance routière, croiser avec un service externe (OSRM, ORS).";
+
+/**
+ * Builder unique pour les 4 cas (Ameli/FINESS × radius/list). Factorise les
+ * 4 helpers historiques. Si une nouvelle source spatiale arrive (IRIS, RPPS),
+ * ajouter une entrée à `SOURCE_NOTE` et un alias à la fin du fichier.
+ */
+function buildMetadata(precision: GeoPrecision, withDistance: boolean): QueryMetadata {
+  const notes = [SOURCE_NOTE[precision]];
+  const result: QueryMetadata = { geo_precision: precision, notes };
+  if (withDistance) {
+    result.distance_type = "haversine_postgis";
+    notes.push(HAVERSINE_NOTE);
+  }
+  return result;
+}
+
+export const ameliRadiusMetadata = (): QueryMetadata =>
+  buildMetadata("centroide_commune_ameli", true);
+
+export const ameliDeptMetadata = (): QueryMetadata =>
+  buildMetadata("centroide_commune_ameli", false);
+
+export const finessRadiusMetadata = (): QueryMetadata =>
+  buildMetadata("lambert93_natif_finess", true);
+
+export const finessByCategorieMetadata = (): QueryMetadata =>
+  buildMetadata("lambert93_natif_finess", false);

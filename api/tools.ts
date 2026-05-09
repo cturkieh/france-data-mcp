@@ -12,6 +12,8 @@ import {
   type AmeliResult,
   getAmeliBySpecialiteDept,
   getAmeliInRadius,
+  listAmeliSpecialites,
+  listAmeliTypesPs,
 } from "../src/sante/ameli-db.js";
 import { RADIUS_MAX_KM, RADIUS_MIN_KM } from "../src/sante/db-helpers.js";
 import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
@@ -211,6 +213,21 @@ const AMELI_SCOPE_WARNING =
   "Pour effectifs tous statuts, voir Annuaire Santé ANS (RPPS, esante.gouv.fr) — non couvert par ce serveur.";
 
 /**
+ * Aide à la sélection des codes type_ps Ameli, intégrée à toutes les
+ * descriptions de tools de prospection. Volontairement courte pour ne pas
+ * bloater le token budget côté caller : la nomenclature exhaustive vit dans
+ * les tools `lister_specialites_ameli` et `lister_types_ps_ameli`.
+ *
+ * Le code "2" est intentionnellement décrit comme "fourre-tout" — c'est le
+ * piège récurrent (audit Charleville 2026-05-09). Sans cette précision, un
+ * caller filtrant `type_ps_codes=["2"]` pour cibler les IDE récupère en
+ * réalité IDE + kinés + sages-femmes + podologues + orthophonistes + IPA,
+ * soit ~2x les volumes attendus.
+ */
+const AMELI_TYPE_PS_HELP =
+  "Codes type_ps Ameli présents en base (3) : '1' médecins, '2' auxiliaires médicaux (fourre-tout : IDE, kinés, sages-femmes, podologues, orthophonistes, orthoptistes, IPA), '5' chirurgiens-dentistes.";
+
+/**
  * Réponse enrichie du fallback `naf + center+radiusKm` (limite API DINUM).
  *
  * Le champ `fallback` documente la stratégie ET signale honnêtement quand la
@@ -305,14 +322,18 @@ function dedupeAmeliByPs(result: AmeliQueryResult): AmeliDedupedResult {
   // Iteration order = input order, which is already sorted by distance/name
   // upstream — preserve it to keep the output deterministic.
   for (const row of result.results) {
-    const key = [
+    // JSON.stringify plutôt que `[...].join("|")` : la raison sociale peut
+    // contenir un pipe ("SELARL X | Y") qui collisionnerait sinon avec un
+    // praticien différent post-split. Garantit l'unicité de la clé sans
+    // séparateur fragile.
+    const key = JSON.stringify([
       row.identite.nom,
       row.identite.prenom,
       row.identite.civilite,
       row.identite.raison_sociale,
       row.specialite.code,
       row.type_ps.code,
-    ].join("|");
+    ]);
     const { identite, specialite, type_ps, ...site } = row;
     const existing = grouped.get(key);
     if (existing) {
@@ -444,7 +465,8 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_commune_by_code",
-    description: "Récupère une commune par son code INSEE. Renvoie null si introuvable.",
+    description:
+      "Récupère une commune par son code INSEE. Retourne un objet `LookupResult` discriminé par `found`. `found: true` → champs commune à plat (nom, codesPostaux, centre…). `found: false` → `{ found: false, key, lookupStatus: 'not_found', message }` orientant vers `autocomplete_commune` pour disambiguer.",
     inputSchema: {
       type: "object",
       properties: {
@@ -577,7 +599,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "entreprise_by_siren",
     description:
-      "Récupère le détail d'une entreprise française par son SIREN (9 chiffres) : raison sociale, NAF, finances historiques, dirigeants, établissements. Source : DINUM Recherche Entreprises.\n\n⚠️ La liste `etablissements` peut être tronquée. Le champ `nombreEtablissements` (compté SIRENE) reflète le total réel. **Lire `enrichmentStatus`** pour savoir si la liste est complète :\n- `success` : `etablissements` contient tous les sites\n- `partial` : sites manquants (multi-département ou NAF différent du siège) — voir `enrichmentWarning`\n- `failed` : l'enrichissement a échoué (rate limit, panne API) — seul le siège est listé\n- `not_attempted` : entreprise monosite ou data SIRENE manquante\n\nPour énumération exhaustive multi-département, utiliser `entreprises_in_radius` par zone géographique. Coût : 1 ou 2 appels API DINUM par invocation (rate limit ~1 req/s effectif).",
+      "Récupère le détail d'une entreprise française par son SIREN (9 chiffres) : raison sociale, NAF, finances historiques, dirigeants, établissements. Source : DINUM Recherche Entreprises.\n\n**Format de retour** : objet `LookupResult` discriminé par `found`.\n- `found: true` → l'entreprise est retournée à plat (champs `siren`, `nomComplet`, `etablissements`, `enrichmentStatus`, …)\n- `found: false` → `{ found: false, key, lookupStatus: 'not_found' | 'ambiguous', message }`. `not_found` : SIREN non indexé par DINUM (souvent diffusion partielle INSEE — l'entreprise peut quand même exister dans SIRENE). `ambiguous` : régression API à signaler.\n\n⚠️ Quand `found: true`, la liste `etablissements` peut être tronquée. Le champ `nombreEtablissements` (compté SIRENE) reflète le total réel. **Lire `enrichmentStatus`** pour savoir si la liste est complète :\n- `success` : `etablissements` contient tous les sites\n- `partial` : sites manquants (multi-département ou NAF différent du siège) — voir `enrichmentWarning`\n- `failed` : l'enrichissement a échoué (rate limit, panne API) — seul le siège est listé\n- `not_attempted` : entreprise monosite ou data SIRENE manquante\n\nPour énumération exhaustive multi-département, utiliser `entreprises_in_radius` par zone géographique. Coût : 1 ou 2 appels API DINUM par invocation (rate limit ~1 req/s effectif).",
     inputSchema: {
       type: "object",
       properties: {
@@ -689,7 +711,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "etablissement_by_finess",
     description:
-      "Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Renvoie null si introuvable. Source : FINESS / DREES. Note : champ `email` toujours `null` (non exposé par FINESS public).",
+      "Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Retourne un objet `LookupResult` discriminé par `found`. `found: true` → champs FINESS à plat. `found: false` → `{ found: false, key, lookupStatus: 'not_found', message }`. Le référentiel DREES a 1-2 mois de retard sur le terrain : pour des structures émergentes (CPTS récentes, MSP en agrément), cross-check ARS / Service Public. Source : FINESS / DREES. Note : champ `email` toujours `null` (non exposé par FINESS public).",
     inputSchema: {
       type: "object",
       properties: {
@@ -708,7 +730,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_in_radius",
-    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). Filtres optionnels : codes spécialité Ameli (ex: '01' MG, '03' cardio, '06' dermato) et codes type PS ('1' médecin, '2' IDE, '3' sage-femme, '4' chir-dentiste, '5' pharmacien, '8' kiné, etc.). Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -730,7 +752,7 @@ export const TOOLS: McpTool[] = [
         type_ps_codes: {
           type: "array",
           description:
-            "Liste de codes type PS (ex: ['1'] médecins, ['2'] IDE). Si omis, tous types.",
+            "Liste de codes type PS Ameli (3 valeurs présentes en base : '1' médecins, '2' auxiliaires médicaux fourre-tout — IDE/kinés/sages-femmes/podologues/orthophonistes/orthoptistes/IPA, '5' chirurgiens-dentistes). Pour cibler une seule profession, préférer `specialite_codes`. Si omis, tous types.",
           items: { type: "string" },
         },
         limit: {
@@ -774,7 +796,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_par_specialite_dept",
-    description: `Liste des professionnels de santé libéraux conventionnés d'un département, avec filtres optionnels par spécialité ou type de PS. Pour énumération administrative — pas de rayon. Pagination : utiliser \`offset\` pour récupérer les pages suivantes quand \`truncated=true\`. Multi-sites : utiliser \`dedupe_by_ps=true\` pour regrouper par praticien. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Liste des professionnels de santé libéraux conventionnés d'un département, avec filtres optionnels par spécialité ou type de PS. Pour énumération administrative — pas de rayon. ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls), passer par \`specialite_code\` plutôt que \`type_ps_code\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Pagination : utiliser \`offset\` pour récupérer les pages suivantes quand \`truncated=true\`. Multi-sites : utiliser \`dedupe_by_ps=true\` pour regrouper par praticien. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -785,11 +807,13 @@ export const TOOLS: McpTool[] = [
         },
         specialite_code: {
           type: "string",
-          description: "Code spécialité Ameli (ex: '03' cardio). Optionnel.",
+          description:
+            "Code spécialité Ameli (ex: '01' MG, '24' IDE, '26' kiné, '03' cardio). Optionnel. Liste complète via `lister_specialites_ameli`.",
         },
         type_ps_code: {
           type: "string",
-          description: "Code type PS (ex: '1' médecin). Optionnel.",
+          description:
+            "Code type PS Ameli ('1' médecins, '2' auxiliaires médicaux, '5' chirurgiens-dentistes). Optionnel — préférer `specialite_code` pour un ciblage précis. Liste complète via `lister_types_ps_ameli`.",
         },
         limit: {
           type: "number",
@@ -829,6 +853,30 @@ export const TOOLS: McpTool[] = [
       if (offset !== undefined) input.offset = offset;
       const result = await getAmeliBySpecialiteDept(input);
       return dedupe ? dedupeAmeliByPs(result) : result;
+    },
+  },
+  {
+    name: "lister_specialites_ameli",
+    description: `Liste les codes spécialité Ameli effectivement présents en base, avec leur libellé natif, leur \`type_ps_code\` de rattachement et leur count. Triés par fréquence décroissante. Utile pour découvrir la nomenclature avant de filtrer un \`professionnels_in_radius\` ou \`professionnels_par_specialite_dept\`. Les libellés spécialité Ameli sont clairs (ex: "Infirmier", "Cardiologue") — c'est la dimension recommandée pour cibler une profession précise. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+    handler: async () => {
+      const specialites = await listAmeliSpecialites();
+      return { count: specialites.length, results: specialites };
+    },
+  },
+  {
+    name: "lister_types_ps_ameli",
+    description: `Liste les codes \`type_ps\` Ameli présents en base, avec leur libellé natif (\`libelle_source\`), un libellé clarifié (\`libelle_clarifie\`) résolvant l'ambiguïté du code "2" fourre-tout, leur count total, et \`specialites_presentes\` (la liste effective des spécialités regroupées sous chaque type_ps avec leurs counts). Pas de dictionnaire inventé : la clarification est dérivée de la donnée live à chaque appel. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+    handler: async () => {
+      const typesPs = await listAmeliTypesPs();
+      return { count: typesPs.length, results: typesPs };
     },
   },
 ];

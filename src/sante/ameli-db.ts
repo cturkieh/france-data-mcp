@@ -9,10 +9,19 @@
  * boundary public.
  */
 
+import { metersToKm } from "../core/numbers.js";
+import {
+  ameliDeptMetadata,
+  ameliRadiusMetadata,
+  type QueryMetadata,
+} from "../core/query-metadata.js";
 import { getAnonClient } from "../storage/supabase.js";
+import { assertValidDept } from "../territoire/dept-codes.js";
+import { AMELI_TYPE_PS_QUERYABLE, clarifyTypePsLibelle } from "./ameli-nomenclature.js";
 import {
   clampLimit,
   clampOffset,
+  expectRpcRows,
   formatRpcError,
   trimOrNull,
   validateCoords,
@@ -79,20 +88,91 @@ export interface AmeliQueryResult {
   count: number;
   truncated: boolean;
   results: AmeliResult[];
+  /**
+   * Métadonnées sur la précision géo et le type de distance. Surface au
+   * caller MCP que les coords sont au centroïde commune (~3 km, pas
+   * adresse) et que la distance est haversine (pas routière).
+   *
+   * Optionnel pour ne pas alourdir les call-sites de mock côté tests —
+   * les RPCs de prod (cf. `getAmeliInRadius`/`getAmeliBySpecialiteDept`)
+   * la peuplent toujours, c'est l'unique source d'absence du champ.
+   */
+  query_metadata?: QueryMetadata;
 }
 
-function validateDepartement(dept: string): void {
-  // Accepts "01"-"95" (excl "20"), "2A"/"2B", "971"-"978", "984"-"988".
-  // RangeError plutôt que Error pour cohérence avec les autres validators
-  // (clampLimit, clampOffset, validateCoords, validateRadiusKm) — permet
-  // au boundary MCP de mapper sur JSON-RPC -32602 (Invalid params) au lieu
-  // de -32603 (Internal error). Tests existants matchent sur le message
-  // (`/must be a valid INSEE code/`), pas sur la classe — RangeError étend
-  // Error, donc compat totale.
-  if (dept === "2A" || dept === "2B") return;
-  if (/^\d{2}$/.test(dept) && dept !== "20") return;
-  if (/^(97[1-8]|98[4-8])$/.test(dept)) return;
-  throw new RangeError(`[france-data-mcp] departement must be a valid INSEE code, got "${dept}"`);
+/** Une spécialité présente dans la nomenclature Ameli, avec son count en base. */
+export interface AmeliSpecialiteEntry {
+  /** Code spécialité Ameli (ex : "01" MG, "24" Infirmier, "26" Kiné). */
+  code: string;
+  /** Libellé natif Ameli — toujours clair côté spécialité. */
+  libelle: string;
+  /** Type de PS auquel cette spécialité est rattachée. */
+  type_ps_code: string;
+  /** Libellé natif Ameli du type_ps (peut être ambigu, cf. clarifyTypePsLibelle). */
+  type_ps_libelle: string;
+  /** Nombre d'entrées en base pour ce couple (specialite, type_ps). */
+  count: number;
+}
+
+/**
+ * Description d'un `type_ps_code` enrichie de la liste des spécialités
+ * effectivement regroupées dessous (résout l'ambiguïté du libellé natif).
+ *
+ * Distinct du type statique `AmeliTypePsEntry` exposé par
+ * `ameli-nomenclature.ts` : ce dernier sert pour les helpers de clarification
+ * sans toucher la base ; celui-ci est le shape retourné par le RPC live.
+ */
+export interface AmeliTypePsListEntry {
+  /** Code natif Ameli (1, 2, 5 — codes 3 et 4 filtrés à l'ingestion). */
+  code: string;
+  /**
+   * Libellé natif Ameli, tel qu'il apparaît dans le CSV upstream. Conservé
+   * pour traçabilité — c'est ce que renvoient aussi les autres tools.
+   */
+  libelle_source: string;
+  /**
+   * Libellé clarifié quand le source est ambigu (cas du code "2"). Si la
+   * source matche notre référence, on applique le clarifié ; sinon on
+   * garde la source pour rester honnête (drift detection).
+   */
+  libelle_clarifie: string;
+  /** Total d'entrées sous ce type_ps. */
+  count: number;
+  /**
+   * Liste des spécialités effectivement présentes sous ce type_ps, avec
+   * leur count individuel. Cas du code "2" : exposera Infirmier, Kiné,
+   * Orthophoniste, Pédicure-podologue, Sage-femme, Orthoptiste, IPA.
+   */
+  specialites_presentes: Array<{
+    code: string;
+    libelle: string;
+    count: number;
+  }>;
+}
+
+// `validateDepartement` consolidé V0.4.3 : utilise `assertValidDept` partagé
+// (cf. `src/territoire/dept-codes.ts`) — single source of truth avec FINESS et
+// commune-index. Throw RangeError pour cohérence avec les autres validators
+// DB layer (`validateCoords`, `validateRadiusKm`).
+
+/**
+ * Garde de typage : un caller passant `type_ps_codes=["3"]` (laboratoires,
+ * filtré à l'ingestion) recevait silencieusement un résultat vide. On lève
+ * un RangeError clair pour orienter vers la bonne dimension de filtre.
+ *
+ * Pas de validation côté `specialite_codes` : ~88 codes vivants en base, la
+ * nomenclature live est exposée par `lister_specialites_ameli` — laisser
+ * le SQL `= ANY(...)` retourner naturellement vide pour les codes invalides.
+ */
+function validateTypePsCodes(codes: readonly string[] | undefined): void {
+  if (!codes || codes.length === 0) return;
+  for (const code of codes) {
+    if (!AMELI_TYPE_PS_QUERYABLE.includes(code)) {
+      throw new RangeError(
+        `[france-data-mcp] type_ps_code "${code}" n'est pas filtrable (présents en base : ${AMELI_TYPE_PS_QUERYABLE.join(", ")}). Codes "3" (laboratoires) et "4" (non-conventionnés) sont filtrés à l'ingestion — voir FINESS pour ces personnes morales.`,
+      );
+    }
+  }
 }
 
 /** Find PS within a geographic radius. */
@@ -100,6 +180,7 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   const limit = clampLimit(input.limit);
   validateCoords(input.center.lat, input.center.lon);
   validateRadiusKm(input.radiusKm);
+  validateTypePsCodes(input.typePsCodes);
 
   const supabase = getAnonClient();
   const { data, error } = await supabase.rpc("ameli_in_radius", {
@@ -112,7 +193,7 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   });
 
   if (error) throw new Error(formatRpcError("ameli_in_radius", error));
-  return buildAmeliQueryResult(data, limit);
+  return buildAmeliQueryResult("ameli_in_radius", data, limit, ameliRadiusMetadata());
 }
 
 /** List PS by department (+ optional specialty / type filter, optional offset). */
@@ -121,7 +202,8 @@ export async function getAmeliBySpecialiteDept(
 ): Promise<AmeliQueryResult> {
   const limit = clampLimit(input.limit);
   const offset = clampOffset(input.offset);
-  validateDepartement(input.departement);
+  assertValidDept(input.departement);
+  validateTypePsCodes(input.typePsCode ? [input.typePsCode] : undefined);
 
   const supabase = getAnonClient();
   const { data, error } = await supabase.rpc("ameli_by_specialite_dept", {
@@ -133,19 +215,25 @@ export async function getAmeliBySpecialiteDept(
   });
 
   if (error) throw new Error(formatRpcError("ameli_by_specialite_dept", error));
-  return buildAmeliQueryResult(data, limit);
+  return buildAmeliQueryResult("ameli_by_specialite_dept", data, limit, ameliDeptMetadata());
 }
 
 // --- internals -------------------------------------------------------------
 
-function buildAmeliQueryResult(data: unknown, limit: number): AmeliQueryResult {
-  const rows = (data ?? []) as RawAmeliRow[];
+function buildAmeliQueryResult(
+  rpc: string,
+  data: unknown,
+  limit: number,
+  metadata: QueryMetadata,
+): AmeliQueryResult {
+  const rows = expectRpcRows<RawAmeliRow>(rpc, data);
   const truncated = rows.length > limit;
   const sliced = truncated ? rows.slice(0, limit) : rows;
   return {
     count: sliced.length,
     truncated,
     results: sliced.map(toAmeliResult),
+    query_metadata: metadata,
   };
 }
 
@@ -179,10 +267,7 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
   const coords = row.geom
     ? { lat: row.geom.coordinates[1] ?? 0, lon: row.geom.coordinates[0] ?? 0 }
     : null;
-  const distance =
-    typeof row.distance_meters === "number"
-      ? Math.round((row.distance_meters / 1000) * 100) / 100
-      : null;
+  const distance = metersToKm(row.distance_meters);
   return {
     id: row.id,
     identite: {
@@ -212,4 +297,105 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
       option_tarifaire_libelle: row.option_tarifaire_libelle,
     },
   };
+}
+
+// --- Nomenclature listings -------------------------------------------------
+
+interface RawSpecialiteRow {
+  code: string | null;
+  libelle: string | null;
+  type_ps_code: string | null;
+  type_ps_libelle: string | null;
+  count: number | string | null;
+}
+
+interface RawSpecialiteAggInTypePs {
+  code: string | null;
+  libelle: string | null;
+  count: number | string | null;
+}
+
+interface RawTypePsRow {
+  code: string | null;
+  libelle_source: string | null;
+  count: number | string | null;
+  specialites_presentes: RawSpecialiteAggInTypePs[] | null;
+}
+
+/**
+ * Coerce un count remonté par PostgREST. Les BIGINT sont sérialisés en string
+ * par défaut côté supabase-js — un parseInt brut donnerait `NaN` silencieux
+ * sur `null`, ce qu'on refuse par discipline (cf. règles silent-failure).
+ */
+function coerceCount(raw: number | string | null | undefined): number {
+  if (raw === null || raw === undefined) return 0;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : 0;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Liste les spécialités Ameli effectivement présentes en base, avec leur
+ * count et le `type_ps_code` associé. Triées par fréquence décroissante.
+ *
+ * Plus utile qu'un dictionnaire hardcodé : reflète automatiquement les
+ * évolutions du CSV upstream (nouveau code spécialité ajouté par Ameli)
+ * sans nécessiter de release. Le caller MCP peut découvrir la nomenclature
+ * à la volée et choisir le bon `specialite_code` pour ses filtres.
+ */
+export async function listAmeliSpecialites(): Promise<AmeliSpecialiteEntry[]> {
+  const supabase = getAnonClient();
+  const { data, error } = await supabase.rpc("ameli_lister_specialites");
+  if (error) throw new Error(formatRpcError("ameli_lister_specialites", error));
+  const rows = expectRpcRows<RawSpecialiteRow>("ameli_lister_specialites", data);
+  const out: AmeliSpecialiteEntry[] = [];
+  for (const row of rows) {
+    if (!row.code || !row.type_ps_code) continue;
+    out.push({
+      code: row.code,
+      libelle: row.libelle ?? "",
+      type_ps_code: row.type_ps_code,
+      type_ps_libelle: row.type_ps_libelle ?? "",
+      count: coerceCount(row.count),
+    });
+  }
+  return out;
+}
+
+/**
+ * Liste les `type_ps_code` Ameli présents en base avec, pour chacun, la liste
+ * des spécialités effectivement regroupées dessous. Résout empiriquement
+ * l'ambiguïté du libellé natif Ameli pour le code "2" (fourre-tout qui
+ * mentionne "chirurgien-dentiste" alors que les dentistes ont le code 5).
+ *
+ * Le libellé clarifié n'est appliqué que si le libellé source matche notre
+ * référence (`AMELI_TYPE_PS_NOMENCLATURE`) — sinon on garde la source pour
+ * détecter un drift Ameli sans corrompre la donnée.
+ */
+export async function listAmeliTypesPs(): Promise<AmeliTypePsListEntry[]> {
+  const supabase = getAnonClient();
+  const { data, error } = await supabase.rpc("ameli_lister_types_ps");
+  if (error) throw new Error(formatRpcError("ameli_lister_types_ps", error));
+  const rows = expectRpcRows<RawTypePsRow>("ameli_lister_types_ps", data);
+  const out: AmeliTypePsListEntry[] = [];
+  for (const row of rows) {
+    if (!row.code) continue;
+    const source = row.libelle_source ?? "";
+    const clarified = clarifyTypePsLibelle(row.code, source) ?? source;
+    const specialites = (row.specialites_presentes ?? [])
+      .filter((s): s is RawSpecialiteAggInTypePs & { code: string } => Boolean(s?.code))
+      .map((s) => ({
+        code: s.code,
+        libelle: s.libelle ?? "",
+        count: coerceCount(s.count),
+      }));
+    out.push({
+      code: row.code,
+      libelle_source: source,
+      libelle_clarifie: clarified,
+      count: coerceCount(row.count),
+      specialites_presentes: specialites,
+    });
+  }
+  return out;
 }

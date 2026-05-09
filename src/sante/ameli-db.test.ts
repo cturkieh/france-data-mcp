@@ -5,7 +5,12 @@ vi.mock("../storage/supabase.js", () => ({
   getAnonClient: () => ({ rpc: mockRpc }),
 }));
 
-import { getAmeliBySpecialiteDept, getAmeliInRadius } from "./ameli-db.js";
+import {
+  getAmeliBySpecialiteDept,
+  getAmeliInRadius,
+  listAmeliSpecialites,
+  listAmeliTypesPs,
+} from "./ameli-db.js";
 
 const sampleRow = {
   id: 1234,
@@ -92,6 +97,17 @@ describe("getAmeliInRadius", () => {
     await expect(
       getAmeliInRadius({ center: { lat: 49.77, lon: 4.72 }, radiusKm: 0 }),
     ).rejects.toThrow(/radiusKm must be in/);
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  it("rejette un type_ps_code filtré à l'ingestion (3 = laboratoires) avec un message orientant vers FINESS", async () => {
+    await expect(
+      getAmeliInRadius({
+        center: { lat: 49.77, lon: 4.72 },
+        radiusKm: 5,
+        typePsCodes: ["3"],
+      }),
+    ).rejects.toThrow(/n'est pas filtrable.*FINESS/s);
     expect(mockRpc).not.toHaveBeenCalled();
   });
 
@@ -182,5 +198,126 @@ describe("getAmeliBySpecialiteDept", () => {
       /offset must be between/,
     );
     expect(mockRpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("listAmeliSpecialites", () => {
+  it("call le RPC et map les rows en AmeliSpecialiteEntry triés par count", async () => {
+    mockRpc.mockResolvedValue({
+      data: [
+        {
+          code: "24",
+          libelle: "Infirmier",
+          type_ps_code: "2",
+          type_ps_libelle: "Autres PS (...)",
+          count: "104041",
+        },
+        {
+          code: "01",
+          libelle: "Médecin généraliste",
+          type_ps_code: "1",
+          type_ps_libelle: "Médecins généralistes et spécialistes",
+          count: 55381,
+        },
+      ],
+      error: null,
+    });
+    const out = await listAmeliSpecialites();
+    expect(mockRpc).toHaveBeenCalledWith("ameli_lister_specialites");
+    expect(out).toHaveLength(2);
+    expect(out[0]?.code).toBe("24");
+    expect(out[0]?.count).toBe(104041); // string BIGINT coerced to number
+    expect(out[1]?.count).toBe(55381); // number passes through
+  });
+
+  it("filtre les rows sans code (defensive)", async () => {
+    mockRpc.mockResolvedValue({
+      data: [
+        { code: null, libelle: "x", type_ps_code: "1", type_ps_libelle: "y", count: 1 },
+        {
+          code: "01",
+          libelle: "MG",
+          type_ps_code: "1",
+          type_ps_libelle: "Médecins",
+          count: 100,
+        },
+      ],
+      error: null,
+    });
+    const out = await listAmeliSpecialites();
+    expect(out).toHaveLength(1);
+    expect(out[0]?.code).toBe("01");
+  });
+
+  it("retourne un array vide quand le RPC renvoie un array vide (catalogue absent)", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    expect(await listAmeliSpecialites()).toEqual([]);
+  });
+
+  it("throw quand le RPC viole son contrat (data null sans error — V0.4.3 expectRpcRows)", async () => {
+    mockRpc.mockResolvedValue({ data: null, error: null });
+    await expect(listAmeliSpecialites()).rejects.toThrow(/RPC contract violation/);
+  });
+
+  it("propage l'erreur RPC en exception", async () => {
+    mockRpc.mockResolvedValue({ data: null, error: { message: "boom" } });
+    await expect(listAmeliSpecialites()).rejects.toThrow(/ameli_lister_specialites.*boom/);
+  });
+});
+
+describe("listAmeliTypesPs", () => {
+  it("clarifie le libellé du code 2 quand la source matche la référence", async () => {
+    mockRpc.mockResolvedValue({
+      data: [
+        {
+          code: "2",
+          libelle_source: "Autres PS (chirurgien-dentiste, sage-femme, infirmier, orthoptiste…)",
+          count: "245990",
+          specialites_presentes: [
+            { code: "24", libelle: "Infirmier", count: 104041 },
+            { code: "26", libelle: "Masseur-kinésithérapeute", count: 86588 },
+          ],
+        },
+      ],
+      error: null,
+    });
+    const out = await listAmeliTypesPs();
+    expect(out[0]?.code).toBe("2");
+    expect(out[0]?.libelle_source).toContain("Autres PS");
+    expect(out[0]?.libelle_clarifie).toContain("Auxiliaires médicaux");
+    expect(out[0]?.specialites_presentes).toHaveLength(2);
+    expect(out[0]?.specialites_presentes[0]?.code).toBe("24");
+  });
+
+  it("garde la source quand elle ne matche pas la référence (drift detection)", async () => {
+    mockRpc.mockResolvedValue({
+      data: [
+        {
+          code: "2",
+          libelle_source: "LIBELLE AMELI MODIFIE EN UPSTREAM",
+          count: 245990,
+          specialites_presentes: [],
+        },
+      ],
+      error: null,
+    });
+    const out = await listAmeliTypesPs();
+    expect(out[0]?.libelle_clarifie).toBe("LIBELLE AMELI MODIFIE EN UPSTREAM");
+  });
+
+  it("gère specialites_presentes null/undefined", async () => {
+    mockRpc.mockResolvedValue({
+      data: [
+        {
+          code: "1",
+          libelle_source: "Médecins généralistes et spécialistes",
+          count: 172150,
+          specialites_presentes: null,
+        },
+      ],
+      error: null,
+    });
+    const out = await listAmeliTypesPs();
+    expect(out[0]?.specialites_presentes).toEqual([]);
   });
 });

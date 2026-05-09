@@ -76,8 +76,11 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 
 **Limitations connues sur les fiches FINESS** :
 - `email` est toujours `null` (la source DREES ne publie pas les emails — utiliser l'Annuaire Santé Ameli pour les pros libéraux).
-- `distance_km` n'est rempli que sur les retours `etablissements_finess_in_radius` (pas de référence pour `by_categorie` / `by_finess`).
+- `distance_km` n'est rempli que sur les retours `etablissements_finess_in_radius` (pas de référence pour `by_categorie` / `by_finess`). La distance est **vol d'oiseau (haversine PostGIS)**, pas routière — pour la distance routière, croiser avec un service externe (OSRM, ORS).
 - Les DOM-COM ne sont pas encore ingérés (v0.3 garde un `code_insee CHAR(5)` strict métropole + Corse ; v0.4 prévoit l'élargissement).
+- **Latence DREES** : la base est régénérée bimestriellement par la DREES. Pour les structures émergentes (CPTS récemment agréées, MSP en cours d'ouverture), comptez **1 à 2 mois de retard** sur le terrain. Si une structure réelle n'apparaît pas dans FINESS, cross-checker avec l'ARS régionale ou Service Public (`mcp__claude_ai_Service_Public__rechercher_service_local`) avant de conclure à son inexistence.
+
+**Métadonnées de réponse (v0.4.3)** : les retours `etablissements_finess_in_radius` / `etablissements_finess_by_categorie` exposent un champ `query_metadata` documentant la précision géo (`lambert93_natif_finess`), le type de distance (`haversine_postgis`) et les notes actionnables (latence DREES, distance non-routière). À lire pour ne pas surinterpréter les résultats.
 
 ### V0.4 — Health professionals (Annuaire Santé Ameli)
 
@@ -100,8 +103,12 @@ Pour un comptage tous statuts (libéraux + salariés + retraités inscrits), il 
 
 **Caractéristiques techniques** :
 - **Précision géo** : centroïde commune (~3 km en moyenne), pas le numéro de rue. Adapté à l'analyse de densité, pas au géocodage adresse.
+- **Distance** : vol d'oiseau (haversine PostGIS), pas routière. Pour la distance routière (logistique navette labo, par ex.), croiser avec OSRM / ORS côté caller.
+- **Nomenclature `type_ps`** : 3 codes en base (`1` médecins, `2` auxiliaires médicaux fourre-tout — IDE/kinés/sages-femmes/podologues/orthophonistes/orthoptistes/IPA, `5` chirurgiens-dentistes). Le libellé natif Ameli pour le code `2` est trompeur (« Autres PS (chirurgien-dentiste, sage-femme, infirmier, orthoptiste…) ») — les chirurgiens-dentistes ont en réalité leur propre code (`5`). Pour cibler une profession précise (IDE seuls par exemple), utiliser **`specialite_code`** plutôt que `type_ps_code` ; nomenclature live exposée par les tools `lister_specialites_ameli` et `lister_types_ps_ameli`.
 - **Multi-sites** : un PS exerçant sur N adresses apparaît N fois. Utiliser `dedupe_by_ps=true` pour regrouper par praticien et lister les sites en sous-objet. La source publique n'expose pas RPPS/ADELI, donc la dédup serveur se base sur `(nom, prenom, civilite, specialite_code, type_ps_code)`.
 - **Pagination** : `professionnels_par_specialite_dept` accepte un `offset` (≥0, max 100 000) pour énumérer un département à fort effectif. Re-paginer tant que `truncated=true`.
+- **Métadonnées de réponse (v0.4.3)** : `query_metadata` expose `geo_precision: "centroide_commune_ameli"` et `distance_type: "haversine_postgis"` pour rendre transparente la nature des coords et de la distance.
+- **Lookups silencieux corrigés (v0.4.3)** : les tools `entreprise_by_siren`, `etablissement_by_finess`, `get_commune_by_code` retournent désormais un objet typé `{ found: false, lookupStatus, message }` au lieu de `null` brut quand l'identifiant est introuvable. Permet au caller LLM de distinguer « non indexé » / « régression API » / « commune fusionnée » et d'orienter vers la bonne action corrective.
 - **CGU** : art. L.1461-2 CSP — toute application publique doit afficher « Source : Annuaire santé Ameli, Assurance Maladie » et la date de sync.
 
 ---

@@ -116,3 +116,30 @@ export function trimOrNull(s: string | null | undefined): string | null {
   const trimmed = s.trim();
   return trimmed === "" ? null : trimmed;
 }
+
+/**
+ * Normalise le `data` retourné par un RPC supabase-js en array typé.
+ *
+ * Supabase RPC convention : sur un SETOF, `error == null` ⇒ `data` est un
+ * `T[]` (potentiellement vide). Recevoir `data == null` quand `error` est
+ * également null signale une violation du contrat (RPC renommé sans erreur,
+ * permission silencieuse, glitch côté supabase-js). Le caller bénéficiait
+ * jusqu'ici d'un `data ?? []` qui masquait silencieusement ce cas comme un
+ * résultat vide — exactement le silent failure que CLAUDE.md interdit.
+ *
+ * Throw plutôt que log + fallback : un caller LLM voit le throw remonter
+ * dans la réponse MCP et peut décider (retry, fallback, abandon).
+ */
+export function expectRpcRows<T>(rpc: string, data: unknown): T[] {
+  if (data === null || data === undefined) {
+    throw new Error(
+      `[france-data-mcp] ${rpc}: RPC contract violation — supabase-js returned no error but data is ${data === null ? "null" : "undefined"}. Expected an array (possibly empty). Investigate RPC name, schema cache, or supabase-js version.`,
+    );
+  }
+  if (!Array.isArray(data)) {
+    throw new Error(
+      `[france-data-mcp] ${rpc}: RPC contract violation — expected array, got ${typeof data}. Likely an RPC signature mismatch.`,
+    );
+  }
+  return data as T[];
+}

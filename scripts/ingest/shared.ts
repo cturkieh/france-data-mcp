@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { DEFAULT_USER_AGENT } from "../../src/core/http.js";
 import { getServiceClient, requireEnv } from "../../src/storage/supabase.js";
@@ -213,5 +214,16 @@ export function getUntypedServiceClient(source: string): SupabaseClient {
   } catch (err) {
     console.error(`[${source}] failed to build service client:`, err);
     throw new IngestError("copy", err instanceof Error ? err.message : String(err), err);
+  }
+}
+
+/**
+ * Executes `fn` only when the importing module is the script entrypoint.
+ * Use `fileURLToPath` rather than literal URL compare — process.argv[1] is the
+ * raw filesystem path while import.meta.url URL-encodes spaces/accents.
+ */
+export async function runIfMain(moduleUrl: string, fn: () => Promise<void>): Promise<void> {
+  if (process.argv[1] && fileURLToPath(moduleUrl) === process.argv[1]) {
+    await fn();
   }
 }

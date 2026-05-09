@@ -1,6 +1,5 @@
 import "./load-env.js";
 import * as fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
 import {
@@ -18,6 +17,7 @@ import {
   getNonEmpty,
   getUntypedServiceClient,
   preValidateFile,
+  runIfMain,
   safeSerializeIngestLog,
   writeIngestLog,
 } from "./shared.js";
@@ -535,8 +535,5 @@ export const __TESTING__ = { parseAmeliRecord };
 
 // Only run main() when this file is executed as a script. Without this guard,
 // vitest pulls in the module to test the pure helpers and immediately tries
-// to connect to Supabase. Use `fileURLToPath(import.meta.url)` so paths with
-// spaces/accents compare correctly (FINESS v0.2.1 lesson).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  await main();
-}
+// to connect to Supabase. See `runIfMain` for the rationale on `fileURLToPath`.
+await runIfMain(import.meta.url, main);

@@ -1,6 +1,18 @@
+import {
+  type LookupResult,
+  lookupFound,
+  lookupNotFound,
+} from "../core/lookup-result.js";
+import { metersToKm } from "../core/numbers.js";
+import {
+  finessByCategorieMetadata,
+  finessRadiusMetadata,
+  type QueryMetadata,
+} from "../core/query-metadata.js";
 import { getAnonClient } from "../storage/supabase.js";
 import {
   clampLimit,
+  expectRpcRows,
   formatRpcError,
   trimOrNull,
   validateCoords,
@@ -50,6 +62,16 @@ export interface FinessQueryResult {
   count: number;
   truncated: boolean;
   results: FinessResult[];
+  /**
+   * Métadonnées sur la précision géo et le type de distance. Surface au
+   * caller MCP que les coords proviennent du Lambert93 DREES (~adresse) et
+   * que la distance est haversine (pas routière). Inclut un rappel sur la
+   * latence DREES (~1-2 mois) pour les structures émergentes.
+   *
+   * Optionnel : tous les RPCs de prod la peuplent (cf. `getFinessInRadius`/
+   * `getFinessByCategorie`) ; cas d'absence réservé aux mocks tests.
+   */
+  query_metadata?: QueryMetadata;
 }
 
 function familiesToCodes(familles: FinessFamilleQuery[] | undefined): string[] {
@@ -86,7 +108,7 @@ export async function getFinessInRadius(input: InRadiusInput): Promise<FinessQue
   if (error) {
     throw new Error(formatRpcError("finess_in_radius", error));
   }
-  return buildFinessQueryResult(data, limit);
+  return buildFinessQueryResult("finess_in_radius", data, limit, finessRadiusMetadata());
 }
 
 /**
@@ -106,16 +128,23 @@ export async function getFinessByCategorie(input: ByCategorieInput): Promise<Fin
   if (error) {
     throw new Error(formatRpcError("finess_by_categorie", error));
   }
-  return buildFinessQueryResult(data, limit);
+  return buildFinessQueryResult("finess_by_categorie", data, limit, finessByCategorieMetadata());
 }
 
 /**
  * Fetch a single FINESS establishment by its 9-digit FINESS number.
- * Returns null if not found. The audit (B3) flagged the absence of this
- * lookup — the radius/categorie tools couldn't be paired with a "give me
- * the full record" call.
+ *
+ * Retourne un `LookupResult` discriminé par `found`. Si le numéro n'existe
+ * pas dans le dump FINESS DREES (numéro mal formé, fermeture récente non
+ * encore propagée, frais d'établissement émergent — la base DREES a 1-2 mois
+ * de retard sur le terrain), la fonction renvoie un objet `{ found: false,
+ * lookupStatus: "not_found", message }` au lieu d'un `null` silencieux.
+ * Pattern aligné sur `getEntrepriseBySiren` et `getCommuneByCode`
+ * (cf. `src/core/lookup-result.ts`).
  */
-export async function getFinessByNumFiness(numFiness: string): Promise<FinessResult | null> {
+export async function getFinessByNumFiness(
+  numFiness: string,
+): Promise<LookupResult<FinessResult>> {
   if (!/^\d{9}$/.test(numFiness)) {
     throw new Error(`[france-data-mcp] num_finess must be 9 digits, got "${numFiness}"`);
   }
@@ -126,7 +155,7 @@ export async function getFinessByNumFiness(numFiness: string): Promise<FinessRes
   if (error) {
     throw new Error(formatRpcError("finess_by_num_finess", error));
   }
-  const rows = (data ?? []) as RawFinessRow[];
+  const rows = expectRpcRows<RawFinessRow>("finess_by_num_finess", data);
   if (rows.length > 1) {
     // The RPC has a `LIMIT 1` clause, but defense-in-depth: if a deploy
     // glitch removed it, or if the table somehow had duplicate num_finess
@@ -138,19 +167,31 @@ export async function getFinessByNumFiness(numFiness: string): Promise<FinessRes
     );
   }
   const first = rows[0];
-  return first ? toFinessResult(first) : null;
+  if (!first) {
+    return lookupNotFound(
+      numFiness,
+      `Numéro FINESS "${numFiness}" introuvable dans la base DREES (dernière sync bimestrielle). Causes possibles : numéro inexistant, structure très récente non encore propagée par DREES (latence ~1-2 mois), erreur de saisie. Pour structures émergentes (CPTS, MSP récentes), cross-check avec ARS régionale ou Service Public.`,
+    );
+  }
+  return lookupFound(toFinessResult(first));
 }
 
 // --- internals -------------------------------------------------------------
 
-function buildFinessQueryResult(data: unknown, limit: number): FinessQueryResult {
-  const rows = (data ?? []) as RawFinessRow[];
+function buildFinessQueryResult(
+  rpc: string,
+  data: unknown,
+  limit: number,
+  metadata: QueryMetadata,
+): FinessQueryResult {
+  const rows = expectRpcRows<RawFinessRow>(rpc, data);
   const truncated = rows.length > limit;
   const sliced = truncated ? rows.slice(0, limit) : rows;
   return {
     count: sliced.length,
     truncated,
     results: sliced.map(toFinessResult),
+    query_metadata: metadata,
   };
 }
 
@@ -190,10 +231,7 @@ function toFinessResult(row: RawFinessRow): FinessResult {
       code_insee: row.code_insee.trim(),
     },
     coords,
-    distance_km:
-      typeof row.distance_meters === "number"
-        ? Math.round((row.distance_meters / 1000) * 100) / 100
-        : null,
+    distance_km: metersToKm(row.distance_meters),
     telephone: trimOrNull(row.telephone),
     email: row.email,
   };

@@ -8,6 +8,11 @@
  */
 
 import { fetchJson } from "../core/http.js";
+import {
+  type LookupResult,
+  lookupFound,
+  lookupNotFound,
+} from "../core/lookup-result.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
@@ -110,14 +115,26 @@ export async function searchCommunes(options: SearchCommunesOptions): Promise<Co
 
 /**
  * Récupère une commune unique par son code INSEE.
- * Renvoie `null` si le code n'existe pas.
+ *
+ * Retourne un `LookupResult` discriminé par `found`. Si le code n'existe pas
+ * dans le COG INSEE (commune fusionnée, code mal formé, code de canton…),
+ * la fonction renvoie `{ found: false, lookupStatus: "not_found", message }`
+ * au lieu d'un `null` silencieux. Pattern aligné sur `getEntrepriseBySiren`
+ * et `getFinessByNumFiness` (cf. `src/core/lookup-result.ts`).
  */
 export async function getCommuneByCode(
   code: string,
   signal?: AbortSignal,
-): Promise<Commune | null> {
+): Promise<LookupResult<Commune>> {
   const results = await searchCommunes({ code, limit: 1, signal });
-  return results[0] ?? null;
+  const first = results[0];
+  if (!first) {
+    return lookupNotFound(
+      code,
+      `Commune introuvable pour le code INSEE "${code}". Causes possibles : code mal formé (attendu 5 caractères), commune fusionnée (référentiel COG INSEE bouge au 1er janvier), code de canton/EPCI mal interprété comme commune. Pour disambiguer : utiliser \`autocomplete_commune\` avec un nom partiel.`,
+    );
+  }
+  return lookupFound(first);
 }
 
 /**

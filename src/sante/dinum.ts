@@ -17,6 +17,11 @@
 
 import { parseCoordinates } from "../core/coords.js";
 import { fetchJson } from "../core/http.js";
+import {
+  type LookupResult,
+  lookupFound,
+  lookupNotFound,
+} from "../core/lookup-result.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
@@ -331,26 +336,35 @@ export async function searchEntreprises(
 export async function getEntrepriseBySiren(
   siren: string,
   signal?: AbortSignal,
-): Promise<Entreprise | null> {
+): Promise<LookupResult<Entreprise>> {
   if (!/^\d{9}$/.test(siren)) {
     throw new Error(`getEntrepriseBySiren: SIREN invalide "${siren}" (attendu 9 chiffres)`);
   }
   const result = await searchEntreprises({ q: siren, perPage: 5, onlyActive: false, signal });
   const match = result.entreprises.find((e) => e.siren === siren);
-  if (!match && result.entreprises.length > 0) {
-    // L'API a renvoyé des résultats mais aucun ne matche le SIREN exact —
-    // bizarre, peut signaler une régression côté DINUM (recherche full-text
-    // qui matche sur autre chose que le SIREN). À surveiller.
-    console.warn(
-      `[france-data-mcp] getEntrepriseBySiren(${siren}): l'API a renvoyé ${result.entreprises.length} résultat(s) sans match exact du SIREN.`,
+  if (!match) {
+    if (result.entreprises.length > 0) {
+      // L'API a renvoyé des résultats mais aucun ne matche le SIREN exact —
+      // bizarre, peut signaler une régression côté DINUM (recherche full-text
+      // qui matche sur autre chose que le SIREN). À surveiller.
+      console.warn(
+        `[france-data-mcp] getEntrepriseBySiren(${siren}): l'API a renvoyé ${result.entreprises.length} résultat(s) sans match exact du SIREN.`,
+      );
+      return lookupNotFound(
+        siren,
+        `L'API DINUM a renvoyé ${result.entreprises.length} résultat(s) full-text mais aucun ne correspond exactement au SIREN ${siren}. Possible régression côté API DINUM ou faux positif full-text.`,
+        "ambiguous",
+      );
+    }
+    // "pas indexé par DINUM" ≠ "n'existe pas dans SIRENE". Comportement
+    // normal pour les SIREN en diffusion partielle (cf. JSDoc ci-dessus, cas
+    // Bio Ard'Aisne). Le caller voit explicitement `found: false` et un
+    // message orientant vers les alternatives.
+    return lookupNotFound(
+      siren,
+      `SIREN ${siren} non indexé par recherche-entreprises.api.gouv.fr. Cause probable : entreprise en diffusion partielle INSEE (statut_diffusion ∈ {P,N}), exclusion sectorielle, ou SIREN inexistant. Pour confirmation : interroger SIRENE INSEE directement (API authentifiée).`,
     );
   }
-  // null = "pas indexé par DINUM" — pas forcément "n'existe pas dans SIRENE".
-  // C'est le comportement normal pour les SIREN en diffusion partielle (cf.
-  // JSDoc ci-dessus, cas Bio Ard'Aisne). On ne logge pas pour éviter le
-  // spam quand un caller énumère des SIREN — la doc + le retour null
-  // explicite suffisent à signaler la limitation.
-  if (!match) return null;
 
   // Trouve le siège : on préfère le SIRET déclaré comme siège plutôt que
   // l'index 0 du tableau (l'ordre n'est pas garanti et peut changer si on
@@ -364,12 +378,12 @@ export async function getEntrepriseBySiren(
 
   if (totalSirene <= 1) {
     match.enrichmentStatus = "not_attempted";
-    return match;
+    return lookupFound(match);
   }
   if (!naf || !departement) {
     match.enrichmentStatus = "not_attempted";
     match.enrichmentWarning = warnSkipped({ naf, siegePostalCode, departement });
-    return match;
+    return lookupFound(match);
   }
 
   // Second appel : l'API DINUM expose les autres établissements dans
@@ -417,7 +431,7 @@ export async function getEntrepriseBySiren(
     match.enrichmentWarning = warnFailed({ errType, msg, totalSirene });
   }
 
-  return match;
+  return lookupFound(match);
 }
 
 function warnSkipped(opts: {

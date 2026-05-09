@@ -1,6 +1,5 @@
 import "./load-env.js";
 import * as fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
 import { finessFamille } from "../../src/sante/finess-categories.js";
@@ -13,6 +12,7 @@ import {
   getNonEmpty,
   getUntypedServiceClient,
   preValidateFile,
+  runIfMain,
   safeSerializeIngestLog,
   writeIngestLog,
 } from "./shared.js";
@@ -232,6 +232,24 @@ async function main(): Promise<void> {
         );
       }
     }
+    // V0.4.3 — coord rejection ladder. Soft warn à >2% (drift léger), hard
+    // throw à >5%. MIN_GEOM_COVERAGE 0.8 côté swap atomic ne catch QUE après
+    // reprojection server-side : un drift 5-15% au parse rejette les rows
+    // upstream (`coordx_lambert93 = null` à l'insert), géom NULL, et
+    // ST_DWithin les ignore — ingestion silencieusement partielle. On bloque
+    // explicitement avant le swap.
+    const coordRejectRate = rateOf(stats.parsedCoordRejected);
+    if (stats.parsedCoordRejected > 0 && coordRejectRate > 0.02) {
+      console.warn(
+        `[finess] coords Lambert93 rejected by strict regex : ${stats.parsedCoordRejected} rows (${fmt(coordRejectRate)} of inserted). Expected baseline < 2% — investigate column shift or DREES coord format change.`,
+      );
+      if (coordRejectRate > 0.05) {
+        throw new IngestError(
+          "validate",
+          `Lambert93 coord rejection rate ${fmt(coordRejectRate)} above 5% — likely upstream regression (CSV column shift on coordxet/coordyet, or DREES format change). Refusing to swap a partially geocoded ingestion.`,
+        );
+      }
+    }
 
     // 4d. NOMENCLATURE DRIFT — surface DREES codes that fell into "autre".
     // Catalogue covers ~92% of FINESS volume by design. If `autre` overshoots
@@ -299,6 +317,14 @@ interface IngestStreamStats {
   skippedDom: number;
   parsedNoLigneAch: number;
   /**
+   * Lignes où `coordxet` ou `coordyet` étaient présents dans le CSV mais ont
+   * été rejetés par `parseLambert93Coord` (regex stricte). Symétrique à
+   * `parsedNoLigneAch` : surface un drift 5-15% que `MIN_GEOM_COVERAGE=0.8`
+   * ne catche pas, signalant un column shift ou un format upstream modifié
+   * par DREES.
+   */
+  parsedCoordRejected: number;
+  /**
    * Codes catégorie that finessFamille() classified as "autre" together with
    * the count of rows. Surfaces a DREES nomenclature drift early — if a new
    * code lands at high volume, the operator can decide to add it to
@@ -332,6 +358,7 @@ async function streamCsvToStaging(
   let skippedBadDept = 0;
   let skippedDom = 0;
   let parsedNoLigneAch = 0;
+  let parsedCoordRejected = 0;
   const unknownCategorieCounts = new Map<string, number>();
   let firstBatch = true;
 
@@ -380,6 +407,12 @@ async function streamCsvToStaging(
       if (parsed.ligneAchPresentButUnparsed) {
         parsedNoLigneAch++;
       }
+      // V0.4.3 — track Lambert93 coords rejected by the strict regex. Same
+      // motivation as parsedNoLigneAch : surfaces a column shift / format
+      // drift that MIN_GEOM_COVERAGE=0.8 alone wouldn't catch at 5-15% rates.
+      if (parsed.coordPresentButUnparsed) {
+        parsedCoordRejected++;
+      }
       // Track DREES codes that fall into "autre" — surfaces a nomenclature
       // drift (new code at high volume) so it can be added to a family in one PR.
       const code = parsed.row.categorie_code;
@@ -422,6 +455,7 @@ async function streamCsvToStaging(
     skippedBadDept,
     skippedDom,
     parsedNoLigneAch,
+    parsedCoordRejected,
     unknownCategorieCounts,
   };
 }
@@ -429,8 +463,18 @@ async function streamCsvToStaging(
 type SkipReason = "no_finess_id" | "no_commune" | "bad_dept" | "dom_unsupported";
 
 type ParsedFinessRow =
-  | { row: FinessStagingRow; ligneAchPresentButUnparsed: boolean; skipReason?: never }
-  | { row?: never; ligneAchPresentButUnparsed?: never; skipReason: SkipReason };
+  | {
+      row: FinessStagingRow;
+      ligneAchPresentButUnparsed: boolean;
+      coordPresentButUnparsed: boolean;
+      skipReason?: never;
+    }
+  | {
+      row?: never;
+      ligneAchPresentButUnparsed?: never;
+      coordPresentButUnparsed?: never;
+      skipReason: SkipReason;
+    };
 
 /**
  * Match `ligneacheminement` of the form `"08000 CHARLEVILLE MEZIERES CEDEX"`.
@@ -480,6 +524,15 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
   // geom NULL ici — populé server-side par ingest_apply_finess_geom_batch
   // qui lit coordx/y_lambert93 et reprojette Lambert 93 → WGS84. SSOT = le RPC.
   // Postmortem V0.2 : commit 88ebfc0 ; switch typed columns : V0.4.2.
+  const coordxRaw = getNonEmpty(rec, "coordxet");
+  const coordyRaw = getNonEmpty(rec, "coordyet");
+  const coordxParsed = parseLambert93Coord(coordxRaw);
+  const coordyParsed = parseLambert93Coord(coordyRaw);
+  // Drift signal V0.4.3 : présent dans le CSV mais rejeté par la regex stricte.
+  // Catche les column shifts 5-15% que MIN_GEOM_COVERAGE=0.8 laisse passer.
+  const coordPresentButUnparsed =
+    (coordxRaw !== null && coordxParsed === null) ||
+    (coordyRaw !== null && coordyParsed === null);
 
   return {
     row: {
@@ -499,12 +552,13 @@ function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
       date_ouverture: getNonEmpty(rec, "dateouv"),
       date_maj: getNonEmpty(rec, "datemaj"),
       geom: null,
-      coordx_lambert93: parseLambert93Coord(getNonEmpty(rec, "coordxet")),
-      coordy_lambert93: parseLambert93Coord(getNonEmpty(rec, "coordyet")),
+      coordx_lambert93: coordxParsed,
+      coordy_lambert93: coordyParsed,
       // V0.4.2 — colonnes typées remplacent raw->>'coordxet' ; colonne gardée pour rétro-compat.
       raw: {},
     },
     ligneAchPresentButUnparsed,
+    coordPresentButUnparsed,
   };
 }
 
@@ -537,13 +591,5 @@ export const __TESTING__ = {
 // by the test suite or another module. Without this guard, vitest pulls in
 // the module to test the pure helpers and immediately tries to connect to
 // Supabase via `main()` — failing with "Missing SUPABASE_URL" before any
-// test runs.
-//
-// Use `fileURLToPath` instead of string-comparing `import.meta.url` against
-// `file://${process.argv[1]}` — the latter URL-encodes spaces/accents while
-// `process.argv[1]` is the raw path, so the literal comparison breaks
-// silently when the repo lives under e.g. "/Users/My Name/...". Caught by
-// the v0.2.1 review.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  await main();
-}
+// test runs. See `runIfMain` for the rationale on `fileURLToPath`.
+await runIfMain(import.meta.url, main);

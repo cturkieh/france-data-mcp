@@ -314,6 +314,97 @@ describe("professionnels_par_specialite_dept (MCP tool)", () => {
   });
 });
 
+describe("documentation tools Ameli — type_ps codes", () => {
+  it("la description type_ps_codes est cohérente avec la nomenclature live (1, 2, 5)", () => {
+    const tool = findTool("professionnels_in_radius");
+    const arr = (tool?.inputSchema.properties as Record<string, { description: string }>)
+      .type_ps_codes;
+    expect(arr.description).toContain("'1'");
+    expect(arr.description).toContain("'2'");
+    expect(arr.description).toContain("'5'");
+    expect(arr.description).toContain("auxiliaires médicaux");
+    // Garde-fou anti-régression : les anciens codes faux ne doivent plus apparaître
+    // dans la doc (cf. audit Charleville 2026-05-09 : '3 sage-femme', '4 chir-dentiste',
+    // '8 kiné' n'existent pas dans la nomenclature Ameli).
+    expect(arr.description).not.toMatch(/'3'\s*sage-femme/i);
+    expect(arr.description).not.toMatch(/'4'\s*chir-dentiste/i);
+    expect(arr.description).not.toMatch(/'8'\s*kiné/i);
+  });
+
+  it("la description du tool oriente vers specialite_codes pour ciblage précis", () => {
+    const tool = findTool("professionnels_in_radius");
+    expect(tool?.description).toMatch(/cibler une profession précise/i);
+    expect(tool?.description).toContain("lister_specialites_ameli");
+  });
+
+  it("la description annonce explicitement le calcul haversine", () => {
+    const tool = findTool("professionnels_in_radius");
+    expect(tool?.description).toContain("haversine");
+  });
+});
+
+describe("lister_specialites_ameli (MCP tool)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré dans la liste des tools", () => {
+    const tool = findTool("lister_specialites_ameli");
+    expect(tool).toBeDefined();
+    // Aucun paramètre requis : le tool retourne toute la nomenclature.
+    expect(tool?.inputSchema.required).toBeUndefined();
+  });
+
+  it("délègue à listAmeliSpecialites et expose un count", async () => {
+    const spy = vi.spyOn(ameliDb, "listAmeliSpecialites").mockResolvedValueOnce([
+      {
+        code: "24",
+        libelle: "Infirmier",
+        type_ps_code: "2",
+        type_ps_libelle: "Autres PS (...)",
+        count: 104041,
+      },
+    ]);
+    const tool = findTool("lister_specialites_ameli");
+    const result = (await tool?.handler({})) as { count: number; results: unknown[] };
+    expect(spy).toHaveBeenCalledOnce();
+    expect(result.count).toBe(1);
+    expect(result.results).toHaveLength(1);
+  });
+});
+
+describe("lister_types_ps_ameli (MCP tool)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré dans la liste des tools", () => {
+    const tool = findTool("lister_types_ps_ameli");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toBeUndefined();
+  });
+
+  it("délègue à listAmeliTypesPs et expose specialites_presentes au caller", async () => {
+    const spy = vi.spyOn(ameliDb, "listAmeliTypesPs").mockResolvedValueOnce([
+      {
+        code: "2",
+        libelle_source: "Autres PS (chirurgien-dentiste, sage-femme, infirmier, orthoptiste…)",
+        libelle_clarifie: "Auxiliaires médicaux (...)",
+        count: 245990,
+        specialites_presentes: [{ code: "24", libelle: "Infirmier", count: 104041 }],
+      },
+    ]);
+    const tool = findTool("lister_types_ps_ameli");
+    const result = (await tool?.handler({})) as {
+      count: number;
+      results: Array<{ specialites_presentes: unknown[] }>;
+    };
+    expect(spy).toHaveBeenCalledOnce();
+    expect(result.count).toBe(1);
+    expect(result.results[0]?.specialites_presentes).toHaveLength(1);
+  });
+});
+
 describe("coercition tolérante des nombres (asNumber)", () => {
   afterEach(() => {
     vi.restoreAllMocks();

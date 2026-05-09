@@ -77,13 +77,18 @@ describe("searchCommunes", () => {
 });
 
 describe("getCommuneByCode", () => {
-  it("renvoie null si code introuvable", async () => {
+  it("renvoie un LookupNotFound typé si code introuvable", async () => {
     fetchMock.mockResolvedValue(jsonResponse([]));
     const commune = await getCommuneByCode("99999");
-    expect(commune).toBeNull();
+    expect(commune.found).toBe(false);
+    if (!commune.found) {
+      expect(commune.key).toBe("99999");
+      expect(commune.lookupStatus).toBe("not_found");
+      expect(commune.message).toMatch(/introuvable|fusionnée|mal formé/i);
+    }
   });
 
-  it("renvoie la commune si trouvée", async () => {
+  it("renvoie la commune wrappée found:true si trouvée", async () => {
     fetchMock.mockResolvedValue(
       jsonResponse([
         {
@@ -95,7 +100,10 @@ describe("getCommuneByCode", () => {
       ]),
     );
     const commune = await getCommuneByCode("51454");
-    expect(commune?.nom).toBe("Reims");
+    expect(commune.found).toBe(true);
+    if (commune.found) {
+      expect(commune.nom).toBe("Reims");
+    }
   });
 });
 

@@ -1,5 +1,18 @@
-import { describe, expect, it } from "vitest";
-import { getFinessByCategorie, getFinessInRadius } from "./finess-db.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock supabase à l'import : permet aux tests `getFinessByNumFiness`
+// d'invoquer le wrapper sans accès DB. Les tests de validation d'input
+// throw AVANT le RPC, donc ils ne touchent pas le mock — compat.
+const mockRpc = vi.fn();
+vi.mock("../storage/supabase.js", () => ({
+  getAnonClient: () => ({ rpc: mockRpc }),
+}));
+
+import {
+  getFinessByCategorie,
+  getFinessByNumFiness,
+  getFinessInRadius,
+} from "./finess-db.js";
 
 // Pure unit tests for the input-validation guards. No DB / Supabase Local
 // needed — the RangeError throws before any RPC call. Locks the SFH-7
@@ -101,5 +114,85 @@ describe("getFinessByCategorie input validation", () => {
     await expect(getFinessByCategorie({ famille: "ehpad", limit: 1000 })).rejects.toThrow(
       /limit must be between/,
     );
+  });
+});
+
+describe("getFinessByNumFiness LookupResult (V0.4.3 migration)", () => {
+  beforeEach(() => {
+    mockRpc.mockReset();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("retourne un LookupNotFound typé quand le RPC ne renvoie rien", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    const out = await getFinessByNumFiness("999999999");
+    expect(out.found).toBe(false);
+    if (!out.found) {
+      expect(out.key).toBe("999999999");
+      expect(out.lookupStatus).toBe("not_found");
+      expect(out.message).toMatch(/introuvable|DREES|émergente/i);
+    }
+  });
+
+  it("wrap le résultat en found:true quand le RPC retourne un row", async () => {
+    mockRpc.mockResolvedValue({
+      data: [
+        {
+          num_finess: "080010101",
+          raison_sociale: "LBM BIO ARD'AISNE",
+          categorie_code: "611",
+          categorie_libelle: "Laboratoire de Biologie Médicale",
+          voie: "7 R DUBOIS CRANCE",
+          code_postal: "08000",
+          ville: "CHARLEVILLE MEZIERES",
+          code_departement: "08",
+          code_insee: "08105",
+          telephone: "0324564266",
+          email: null,
+          geom: { type: "Point", coordinates: [4.715688833, 49.77217843] },
+        },
+      ],
+      error: null,
+    });
+    const out = await getFinessByNumFiness("080010101");
+    expect(out.found).toBe(true);
+    if (out.found) {
+      expect(out.num_finess).toBe("080010101");
+      expect(out.raison_sociale).toBe("LBM BIO ARD'AISNE");
+    }
+  });
+
+  it("warn et garde le premier row quand le RPC remonte plusieurs lignes (PK normalement unique)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const row = {
+      num_finess: "080010101",
+      raison_sociale: "DUPLICATE A",
+      categorie_code: "611",
+      categorie_libelle: "Laboratoire de Biologie Médicale",
+      voie: "7 R DUBOIS CRANCE",
+      code_postal: "08000",
+      ville: "CHARLEVILLE MEZIERES",
+      code_departement: "08",
+      code_insee: "08105",
+      telephone: null,
+      email: null,
+      geom: null,
+    };
+    mockRpc.mockResolvedValue({ data: [row, { ...row, raison_sociale: "DUPLICATE B" }], error: null });
+    const out = await getFinessByNumFiness("080010101");
+    expect(out.found).toBe(true);
+    if (out.found) {
+      expect(out.raison_sociale).toBe("DUPLICATE A");
+    }
+    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("expected ≤ 1");
+    warnSpy.mockRestore();
+  });
+
+  it("rejette un num_finess mal formé sans appeler le RPC", async () => {
+    await expect(getFinessByNumFiness("123")).rejects.toThrow(/num_finess must be 9 digits/);
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 });

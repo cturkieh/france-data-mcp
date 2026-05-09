@@ -1,5 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LookupResult } from "../core/lookup-result.js";
 import { getEntrepriseBySiren, searchEntreprises } from "./dinum.js";
+
+/**
+ * Test helper : narrow `LookupResult<T>` vers le cas `found: true` ou throw.
+ * Réduit le bruit des `if (e.found) { ... }` dans les assertions positives.
+ */
+function assertFound<T>(r: LookupResult<T>): T & { found: true; lookupStatus: "found" } {
+  if (!r.found) {
+    throw new Error(
+      `Expected found result, got LookupNotFound (status=${r.lookupStatus}, key=${r.key}, message=${r.message})`,
+    );
+  }
+  return r;
+}
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -193,10 +207,15 @@ describe("searchEntreprises", () => {
 });
 
 describe("getEntrepriseBySiren", () => {
-  it("retourne null si SIREN introuvable", async () => {
+  it("retourne un LookupNotFound typé si SIREN introuvable", async () => {
     fetchMock.mockResolvedValue(apiResponse({ results: [] }));
     const e = await getEntrepriseBySiren("999999999");
-    expect(e).toBeNull();
+    expect(e.found).toBe(false);
+    if (!e.found) {
+      expect(e.key).toBe("999999999");
+      expect(e.lookupStatus).toBe("not_found");
+      expect(e.message).toMatch(/non indexé|diffusion partielle/i);
+    }
   });
 
   it("envoie q=<siren> en clair (PAS la syntaxe Lucene q=siren:XXX)", async () => {
@@ -225,14 +244,16 @@ describe("getEntrepriseBySiren", () => {
       }),
     );
     const e = await getEntrepriseBySiren("787120435");
-    expect(e).not.toBeNull();
-    expect(e?.siren).toBe("787120435");
-    expect(e?.nomComplet).toBe("RENAULT");
+    expect(e.found).toBe(true);
+    if (e.found) {
+      expect(e.siren).toBe("787120435");
+      expect(e.nomComplet).toBe("RENAULT");
+    }
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
   });
 
-  it("warn et retourne null si l'API renvoie des résultats sans match SIREN exact", async () => {
+  it("warn et retourne LookupNotFound 'ambiguous' si l'API renvoie des résultats sans match SIREN exact", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fetchMock.mockResolvedValue(
       apiResponse({
@@ -244,7 +265,11 @@ describe("getEntrepriseBySiren", () => {
       }),
     );
     const e = await getEntrepriseBySiren("787120435");
-    expect(e).toBeNull();
+    expect(e.found).toBe(false);
+    if (!e.found) {
+      expect(e.lookupStatus).toBe("ambiguous");
+      expect(e.message).toContain("787120435");
+    }
     expect(warnSpy).toHaveBeenCalled();
     expect(warnSpy.mock.calls[0]?.[0]).toContain("787120435");
     warnSpy.mockRestore();
@@ -321,12 +346,11 @@ describe("getEntrepriseBySiren", () => {
         }),
       );
 
-    const e = await getEntrepriseBySiren("787120435");
-    expect(e).not.toBeNull();
-    expect(e?.nombreEtablissements).toBe(19);
-    expect(e?.nombreEtablissementsOuverts).toBe(10);
-    expect(e?.etablissements).toHaveLength(4);
-    expect(e?.etablissements.map((et) => et.siret).sort()).toEqual([
+    const e = assertFound(await getEntrepriseBySiren("787120435"));
+    expect(e.nombreEtablissements).toBe(19);
+    expect(e.nombreEtablissementsOuverts).toBe(10);
+    expect(e.etablissements).toHaveLength(4);
+    expect(e.etablissements.map((et) => et.siret).sort()).toEqual([
       "78712043500070",
       "78712043500088",
       "78712043500096",
@@ -359,9 +383,9 @@ describe("getEntrepriseBySiren", () => {
         ],
       }),
     );
-    const e = await getEntrepriseBySiren("111111111");
-    expect(e?.etablissements).toHaveLength(1);
-    expect(e?.enrichmentStatus).toBe("not_attempted");
+    const e = assertFound(await getEntrepriseBySiren("111111111"));
+    expect(e.etablissements).toHaveLength(1);
+    expect(e.enrichmentStatus).toBe("not_attempted");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -434,10 +458,10 @@ describe("getEntrepriseBySiren", () => {
       )
       .mockRejectedValueOnce(new TypeError("network down"));
 
-    const e = await getEntrepriseBySiren("555555555");
-    expect(e?.etablissements).toHaveLength(1);
-    expect(e?.enrichmentStatus).toBe("failed");
-    expect(e?.enrichmentWarning).toContain("nombreEtablissements=10");
+    const e = assertFound(await getEntrepriseBySiren("555555555"));
+    expect(e.etablissements).toHaveLength(1);
+    expect(e.enrichmentStatus).toBe("failed");
+    expect(e.enrichmentWarning).toContain("nombreEtablissements=10");
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
   });
@@ -465,11 +489,11 @@ describe("getEntrepriseBySiren", () => {
           ],
         }),
       );
-    const e = await getEntrepriseBySiren("666666666");
-    expect(e?.etablissements).toHaveLength(3);
-    expect(e?.enrichmentStatus).toBe("partial");
-    expect(e?.enrichmentWarning).toContain("3/19");
-    expect(e?.enrichmentWarning).toContain("multi-département");
+    const e = assertFound(await getEntrepriseBySiren("666666666"));
+    expect(e.etablissements).toHaveLength(3);
+    expect(e.enrichmentStatus).toBe("partial");
+    expect(e.enrichmentWarning).toContain("3/19");
+    expect(e.enrichmentWarning).toContain("multi-département");
   });
 
   it("enrichmentStatus='success' quand on a tous les établissements", async () => {
@@ -492,10 +516,10 @@ describe("getEntrepriseBySiren", () => {
           ],
         }),
       );
-    const e = await getEntrepriseBySiren("777777777");
-    expect(e?.etablissements).toHaveLength(2);
-    expect(e?.enrichmentStatus).toBe("success");
-    expect(e?.enrichmentWarning).toBeUndefined();
+    const e = assertFound(await getEntrepriseBySiren("777777777"));
+    expect(e.etablissements).toHaveLength(2);
+    expect(e.enrichmentStatus).toBe("success");
+    expect(e.enrichmentWarning).toBeUndefined();
   });
 
   it("retourne l'entreprise avec finances ordonnées par année décroissante", async () => {
@@ -516,8 +540,8 @@ describe("getEntrepriseBySiren", () => {
         ],
       }),
     );
-    const e = await getEntrepriseBySiren("787120435");
-    expect(e?.finances.map((f) => f.annee)).toEqual([2024, 2023, 2022]);
+    const e = assertFound(await getEntrepriseBySiren("787120435"));
+    expect(e.finances.map((f) => f.annee)).toEqual([2024, 2023, 2022]);
   });
 
   it("rejette les SIREN invalides sans appeler l'API", async () => {

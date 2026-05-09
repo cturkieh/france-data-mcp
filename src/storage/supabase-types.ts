@@ -7,30 +7,10 @@ export type Json =
   | Json[]
 
 export type Database = {
-  graphql_public: {
-    Tables: {
-      [_ in never]: never
-    }
-    Views: {
-      [_ in never]: never
-    }
-    Functions: {
-      graphql: {
-        Args: {
-          extensions?: Json
-          operationName?: string
-          query?: string
-          variables?: Json
-        }
-        Returns: Json
-      }
-    }
-    Enums: {
-      [_ in never]: never
-    }
-    CompositeTypes: {
-      [_ in never]: never
-    }
+  // Allows to automatically instantiate createClient with right options
+  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
+  __InternalSupabase: {
+    PostgrestVersion: "14.5"
   }
   public: {
     Tables: {
@@ -73,6 +53,7 @@ export type Database = {
           code_insee?: string | null
           code_postal?: string | null
           created_at?: string | null
+          geog?: unknown
           geom?: unknown
           id?: number
           nature_exercice_code?: string | null
@@ -101,6 +82,97 @@ export type Database = {
           code_insee?: string | null
           code_postal?: string | null
           created_at?: string | null
+          geog?: unknown
+          geom?: unknown
+          id?: number
+          nature_exercice_code?: string | null
+          nature_exercice_libelle?: string | null
+          nom?: string
+          option_tarifaire_code?: string | null
+          option_tarifaire_libelle?: string | null
+          prenom?: string
+          raison_sociale?: string | null
+          raw?: Json | null
+          secteur_conventionnel_code?: string | null
+          secteur_conventionnel_libelle?: string | null
+          specialite_code?: string | null
+          specialite_libelle?: string | null
+          telephone?: string | null
+          type_ps_code?: string | null
+          type_ps_libelle?: string | null
+          ville?: string | null
+        }
+        Relationships: []
+      }
+      annuaire_ameli_previous: {
+        Row: {
+          activite_particuliere_code: string | null
+          activite_particuliere_libelle: string | null
+          adresse: string | null
+          civilite: string | null
+          code_departement: string
+          code_insee: string | null
+          code_postal: string | null
+          created_at: string | null
+          geog: unknown
+          geom: unknown
+          id: number
+          nature_exercice_code: string | null
+          nature_exercice_libelle: string | null
+          nom: string
+          option_tarifaire_code: string | null
+          option_tarifaire_libelle: string | null
+          prenom: string
+          raison_sociale: string | null
+          raw: Json | null
+          secteur_conventionnel_code: string | null
+          secteur_conventionnel_libelle: string | null
+          specialite_code: string | null
+          specialite_libelle: string | null
+          telephone: string | null
+          type_ps_code: string | null
+          type_ps_libelle: string | null
+          ville: string | null
+        }
+        Insert: {
+          activite_particuliere_code?: string | null
+          activite_particuliere_libelle?: string | null
+          adresse?: string | null
+          civilite?: string | null
+          code_departement: string
+          code_insee?: string | null
+          code_postal?: string | null
+          created_at?: string | null
+          geog?: unknown
+          geom?: unknown
+          id?: number
+          nature_exercice_code?: string | null
+          nature_exercice_libelle?: string | null
+          nom: string
+          option_tarifaire_code?: string | null
+          option_tarifaire_libelle?: string | null
+          prenom: string
+          raison_sociale?: string | null
+          raw?: Json | null
+          secteur_conventionnel_code?: string | null
+          secteur_conventionnel_libelle?: string | null
+          specialite_code?: string | null
+          specialite_libelle?: string | null
+          telephone?: string | null
+          type_ps_code?: string | null
+          type_ps_libelle?: string | null
+          ville?: string | null
+        }
+        Update: {
+          activite_particuliere_code?: string | null
+          activite_particuliere_libelle?: string | null
+          adresse?: string | null
+          civilite?: string | null
+          code_departement?: string
+          code_insee?: string | null
+          code_postal?: string | null
+          created_at?: string | null
+          geog?: unknown
           geom?: unknown
           id?: number
           nature_exercice_code?: string | null
@@ -126,12 +198,16 @@ export type Database = {
         Row: {
           categorie_code: string | null
           categorie_libelle: string | null
+          code_departement: string
           code_insee: string
           code_postal: string | null
+          coordx_lambert93: number | null
+          coordy_lambert93: number | null
           created_at: string | null
           date_maj: string | null
           date_ouverture: string | null
           email: string | null
+          geog: unknown
           geom: unknown
           num_finess: string
           num_voie: string | null
@@ -145,12 +221,16 @@ export type Database = {
         Insert: {
           categorie_code?: string | null
           categorie_libelle?: string | null
+          code_departement: string
           code_insee: string
           code_postal?: string | null
+          coordx_lambert93?: number | null
+          coordy_lambert93?: number | null
           created_at?: string | null
           date_maj?: string | null
           date_ouverture?: string | null
           email?: string | null
+          geog?: unknown
           geom?: unknown
           num_finess: string
           num_voie?: string | null
@@ -164,12 +244,88 @@ export type Database = {
         Update: {
           categorie_code?: string | null
           categorie_libelle?: string | null
+          code_departement?: string
           code_insee?: string
           code_postal?: string | null
+          coordx_lambert93?: number | null
+          coordy_lambert93?: number | null
           created_at?: string | null
           date_maj?: string | null
           date_ouverture?: string | null
           email?: string | null
+          geog?: unknown
+          geom?: unknown
+          num_finess?: string
+          num_voie?: string | null
+          raison_sociale?: string
+          raw?: Json | null
+          telephone?: string | null
+          type_voie?: string | null
+          ville?: string | null
+          voie?: string | null
+        }
+        Relationships: []
+      }
+      finess_previous: {
+        Row: {
+          categorie_code: string | null
+          categorie_libelle: string | null
+          code_departement: string
+          code_insee: string
+          code_postal: string | null
+          coordx_lambert93: number | null
+          coordy_lambert93: number | null
+          created_at: string | null
+          date_maj: string | null
+          date_ouverture: string | null
+          email: string | null
+          geog: unknown
+          geom: unknown
+          num_finess: string
+          num_voie: string | null
+          raison_sociale: string
+          raw: Json | null
+          telephone: string | null
+          type_voie: string | null
+          ville: string | null
+          voie: string | null
+        }
+        Insert: {
+          categorie_code?: string | null
+          categorie_libelle?: string | null
+          code_departement: string
+          code_insee: string
+          code_postal?: string | null
+          coordx_lambert93?: number | null
+          coordy_lambert93?: number | null
+          created_at?: string | null
+          date_maj?: string | null
+          date_ouverture?: string | null
+          email?: string | null
+          geog?: unknown
+          geom?: unknown
+          num_finess: string
+          num_voie?: string | null
+          raison_sociale: string
+          raw?: Json | null
+          telephone?: string | null
+          type_voie?: string | null
+          ville?: string | null
+          voie?: string | null
+        }
+        Update: {
+          categorie_code?: string | null
+          categorie_libelle?: string | null
+          code_departement?: string
+          code_insee?: string
+          code_postal?: string | null
+          coordx_lambert93?: number | null
+          coordy_lambert93?: number | null
+          created_at?: string | null
+          date_maj?: string | null
+          date_ouverture?: string | null
+          email?: string | null
+          geog?: unknown
           geom?: unknown
           num_finess?: string
           num_voie?: string | null
@@ -421,43 +577,11 @@ export type Database = {
             }
             Returns: string
           }
-      disablelongtransactions: { Args: never; Returns: string }
-      dropgeometrycolumn:
-        | {
-            Args: {
-              catalog_name: string
-              column_name: string
-              schema_name: string
-              table_name: string
-            }
-            Returns: string
-          }
-        | {
-            Args: {
-              column_name: string
-              schema_name: string
-              table_name: string
-            }
-            Returns: string
-          }
-        | { Args: { column_name: string; table_name: string }; Returns: string }
-      dropgeometrytable:
-        | {
-            Args: {
-              catalog_name: string
-              schema_name: string
-              table_name: string
-            }
-            Returns: string
-          }
-        | { Args: { schema_name: string; table_name: string }; Returns: string }
-        | { Args: { table_name: string }; Returns: string }
-      enablelongtransactions: { Args: never; Returns: string }
-      equals: { Args: { geom1: unknown; geom2: unknown }; Returns: boolean }
       ameli_by_specialite_dept: {
         Args: {
           p_departement: string
           p_limit: number
+          p_offset?: number
           p_specialite_code: string
           p_type_ps_code: string
         }
@@ -522,6 +646,58 @@ export type Database = {
           ville: string
         }[]
       }
+      ameli_lister_specialites: {
+        Args: never
+        Returns: {
+          code: string
+          count: number
+          libelle: string
+          type_ps_code: string
+          type_ps_libelle: string
+        }[]
+      }
+      ameli_lister_types_ps: {
+        Args: never
+        Returns: {
+          code: string
+          count: number
+          libelle_source: string
+          specialites_presentes: Json
+        }[]
+      }
+      disablelongtransactions: { Args: never; Returns: string }
+      dropgeometrycolumn:
+        | {
+            Args: {
+              catalog_name: string
+              column_name: string
+              schema_name: string
+              table_name: string
+            }
+            Returns: string
+          }
+        | {
+            Args: {
+              column_name: string
+              schema_name: string
+              table_name: string
+            }
+            Returns: string
+          }
+        | { Args: { column_name: string; table_name: string }; Returns: string }
+      dropgeometrytable:
+        | {
+            Args: {
+              catalog_name: string
+              schema_name: string
+              table_name: string
+            }
+            Returns: string
+          }
+        | { Args: { schema_name: string; table_name: string }; Returns: string }
+        | { Args: { table_name: string }; Returns: string }
+      enablelongtransactions: { Args: never; Returns: string }
+      equals: { Args: { geom1: unknown; geom2: unknown }; Returns: boolean }
       finess_by_categorie: {
         Args: {
           p_code_insee: string
@@ -686,6 +862,10 @@ export type Database = {
       }
       geomfromewkt: { Args: { "": string }; Returns: unknown }
       gettransactionid: { Args: never; Returns: unknown }
+      ingest_apply_finess_geom_batch: {
+        Args: { p_limit: number }
+        Returns: number
+      }
       ingest_atomic_swap: { Args: { p_prod_table: string }; Returns: undefined }
       ingest_create_annuaire_ameli_staging: { Args: never; Returns: undefined }
       ingest_create_finess_staging: { Args: never; Returns: undefined }
@@ -1458,9 +1638,6 @@ export type CompositeTypes<
     : never
 
 export const Constants = {
-  graphql_public: {
-    Enums: {},
-  },
   public: {
     Enums: {},
   },

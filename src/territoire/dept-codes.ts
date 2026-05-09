@@ -43,3 +43,14 @@ export function isValidDept(dept: string): boolean {
   if (/^(97[1-8]|98[4-8])$/.test(dept)) return true;
   return false;
 }
+
+/**
+ * Variante throw-on-invalid de `isValidDept`. Cohérent avec les autres
+ * validators du DB layer (`validateCoords`, `validateRadiusKm`) : `RangeError`
+ * pour permettre au boundary MCP de mapper vers JSON-RPC -32602 (Invalid
+ * params) au lieu de -32603 (Internal error).
+ */
+export function assertValidDept(dept: string): void {
+  if (isValidDept(dept)) return;
+  throw new RangeError(`[france-data-mcp] departement must be a valid INSEE code, got "${dept}"`);
+}
