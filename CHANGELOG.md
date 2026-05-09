@@ -4,6 +4,74 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.1] — 2026-05-09
+
+**Hotfix RPPS — récupère les ~970 K PS skippés par V0.5.0** (+77 % de couverture
+ingérée vs V0.5.0). Le 1er run V0.5.0 (run GH `25607546400`) avait skippé 43 %
+des PS car le parser exigeait une adresse de structure matchée sur l'index
+commune INSEE — exactement la valeur ajoutée du RPPS vs Ameli (étudiants,
+retraités, salariés CH/CHU sans adresse site, libéraux à domicile).
+
+### Refactor parser
+- Skip uniquement `no_identity` (rpps_id vide ou nom/prénom manquant).
+- Tous les autres PS insérés, avec `geom NULL` si pas de match commune et
+  `code_departement` dérivé du code postal quand possible (helper
+  `deriveDeptFromCp` — métropole 2-chars, DOM 3-chars 971-978, COM 984-988,
+  Corse 20xxx → NULL car ambigu 2A/2B sans la commune).
+- Volumétrie cible : **~2,0-2,2 M rows ingérées** (vs 1,27 M en V0.5.0).
+- Thresholds recalibrés : `MIN_ROWS=2_000_000`, `MAX_ROWS=2_400_000`,
+  `STRUCTURAL_FAIL_THRESHOLD=0.01` (couvre uniquement no_identity).
+
+### Enrichissement post-INSERT via JOIN FINESS
+- Nouvelle RPC `ingest_apply_rpps_finess_enrichment_batch(p_limit)` —
+  LEFT JOIN sur `finess.num_finess` + CASE WHEN qui pose `geom_source =
+  'finess_join'` (avec coords FINESS) ou `'finess_unmatched'` (sentinelle qui
+  sort la row du predicate du prochain scan). Pattern boucle batched mirror
+  de `ingest_apply_finess_geom_batch` (V0.4.2).
+- Helper TS partagé `runBatchedRpc(supabase, rpc, params, expected, batch)`
+  extrait dans `scripts/ingest/shared.ts` — déduplique le pattern boucle
+  utilisé aussi par finess.ts.
+- Index partiel `rpps_staging_pending_enrichment_idx WHERE geom IS NULL AND
+  num_finess IS NOT NULL AND geom_source IS NULL` pour rester en O(p_limit)
+  par batch malgré 970 K rows éligibles.
+- 2 sentinelles defense en profondeur :
+  1. Throw si `enrichedCount === 0 && initialNoGeo > 0` (régression totale
+     du JOIN, indépendant du sample size).
+  2. Throw si `initialNoGeo >= 1000 && matchRate < 10 %` (régression
+     partielle — bruit du ratio absorbé sous le sample min).
+- Filet final `geoRate < 25 %` reste en place (FLOOR catastrophe).
+
+### Filtre catégorie professionnelle
+- Nouveau param `p_categorie_codes TEXT[]` sur les 3 RPCs query
+  (`rpps_in_radius`, `rpps_par_specialite_dept`, `rpps_dans_etablissement`).
+- Helper SQL `rpps_categorie_match(code, codes)` — source unique pour la
+  sémantique : `cardinality = 0 → C, M, IS NULL` (default actifs) ;
+  `cardinality > 0 → ANY(codes) OR IS NULL`.
+- Nouveau param MCP `include_inactifs: boolean` (default `false`). Description
+  enrichie : « Par défaut, ne renvoie que les PS en activité (Civil C +
+  Militaire M). Passer `include_inactifs: true` pour inclure aussi
+  Retraité (R), Étudiant (E), Suspendu (S), Décédé (D). »
+- `coerceBoolean(args.include_inactifs)` — accepte aussi `"true"` / `"1"`,
+  throw `RangeError` (mappé `-32602`) sur valeur ambiguë.
+- Indexes composites `rpps_categorie_idx` + `rpps_dept_categorie_idx`
+  (mirror sur staging) pour la perf des filters dept dense.
+
+### Migration SQL `20260509T210000_rpps_v051_relax_constraints`
+- `ALTER TABLE rpps ALTER code_departement DROP NOT NULL` (idem staging DDL).
+- `ADD COLUMN geom_source TEXT` (rpps + staging).
+- DDL staging recréé en superset strict (les colonnes/indexes manquants au
+  swap atomic seraient silencieusement perdus).
+- Field `categorie` ajouté au shape `RppsResult` (déplacé depuis
+  `RppsLookupResult` qui le redéfinissait — anti-duplication).
+
+### Discipline post-fix
+- `pnpm test:unit` : **374 tests verts** (16 nouveaux cas RPPS, 10 nouveaux cas
+  `deriveDeptFromCp`).
+- `pnpm typecheck` clean (tsconfig + tsconfig.api).
+- `pnpm lint` clean (Biome).
+- `/simplify` (3 agents standalone) + `/review` LOOP 4 rounds (3 agents
+  pr-review-toolkit) jusqu'à CONVERGENT.
+
 ## [0.5.0] — 2026-05-09
 
 **Phase 2 RPPS / Annuaire Santé ANS** — la pièce qui complète le triangle de

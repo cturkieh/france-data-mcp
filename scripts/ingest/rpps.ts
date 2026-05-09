@@ -9,6 +9,7 @@ import {
   matchCommune,
 } from "../../src/territoire/commune-index.js";
 import { fetchAllCommunes } from "../../src/territoire/communes.js";
+import { deriveDeptFromCp } from "../../src/territoire/dept-codes.js";
 import {
   IngestError,
   type IngestLogEntry,
@@ -19,6 +20,7 @@ import {
   getUntypedServiceClient,
   preValidateFile,
   runAndRecordCanary,
+  runBatchedRpc,
   runIfMain,
   safeSerializeIngestLog,
   shortCircuitIfSameChecksum,
@@ -36,6 +38,13 @@ import {
  *   par construction de la nomenclature ANS)
  * - Identifiant national stable (`rpps_id`) — exposé en colonne et indexé
  * - 4× plus de volume (~2.23M lignes vs ~462K Ameli) → BATCH_SIZE plus large
+ *
+ * Skip uniquement no_identity. Les PS sans adresse de structure (étudiants,
+ * retraités, salariés CH/CHU sans adresse site déclarée, libéraux à domicile)
+ * sont insérés avec geom NULL et dept dérivé du CP quand possible. Une phase
+ * post-VALIDATE / pre-SWAP enrichit ces rows via JOIN avec FINESS sur
+ * `num_finess` — les salariés CH/CHU se géolocalisent ainsi à la précision
+ * adresse FINESS, ce qui couvre exactement la valeur ajoutée RPPS vs Ameli.
  */
 
 const RPPS_CSV_URL =
@@ -46,12 +55,13 @@ const RPPS_CSV_URL =
  * faux positif sur une variation mensuelle classique (±5%). */
 const MIN_SIZE_BYTES = 600_000_000;
 /**
- * Volumétrie cible : 2 230 K lignes (annoncé ANS au 2026-05-05). Bounds larges
- * (1.8M – 2.6M) pour absorber la croissance organique du référentiel sans
- * trigger faux. Au-dessus de 2.6M : suspicion changement de format ANS.
+ * Volumétrie cible : ~2.0-2.2 M lignes ingérées. Le CSV ANS expose ~2.23 M
+ * lignes au 2026-05-09 ; MIN_ROWS proche du réel (2.0M) catche les partial
+ * parses. MAX_ROWS 2.4M absorbe la croissance organique du référentiel ;
+ * au-dessus, suspicion de changement de format ANS.
  */
-const MIN_ROWS = 1_800_000;
-const MAX_ROWS = 2_600_000;
+const MIN_ROWS = 2_000_000;
+const MAX_ROWS = 2_400_000;
 
 /**
  * Insertions par batch. 1000 (vs 500 Ameli) car le volume est 4× plus grand
@@ -60,11 +70,37 @@ const MAX_ROWS = 2_600_000;
  */
 const BATCH_SIZE = 1_000;
 
-const SAMPLE_CAP = 200;
-/** Tolérance unmatched-locality (idem Ameli). */
-const UNMATCHED_LOCALITY_THRESHOLD = 0.08;
-/** Tolérance fail structurel (idem Ameli). */
+/** Rows par batch d'enrichissement FINESS server-side (PostgREST 60s timeout safe). */
+const ENRICH_BATCH_SIZE = 10_000;
+
+/**
+ * Tolérance fail structurel — ne couvre QUE `no_identity` (rpps_id vide ou
+ * nom/prénom manquant). Les PS sans adresse passent en geom NULL et sont
+ * enrichis post-INSERT via FINESS. Au-dessus de 1 % de no_identity, on
+ * suspecte un column rename ANS upstream.
+ */
 const STRUCTURAL_FAIL_THRESHOLD = 0.01;
+
+/**
+ * Couverture geom minimale post-enrichissement FINESS. Warn à 50 % (pour
+ * surfacer une dégradation graduelle), hard fail à 25 % (catastrophe : FINESS
+ * dataset corrompu, colonne `Numéro FINESS site` ANS renommée).
+ */
+const GEO_RATE_WARN = 0.5;
+const GEO_RATE_FLOOR = 0.25;
+
+/**
+ * Match rate minimal du JOIN FINESS sur les rows éligibles (avec num_finess
+ * mais sans geom centroïde). En steady state on attend ~50-60 % de match
+ * (les num_finess RPPS ne pointent pas tous vers un FINESS prod, ex: cabinets
+ * libéraux à domicile sans déclaration FINESS). Floor 10 % : en-dessous,
+ * régression partielle ou totale du JOIN (column drift, GRANT cassé, dataset
+ * incomplet) — refuse de swap. Évalué en ratio (pas en absolu) pour rester
+ * robuste à la variance de volume du CSV ANS.
+ */
+const FINESS_MATCH_FLOOR = 0.1;
+/** Plancher de volume sous lequel le ratio devient bruité ; on log seulement. */
+const FINESS_MATCH_RATIO_MIN_SAMPLE = 1_000;
 
 /**
  * Noms exacts des colonnes côté CSV ANS (français accentué). Centralisés ici
@@ -105,6 +141,20 @@ const COL = {
   EMAIL: "Adresse e-mail (coord. structure)",
 } as const;
 
+/**
+ * Provenance du `geom` d'une row RPPS, pour observabilité. `commune_centroid`
+ * est appliqué par le parser TS quand le CP+ville match une commune INSEE ;
+ * `finess_join` est appliqué côté SQL par `ingest_apply_rpps_finess_enrichment_batch`
+ * quand la row est enrichie via JOIN sur `num_finess`. NULL = pas de geom.
+ *
+ * Const exporté pour servir de source unique de vérité (TS + SQL + tests).
+ */
+export const GEOM_SOURCES = {
+  COMMUNE_CENTROID: "commune_centroid",
+  FINESS_JOIN: "finess_join",
+} as const;
+export type GeomSource = (typeof GEOM_SOURCES)[keyof typeof GEOM_SOURCES];
+
 interface RppsStagingRow {
   rpps_id: string;
   identifiant_pp: string | null;
@@ -129,11 +179,13 @@ interface RppsStagingRow {
   adresse: string | null;
   code_postal: string | null;
   ville: string | null;
-  code_departement: string;
+  /** Nullable : dérivé du CP si pas de match commune, NULL si pas de CP exploitable. */
+  code_departement: string | null;
   code_insee: string | null;
   telephone: string | null;
   email: string | null;
   geom: string | null;
+  geom_source: GeomSource | null;
   raw: Record<string, never>;
 }
 
@@ -206,8 +258,10 @@ async function main(): Promise<void> {
     log.row_count = stats.inserted;
 
     // 5. VALIDATE COHERENCE
+    const insertedWithoutGeo = stats.inserted - stats.insertedWithGeo;
+    const deptDerivedFromCp = insertedWithoutGeo - stats.deptUnknown;
     console.log(
-      `[rpps] insert summary: inserted=${stats.inserted}, no_identity=${stats.skippedNoIdentity}, no_locality=${stats.skippedNoLocality}, unmatched_locality=${stats.skippedUnmatchedLocality}`,
+      `[rpps] insert summary: inserted=${stats.inserted} (with_geo=${stats.insertedWithGeo}, without_geo=${insertedWithoutGeo}, dept_derived_from_cp=${deptDerivedFromCp}, dept_unknown=${stats.deptUnknown}), skipped no_identity=${stats.skippedNoIdentity}`,
     );
 
     if (stats.inserted < MIN_ROWS) {
@@ -224,26 +278,17 @@ async function main(): Promise<void> {
     }
 
     const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
-    const denominator =
-      stats.inserted +
-      stats.skippedNoIdentity +
-      stats.skippedNoLocality +
-      stats.skippedUnmatchedLocality;
+    const denominator = stats.inserted + stats.skippedNoIdentity;
     if (denominator === 0) {
       throw new IngestError(
         "validate",
         "Pipeline produced zero parser events. Refuse to swap an empty table into prod.",
       );
     }
-    const rateOf = (failures: number) => failures / denominator;
-
-    const structuralFailures = stats.skippedNoIdentity + stats.skippedNoLocality;
-    const structuralRate = rateOf(structuralFailures);
-    const unmatchedRate = rateOf(stats.skippedUnmatchedLocality);
-
-    if (structuralFailures > 0) {
+    const structuralRate = stats.skippedNoIdentity / denominator;
+    if (stats.skippedNoIdentity > 0) {
       console.warn(
-        `[rpps] structural skips: ${stats.skippedNoIdentity} no_identity, ${stats.skippedNoLocality} no_locality (${fmt(structuralRate)} of total)`,
+        `[rpps] structural skips: ${stats.skippedNoIdentity} no_identity (${fmt(structuralRate)} of total)`,
       );
       if (structuralRate > STRUCTURAL_FAIL_THRESHOLD) {
         throw new IngestError(
@@ -253,26 +298,68 @@ async function main(): Promise<void> {
       }
     }
 
-    if (stats.skippedUnmatchedLocality > 0) {
-      const topUnmatched = [...stats.unmatchedSampleCounts.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(", ");
-      console.warn(
-        `[rpps] unmatched localities: ${stats.skippedUnmatchedLocality} (${fmt(unmatchedRate)}). Top: ${topUnmatched}`,
-      );
-      if (stats.unmatchedDistinctKeysDropped > 0) {
-        console.warn(
-          `[rpps] sample cap saturated: ${stats.unmatchedDistinctKeysDropped} distinct unmatched (cp,ville) keys not tracked.`,
-        );
-      }
-      if (unmatchedRate > UNMATCHED_LOCALITY_THRESHOLD) {
+    // 5b. ENRICH FROM FINESS — la RPC fait un LEFT JOIN finess + CASE WHEN
+    // qui pose 'finess_join' (avec coords) ou 'finess_unmatched' (sentinelle
+    // qui sort la row du predicate du prochain scan). Le retour = total rows
+    // visitées dans la batch ; 0 = file vide → boucle sort proprement.
+    const initialNoGeo = stats.inserted - stats.insertedWithGeo;
+    const { totalUpdated: visited, iterations: enrichIterations } =
+      initialNoGeo > 0
+        ? await runBatchedRpc(
+            supabase,
+            "ingest_apply_rpps_finess_enrichment_batch",
+            { p_limit: ENRICH_BATCH_SIZE },
+            initialNoGeo,
+            ENRICH_BATCH_SIZE,
+          )
+        : { totalUpdated: 0, iterations: 0 };
+    // `visited` couvre matched + unmatched ; pour connaître le nombre de
+    // rows réellement matchées (avec geom non-null), on relit la staging.
+    const { count: enriched, error: enrichCountErr } = await supabase
+      .from("rpps_staging")
+      .select("*", { count: "exact", head: true })
+      .eq("geom_source", "finess_join");
+    if (enrichCountErr) {
+      throw new IngestError("validate", `Failed to count enriched rows: ${enrichCountErr.message}`);
+    }
+    const enrichedCount = enriched ?? 0;
+    const totalWithGeo = stats.insertedWithGeo + enrichedCount;
+    const geoRate = stats.inserted > 0 ? totalWithGeo / stats.inserted : 0;
+    console.log(
+      `[rpps] FINESS enrichment: ${enrichedCount} matched / ${visited} visited / ${initialNoGeo} eligible in ${enrichIterations} batches. Total geo: ${totalWithGeo}/${stats.inserted} (${fmt(geoRate)})`,
+    );
+    // Defense en profondeur sur le JOIN FINESS — 2 sentinelles :
+    //  1. 0 matched sur N>0 éligibles : régression totale du JOIN (num_finess
+    //     column drift, GRANT cassé, finess table corrompue). Throw quel que
+    //     soit N : c'est suspect même à petite échelle.
+    //  2. Sample suffisant + ratio sous FINESS_MATCH_FLOOR : régression
+    //     partielle. Sous MIN_SAMPLE, le ratio devient bruité — on log seul.
+    if (initialNoGeo > 0) {
+      const matchRate = enrichedCount / initialNoGeo;
+      if (enrichedCount === 0) {
         throw new IngestError(
           "validate",
-          `Unmatched-locality rate ${fmt(unmatchedRate)} above ${fmt(UNMATCHED_LOCALITY_THRESHOLD)} — likely INSEE commune drift`,
+          `${initialNoGeo} rows eligible for FINESS enrichment but 0 matched — likely num_finess column drift or finess table regression`,
         );
       }
+      if (initialNoGeo >= FINESS_MATCH_RATIO_MIN_SAMPLE && matchRate < FINESS_MATCH_FLOOR) {
+        throw new IngestError(
+          "validate",
+          `FINESS join match rate ${fmt(matchRate)} below floor ${fmt(FINESS_MATCH_FLOOR)} (${enrichedCount}/${initialNoGeo} matched) — likely num_finess column drift or finess table regression`,
+        );
+      }
+      console.log(`[rpps] FINESS match rate: ${fmt(matchRate)} (${enrichedCount}/${initialNoGeo})`);
+    }
+    if (geoRate < GEO_RATE_FLOOR) {
+      throw new IngestError(
+        "validate",
+        `Geo coverage ${fmt(geoRate)} below floor ${fmt(GEO_RATE_FLOOR)} — likely FINESS dataset corruption or ANS column rename`,
+      );
+    }
+    if (geoRate < GEO_RATE_WARN) {
+      console.warn(
+        `[rpps] ⚠️ Geo coverage ${fmt(geoRate)} below warn threshold ${fmt(GEO_RATE_WARN)} — investigate commune index drift or FINESS join rate degradation`,
+      );
     }
 
     // 6. ATOMIC SWAP
@@ -312,11 +399,11 @@ async function main(): Promise<void> {
 
 interface IngestStreamStats {
   inserted: number;
+  /** Rows avec geom au centroïde commune (le reste est ` inserted - insertedWithGeo`). */
+  insertedWithGeo: number;
+  /** Rows sans geom ni dept (ni CP ni ville exploitables — étudiants/retraités). */
+  deptUnknown: number;
   skippedNoIdentity: number;
-  skippedNoLocality: number;
-  skippedUnmatchedLocality: number;
-  unmatchedSampleCounts: Map<string, number>;
-  unmatchedDistinctKeysDropped: number;
 }
 
 async function streamCsvToStaging(
@@ -345,11 +432,9 @@ async function streamCsvToStaging(
 
   let batch: RppsStagingRow[] = [];
   let inserted = 0;
+  let insertedWithGeo = 0;
+  let deptUnknown = 0;
   let skippedNoIdentity = 0;
-  let skippedNoLocality = 0;
-  let skippedUnmatchedLocality = 0;
-  let unmatchedDistinctKeysDropped = 0;
-  const unmatchedSampleCounts = new Map<string, number>();
   let firstBatch = true;
 
   const isSchemaCacheMiss = (err: { code?: string } | null): boolean => err?.code === "PGRST205";
@@ -387,60 +472,28 @@ async function streamCsvToStaging(
 
   for await (const record of parser as AsyncIterable<Record<string, string>>) {
     const parsed = parseRppsRecord(record, index);
-    if (parsed.row) {
-      batch.push(parsed.row);
-    } else {
-      const reason = parsed.skipReason;
-      switch (reason) {
-        case "no_identity":
-          skippedNoIdentity++;
-          break;
-        case "no_locality":
-          skippedNoLocality++;
-          break;
-        case "unmatched_locality": {
-          skippedUnmatchedLocality++;
-          // sampleKey est non-optional dans la branche unmatched_locality du
-          // discriminated union (pas besoin de garde supplémentaire).
-          const { sampleKey } = parsed;
-          const current = unmatchedSampleCounts.get(sampleKey);
-          if (current !== undefined || unmatchedSampleCounts.size < SAMPLE_CAP) {
-            unmatchedSampleCounts.set(sampleKey, (current ?? 0) + 1);
-          } else {
-            unmatchedDistinctKeysDropped++;
-          }
-          break;
-        }
-        default: {
-          const _exhaustive: never = reason;
-          throw new Error(`unreachable skipReason: ${String(_exhaustive)}`);
-        }
-      }
+    if (!parsed.row) {
+      skippedNoIdentity++;
+      continue;
     }
+    batch.push(parsed.row);
+    if (parsed.row.geom) insertedWithGeo++;
+    else if (!parsed.row.code_departement) deptUnknown++;
     if (batch.length >= BATCH_SIZE) await flush();
   }
   await flush();
-  return {
-    inserted,
-    skippedNoIdentity,
-    skippedNoLocality,
-    skippedUnmatchedLocality,
-    unmatchedSampleCounts,
-    unmatchedDistinctKeysDropped,
-  };
+  return { inserted, insertedWithGeo, deptUnknown, skippedNoIdentity };
 }
 
-type SkipReason = "no_identity" | "no_locality" | "unmatched_locality";
-
-type ParsedRppsRow =
-  | { row: RppsStagingRow; skipReason?: never; sampleKey?: never }
-  | { row?: never; skipReason: Exclude<SkipReason, "unmatched_locality">; sampleKey?: never }
-  | { row?: never; skipReason: "unmatched_locality"; sampleKey: string };
+type ParsedRppsRow = { row: RppsStagingRow } | { row?: never };
 
 /**
- * Parse une ligne RPPS en row staging. Les ratés non-bloquants (manque
- * d'identité, locality unmatched, etc.) sont retournés comme skipReason
- * pour que le caller threshold-aborte le run global si trop fréquents.
+ * Parse une ligne RPPS en row staging. Skip uniquement `no_identity` (rpps_id
+ * vide ou nom/prénom manquant). Toutes les autres lignes — y compris celles
+ * sans adresse de structure — produisent une row, avec geom NULL si le
+ * CP+ville ne match aucune commune. Le post-INSERT
+ * `ingest_apply_rpps_finess_enrichment_batch` enrichit ces rows via JOIN
+ * FINESS sur `num_finess`.
  */
 export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex): ParsedRppsRow {
   const rppsId = getNonEmpty(rec, COL.RPPS_ID);
@@ -450,19 +503,11 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
   // `nom = prenom` quand l'un manque masquait silencieusement une donnée
   // partielle ; mieux vaut tracker ces lignes en `no_identity` et alerter
   // par le threshold structurel si elles deviennent fréquentes.
-  if (!rppsId || !nom || !prenom) return { skipReason: "no_identity" };
+  if (!rppsId || !nom || !prenom) return {};
 
   const codePostalRaw = getNonEmpty(rec, COL.CODE_POSTAL);
   const villeRaw = getNonEmpty(rec, COL.LIBELLE_COMMUNE);
-  if (!codePostalRaw && !villeRaw) return { skipReason: "no_locality" };
-
   const matched: IndexedCommune | null = matchCommune(index, codePostalRaw, villeRaw);
-  if (!matched) {
-    return {
-      skipReason: "unmatched_locality",
-      sampleKey: `${codePostalRaw ?? "?"}|${villeRaw ?? "?"}`,
-    };
-  }
 
   // Reconstruit l'adresse littérale (numéro + type voie + libellé voie). On
   // joint les segments présents avec un espace, on évite "null null null"
@@ -474,7 +519,24 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
   ].filter((s): s is string => Boolean(s));
   const adresse = adresseParts.length > 0 ? adresseParts.join(" ") : null;
 
-  const geom = `SRID=4326;POINT(${matched.lon} ${matched.lat})`;
+  let geom: string | null = null;
+  let geomSource: GeomSource | null = null;
+  let codeInsee: string | null = null;
+  let codeDept: string | null = null;
+
+  if (matched) {
+    geom = `SRID=4326;POINT(${matched.lon} ${matched.lat})`;
+    geomSource = GEOM_SOURCES.COMMUNE_CENTROID;
+    codeInsee = matched.codeInsee;
+    codeDept = matched.codeDepartement;
+  } else {
+    // Fallback dept : dérive depuis le CP si possible. Pas de match commune
+    // → pas de geom (le post-enrichissement FINESS comblera quand num_finess
+    // est exploitable). Le dept dérivé est "qualité moyenne" (un CP couvre
+    // parfois 2 dept en limite, cf. brief V0.5.1) mais largement suffisant
+    // pour `rpps_par_specialite_dept`. NULL si CP absent ou ambigu (Corse).
+    codeDept = deriveDeptFromCp(codePostalRaw) ?? null;
+  }
 
   return {
     row: {
@@ -501,11 +563,12 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
       adresse,
       code_postal: codePostalRaw ? codePostalRaw.trim().slice(0, 5) : null,
       ville: villeRaw,
-      code_departement: matched.codeDepartement,
-      code_insee: matched.codeInsee,
+      code_departement: codeDept,
+      code_insee: codeInsee,
       telephone: getNonEmpty(rec, COL.TELEPHONE),
       email: getNonEmpty(rec, COL.EMAIL),
       geom,
+      geom_source: geomSource,
       // V0.4.1 lesson : pas de raw JSONB stocké (économise ~70% du poids row
       // sur 2.23M lignes = ~1.5 GB sur Pro tier 8GB). Jamais lu côté tools.
       raw: {},

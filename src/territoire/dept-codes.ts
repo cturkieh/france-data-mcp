@@ -54,3 +54,39 @@ export function assertValidDept(dept: string): void {
   if (isValidDept(dept)) return;
   throw new RangeError(`[france-data-mcp] departement must be a valid INSEE code, got "${dept}"`);
 }
+
+/**
+ * Dérive le code département depuis un code postal 5 chiffres. Sert au
+ * fallback de l'ingestion RPPS V0.5.1 quand le CP+ville ne match aucune
+ * commune INSEE — on garde au moins le dept pour permettre le filtrage
+ * `rpps_par_specialite_dept`.
+ *
+ *  - "08000" → "08"   (métropole : 2 premiers)
+ *  - "75001" → "75"
+ *  - "97400" → "974"  (DROM : 3 premiers, 971-978)
+ *  - "98711" → "987"  (COM : 3 premiers, 984-988)
+ *  - "20100" → undefined (Corse ambigu : 2A si 20000-20199/20300+, 2B si
+ *    20200-20299 — ne pas inventer sans la commune)
+ *  - moins de 5 chiffres ou non-numérique → undefined
+ *
+ * Validation finale via `isValidDept` pour ne jamais retourner un code
+ * fictif (ex: "99" pour un CP "99xxx" anormal — non français).
+ */
+export function deriveDeptFromCp(cp: string | null | undefined): string | undefined {
+  if (!cp) return undefined;
+  const trimmed = cp.trim();
+  if (!/^\d{5}/.test(trimmed)) return undefined;
+  const cp5 = trimmed.slice(0, 5);
+  if (cp5.startsWith("20")) return undefined;
+  const candidate =
+    cp5.startsWith("97") || cp5.startsWith("98") ? cp5.slice(0, 3) : cp5.slice(0, 2);
+  // Validation stricte locale : on accepte uniquement les ranges réellement
+  // émises côté INSEE. `isValidDept` est permissif (regex `\d{2}` tolère "96",
+  // "99", etc.) pour rétro-compat du DB layer ; ici on dérive depuis du data
+  // RPPS brut, autant ne pas stocker de dept fantaisiste qui polluerait
+  // `rpps_par_specialite_dept`. Métropole = 01-95 sauf 20 (Corse 2A/2B exclue
+  // car déjà filtrée plus haut). DOM = 971-978. COM = 984-988.
+  if (/^(0[1-9]|1[0-9]|2[1-9]|[3-8][0-9]|9[0-5])$/.test(candidate)) return candidate;
+  if (/^(97[1-8]|98[4-8])$/.test(candidate)) return candidate;
+  return undefined;
+}

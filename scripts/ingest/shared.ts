@@ -397,3 +397,56 @@ export async function runIfMain(moduleUrl: string, fn: () => Promise<void>): Pro
     await fn();
   }
 }
+
+/**
+ * Boucle un RPC server-side qui traite un lot de rows par appel et retourne
+ * le nombre de rows mises à jour, jusqu'à ce qu'aucune row ne soit éligible
+ * (`rowCount === 0`). Pattern partagé par les ingesters qui restent sous le
+ * timeout PostgREST 60s : `ingest_apply_finess_geom_batch` (Lambert93→WGS84
+ * sur ~95K rows), `ingest_apply_rpps_finess_enrichment_batch` (FINESS join
+ * sur ~970K rows RPPS sans geom).
+ *
+ * Garde anti-divergence : si après `ceil(expectedTotal / batchSize) + 5`
+ * itérations le RPC retourne toujours non-zéro, on suspecte un bug de
+ * contrat (UPDATE compté mais condition WHERE jamais réduite) et on throw.
+ * La marge `+5` absorbe les batches partiels où certaines rows n'ont pas
+ * de match upstream et restent visibles à chaque scan.
+ *
+ * Type-strict : un retour `null`/`string` est traité comme régression
+ * PostgREST (pas un fallback à 0 silencieux qui sort la boucle trop tôt).
+ *
+ * @param expectedTotal — borne haute pour le `maxIterations` cap. Pas une
+ *   contrainte fonctionnelle ; le RPC peut traiter moins (et la boucle
+ *   terminera plus tôt sur le `rowCount === 0`).
+ */
+export async function runBatchedRpc(
+  supabase: SupabaseClient,
+  rpcName: string,
+  params: Record<string, unknown>,
+  expectedTotal: number,
+  batchSize: number,
+): Promise<{ totalUpdated: number; iterations: number }> {
+  const maxIterations = Math.ceil(Math.max(expectedTotal, 1) / batchSize) + 5;
+  let totalUpdated = 0;
+  let iter = 0;
+  while (true) {
+    if (++iter > maxIterations) {
+      throw new IngestError(
+        "validate",
+        `${rpcName} did not converge after ${maxIterations} batches — likely RPC contract regression (rows updated but WHERE predicate not narrowing)`,
+      );
+    }
+    const { data, error } = await supabase.rpc(rpcName, params);
+    if (error) {
+      throw new IngestError("validate", `${rpcName} failed: ${error.message}`);
+    }
+    if (typeof data !== "number") {
+      throw new IngestError(
+        "validate",
+        `${rpcName} returned ${typeof data} instead of number — RPC contract regression`,
+      );
+    }
+    totalUpdated += data;
+    if (data === 0) return { totalUpdated, iterations: iter };
+  }
+}

@@ -66,7 +66,6 @@ describe("parseRppsRecord", () => {
   it("parses une ligne complète et produit un EWKT geom au centroïde commune", () => {
     const result = parseRppsRecord(row(), idx);
     expect(result.row).toBeDefined();
-    expect(result.skipReason).toBeUndefined();
     if (!result.row) throw new Error("expected row");
     expect(result.row.rpps_id).toBe("810009647990");
     expect(result.row.nom).toBe("DUPONT");
@@ -79,6 +78,7 @@ describe("parseRppsRecord", () => {
     expect(result.row.code_departement).toBe("08");
     expect(result.row.code_postal).toBe("08000");
     expect(result.row.geom).toBe("SRID=4326;POINT(4.7203 49.7724)");
+    expect(result.row.geom_source).toBe("commune_centroid");
     expect(result.row.adresse).toBe("60 AV DE JASSERON");
   });
 
@@ -100,18 +100,15 @@ describe("parseRppsRecord", () => {
     expect(result.row.adresse).toBeNull();
   });
 
-  it("skip no_identity quand rpps_id est vide", () => {
+  it("skip no_identity quand rpps_id est vide (row absent)", () => {
     const result = parseRppsRecord(row({ [COL.RPPS_ID]: "" }), idx);
-    expect(result.skipReason).toBe("no_identity");
     expect(result.row).toBeUndefined();
   });
 
   it("skip no_identity quand nom OU prénom vide", () => {
-    expect(parseRppsRecord(row({ [COL.NOM]: "", [COL.PRENOM]: "" }), idx).skipReason).toBe(
-      "no_identity",
-    );
-    expect(parseRppsRecord(row({ [COL.NOM]: "" }), idx).skipReason).toBe("no_identity");
-    expect(parseRppsRecord(row({ [COL.PRENOM]: "" }), idx).skipReason).toBe("no_identity");
+    expect(parseRppsRecord(row({ [COL.NOM]: "", [COL.PRENOM]: "" }), idx).row).toBeUndefined();
+    expect(parseRppsRecord(row({ [COL.NOM]: "" }), idx).row).toBeUndefined();
+    expect(parseRppsRecord(row({ [COL.PRENOM]: "" }), idx).row).toBeUndefined();
   });
 
   it("conserve nom et prénom tels quels (pas de duplication silencieuse)", () => {
@@ -121,19 +118,77 @@ describe("parseRppsRecord", () => {
     expect(r.row.prenom).toBe("Sophie");
   });
 
-  it("skip no_locality quand CP ET ville vides", () => {
+  // --- Pas de skip no_locality : geom NULL fallback + enrichissement FINESS ---
+
+  it("produit row geom NULL quand CP ET ville absents (étudiant/retraité)", () => {
     const result = parseRppsRecord(row({ [COL.CODE_POSTAL]: "", [COL.LIBELLE_COMMUNE]: "" }), idx);
-    expect(result.skipReason).toBe("no_locality");
+    if (!result.row) throw new Error("expected row (CP+ville absents)");
+    expect(result.row.geom).toBeNull();
+    expect(result.row.geom_source).toBeNull();
+    expect(result.row.code_departement).toBeNull();
+    expect(result.row.code_insee).toBeNull();
+    // Identité préservée pour permettre lookup par rpps_id
+    expect(result.row.rpps_id).toBe("810009647990");
+    expect(result.row.num_finess).toBe("080010234");
   });
 
-  it("skip unmatched_locality + sample key quand le CP+ville ne match aucune commune", () => {
+  it("produit row geom NULL avec dept dérivé du CP quand CP+ville unmatched (métropole)", () => {
     const result = parseRppsRecord(
-      row({ [COL.CODE_POSTAL]: "99999", [COL.LIBELLE_COMMUNE]: "VILLE INCONNUE" }),
+      row({ [COL.CODE_POSTAL]: "08999", [COL.LIBELLE_COMMUNE]: "VILLE INCONNUE" }),
       idx,
     );
-    expect(result.skipReason).toBe("unmatched_locality");
-    expect(result.sampleKey).toBe("99999|VILLE INCONNUE");
+    if (!result.row) throw new Error("expected row");
+    expect(result.row.geom).toBeNull();
+    expect(result.row.geom_source).toBeNull();
+    expect(result.row.code_departement).toBe("08");
+    expect(result.row.code_insee).toBeNull();
   });
+
+  it("dérive dept DOM 3-chars depuis CP unmatched", () => {
+    const result = parseRppsRecord(
+      row({ [COL.CODE_POSTAL]: "97400", [COL.LIBELLE_COMMUNE]: "SAINT-DENIS-LA-REUNION" }),
+      idx,
+    );
+    if (!result.row) throw new Error("expected row");
+    expect(result.row.geom).toBeNull();
+    expect(result.row.code_departement).toBe("974");
+  });
+
+  it("retourne dept NULL pour CP Corse 20xxx (ambigu 2A/2B sans commune)", () => {
+    const result = parseRppsRecord(
+      row({ [COL.CODE_POSTAL]: "20100", [COL.LIBELLE_COMMUNE]: "VILLE INCONNUE" }),
+      idx,
+    );
+    if (!result.row) throw new Error("expected row");
+    expect(result.row.code_departement).toBeNull();
+  });
+
+  it("retourne dept NULL pour CP malformé sans match commune", () => {
+    const result = parseRppsRecord(
+      row({ [COL.CODE_POSTAL]: "ABC", [COL.LIBELLE_COMMUNE]: "" }),
+      idx,
+    );
+    if (!result.row) throw new Error("expected row");
+    expect(result.row.code_departement).toBeNull();
+  });
+
+  it("préserve num_finess sur PS sans adresse — clé du post-enrichissement", () => {
+    const result = parseRppsRecord(
+      row({
+        [COL.CODE_POSTAL]: "",
+        [COL.LIBELLE_COMMUNE]: "",
+        [COL.NUM_FINESS]: "750100166",
+      }),
+      idx,
+    );
+    if (!result.row) throw new Error("expected row");
+    expect(result.row.num_finess).toBe("750100166");
+    expect(result.row.geom).toBeNull();
+    // Le post-INSERT `ingest_apply_rpps_finess_enrichment_batch` joindra
+    // sur ce num_finess pour combler geom + dept + insee depuis FINESS.
+  });
+
+  // --- Pas de match commune mais infos préservées ---------------------------------------------------
 
   it("trim+slice le code_postal à 5 chars (CHAR(5) safety)", () => {
     const result = parseRppsRecord(row({ [COL.CODE_POSTAL]: "  08000 CEDEX " }), idx);

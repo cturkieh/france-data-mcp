@@ -97,4 +97,4 @@ export {
   type AnsFhirPractitioner,
 } from "./ans-fhir.js";
 
-export const SANTE_VERSION = "0.5.0";
+export const SANTE_VERSION = "0.5.1";

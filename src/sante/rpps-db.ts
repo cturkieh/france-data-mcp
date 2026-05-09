@@ -46,6 +46,12 @@ export interface RppsResult {
   /** Spécialité fine (DES/DESC). Plus riche que la spécialité Ameli simple. */
   savoir_faire: { code: string | null; libelle: string | null };
   mode_exercice: { code: string | null; libelle: string | null };
+  /**
+   * Catégorie professionnelle ANS — distingue actifs (Civil C, Militaire M)
+   * de Retraité (R) / Étudiant (E) / Suspendu (S) / Décédé (D). Le filtre
+   * default des RPCs masque les inactifs sauf si `include_inactifs:true`.
+   */
+  categorie: { code: string | null; libelle: string | null };
   /** Pivot vers FINESS / SIRENE. Souvent rempli pour les salariés, plus rare en libéral pur. */
   structure: {
     num_finess: string | null;
@@ -68,7 +74,6 @@ export interface RppsResult {
 export interface RppsLookupResult extends RppsResult {
   /** Identifiant PP legacy (pré-IDNPS), conservé quand fourni par l'extract. */
   identifiant_pp: string | null;
-  categorie: { code: string | null; libelle: string | null };
   siren: string | null;
   email: string | null;
 }
@@ -82,6 +87,12 @@ export interface RppsInRadiusInput {
   savoirFaireCodes?: string[];
   /** Codes mode exercice (L libéral, S salarié, M mixte, R remplaçant…). */
   modeExerciceCodes?: string[];
+  /**
+   * Codes catégorie professionnelle ANS. Vide ou omis → filtre default actifs
+   * (`C` Civil + `M` Militaire + `IS NULL`). Sinon → filtre exact ANY. Pour
+   * « tous les statuts » passer la liste exhaustive `CATEGORIE_CODES_TOUS_STATUTS`.
+   */
+  categorieCodes?: string[];
   limit?: number;
 }
 
@@ -90,6 +101,8 @@ export interface RppsParSpecialiteDeptInput {
   professionCode?: string;
   savoirFaireCode?: string;
   modeExerciceCode?: string;
+  /** Voir `RppsInRadiusInput.categorieCodes`. */
+  categorieCodes?: string[];
   limit?: number;
   offset?: number;
 }
@@ -97,8 +110,19 @@ export interface RppsParSpecialiteDeptInput {
 export interface RppsDansEtablissementInput {
   /** Numéro FINESS (9 chiffres) du site d'exercice. */
   numFiness: string;
+  /** Voir `RppsInRadiusInput.categorieCodes`. */
+  categorieCodes?: string[];
   limit?: number;
 }
+
+/**
+ * Liste exhaustive des codes catégorie ANS (actifs + inactifs). Sert de
+ * sentinelle pour les callers MCP qui veulent désactiver le filtre default
+ * (`include_inactifs: true`). Le RPC SQL applique son default actifs quand
+ * `cardinality(p_categorie_codes) = 0`, donc passer cette liste exhaustive
+ * est sémantiquement équivalent à « pas de filtre ».
+ */
+export const CATEGORIE_CODES_TOUS_STATUTS = ["C", "M", "R", "E", "S", "D"];
 
 export interface RppsQueryResult {
   count: number;
@@ -122,6 +146,7 @@ export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQue
     p_profession_codes: input.professionCodes ?? [],
     p_savoir_faire_codes: input.savoirFaireCodes ?? [],
     p_mode_exercice_codes: input.modeExerciceCodes ?? [],
+    p_categorie_codes: input.categorieCodes ?? [],
     p_limit: limit + 1,
   });
 
@@ -145,6 +170,7 @@ export async function getRppsParSpecialiteDept(
     p_profession_code: input.professionCode ?? null,
     p_savoir_faire_code: input.savoirFaireCode ?? null,
     p_mode_exercice_code: input.modeExerciceCode ?? null,
+    p_categorie_codes: input.categorieCodes ?? [],
     p_limit: limit + 1,
     p_offset: offset,
   });
@@ -168,6 +194,7 @@ export async function getRppsDansEtablissement(
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("rpps_dans_etablissement", {
     p_num_finess: numFiness,
+    p_categorie_codes: input.categorieCodes ?? [],
     p_limit: limit + 1,
   });
 
@@ -234,6 +261,8 @@ interface RawRppsRow {
   savoir_faire_libelle: string | null;
   mode_exercice_code: string | null;
   mode_exercice_libelle: string | null;
+  categorie_code: string | null;
+  categorie_libelle: string | null;
   num_finess: string | null;
   num_finess_ej: string | null;
   siret: string | null;
@@ -260,6 +289,8 @@ interface RawRppsCompactRow {
   savoir_faire_libelle: string | null;
   mode_exercice_code: string | null;
   mode_exercice_libelle: string | null;
+  categorie_code: string | null;
+  categorie_libelle: string | null;
   num_finess: string | null;
   num_finess_ej: string | null;
   raison_sociale: string | null;
@@ -268,8 +299,6 @@ interface RawRppsCompactRow {
 
 interface RawRppsLookupRow extends RawRppsRow {
   identifiant_pp: string | null;
-  categorie_code: string | null;
-  categorie_libelle: string | null;
   siren: string | null;
   email: string | null;
 }
@@ -291,6 +320,7 @@ function toResult(row: RawRppsRow): RppsResult {
     profession: { code: row.profession_code, libelle: row.profession_libelle },
     savoir_faire: { code: row.savoir_faire_code, libelle: row.savoir_faire_libelle },
     mode_exercice: { code: row.mode_exercice_code, libelle: row.mode_exercice_libelle },
+    categorie: { code: row.categorie_code, libelle: row.categorie_libelle },
     structure: {
       num_finess: row.num_finess,
       num_finess_ej: row.num_finess_ej,
@@ -320,6 +350,7 @@ function toCompactResult(row: RawRppsCompactRow): RppsResult {
     profession: { code: row.profession_code, libelle: row.profession_libelle },
     savoir_faire: { code: row.savoir_faire_code, libelle: row.savoir_faire_libelle },
     mode_exercice: { code: row.mode_exercice_code, libelle: row.mode_exercice_libelle },
+    categorie: { code: row.categorie_code, libelle: row.categorie_libelle },
     structure: {
       num_finess: row.num_finess,
       num_finess_ej: row.num_finess_ej,
@@ -340,10 +371,10 @@ function toCompactResult(row: RawRppsCompactRow): RppsResult {
 }
 
 function toLookupResult(row: RawRppsLookupRow): RppsLookupResult {
+  // `categorie` est désormais porté par RppsResult (V0.5.1) — hérité via spread.
   return {
     ...toResult(row),
     identifiant_pp: row.identifiant_pp,
-    categorie: { code: row.categorie_code, libelle: row.categorie_libelle },
     siren: row.siren,
     email: row.email,
   };

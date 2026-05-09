@@ -31,6 +31,7 @@ import {
   searchEntreprises,
 } from "../src/sante/index.js";
 import {
+  CATEGORIE_CODES_TOUS_STATUTS,
   getRppsById,
   getRppsDansEtablissement,
   getRppsInRadius,
@@ -47,6 +48,9 @@ import {
 
 /** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
 const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
+
+const RPPS_INCLUDE_INACTIFS_HINT =
+  "Par défaut, ne renvoie que les PS en activité (catégorie professionnelle Civil C ou Militaire M). Passer `include_inactifs: true` pour inclure aussi Retraité (R), Étudiant (E), Suspendu (S), Décédé (D).";
 
 export type McpTool = {
   name: string;
@@ -931,7 +935,7 @@ export const TOOLS: McpTool[] = [
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
   {
     name: "professionnels_rpps_in_radius",
-    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. ${RPPS_CGU_NOTICE}`,
+    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_INACTIFS_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -947,6 +951,7 @@ export const TOOLS: McpTool[] = [
         profession_codes: { type: "array", items: { type: "string" } },
         savoir_faire_codes: { type: "array", items: { type: "string" } },
         mode_exercice_codes: { type: "array", items: { type: "string" } },
+        include_inactifs: { type: "boolean" },
         limit: { type: "number" },
       },
       required: ["center", "radius_km"],
@@ -964,13 +969,16 @@ export const TOOLS: McpTool[] = [
       if (professionCodes) input.professionCodes = professionCodes;
       if (savoirFaireCodes) input.savoirFaireCodes = savoirFaireCodes;
       if (modeExerciceCodes) input.modeExerciceCodes = modeExerciceCodes;
+      if (coerceBoolean(args.include_inactifs, "include_inactifs") === true) {
+        input.categorieCodes = CATEGORIE_CODES_TOUS_STATUTS;
+      }
       if (limit !== undefined) input.limit = limit;
       return await getRppsInRadius(input);
     },
   },
   {
     name: "professionnels_rpps_par_dept",
-    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_CGU_NOTICE}`,
+    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_INACTIFS_HINT} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -978,6 +986,7 @@ export const TOOLS: McpTool[] = [
         profession_code: { type: "string" },
         savoir_faire_code: { type: "string" },
         mode_exercice_code: { type: "string" },
+        include_inactifs: { type: "boolean" },
         limit: { type: "number" },
         offset: { type: "number" },
       },
@@ -995,6 +1004,9 @@ export const TOOLS: McpTool[] = [
       if (professionCode) input.professionCode = professionCode;
       if (savoirFaireCode) input.savoirFaireCode = savoirFaireCode;
       if (modeExerciceCode) input.modeExerciceCode = modeExerciceCode;
+      if (coerceBoolean(args.include_inactifs, "include_inactifs") === true) {
+        input.categorieCodes = CATEGORIE_CODES_TOUS_STATUTS;
+      }
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
       return await getRppsParSpecialiteDept(input);
@@ -1002,11 +1014,12 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "rpps_dans_etablissement",
-    description: `Liste les professionnels de santé rattachés à un établissement FINESS (par numéro FINESS site, 9 chiffres). C'est le pivot RPPS↔FINESS — répond à "qui travaille dans ce labo / hôpital / clinique ?". Le \`mode_exercice\` distingue les libéraux exerçant sur place (vacations) des salariés. Couverture : RPPS expose ce lien quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts. ${RPPS_CGU_NOTICE}`,
+    description: `Liste les professionnels de santé rattachés à un établissement FINESS (par numéro FINESS site, 9 chiffres). C'est le pivot RPPS↔FINESS — répond à "qui travaille dans ce labo / hôpital / clinique ?". Le \`mode_exercice\` distingue les libéraux exerçant sur place (vacations) des salariés. Couverture : RPPS expose ce lien quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts. ${RPPS_INCLUDE_INACTIFS_HINT} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
         num_finess: { type: "string", pattern: "^\\d{9}$" },
+        include_inactifs: { type: "boolean" },
         limit: { type: "number" },
       },
       required: ["num_finess"],
@@ -1016,6 +1029,9 @@ export const TOOLS: McpTool[] = [
       if (!numFiness) throw new Error("num_finess (string, 9 chiffres) requis");
       const limit = coerceNumber(args.limit, "limit");
       const input: Parameters<typeof getRppsDansEtablissement>[0] = { numFiness };
+      if (coerceBoolean(args.include_inactifs, "include_inactifs") === true) {
+        input.categorieCodes = CATEGORIE_CODES_TOUS_STATUTS;
+      }
       if (limit !== undefined) input.limit = limit;
       return await getRppsDansEtablissement(input);
     },

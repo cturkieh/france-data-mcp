@@ -109,16 +109,20 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 
 > Couverture Ameli : libéraux **conventionnés uniquement** (~462 K). Pour les salariés (hospitaliers, salariés en LBM/cabinet), voir RPPS ci-dessous.
 
-### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (4 tools — V0.5.0)
+### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (4 tools — V0.5.1)
 
 | Tool | Description |
 |---|---|
-| `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice |
+| `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice, `include_inactifs` |
 | `professionnels_rpps_par_dept` | Listing départemental + pagination. Idéal pour compter ou lister tout le monde (vs Ameli libéraux uniquement) |
 | `rpps_dans_etablissement` | **Killer feature** — répond à *"qui travaille dans ce labo / hôpital ?"*. Filtre par numéro FINESS site |
 | `professionnel_by_rpps` | Fiche par identifiant national (11 chars). Fallback live FHIR ANS si non trouvé en base locale |
 
-> Couverture RPPS : **2,23 M PS** (libéraux + salariés + remplaçants + retraités). ID national stable, lien vers structure d'exercice (`num_finess`) — permet le pivot PS↔FINESS. Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
+> Couverture RPPS : **~2,2 M PS** (libéraux + salariés + remplaçants + retraités + étudiants). ID national stable, lien vers structure d'exercice (`num_finess`) — permet le pivot PS↔FINESS. Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
+
+**V0.5.1 — enrichissement FINESS post-INSERT.** Les PS sans adresse de structure exploitable (étudiants, retraités, salariés CH/CHU sans adresse site déclarée, libéraux à domicile — ~970 K rows skippées en V0.5.0) sont désormais ingérés avec `geom NULL`, puis géolocalisés à la précision adresse FINESS via JOIN sur `num_finess`. Champ `geom_source` interne = `commune_centroid` (~3 km moyenne) ou `finess_join` (adresse FINESS).
+
+**Filtre catégorie professionnelle.** Par défaut, les tools RPPS ne renvoient que les PS en activité (Civil C + Militaire M). Passer `include_inactifs: true` pour inclure aussi Retraité (R), Étudiant (E), Suspendu (S), Décédé (D).
 
 **⚠️ Périmètre — à lire avant de construire un comptage**
 
@@ -187,7 +191,7 @@ const ehpad = await searchEtablissements({
 
 ## État du projet
 
-✅ **Version 0.5.0 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et ~2,23 M PS RPPS ingérés et géocodés en WGS84. 362 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+✅ **Version 0.5.1 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS** ingérés (V0.5.1 récupère les ~970 K PS skippés par V0.5.0 via enrichissement FINESS post-INSERT). 374 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
 
 ### Fait
 
@@ -195,7 +199,7 @@ const ehpad = await searchEtablissements({
 - [x] `entreprises` — DINUM Recherche Entreprises + fallback INSEE SIRENE V3.11 (2 tools)
 - [x] `FINESS` — ingestion data.gouv → Supabase + PostGIS, 24 familles, atomic swap, canary post-swap (3 tools)
 - [x] `Annuaire Santé Ameli` — pipeline weekly, géocodage centroïde commune, libellés data-driven (4 tools)
-- [x] **`RPPS / Annuaire Santé ANS`** — pipeline mensuel ~2,23 M PS, ID national stable, pivot PS↔FINESS, fallback live FHIR ANS (4 tools, V0.5.0)
+- [x] **`RPPS / Annuaire Santé ANS`** — pipeline mensuel ~2,2 M PS, ID national stable, pivot PS↔FINESS, enrichissement FINESS post-INSERT, filtre catégorie pro, fallback live FHIR ANS (4 tools, V0.5.1)
 - [x] Pipeline ingestion durci — SHA256 short-circuit, threshold parsedCoordRejected, atomic swap reversible
 - [x] Serveur MCP HTTP déployé sur Vercel
 - [x] Documentation Charleville-Mézières reproductible (`examples/charleville.ts`)

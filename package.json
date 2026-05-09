@@ -1,6 +1,6 @@
 {
   "name": "france-data-mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Boîte à outils MCP et TypeScript pour interroger les données publiques françaises (INSEE, FINESS, RPPS / Annuaire Santé ANS, Annuaire Santé Ameli, IGN géocodage, geo.api.gouv.fr, DINUM Recherche Entreprises). Conçu pour Claude, Cursor et toute application qui veut exploiter l'open data territorial français.",
   "keywords": [
     "mcp",
