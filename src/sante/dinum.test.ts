@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LookupResult } from "../core/lookup-result.js";
 import { getEntrepriseBySiren, searchEntreprises } from "./dinum.js";
-import { __resetInseeTokenCacheForTesting } from "./insee-sirene.js";
 
 /**
  * Test helper : narrow `LookupResult<T>` vers le cas `found: true` ou throw.
@@ -22,13 +21,8 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockReset();
   // Isolation : assure que les tests DINUM ne déclenchent pas le fallback
-  // INSEE par accident si les env vars sont héritées de la machine dev.
-  vi.stubEnv("INSEE_SIRENE_CLIENT_ID", "");
-  vi.stubEnv("INSEE_SIRENE_CLIENT_SECRET", "");
-  // Le cache token INSEE est un module-level singleton — un test précédent
-  // qui a obtenu un token le verrait persister sur le test suivant et
-  // sauterait le mock /token (consomme un mock fetch de moins). Reset systématique.
-  __resetInseeTokenCacheForTesting();
+  // INSEE par accident si la clé est héritée de la machine dev.
+  vi.stubEnv("INSEE_SIRENE_API_KEY", "");
 });
 
 afterEach(() => {
@@ -560,30 +554,26 @@ describe("getEntrepriseBySiren", () => {
   });
 });
 
-describe("getEntrepriseBySiren — fallback SIRENE INSEE V3 (audit 2026-05-09)", () => {
+describe("getEntrepriseBySiren — fallback SIRENE INSEE V3", () => {
   it("DINUM not_found + INSEE configuré + INSEE 200 → found:true avec siren_source=insee_v3", async () => {
-    vi.stubEnv("INSEE_SIRENE_CLIENT_ID", "test_client_id");
-    vi.stubEnv("INSEE_SIRENE_CLIENT_SECRET", "test_client_secret");
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "test-key-uuid");
 
     fetchMock
       // 1. DINUM /search → 0 résultats (SIREN en diffusion partielle)
       .mockResolvedValueOnce(apiResponse({ results: [] }))
-      // 2. INSEE /token → bearer token
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ access_token: "fake-token", expires_in: 604800 }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      )
-      // 3. INSEE /siren/787120435 → uniteLegale
+      // 2. INSEE /siren/787120435 → uniteLegale + period courante
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
             uniteLegale: {
               siren: "787120435",
-              denominationUniteLegale: "BIO ARD'AISNE",
-              activitePrincipaleUniteLegale: "86.90B",
-              etatAdministratifUniteLegale: "A",
+              periodesUniteLegale: [
+                {
+                  denominationUniteLegale: "BIO ARD'AISNE",
+                  activitePrincipaleUniteLegale: "86.90B",
+                  etatAdministratifUniteLegale: "A",
+                },
+              ],
             },
           }),
           { status: 200, headers: { "content-type": "application/json" } },
@@ -602,28 +592,21 @@ describe("getEntrepriseBySiren — fallback SIRENE INSEE V3 (audit 2026-05-09)",
     }
   });
 
-  it("DINUM not_found + pas de creds INSEE → not_found avec message explicite", async () => {
+  it("DINUM not_found + pas de clé INSEE → not_found avec message explicite", async () => {
     fetchMock.mockResolvedValueOnce(apiResponse({ results: [] }));
     const e = await getEntrepriseBySiren("888888888");
     expect(e.found).toBe(false);
     if (!e.found) {
       expect(e.message).toMatch(/non configuré/);
-      expect(e.message).toMatch(/INSEE_SIRENE_CLIENT_ID/);
+      expect(e.message).toMatch(/INSEE_SIRENE_API_KEY/);
     }
   });
 
   it("DINUM not_found + INSEE configuré + INSEE 404 → not_found avec message 'a aussi retourné null'", async () => {
-    vi.stubEnv("INSEE_SIRENE_CLIENT_ID", "test_id");
-    vi.stubEnv("INSEE_SIRENE_CLIENT_SECRET", "test_secret");
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "test-key-uuid");
 
     fetchMock
       .mockResolvedValueOnce(apiResponse({ results: [] }))
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ access_token: "fake-token", expires_in: 604800 }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      )
       .mockResolvedValueOnce(new Response(null, { status: 404 }));
 
     const e = await getEntrepriseBySiren("999999998");

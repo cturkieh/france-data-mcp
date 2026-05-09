@@ -4,6 +4,61 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.4.5] — 2026-05-09
+
+Correctif d'auth INSEE SIRENE découvert post-merge V0.4.4 : le portail INSEE
+moderne (`portail-api.insee.fr`) expose une simple **clé API UUID** par
+défaut, PAS un flux OAuth2 client_credentials. La V0.4.4 partait sur OAuth2,
+incompatible avec les clés effectivement émises par le portail.
+
+### Auth INSEE SIRENE V3.11 — refactor majeur
+
+- **Une seule variable d'env** `INSEE_SIRENE_API_KEY` (UUID issu du portail
+  INSEE, plan « api key »). Remplace les 2 vars OAuth2 V0.4.4
+  (`INSEE_SIRENE_CLIENT_ID` + `INSEE_SIRENE_CLIENT_SECRET`).
+- **Header HTTP** `X-INSEE-Api-Key-Integration` (custom Gravitee côté INSEE,
+  vérifié 2026-05-09 — `Authorization: Bearer`, `apikey:`,
+  `X-Gravitee-Api-Key:` retournent tous 401).
+- **1 seul appel HTTP par lookup** au lieu de 2 (suppression du round-trip
+  `/token` OAuth2). Latence p99 divisée par 2 sur le path nominal.
+- **Suppression du cache token** module-level (`tokenCache`,
+  `getInseeBearerToken`, `__resetInseeTokenCacheForTesting`,
+  `TOKEN_REFRESH_MARGIN_MS`, `FALLBACK_TOKEN_TTL_SEC`) — ~90 LOC retirées.
+- **Mapping V3.11 corrigé** : les champs métier (`denominationUniteLegale`,
+  `nomUniteLegale`, `activitePrincipaleUniteLegale`,
+  `etatAdministratifUniteLegale`, `categorieJuridiqueUniteLegale`) vivent
+  dans `uniteLegale.periodesUniteLegale[0]` (la **période courante**, pas
+  directement sur `uniteLegale`). V0.4.4 lisait à plat → mapping silencieux
+  sur `null`. Vérifié live sur SIREN 787120435 (BIO ARD'AISNE).
+- **Sélection de la période courante** par `dateFin === null` plutôt que
+  l'index `[0]` aveugle, avec fallback sur `[0]` + `console.warn` si aucune
+  période ouverte (cas dégénéré : entreprise cessée, données historiques).
+- **Strip guillemets** dans `getInseeApiKey()` : certains parsers `.env`
+  conservent les quotes entourantes, ce qui faisait échouer l'auth en 401.
+- **Log différencié** : `console.warn` sur 404 (outcome attendu — SIREN
+  vraiment absent de SIRENE), `console.error` sur 401/403/5xx/network
+  (vrais incidents). Évite de polluer les dashboards Sentry/Vercel.
+- **Rate limit INSEE** : 30 req/min documenté dans la JSDoc — `fetchJson`
+  retry sur 429 mais sérialise. Le fallback est conçu comme ponctuel (~1%
+  des SIREN), pas comme source primaire.
+
+### ⚠️ Breaking — surface lib npm
+
+Exports retirés depuis `src/sante/index.ts` :
+- `getInseeSirenCredentials` → remplacé par `getInseeApiKey` (différente
+  signature : retour `string | null` au lieu de `{clientId, clientSecret} | null`)
+- `getInseeBearerToken` → supprimé (plus de token endpoint)
+- `__resetInseeTokenCacheForTesting` → supprimé (plus de cache)
+- type `InseeSireneCredentials` → supprimé (remplacé par retour `string`)
+
+La surface MCP (tools côté serveur) est identique à V0.4.4 — seuls les
+callers TS qui importaient ces helpers depuis la lib npm sont impactés.
+
+### Tests
+
+332 tests verts (+ 14 nouveaux insee-sirene, dont fake timers sur les 2 tests
+retry pour ramener le wall-clock CI de 14.8s à 6.4s).
+
 ## [0.4.4] — 2026-05-09
 
 Audit Claude.ai sur les 13 tools MCP : 4 bugs identifiés (B3/B5/B6/B7) +
@@ -40,11 +95,10 @@ Audit Claude.ai sur les 13 tools MCP : 4 bugs identifiés (B3/B5/B6/B7) +
 Nouveau module `src/sante/insee-sirene.ts` : quand DINUM
 `recherche-entreprises.api.gouv.fr` ne connaît pas un SIREN (statut
 diffusion partielle), `getEntrepriseBySiren` tente automatiquement un
-lookup via SIRENE INSEE V3.11. No-op gracieux si les credentials
-`INSEE_SIRENE_CLIENT_ID` / `INSEE_SIRENE_CLIENT_SECRET` ne sont pas
-configurées. OAuth2 client_credentials avec cache token + invalidation sur
-401/403 (rotation creds server-side). `fetchJson` réutilisé pour bénéficier
-des retries 429/5xx.
+lookup via SIRENE INSEE V3.11. No-op gracieux si la clé n'est pas
+configurée. **⚠️ Le mode d'auth a été réécrit en V0.4.5** (OAuth2 retiré,
+remplacé par simple API key UUID + header `X-INSEE-Api-Key-Integration`).
+Voir l'entrée [0.4.5] ci-dessus.
 
 ### Observabilité ingestion
 
@@ -72,8 +126,9 @@ des retries 429/5xx.
 
 ### .env.example
 
-Ajout des 2 variables `INSEE_SIRENE_CLIENT_ID` / `INSEE_SIRENE_CLIENT_SECRET`
-optionnelles (inscription gratuite sur https://portail-api.insee.fr).
+Ajout des 2 variables OAuth2 `INSEE_SIRENE_CLIENT_ID` /
+`INSEE_SIRENE_CLIENT_SECRET` — **remplacées en V0.4.5** par une seule
+`INSEE_SIRENE_API_KEY` (cf. entrée [0.4.5]).
 
 ### Tests
 

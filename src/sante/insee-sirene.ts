@@ -4,149 +4,64 @@
  * Pourquoi : `recherche-entreprises.api.gouv.fr` (DINUM) exclut les entreprises
  * en diffusion partielle INSEE (`statut_diffusion ∈ {P,N}`). Cas connu : SIREN
  * 787120435 (BIO ARD'AISNE) présent dans SIRENE mais absent de DINUM. Pour ces
- * SIREN, on fallback sur l'API SIRENE INSEE directement (auth requise).
+ * SIREN, on fallback sur l'API SIRENE INSEE directement (clé requise).
  *
- * Doc API (vérifié 2026-05-09) :
- * - Catalogue : https://portail-api.insee.fr/catalog (nouveau portail depuis 2024)
- * - Endpoint : `GET https://api.insee.fr/api-sirene/3.11/siren/{siren}` (test
- *   curl 2026-05-09 sans auth → HTTP 401, URL confirmée valide)
- * - Auth OAuth2 client_credentials sur
- *   `https://auth.insee.net/auth/realms/apim-gravitee/protocol/openid-connect/token`
- *   (test curl 2026-05-09 avec creds factices → 401 invalid_client, URL OK).
- *   L'ancien endpoint `https://api.insee.fr/token` est décommissionné (HTTP 404
- *   "url deprecated, visit https://portail-api.insee.fr/").
+ * Auth (vérifié 2026-05-09 sur portail-api.insee.fr V3.11) :
+ * - Header **`X-INSEE-Api-Key-Integration: <api-key>`** (UUID issu du portail).
+ *   Bearer / apikey / X-Gravitee-Api-Key tous renvoient 401 — c'est le custom
+ *   header Gravitee configuré côté gateway INSEE qui prime.
+ * - Endpoint : `GET https://api.insee.fr/api-sirene/3.11/siren/{siren}`
+ * - Rate limit : 30 req/min (header `x-rate-limit-limit: 30`).
  *
- * Tokens INSEE typiquement valides 7 jours. On cache en mémoire avec refresh
- * à T-5min de l'expiration pour éviter les tokens expirés en cours de requête.
+ * Payload V3.11 : les champs métier (denomination, nom, prénom, NAF, état
+ * administratif, catégorie juridique) sont dans
+ * `uniteLegale.periodesUniteLegale[0]` (la période la plus récente, ordre
+ * antéchronologique), PAS sur `uniteLegale` directement.
  *
- * No-op gracieux : si les credentials ne sont pas configurés, `lookupSirenViaInsee`
- * retourne null sans throw — la lib reste utilisable sans clé INSEE.
+ * No-op gracieux : si `INSEE_SIRENE_API_KEY` n'est pas configurée,
+ * `lookupSirenViaInsee` retourne null sans throw — la lib reste utilisable
+ * sans clé INSEE.
  */
 
 import { HttpError, fetchJson } from "../core/http.js";
 import type { Entreprise } from "./dinum.js";
 
-const TOKEN_URL =
-  "https://auth.insee.net/auth/realms/apim-gravitee/protocol/openid-connect/token";
 const SIRENE_BASE_URL = "https://api.insee.fr/api-sirene/3.11";
-/** Refresh à T-5min : marge confortable pour ne pas envoyer un token qui expire mid-flight. */
-const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+/** Nom exact du header attendu par l'API gateway Gravitee côté INSEE V3.11. */
+const INSEE_AUTH_HEADER = "X-INSEE-Api-Key-Integration";
 /**
  * Timeout côté caller. Doit couvrir TOUS les retries `fetchJson` (jusqu'à 4
  * tentatives avec backoff exponentiel ~0.5+1+2+4s = 7.5s + temps de requête).
- * 60s laisse une marge confortable même sous lenteur INSEE 5xx — sans timeout
- * généreux, le 1er abort tue le retry et neutralise la robustesse promise.
+ * 60s laisse une marge confortable même sous lenteur INSEE 5xx.
  */
 const FETCH_TIMEOUT_MS = 60_000;
-/** TTL de fallback quand l'API auth INSEE n'expose pas `expires_in`. 1h conservateur. */
-const FALLBACK_TOKEN_TTL_SEC = 3600;
-
-export type InseeSireneCredentials = {
-  clientId: string;
-  clientSecret: string;
-};
 
 /**
- * Lit `INSEE_SIRENE_CLIENT_ID` et `INSEE_SIRENE_CLIENT_SECRET` depuis l'env.
- * Retourne `null` si l'une des deux manque ou est vide (no-op gracieux).
+ * Lit `INSEE_SIRENE_API_KEY` depuis l'env. Retourne `null` si absente ou vide
+ * (no-op gracieux : la lib reste utilisable sans clé INSEE).
+ *
+ * Strippe aussi les guillemets entourants — certains parsers `.env` (ou un
+ * copier-coller Vercel UI) les conservent, et l'API INSEE rejette alors
+ * silencieusement la clé en 401, ce qui ressemble à une clé révoquée.
  */
-export function getInseeSirenCredentials(): InseeSireneCredentials | null {
-  const clientId = process.env.INSEE_SIRENE_CLIENT_ID;
-  const clientSecret = process.env.INSEE_SIRENE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) return null;
-  return { clientId, clientSecret };
-}
-
-type CachedToken = {
-  accessToken: string;
-  /** Date.now() à laquelle le token doit être considéré expiré (avec marge). */
-  expiresAtMs: number;
-};
-
-let tokenCache: CachedToken | null = null;
-
-/**
- * Reset le cache du token. Utilisé exclusivement par les tests pour isoler
- * les cas où on vérifie le comportement de cache (1er appel = fetch, 2e = hit).
- * Convention `__...ForTesting` aligné sur `__resetClientsForTesting` (storage/supabase).
- */
-export function __resetInseeTokenCacheForTesting(): void {
-  tokenCache = null;
-}
-
-type TokenResponse = {
-  access_token: string;
-  token_type?: string;
-  /** Durée de vie en secondes (typiquement 604800 = 7 jours). */
-  expires_in?: number;
-};
-
-/**
- * Récupère un bearer token INSEE — depuis le cache si valide, sinon nouveau
- * via OAuth2 client_credentials. Throw uniquement si l'API auth est joignable
- * mais retourne une réponse non-conforme (signal de panne amont). Les erreurs
- * réseau/credentials sont remontées telles quelles au caller.
- */
-export async function getInseeBearerToken(creds: InseeSireneCredentials): Promise<string> {
-  if (tokenCache && Date.now() < tokenCache.expiresAtMs) {
-    return tokenCache.accessToken;
-  }
-
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: creds.clientId,
-    client_secret: creds.clientSecret,
-  });
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let response: Response;
-  try {
-    response = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  if (!response.ok) {
-    const text = await response.text().catch((bodyErr: unknown) => {
-      const bodyMsg = bodyErr instanceof Error ? bodyErr.message : String(bodyErr);
-      console.warn(
-        `[france-data-mcp] INSEE token endpoint: failed to read error body (HTTP ${response.status}): ${bodyMsg}`,
-      );
-      return "";
-    });
-    throw new Error(
-      `INSEE token endpoint returned HTTP ${response.status} ${response.statusText}: ${text.slice(0, 200)}`,
-    );
-  }
-
-  const data = (await response.json()) as TokenResponse;
-  if (!data.access_token) {
-    throw new Error("INSEE token endpoint returned no access_token");
-  }
-  // expires_in absent → assume FALLBACK_TOKEN_TTL_SEC. Toujours appliquer la
-  // marge de refresh pour ne jamais retourner un token qui va expirer mid-call.
-  const expiresInSec = data.expires_in ?? FALLBACK_TOKEN_TTL_SEC;
-  tokenCache = {
-    accessToken: data.access_token,
-    expiresAtMs: Date.now() + expiresInSec * 1000 - TOKEN_REFRESH_MARGIN_MS,
-  };
-  return data.access_token;
+export function getInseeApiKey(): string | null {
+  const raw = process.env.INSEE_SIRENE_API_KEY;
+  if (!raw) return null;
+  const cleaned = raw.trim().replace(/^["']|["']$/g, "");
+  return cleaned === "" ? null : cleaned;
 }
 
 /**
  * Shape minimale de la réponse INSEE SIRENE V3 — on lit uniquement les champs
- * nécessaires au mapping `Entreprise`. La doc INSEE expose bien plus (catégorie
- * juridique, périodes, sigle, ESS, etc.) mais on reste minimal pour respecter
- * le contrat "fallback de dépannage", pas un remplacement complet de DINUM.
+ * nécessaires au mapping `Entreprise`. Les valeurs métier vivent dans
+ * `periodesUniteLegale[0]` (la période courante).
+ *
+ * Exporté pour permettre aux tests de typer leurs fixtures (`Partial<ApiInseePeriode>`)
+ * et bénéficier de l'autocomplete + détection de typos sur les noms de champs.
  */
-type ApiInseeUniteLegale = {
-  siren?: string;
+export type ApiInseePeriode = {
+  dateFin?: string | null;
+  dateDebut?: string | null;
   denominationUniteLegale?: string | null;
   nomUniteLegale?: string | null;
   prenomUsuelUniteLegale?: string | null;
@@ -154,6 +69,11 @@ type ApiInseeUniteLegale = {
   activitePrincipaleUniteLegale?: string | null;
   etatAdministratifUniteLegale?: string | null;
   categorieJuridiqueUniteLegale?: string | null;
+};
+
+type ApiInseeUniteLegale = {
+  siren?: string;
+  periodesUniteLegale?: ApiInseePeriode[];
 };
 
 type ApiInseeResponse = {
@@ -164,27 +84,23 @@ type ApiInseeResponse = {
  * Récupère une entreprise par SIREN via l'API SIRENE INSEE V3.11.
  *
  * Comportement :
- * - Pas de credentials configurés → `null` (no-op gracieux, pas de throw)
+ * - Pas de clé configurée → `null` (no-op gracieux, pas de throw)
  * - HTTP 404 → `null` (vraiment pas dans SIRENE)
- * - HTTP 401/403 → `null` + `console.warn` (auth cassée, ne pas throw)
+ * - HTTP 401/403 → `null` + `console.error` (clé invalide ou révoquée)
  * - HTTP 5xx / timeout / erreur réseau → `null` + `console.error`
  * - HTTP 200 → `Entreprise` mappée minimale (siren, nomComplet, naf, actif)
+ *
+ * ⚠️ Rate limit INSEE : 30 req/min. `fetchJson` retry sur 429 en respectant
+ * `retry-after`, mais en burst soutenu (>30 lookups/min) les retries se
+ * sérialisent et la latence p99 explose. Conçu comme fallback ponctuel sur
+ * SIREN diffusion partielle (cas rare ~1% des SIREN), pas comme source primaire.
  */
 export async function lookupSirenViaInsee(siren: string): Promise<Entreprise | null> {
-  const creds = getInseeSirenCredentials();
-  if (!creds) return null;
-
-  let token: string;
-  try {
-    token = await getInseeBearerToken(creds);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[france-data-mcp] INSEE SIRENE auth failed for siren=${siren}: ${msg}`);
-    return null;
-  }
+  const apiKey = getInseeApiKey();
+  if (!apiKey) return null;
 
   // fetchJson gère retry exponentiel sur 5xx + retry-after sur 429 — important
-  // sur INSEE qui rate-limit agressivement. Les 4xx (404/401/403) throwent en
+  // sur INSEE qui rate-limit à 30 req/min. Les 4xx (404/401/403) throwent en
   // HttpError immédiat, qu'on attrape pour transformer en `null` (le contrat
   // de cette fonction est un fallback gracieux, pas une propagation d'erreur).
   const url = `${SIRENE_BASE_URL}/siren/${encodeURIComponent(siren)}`;
@@ -193,27 +109,20 @@ export async function lookupSirenViaInsee(siren: string): Promise<Entreprise | n
   let data: ApiInseeResponse;
   try {
     data = await fetchJson<ApiInseeResponse>(url, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { [INSEE_AUTH_HEADER]: apiKey },
       signal: controller.signal,
     });
   } catch (err) {
     // Log unique en début de catch (discipline error-handling : zéro silence,
-    // un seul point de trace par catch) puis dispatch des side-effects (token
-    // invalidation sur 401/403). Le 404 est un outcome attendu mais on le
-    // trace pour distinguer en post-mortem "absent partout" de "INSEE pas
-    // configuré".
+    // un seul point de trace par catch). 404 = outcome attendu (`warn`, pour
+    // ne pas polluer les dashboards d'erreurs Sentry/Vercel) ; 401/403/5xx/
+    // network = vrais incidents (`error`).
     const httpStatus = err instanceof HttpError ? err.status : null;
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.error(
+    const logFn = httpStatus === 404 ? console.warn : console.error;
+    logFn(
       `[france-data-mcp] INSEE SIRENE lookup terminated for siren=${siren} — ${httpStatus !== null ? `HTTP ${httpStatus}` : `network/parse error: ${errMsg}`}`,
     );
-    if (httpStatus === 401 || httpStatus === 403) {
-      // Token revoke server-side (rotation creds, expiration anticipée par
-      // INSEE) — sans invalidation, tous les appels suivants pendant la
-      // durée du cache (jusqu'à 7j) réutiliseraient le même token cassé et
-      // retomberaient en 401 silencieux.
-      tokenCache = null;
-    }
     return null;
   } finally {
     clearTimeout(timeout);
@@ -227,36 +136,52 @@ export async function lookupSirenViaInsee(siren: string): Promise<Entreprise | n
     return null;
   }
 
+  // Période courante = celle dont `dateFin` est null (= période ouverte). On
+  // ne se fie pas à l'ordre du tableau (l'API V3.11 le présente
+  // antéchronologiquement aujourd'hui mais ce n'est pas un contrat documenté ;
+  // un futur INSEE V3.12 pourrait l'inverser sans préavis). Fallback sur [0]
+  // si aucune période ouverte (cas dégénéré : entreprise cessée, données
+  // historiques uniquement) — on log alors un warn pour signaler la dépendance.
+  const periodes = ul.periodesUniteLegale ?? [];
+  let periode = periodes.find((p) => p.dateFin === null || p.dateFin === undefined);
+  if (!periode && periodes.length > 0) {
+    periode = periodes[0];
+    console.warn(
+      `[france-data-mcp] INSEE SIRENE siren=${siren} : aucune période ouverte (dateFin=null), fallback sur periodesUniteLegale[0] (potentiellement obsolète)`,
+    );
+  }
+
   return {
     siren,
-    nomComplet: deriveNomComplet(ul, siren),
+    nomComplet: deriveNomComplet(periode, siren),
     finances: [],
     dirigeants: [],
-    actif: ul.etatAdministratifUniteLegale === "A",
+    actif: periode?.etatAdministratifUniteLegale === "A",
     etablissements: [],
     enrichmentStatus: "not_attempted",
     siren_source: "insee_v3",
-    ...(ul.activitePrincipaleUniteLegale
-      ? { naf: ul.activitePrincipaleUniteLegale }
+    ...(periode?.activitePrincipaleUniteLegale
+      ? { naf: periode.activitePrincipaleUniteLegale }
       : {}),
-    ...(ul.categorieJuridiqueUniteLegale
-      ? { natureJuridique: ul.categorieJuridiqueUniteLegale }
+    ...(periode?.categorieJuridiqueUniteLegale
+      ? { natureJuridique: periode.categorieJuridiqueUniteLegale }
       : {}),
   };
 }
 
 /**
- * Reconstruit `nomComplet` depuis la réponse INSEE :
+ * Reconstruit `nomComplet` depuis la période courante :
  * - `denominationUniteLegale` (raison sociale) prime quand présente (personnes morales)
  * - sinon `prenom + nom` (entrepreneur individuel) — `prenomUsuelUniteLegale` est
  *   le champ canonique, `prenom1UniteLegale` est un fallback historique
  * - sinon `siren` brut (signal explicite que la donnée nominative manque)
  */
-function deriveNomComplet(ul: ApiInseeUniteLegale, siren: string): string {
-  const denomination = ul.denominationUniteLegale?.trim();
+function deriveNomComplet(periode: ApiInseePeriode | undefined, siren: string): string {
+  if (!periode) return siren;
+  const denomination = periode.denominationUniteLegale?.trim();
   if (denomination) return denomination;
-  const prenom = (ul.prenomUsuelUniteLegale ?? ul.prenom1UniteLegale)?.trim();
-  const nom = ul.nomUniteLegale?.trim();
+  const prenom = (periode.prenomUsuelUniteLegale ?? periode.prenom1UniteLegale)?.trim();
+  const nom = periode.nomUniteLegale?.trim();
   if (prenom && nom) return `${prenom} ${nom}`;
   if (nom) return nom;
   return siren;

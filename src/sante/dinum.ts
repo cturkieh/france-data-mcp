@@ -25,7 +25,7 @@ import {
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import type { Coordinates } from "../core/types.js";
-import { getInseeSirenCredentials, lookupSirenViaInsee } from "./insee-sirene.js";
+import { getInseeApiKey, lookupSirenViaInsee } from "./insee-sirene.js";
 
 const BASE_URL = "https://recherche-entreprises.api.gouv.fr/search";
 
@@ -380,9 +380,9 @@ export async function getEntrepriseBySiren(
     // Bio Ard'Aisne). On tente le fallback SIRENE INSEE V3 si configuré.
     const inseeMatch = await lookupSirenViaInsee(siren);
     if (inseeMatch) return lookupFound(inseeMatch);
-    const inseeSuffix = getInseeSirenCredentials()
-      ? "Fallback SIRENE INSEE V3 a aussi retourné null (SIREN absent de SIRENE, auth cassée, ou panne API — voir logs)."
-      : "Fallback SIRENE INSEE V3 non configuré (env vars INSEE_SIRENE_CLIENT_ID/INSEE_SIRENE_CLIENT_SECRET absentes).";
+    const inseeSuffix = getInseeApiKey()
+      ? "Fallback SIRENE INSEE V3 a aussi retourné null (SIREN absent de SIRENE, clé révoquée, ou panne API — voir logs)."
+      : "Fallback SIRENE INSEE V3 non configuré (env var INSEE_SIRENE_API_KEY absente).";
     return lookupNotFound(
       siren,
       `SIREN ${siren} non trouvé via DINUM (statut diffusion partielle probable). ${inseeSuffix}`,

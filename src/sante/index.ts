@@ -18,12 +18,7 @@ export {
   type SearchEntreprisesResult,
 } from "./dinum.js";
 
-export {
-  getInseeSirenCredentials,
-  getInseeBearerToken,
-  lookupSirenViaInsee,
-  type InseeSireneCredentials,
-} from "./insee-sirene.js";
+export { getInseeApiKey, lookupSirenViaInsee } from "./insee-sirene.js";
 
 export {
   loadFiness,
