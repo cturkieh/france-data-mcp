@@ -116,11 +116,17 @@ export interface RppsDansEtablissementInput {
 }
 
 /**
+ * Codes catégorie ANS « actifs » (Civil + Militaire). Default appliqué côté
+ * caller TS quand l'input MCP n'explicite pas `categorieCodes` — la RPC SQL
+ * de `rpps_par_specialite_dept` (V0.5.2) attend désormais une liste non-vide
+ * pour rester inlinable (`LANGUAGE sql STABLE`).
+ */
+export const CATEGORIE_CODES_ACTIFS = ["C", "M"];
+
+/**
  * Liste exhaustive des codes catégorie ANS (actifs + inactifs). Sert de
  * sentinelle pour les callers MCP qui veulent désactiver le filtre default
- * (`include_inactifs: true`). Le RPC SQL applique son default actifs quand
- * `cardinality(p_categorie_codes) = 0`, donc passer cette liste exhaustive
- * est sémantiquement équivalent à « pas de filtre ».
+ * (`include_inactifs: true`).
  */
 export const CATEGORIE_CODES_TOUS_STATUTS = ["C", "M", "R", "E", "S", "D"];
 
@@ -165,12 +171,19 @@ export async function getRppsParSpecialiteDept(
   // Le client untyped ne contraint pas les types des params RPC — on peut
   // passer `null` directement pour les filtres optionnels (le RPC PostgreSQL
   // gère `NULL → pas de filtre` via `IS NULL OR ... = ...`).
+  // `categorieCodes` vide ou omis → default actifs (C + M). La RPC V0.5.2
+  // (LANGUAGE sql STABLE inlinable) exige une liste non-vide pour rester
+  // performante sur dept dense — la résolution du default est explicite ici.
+  const categorieCodes =
+    input.categorieCodes && input.categorieCodes.length > 0
+      ? input.categorieCodes
+      : CATEGORIE_CODES_ACTIFS;
   const { data, error } = await supabase.rpc("rpps_par_specialite_dept", {
     p_departement: input.departement,
     p_profession_code: input.professionCode ?? null,
     p_savoir_faire_code: input.savoirFaireCode ?? null,
     p_mode_exercice_code: input.modeExerciceCode ?? null,
-    p_categorie_codes: input.categorieCodes ?? [],
+    p_categorie_codes: categorieCodes,
     p_limit: limit + 1,
     p_offset: offset,
   });

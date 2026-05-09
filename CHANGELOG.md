@@ -4,9 +4,44 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.2] — 2026-05-10
+
+**Hotfix perf — `rpps_par_specialite_dept` réécrit en `LANGUAGE sql STABLE`**
+
+Smoke test live post-V0.5.1 a confirmé que dept 75 et 13 timeoutent à 15s
+malgré la mitigation `statement_timeout = '15s'`. Root cause : `LANGUAGE
+plpgsql STABLE` empêche l'inlining et bascule sur un plan generic après
+5 appels (default PG ≥ 12 `plan_cache_mode=auto`), qui choisit l'index
+`rpps_insee_idx` (presorted key) et stream-filter ~120K rows au lieu d'un
+bitmap scan sur `rpps_dept_categorie_idx`.
+
+### Corrigé
+- Mig `20260510T010000_rpps_par_specialite_dept_sql_inline.sql` : RPC
+  réécrite en `LANGUAGE sql STABLE` sans clause `SET search_path` (Postgres
+  bloque l'inlining quand `proconfig IS NOT NULL`, cf
+  `inline_set_returning_function`). PostGIS étant installé dans `public`,
+  pas de qualification nécessaire pour `ST_AsGeoJSON`.
+- Plan désormais re-calculé à chaque appel avec les vrais params → bitmap
+  index scan + top-N heapsort → dept 75/13 < 100 ms (vs timeout 15s).
+- `RESET statement_timeout` annule le filet 15s de la V0.5.1 (devenu
+  inutile).
+- Caller TS `getRppsParSpecialiteDept` (`src/sante/rpps-db.ts`) résout
+  désormais le default `categorieCodes` côté client (`CATEGORIE_CODES_ACTIFS
+  = ["C","M"]`) — la nouvelle RPC SQL exige une liste non-vide pour rester
+  inlinable. Comportement sémantiquement identique pour les callers MCP
+  normaux. Effet de bord : un caller PostgREST direct passant `[]` recevra
+  0 rows au lieu des actifs implicites (conforme à la sémantique
+  `ANY(empty array) = false` de Postgres).
+
 ## [0.5.1] — 2026-05-09
 
 **Hotfix RPPS — récupère les ~970 K PS skippés par V0.5.0**
+
+(+77 % de couverture ingérée vs V0.5.0). Le 1er run V0.5.0
+(run GH `25607546400`) avait skippé 43 % des PS car le parser exigeait une
+adresse de structure matchée sur l'index commune INSEE — exactement la
+valeur ajoutée du RPPS vs Ameli (étudiants, retraités, salariés CH/CHU sans
+adresse site, libéraux à domicile).
 
 ### Corrigé après les 1ers runs V0.5.1
 - Retry schema-cache miss étendu à `PGRST204` (column not found) en plus de
@@ -31,16 +66,14 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   (`cardinality($codes) = 0` runtime) → fix 2 branches plpgsql avec filtre
   catégorie inliné comme literal ; (3) plan generic plpgsql STABLE refuse
   d'utiliser l'index optimal même avec les fixes 1 et 2 → mitigation
-  pragmatique `statement_timeout = '15s'` scope local. Tuning fin au
-  backlog (MV par dept ou réécriture exec_plan_cache).
+  pragmatique `statement_timeout = '15s'` scope local. **Cette mitigation
+  ne tient pas en charge dept dense — superseded par V0.5.2.**
 - Garde anti-truncation côté SQL sur `p_departement` : `::CHAR(3)` truncate
   silencieusement "0758" → "075". `RAISE EXCEPTION` si `length` ∉ {2, 3} pour
   defense en profondeur (le caller TS valide déjà via `assertValidDept` mais
-  un caller direct PostgREST passerait outre). (+77 % de couverture
-ingérée vs V0.5.0). Le 1er run V0.5.0 (run GH `25607546400`) avait skippé 43 %
-des PS car le parser exigeait une adresse de structure matchée sur l'index
-commune INSEE — exactement la valeur ajoutée du RPPS vs Ameli (étudiants,
-retraités, salariés CH/CHU sans adresse site, libéraux à domicile).
+  un caller direct PostgREST passerait outre). **Garde reportée dans la
+  V0.5.2 ?** Non : la nouvelle RPC `LANGUAGE sql` n'autorise pas `RAISE
+  EXCEPTION`. La validation reste donc côté caller TS uniquement.
 
 ### Refactor parser
 - Skip uniquement `no_identity` (rpps_id vide ou nom/prénom manquant).
