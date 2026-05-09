@@ -56,8 +56,17 @@ callers TS qui importaient ces helpers depuis la lib npm sont impactés.
 
 ### Tests
 
-332 tests verts (+ 14 nouveaux insee-sirene, dont fake timers sur les 2 tests
-retry pour ramener le wall-clock CI de 14.8s à 6.4s).
+338 tests verts (+ 20 nouveaux insee-sirene, dont fake timers sur les 2 tests
+retry pour ramener le wall-clock CI de 14.8s à 6.4s ; +6 tests strip
+guillemets paramétrés via `it.each` + sélection période courante par
+`dateFin === null`).
+
+### Fix cosmétique post-déploiement
+
+`format_count_human(BIGINT)` retournait `"7.K"` au lieu de `"7.0K"` quand
+la décimale arrondie était 0 (`to_char(..., 'FM999D9')` strippe les zéros
+trailing avec `FM`). Remplacé par `round(..., 1)::TEXT`, déterministe et
+locale-indépendant. Validé live sur prod après application de la migration.
 
 ## [0.4.4] — 2026-05-09
 

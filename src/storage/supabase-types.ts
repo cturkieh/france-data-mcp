@@ -338,8 +338,34 @@ export type Database = {
         }
         Relationships: []
       }
+      ingest_canary_targets: {
+        Row: {
+          created_at: string | null
+          description: string
+          key_type: string
+          key_value: string
+          source: string
+        }
+        Insert: {
+          created_at?: string | null
+          description: string
+          key_type: string
+          key_value: string
+          source: string
+        }
+        Update: {
+          created_at?: string | null
+          description?: string
+          key_type?: string
+          key_value?: string
+          source?: string
+        }
+        Relationships: []
+      }
       ingest_log: {
         Row: {
+          canary_failures: string[] | null
+          csv_sha256: string | null
           csv_size_bytes: number | null
           csv_url: string | null
           error_message: string | null
@@ -348,11 +374,14 @@ export type Database = {
           github_run_url: string | null
           id: number
           row_count: number | null
+          skip_reason: string | null
           source: string
           started_at: string
           status: string
         }
         Insert: {
+          canary_failures?: string[] | null
+          csv_sha256?: string | null
           csv_size_bytes?: number | null
           csv_url?: string | null
           error_message?: string | null
@@ -361,11 +390,14 @@ export type Database = {
           github_run_url?: string | null
           id?: number
           row_count?: number | null
+          skip_reason?: string | null
           source: string
           started_at: string
           status: string
         }
         Update: {
+          canary_failures?: string[] | null
+          csv_sha256?: string | null
           csv_size_bytes?: number | null
           csv_url?: string | null
           error_message?: string | null
@@ -374,6 +406,7 @@ export type Database = {
           github_run_url?: string | null
           id?: number
           row_count?: number | null
+          skip_reason?: string | null
           source?: string
           started_at?: string
           status?: string
@@ -651,7 +684,9 @@ export type Database = {
         Returns: {
           code: string
           count: number
+          is_libelle_partage: boolean
           libelle: string
+          libelle_clarifie: string
           type_ps_code: string
           type_ps_libelle: string
         }[]
@@ -665,6 +700,7 @@ export type Database = {
           specialites_presentes: Json
         }[]
       }
+      check_ingest_canary: { Args: { p_source: string }; Returns: string[] }
       disablelongtransactions: { Args: never; Returns: string }
       dropgeometrycolumn:
         | {
@@ -763,6 +799,7 @@ export type Database = {
           voie: string
         }[]
       }
+      format_count_human: { Args: { n: number }; Returns: string }
       geometry: { Args: { "": string }; Returns: unknown }
       geometry_above: {
         Args: { geom1: unknown; geom2: unknown }
@@ -1642,4 +1679,3 @@ export const Constants = {
     Enums: {},
   },
 } as const
-

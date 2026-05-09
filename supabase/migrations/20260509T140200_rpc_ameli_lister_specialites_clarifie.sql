@@ -29,13 +29,17 @@ LANGUAGE sql IMMUTABLE AS $$
   -- (>= 0 attendu). Pour `n < 0`, on retourne le brut signé pour que tout
   -- caller futur qui passerait une différence par accident voie un signal
   -- clair plutôt qu'un "12M" parasité.
+  --
+  -- `round(..., 1)::TEXT` plutôt que `to_char(..., 'FM999D9')` car FM strippe
+  -- le 0 trailing → 7006 produisait "7.K" au lieu de "7.0K". round/cast est
+  -- déterministe et locale-indépendant.
   SELECT CASE
     WHEN n IS NULL    THEN ''
     WHEN n < 0        THEN n::TEXT
     WHEN n >= 10000000 THEN trunc(n / 1000000.0)::TEXT || 'M'
-    WHEN n >= 1000000  THEN replace(trim(to_char(n / 1000000.0, 'FM999D9')), ',', '.') || 'M'
+    WHEN n >= 1000000  THEN round((n / 1000000.0)::NUMERIC, 1)::TEXT || 'M'
     WHEN n >= 10000    THEN trunc(n / 1000.0)::TEXT || 'K'
-    WHEN n >= 1000     THEN replace(trim(to_char(n / 1000.0, 'FM999D9')), ',', '.') || 'K'
+    WHEN n >= 1000     THEN round((n / 1000.0)::NUMERIC, 1)::TEXT || 'K'
     ELSE n::TEXT
   END;
 $$;
