@@ -4,6 +4,36 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.4] — 2026-05-10
+
+**Hotfix perf #3 — `EXECUTE format` pour contourner le plan generic PostgREST**
+
+V0.5.3 (index couvrant) résolvait le problème en EXPLAIN ANALYZE direct
+(39 ms) mais pas via PostgREST (8 937 ms mean → timeout 57014). Diagnostic
+via `pg_stat_statements` : PostgREST wrappe la query dans un pattern
+`json_to_record LATERAL rpc(...)` qui empêche le planner de voir
+`p_departement` au planning time → plan generic biaisé. Détail technique
+dans la migration `20260510T030000`.
+
+### Corrigé
+- Mig `20260510T030000_rpps_par_specialite_dept_execute_format.sql` : RPC
+  réécrite en `LANGUAGE plpgsql STABLE` avec `EXECUTE format($q$ ...
+  WHERE r.code_departement = %L::CHAR(3) ... $q$, p_departement)`.
+- Le `%L` interpole `p_departement` comme literal SQL → le planner voit
+  `r.code_departement = '75'::CHAR(3)` et utilise les MCV de pg_stats
+  pour estimer correctement la sélectivité → custom plan optimal à
+  chaque appel → Index Scan sur `rpps_dept_insee_sort_idx` (V0.5.3).
+- Garde `length(p_departement) NOT IN (2, 3)` (V0.5.1) maintenue en
+  defense-in-depth pour les callers PostgREST directs.
+- Test live confirmé : dept 75 = 786 ms, dept 13 = 523 ms, dept 08 =
+  504 ms (pas de régression sparse), dept 75 + filtre profession =
+  579 ms. Tous OK.
+
+Trade-off : `LANGUAGE plpgsql` au lieu de `sql` → fonction non-inlinable
+(Function Scan dans le plan parent). C'est OK car le `EXECUTE format`
+force un plan custom à chaque appel, ce qui contourne précisément le
+problème PostgREST. Coût planning ~0,1 ms par appel, négligeable.
+
 ## [0.5.3] — 2026-05-10
 
 **Hotfix perf #2 — index composite couvrant `(code_departement, code_insee, nom, prenom, id)`**
