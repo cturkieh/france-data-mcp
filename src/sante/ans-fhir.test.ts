@@ -60,6 +60,24 @@ describe("lookupPractitionerByRpps", () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     expect(await lookupPractitionerByRpps("")).toBeNull();
     expect(await lookupPractitionerByRpps("   ")).toBeNull();
+  });
+
+  it("retourne null sans appeler l'API si rpps_id n'est pas au format 11 ou 12 chiffres (V0.5.6)", async () => {
+    // Garde symétrique avec `getRppsById` (rpps-db.ts). Sans elle, un
+    // caller TS direct contournant la DB ferait un round-trip réseau ANS
+    // inutile pour un id manifestement invalide. fetchMock n'est PAS armé
+    // ici → si l'implémentation appelait quand même fetch, le test failerait.
+    // `console.warn` mocké pour vérifier le signal de format-rejected qui
+    // distingue ce cas de « PS non trouvé / API down » côté caller.
+    vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await lookupPractitionerByRpps("1234567890")).toBeNull(); // 10 chars
+    expect(await lookupPractitionerByRpps("8100051565666")).toBeNull(); // 13 chars
+    expect(await lookupPractitionerByRpps("abcdefghijk")).toBeNull(); // alpha
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledTimes(3);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("rejeté par la garde format"));
+    warnSpy.mockRestore();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -108,7 +126,7 @@ describe("lookupPractitionerByRpps", () => {
   it("retourne null quand le Bundle est vide", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     fetchMock.mockResolvedValueOnce(fhirBundle([]));
-    const result = await lookupPractitionerByRpps("000000000");
+    const result = await lookupPractitionerByRpps("00000000000");
     expect(result).toBeNull();
   });
 
@@ -116,7 +134,7 @@ describe("lookupPractitionerByRpps", () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fetchMock.mockResolvedValueOnce(new Response("{}", { status: 404 }));
-    const result = await lookupPractitionerByRpps("000000000");
+    const result = await lookupPractitionerByRpps("00000000000");
     expect(result).toBeNull();
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("HTTP 404"));
     warnSpy.mockRestore();

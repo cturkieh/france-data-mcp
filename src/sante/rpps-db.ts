@@ -263,9 +263,9 @@ export async function getRppsDansEtablissement(
  */
 export async function getRppsById(rppsId: string): Promise<RppsLookupResult[]> {
   const trimmed = rppsId.trim();
-  if (!/^\d{11}$/.test(trimmed)) {
+  if (!/^\d{11,12}$/.test(trimmed)) {
     throw new RangeError(
-      `[france-data-mcp] rpps_id invalide "${rppsId}" — attendu 11 chiffres (IDNPS).`,
+      `[france-data-mcp] rpps_id invalide "${rppsId}" — attendu 11 ou 12 chiffres (IDNPS national, format ANS — préfixe "81" optionnel pour les IDs émis depuis 2020 = 12 chars, sans préfixe = 11 chars).`,
     );
   }
   const supabase = getUntypedAnonClient();

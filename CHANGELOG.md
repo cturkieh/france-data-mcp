@@ -4,6 +4,56 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.6] — 2026-05-10
+
+**Canary RPPS — remplacement des 3 IDNPS placeholder par des référents stables**
+
+Les 3 IDNPS placeholder seedés en V0.5.0 (`81000964799`, `00000000001`,
+`99999999999`) faisaient remonter `canary missing: …` à chaque run d'ingestion
+RPPS — ils étaient intentionnellement choisis pour ne pas matcher (sentinel),
+en attendant une migration corrective post-1er-run prod. Cette migration les
+remplace par 3 IDNPS référents identifiés en prod le 2026-05-10 via le serveur
+MCP france-data-mcp lui-même.
+
+### Critères de sélection
+- **Couverture géographique** : 1 PS Paris (75), 1 PS Aix-en-Provence (13),
+  1 PS DOM Réunion (974). Permet de détecter une régression d'ingestion
+  ciblée sur un seul périmètre géographique (ex: parser cassé sur un format
+  d'adresse DOM).
+- **Couverture professionnelle** : 1 Médecin (code 10), 1 Infirmier (code 60),
+  1 Pharmacien (code 21) — les 3 plus grosses populations RPPS.
+- **Stabilité** : tous rattachés à des structures établies (CHU public, CH
+  intercommunal, officine titulaire) — probabilité de radiation faible sur
+  l'horizon de vie de la migration.
+- **Catégorie** : Civil (`C`) pour les 3, aligné sur le default V0.5.5 du
+  filtre `categorieCodes`. Sourcing d'un PS Agent public (`M`) backloggé —
+  aucun candidat trouvé via le sample MCP du 2026-05-10.
+
+### Modifié
+- `supabase/migrations/20260510T050000_rpps_canary_seeds_v056.sql` : INSERT
+  des 3 référents EN PREMIER puis DELETE des 3 placeholders V0.5.0 (ordre
+  inversé pour éliminer toute fenêtre où la table `ingest_canary_targets`
+  serait vide pour `source='rpps'` et où `check_ingest_canary` retournerait
+  silencieusement `[]`). Bloc DO + RAISE NOTICE/WARNING pour traçabilité
+  dans les logs Supabase (`purged % rows, expected 0 or 3`).
+- `src/sante/rpps-db.ts` : regex `getRppsById` `/^\d{11}$/` → `/^\d{11,12}$/`
+  pour accepter le format IDNPS moderne (12 chars avec préfixe `81` Type
+  d'identifiant PP) ET legacy (11 chars). **Bug pré-existant V0.5.0 → V0.5.5
+  révélé par V0.5.6** : tous les vrais IDs en base font 12 chars, donc le
+  tool MCP `professionnel_by_rpps` throw RangeError sur tout vrai ID. Aucun
+  test ne couvrait ce path d'où l'invisibilité.
+- `api/tools.ts` : pattern JSON Schema `^\\s*\\d{11}\\s*$` →
+  `^\\s*\\d{11,12}\\s*$`, descriptions et messages d'erreur alignés
+  (« 11 ou 12 chiffres »).
+- `src/sante/ans-fhir.ts` : doc IDNPS « 11 chars » → « 11 ou 12 chars ».
+
+### Ajouté
+- `src/sante/rpps-db.test.ts` : 7 nouveaux cas Vitest verrouillant
+  (a) le format des 3 IDNPS canary V0.5.6 via parse migration SQL,
+  (b) l'ordre INSERT-puis-DELETE de la migration,
+  (c) le contrat regex `getRppsById` (11 ET 12 chars acceptés, 10 et
+  13 chars rejetés, trim whitespace).
+
 ## [0.5.5] — 2026-05-10
 
 **Correction nomenclature catégorie professionnelle RPPS — alignée sur ANS TRE_R09**

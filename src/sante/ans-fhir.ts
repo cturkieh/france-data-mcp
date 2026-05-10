@@ -15,8 +15,10 @@
  *
  * Identifiants : l'API expose `Practitioner.identifier` typé `IDNPS`
  * (système OID `urn:oid:1.2.250.1.71.4.2.1`). Le CSV legacy expose le
- * même champ sous "Identification nationale PP" (11 chars). On cherche par
- * IDNPS qui matche le `rpps_id` que l'on stocke en DB.
+ * même champ sous "Identification nationale PP" (11 ou 12 chars selon que
+ * le préfixe Type d'identifiant `81` est concaténé ou pas — IDNPS modernes
+ * = 12 chars, anciens = 11). On cherche par IDNPS qui matche le `rpps_id`
+ * que l'on stocke en DB.
  *
  * No-op gracieux : pas de clé → null sans throw — la lib reste utilisable
  * sans clé ANS (la couverture DB suffit à la majorité des cas).
@@ -92,7 +94,7 @@ interface FhirBundle {
 export interface AnsFhirPractitioner {
   /** ID interne ANS (format `003-NNNN-NNNN`). Distinct de l'IDNPS. */
   ans_internal_id: string;
-  /** IDNPS / RPPS national (11 chars). Identique à `rpps_id` côté DB. */
+  /** IDNPS / RPPS national (11 ou 12 chars selon génération). Identique à `rpps_id` côté DB. */
   rpps_id: string;
   civilite: string | null;
   nom: string;
@@ -117,7 +119,24 @@ export async function lookupPractitionerByRpps(
   if (!apiKey) return null;
 
   const trimmed = rppsId.trim();
+  // Garde format symétrique avec `getRppsById` (rpps-db.ts) : un caller TS
+  // direct qui contournerait la DB pour ne tester que le fallback FHIR ne
+  // doit pas envoyer un id malformé à l'API ANS (round-trip réseau inutile,
+  // bruit dans les quotas). Same regex que le tool MCP `professionnel_by_rpps`.
+  //
+  // Sémantique : `getRppsById` throw RangeError, `lookupPractitionerByRpps`
+  // retourne `null` (no-op gracieux, contrat existant — la lib reste utilisable
+  // sans ANS configuré ou pour un PS absent). Pour distinguer « format rejeté »
+  // de « PS non trouvé / API down », un `console.warn` est émis quand l'input
+  // était non-vide mais ne matche pas la regex — sinon le caller debug à
+  // l'aveugle sur les outcomes confondants.
   if (trimmed === "") return null;
+  if (!/^\d{11,12}$/.test(trimmed)) {
+    console.warn(
+      `[france-data-mcp] ANS FHIR lookup skipped — rpps_id "${rppsId}" rejeté par la garde format /^\\d{11,12}$/ (format IDNPS attendu : 11 ou 12 chiffres).`,
+    );
+    return null;
+  }
 
   const baseUrl = getAnsFhirBaseUrl();
   // FHIR search syntax : `identifier=<system>|<value>` cible le `Practitioner`

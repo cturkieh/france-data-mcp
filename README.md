@@ -116,7 +116,7 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 | `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice, `include_etudiants`, `include_agents_publics` |
 | `professionnels_rpps_par_dept` | Listing départemental + pagination. Idéal pour compter ou lister tout le monde (vs Ameli libéraux uniquement) |
 | `rpps_dans_etablissement` | **Killer feature** — répond à *"qui travaille dans ce labo / hôpital ?"*. Filtre par numéro FINESS site |
-| `professionnel_by_rpps` | Fiche par identifiant national (11 chars). Fallback live FHIR ANS si non trouvé en base locale |
+| `professionnel_by_rpps` | Fiche par identifiant national (11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe `81` qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Fallback live FHIR ANS si non trouvé en base locale |
 
 > Couverture RPPS : **~2,2 M PS actifs** (libéraux + salariés privés + hospitaliers contractuels + agents publics + étudiants + remplaçants). L'ANS pré-filtre la source aux PS actifs (cf. DSFT v3.1 §5.1.2 — pas de date de décès, activité ouverte) : aucun retraité, suspendu, radié ou décédé n'est exposé. ID national stable + lien `num_finess` (pivot PS↔FINESS). Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
 

@@ -1069,11 +1069,11 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnel_by_rpps",
-    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 chiffres exactement). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). ${RPPS_CGU_NOTICE}`,
+    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe "81" qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
-        rpps_id: { type: "string", pattern: "^\\s*\\d{11}\\s*$" },
+        rpps_id: { type: "string", pattern: "^\\s*\\d{11,12}\\s*$" },
       },
       required: ["rpps_id"],
     },
@@ -1103,7 +1103,7 @@ export const TOOLS: McpTool[] = [
         found: false,
         rpps_id: rppsId,
         message:
-          "rpps_id introuvable en base locale ET via fallback FHIR ANS. Vérifier le format (11 chars chiffres) ou consulter annuaire.sante.fr.",
+          "rpps_id introuvable en base locale ET via fallback FHIR ANS. Vérifier le format (11 ou 12 chiffres) ou consulter annuaire.sante.fr.",
       };
     },
   },

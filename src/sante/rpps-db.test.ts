@@ -1,6 +1,17 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock supabase au niveau du module : sinon `getRppsById` appellerait
+// `getUntypedAnonClient` qui throw `Error` (pas `RangeError`) quand
+// `SUPABASE_URL` est absent en env de test — les tests d'acceptation
+// passeraient alors par tautologie (env var manquante ≠ regex valide).
+// Le mock retourne data: [] pour permettre une assertion `.resolves` qui
+// exerce vraiment le chemin validation → RPC.
+const mockRpc = vi.fn().mockResolvedValue({ data: [], error: null });
+vi.mock("../storage/supabase.js", () => ({
+  getUntypedAnonClient: () => ({ rpc: mockRpc }),
+}));
 
 import {
   CATEGORIE_CODES_DEFAUT,
@@ -9,6 +20,7 @@ import {
   CATEGORIE_CODE_CIVIL,
   CATEGORIE_CODE_ETUDIANT,
   buildCategorieCodes,
+  getRppsById,
 } from "./rpps-db.js";
 
 // Pure unit tests pour les helpers catégorie ANS TRE_R09. Verrouille le
@@ -96,5 +108,80 @@ describe("V0.5.5 default — TS/SQL sync", () => {
     expect(migrationSql).toMatch(new RegExp(`p_code\\s*=\\s*'${defaultCode}'\\s+OR`));
     // RPC EXECUTE format : COALESCE(NULLIF(...), ARRAY['C'])
     expect(migrationSql).toMatch(new RegExp(`ARRAY\\[\\s*'${defaultCode}'\\s*\\]`));
+  });
+});
+
+// V0.5.6 — Verrouille le format des 3 IDNPS canary (12 chars en prod ANS),
+// sans test on aurait introduit des IDs cassés (ex: 11 chars du V0.5.0
+// placeholder qui ne matchaient jamais en base) sans signal.
+describe("V0.5.6 canary RPPS — format IDNPS", () => {
+  const canaryMigrationPath = join(
+    __dirname,
+    "../../supabase/migrations/20260510T050000_rpps_canary_seeds_v056.sql",
+  );
+  const canaryMigration = readFileSync(canaryMigrationPath, "utf-8").replace(/--[^\n]*/g, "");
+
+  it("contient 3 IDNPS au format ANS (11 ou 12 chiffres)", () => {
+    // Match les VALUES INSERT, pas les DELETE (placeholders historiques 11 chars).
+    const insertBlock = canaryMigration.match(
+      /INSERT INTO ingest_canary_targets[\s\S]+?ON CONFLICT/,
+    );
+    expect(insertBlock, "INSERT block missing in V0.5.6 migration").toBeTruthy();
+    const idnpsMatches = insertBlock?.[0].match(/'rpps_id',\s*'(\d+)'/g) ?? [];
+    expect(idnpsMatches.length).toBe(3);
+    for (const match of idnpsMatches) {
+      const id = match.match(/'(\d+)'/)?.[1];
+      expect(id, `IDNPS extrait de ${match}`).toMatch(/^\d{11,12}$/);
+    }
+  });
+
+  it("INSERT précède DELETE (pas de fenêtre table-vide pour le canary)", () => {
+    const insertPos = canaryMigration.indexOf("INSERT INTO ingest_canary_targets");
+    const deletePos = canaryMigration.indexOf("DELETE FROM ingest_canary_targets");
+    expect(insertPos).toBeGreaterThan(0);
+    expect(deletePos).toBeGreaterThan(insertPos);
+  });
+});
+
+// V0.5.6 — Lock le contrat regex `getRppsById` (11 ou 12 chars). Sans ce
+// test, le bug pré-V0.5.6 (regex /^\d{11}$/ qui rejetait les vrais IDs
+// 12 chars en prod) pourrait revenir silencieusement.
+describe("getRppsById — format rpps_id (V0.5.6 fix)", () => {
+  // mockClear avant chaque cas pour pouvoir asserter le comptage d'appels
+  // RPC sans interférence inter-tests.
+  beforeEach(() => {
+    mockRpc.mockClear();
+  });
+
+  // Pour les inputs valides : assertion couplée `.resolves` + `mockRpc.toHaveBeenCalledWith`
+  // exerce vraiment la chaîne validation → RPC (sans la 2e assertion, un
+  // futur court-circuit du RPC qui retournerait `[]` early passerait vert).
+  // Pour les inputs invalides : `RangeError` est levé AVANT le RPC ; on
+  // asserte ET sur l'instance ET sur le message stable ET sur l'absence
+  // d'appel RPC — détection d'un revert via 3 gardes indépendantes.
+  it("accepte un IDNPS 12 chars (format moderne avec préfixe 81)", async () => {
+    await expect(getRppsById("810005156566")).resolves.toEqual([]);
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    expect(mockRpc).toHaveBeenCalledWith("rpps_lookup_by_id", { p_rpps_id: "810005156566" });
+  });
+
+  it("accepte un IDNPS 11 chars (format legacy sans préfixe)", async () => {
+    await expect(getRppsById("12345678901")).resolves.toEqual([]);
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    expect(mockRpc).toHaveBeenCalledWith("rpps_lookup_by_id", { p_rpps_id: "12345678901" });
+  });
+
+  it("rejette un format manifestement invalide (10 chars, alpha, 13 chars)", async () => {
+    await expect(getRppsById("1234567890")).rejects.toThrow(RangeError);
+    await expect(getRppsById("1234567890")).rejects.toThrow(/rpps_id invalide/);
+    await expect(getRppsById("abcdefghijk")).rejects.toThrow(RangeError);
+    await expect(getRppsById("8100051565666")).rejects.toThrow(RangeError);
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  it("trim les whitespaces avant validation (cohérent avec le pattern MCP)", async () => {
+    await expect(getRppsById("  810005156566  ")).resolves.toEqual([]);
+    // Le rpps_id passé à la RPC est trimmed (pas avec les whitespaces).
+    expect(mockRpc).toHaveBeenCalledWith("rpps_lookup_by_id", { p_rpps_id: "810005156566" });
   });
 });
