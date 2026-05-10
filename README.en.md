@@ -21,7 +21,7 @@ Brings together the most useful French government data sources (FINESS healthcar
 
 ## Status
 
-✅ **v0.5.0 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing 17 tools. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. 362 tests passing, TypeScript strict, Biome clean.
+✅ **v0.5.4 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing 17 tools. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. 374 tests passing, TypeScript strict, Biome clean. v0.5.2/.3/.4 stabilized `professionnels_rpps_par_dept` on dense departments (75/13): timeout 15 s → < 1 s. See [CHANGELOG](CHANGELOG.md) for diagnostic details.
 
 ## Tools (17)
 

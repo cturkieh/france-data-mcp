@@ -191,7 +191,9 @@ const ehpad = await searchEtablissements({
 
 ## État du projet
 
-✅ **Version 0.5.1 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS** ingérés (V0.5.1 récupère les ~970 K PS skippés par V0.5.0 via enrichissement FINESS post-INSERT). 374 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+✅ **Version 0.5.4 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS** ingérés (V0.5.1 récupère les ~970 K PS skippés par V0.5.0 via enrichissement FINESS post-INSERT). 374 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+
+V0.5.2/.3/.4 ont stabilisé `professionnels_rpps_par_dept` sur dept dense (75/13) : timeout 15 s → < 1 s. Diagnostic et fix dans le [CHANGELOG](CHANGELOG.md#054-2026-05-10) (PostgREST `json_to_record LATERAL` + `EXECUTE format ... %L` pour custom plan + index couvrant `(code_departement, code_insee, nom, prenom, id)`).
 
 ### Fait
 
@@ -200,6 +202,7 @@ const ehpad = await searchEtablissements({
 - [x] `FINESS` — ingestion data.gouv → Supabase + PostGIS, 24 familles, atomic swap, canary post-swap (3 tools)
 - [x] `Annuaire Santé Ameli` — pipeline weekly, géocodage centroïde commune, libellés data-driven (4 tools)
 - [x] **`RPPS / Annuaire Santé ANS`** — pipeline mensuel ~2,2 M PS, ID national stable, pivot PS↔FINESS, enrichissement FINESS post-INSERT, filtre catégorie pro, fallback live FHIR ANS (4 tools, V0.5.1)
+- [x] **Perf dept dense** — timeout 15s → < 1 s sur dept 75/13 via index couvrant `(code_departement, code_insee, nom, prenom, id)` + `EXECUTE format` plpgsql pour custom plan PostgREST (V0.5.2 → V0.5.4)
 - [x] Pipeline ingestion durci — SHA256 short-circuit, threshold parsedCoordRejected, atomic swap reversible
 - [x] Serveur MCP HTTP déployé sur Vercel
 - [x] Documentation Charleville-Mézières reproductible (`examples/charleville.ts`)
