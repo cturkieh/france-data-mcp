@@ -4,6 +4,41 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.3] — 2026-05-10
+
+**Hotfix perf #2 — index composite couvrant `(code_departement, code_insee, nom, prenom, id)`**
+
+La V0.5.2 (`LANGUAGE sql STABLE` inlinable) n'a pas suffi : smoke test live a
+confirmé l'inlining (pas de `Function Scan` dans le plan) mais le planner
+choisit toujours `rpps_insee_idx` (Presorted Key sur code_insee) → Index
+Scan stream qui filtre 100K+ rows avant d'atteindre LIMIT 50 → timeout 57014
+sur dept 75/13. Cas classique de "wrong index ORDER BY + LIMIT" documenté
+par pganalyze (Tom Lane confirme que les stats Postgres ne suffisent pas
+encore pour détecter ce pattern, état mai 2026).
+
+### Corrigé
+- Mig `20260510T020000_rpps_dept_insee_covering_idx.sql` :
+  - Nouvel index `rpps_dept_insee_sort_idx (code_departement, code_insee,
+    nom, prenom, id)` sur la table prod (effet immédiat). `CREATE INDEX`
+    bloquant — pas `CONCURRENTLY` (Supabase migrations en transaction
+    interdit CONCURRENTLY, cf migrations 000015/000019 précédentes).
+  - Redéfinition de `ingest_create_rpps_staging` pour mirroir l'index
+    sur la table staging. Sans cette mise à jour, le prochain cron RPPS
+    (5 du mois) aurait recréé `rpps_staging` SANS l'index, swap atomic
+    → l'index aurait été renommé en `rpps_previous_dept_insee_sort_idx`
+    (perdu côté prod) → retour au timeout.
+  - `COMMENT ON INDEX` documentant la finalité pour traçabilité future.
+- Diagnostic comparatif via EXPLAIN ANALYZE en transaction (ROLLBACK final) :
+  - Index complet → **13 ms** (Index Scan + early termination LIMIT 50)
+  - Index minimal `(dept, insee)` → 3360 ms (doit lire 76K rows pour
+    resorter nom/prenom/id en top-N heapsort)
+  - Sans index nouveau → timeout 15s/57014
+- Trade-off accepté : ~80 MB stockage sur 2,2 M rows = 1,4 % du quota
+  Supabase. Solution plus robuste qu'un trick `ORDER BY + 0` ou
+  `WITH MATERIALIZED` (pas de matérialisation explicite à chaque appel).
+- Audit cross-tables (FINESS, Ameli) : indexes prod ↔ staging restent en
+  sync, aucune dette.
+
 ## [0.5.2] — 2026-05-10
 
 **Hotfix perf — `rpps_par_specialite_dept` réécrit en `LANGUAGE sql STABLE`**
