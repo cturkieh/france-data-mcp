@@ -4,6 +4,82 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.5] — 2026-05-10
+
+**Correction nomenclature catégorie professionnelle RPPS — alignée sur ANS TRE_R09**
+
+V0.5.0 → V0.5.4 documentaient et exposaient des codes catégorie fictifs
+(`R` Retraité, `S` Suspendu, `D` Décédé) hérités d'une projection ADELI
+historique jamais vérifiée contre la source officielle. Validation empirique
+post-1er-run V0.5.1 (10 mai 2026, `SELECT GROUP BY` sur `rpps`) : la base ne
+contient que **3 codes** (`C` Civil ~97,2 %, `E` Étudiant ~2,5 %, `M` Agent
+public ~0,3 %). La nomenclature ANS officielle [TRE_R09](https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/)
+confirme : 4 codes au total, dont `F` (« Fonctionnaire d'État ou de
+collectivité locale ») déprécié 2026-02-23 et fusionné dans `M`. Et le
+fichier ANS `PS_LibreAcces_Personne_activite` est pré-filtré aux PS actifs
+à la source (cf. DSFT v3.1 §5.1.2) — aucun retraité, suspendu, radié ou
+décédé n'a jamais été en base. La notion d'« inactif » que portait V0.5.x
+n'existait donc pas dans cette extraction.
+
+### Breaking change MCP
+- Param `include_inactifs: boolean` retiré des 3 tools RPPS query
+  (`professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`,
+  `rpps_dans_etablissement`).
+- Remplacé par 2 flags granulaires :
+  - `include_etudiants: boolean = false` — ajoute le code `E` au filtre
+    (internes, externes, élèves IDE/SF).
+  - `include_agents_publics: boolean = false` — ajoute le code `M` au
+    filtre (PH titulaires, médecins militaires SSA, médecins inspecteurs
+    ARS, médecins conseils CNAM, médecins scolaires, médecins PMI).
+- Default = `[C]` Civil seul (libéraux + salariés privés + hospitaliers
+  contractuels). Ancien default V0.5.x = `[C, M]` mélangeait droit privé
+  et fonction publique sans flag possible pour dissocier.
+
+### Modifié
+- `src/sante/rpps-db.ts` :
+  - Constantes `CATEGORIE_CODES_ACTIFS` / `CATEGORIE_CODES_TOUS_STATUTS`
+    supprimées.
+  - Nouveaux exports `CATEGORIE_CODE_CIVIL`, `CATEGORIE_CODE_ETUDIANT`,
+    `CATEGORIE_CODE_AGENT_PUBLIC`, `CATEGORIE_CODES_OFFICIELS`,
+    `CATEGORIE_CODES_DEFAUT`.
+  - Nouvelle fonction publique `buildCategorieCodes({ includeEtudiants,
+    includeAgentsPublics })` — source unique pour la traduction flags MCP →
+    array SQL, consommée par les 3 handlers tools.
+- `api/tools.ts` : descriptions tools réécrites avec la vraie nomenclature
+  (libellé `M` = Agent public, pas Militaire) et un lien vers la table de
+  référence ANS. Hint partagé `RPPS_INCLUDE_CATEGORIES_HINT`.
+- Mig `20260510T040000_rpps_v055_categorie_codes_default_civil.sql` :
+  - `rpps_categorie_match` : default cardinality=0 → `IN ('C')` au lieu de
+    `IN ('C','M')`. `OR IS NULL` conservé en défense.
+  - `rpps_par_specialite_dept` (V0.5.4 EXECUTE format) : default interne
+    `COALESCE(NULLIF(...), ARRAY['C'])` au lieu de `ARRAY['C','M']`. Aucune
+    autre modif (signature inchangée, performance V0.5.4 préservée).
+- README.md / README.en.md : nouvelle table « Filtre catégorie
+  professionnelle (V0.5.5) » avec les 3 codes officiels, leurs périmètres
+  et leur volumétrie observée. Mention explicite : la base est pré-filtrée
+  aux PS actifs à la source ANS.
+
+### Ajouté
+- `src/sante/rpps-db.test.ts` : 8 cas Vitest unit pour les nouvelles
+  constantes et `buildCategorieCodes`. Verrouille le contrat (default
+  Civils, jamais d'array vide, codes fictifs R/S/D rejetés, code F
+  déprécié rejeté).
+
+### Garde-fou runtime contre l'ancien flag
+Pour éviter qu'un caller V0.5.4 (ou un cache LLM tools/list désynchronisé)
+continue de passer `include_inactifs` et reçoive silencieusement un
+sous-ensemble (`[C]` au lieu de `[C, M]` historique), `categorieCodesFromArgs`
+throw un `RangeError` explicite si le flag est présent — mappé en JSON-RPC
+`-32602` côté `api/mcp.ts`, message guidant vers le mapping nouveaux flags.
+Test `api/tools.test.ts > categorieCodesFromArgs > rejette explicitement le
+legacy include_inactifs` verrouille ce contrat.
+
+### Pourquoi pas d'alias silencieux
+On est en `0.x` OSS, le serveur MCP est utilisé par une poignée de
+testeurs early-stage. Garder `include_inactifs` en alias aurait perpétué
+l'erreur d'abstraction (« inactif » n'existant pas dans cette extraction)
+et empêché les LLMs callers d'apprendre les nouveaux noms de flags.
+
 ## [0.5.4] — 2026-05-10
 
 **Hotfix perf #3 — `EXECUTE format` pour contourner le plan generic PostgREST**

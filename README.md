@@ -109,20 +109,28 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 
 > Couverture Ameli : libéraux **conventionnés uniquement** (~462 K). Pour les salariés (hospitaliers, salariés en LBM/cabinet), voir RPPS ci-dessous.
 
-### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (4 tools — V0.5.1)
+### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (4 tools — V0.5.5)
 
 | Tool | Description |
 |---|---|
-| `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice, `include_inactifs` |
+| `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice, `include_etudiants`, `include_agents_publics` |
 | `professionnels_rpps_par_dept` | Listing départemental + pagination. Idéal pour compter ou lister tout le monde (vs Ameli libéraux uniquement) |
 | `rpps_dans_etablissement` | **Killer feature** — répond à *"qui travaille dans ce labo / hôpital ?"*. Filtre par numéro FINESS site |
 | `professionnel_by_rpps` | Fiche par identifiant national (11 chars). Fallback live FHIR ANS si non trouvé en base locale |
 
-> Couverture RPPS : **~2,2 M PS** (libéraux + salariés + remplaçants + retraités + étudiants). ID national stable, lien vers structure d'exercice (`num_finess`) — permet le pivot PS↔FINESS. Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
+> Couverture RPPS : **~2,2 M PS actifs** (libéraux + salariés privés + hospitaliers contractuels + agents publics + étudiants + remplaçants). L'ANS pré-filtre la source aux PS actifs (cf. DSFT v3.1 §5.1.2 — pas de date de décès, activité ouverte) : aucun retraité, suspendu, radié ou décédé n'est exposé. ID national stable + lien `num_finess` (pivot PS↔FINESS). Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
 
-**V0.5.1 — enrichissement FINESS post-INSERT.** Les PS sans adresse de structure exploitable (étudiants, retraités, salariés CH/CHU sans adresse site déclarée, libéraux à domicile — ~970 K rows skippées en V0.5.0) sont désormais ingérés avec `geom NULL`, puis géolocalisés à la précision adresse FINESS via JOIN sur `num_finess`. Champ `geom_source` interne = `commune_centroid` (~3 km moyenne) ou `finess_join` (adresse FINESS).
+**V0.5.1 — enrichissement FINESS post-INSERT.** Les PS sans adresse de structure exploitable (étudiants, salariés CH/CHU sans adresse site déclarée, libéraux à domicile — ~970 K rows skippées en V0.5.0) sont désormais ingérés avec `geom NULL`, puis géolocalisés à la précision adresse FINESS via JOIN sur `num_finess`. Champ `geom_source` interne = `commune_centroid` (~3 km moyenne) ou `finess_join` (adresse FINESS).
 
-**Filtre catégorie professionnelle.** Par défaut, les tools RPPS ne renvoient que les PS en activité (Civil C + Militaire M). Passer `include_inactifs: true` pour inclure aussi Retraité (R), Étudiant (E), Suspendu (S), Décédé (D).
+**Filtre catégorie professionnelle (V0.5.5).** Nomenclature officielle ANS [TRE_R09](https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/) — 3 codes en base :
+
+| Code | Libellé ANS | Périmètre | Volume |
+|---|---|---|---|
+| `C` | Civil | Droit privé : libéraux, salariés privés, hospitaliers contractuels, salariés associatifs | ~97,2 % |
+| `E` | Étudiant | PS en formation : internes, externes, élèves IDE/SF | ~2,5 % |
+| `M` | Agent public | Statut fonction publique : PH titulaires, médecins militaires SSA, médecins inspecteurs ARS, médecins conseils CNAM, médecins scolaires Éducation nationale, médecins PMI collectivités. Le code `F` (« Fonctionnaire d'État ou de collectivité locale ») a été déprécié 2026-02-23 et fusionné dans `M` | ~0,3 % |
+
+Par défaut, les tools RPPS ne renvoient que les **Civils (C)**. Pour élargir : passer `include_agents_publics: true` (ajoute `M`) et/ou `include_etudiants: true` (ajoute `E`). Le payload retour expose `categorie_code` + `categorie_libelle` sur chaque row pour permettre la dissociation côté caller.
 
 **⚠️ Périmètre — à lire avant de construire un comptage**
 

@@ -40,3 +40,11 @@ export const RPPS_MODE_EXERCICE = {
  */
 export const RPPS_CGU_NOTICE =
   "Source : Annuaire Santé, Agence du Numérique en Santé (ANS) — Licence Ouverte v2.0";
+
+/**
+ * URL canonique de la table de référence ANS TRE_R09 (catégorie professionnelle).
+ * Source unique citée par la JSDoc des constantes `CATEGORIE_CODE_*`, par le
+ * hint MCP `RPPS_INCLUDE_CATEGORIES_HINT` et par la doc publique. Évite la
+ * dérive multi-sites quand l'ANS publie une nouvelle URL.
+ */
+export const TRE_R09_URL = "https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/";

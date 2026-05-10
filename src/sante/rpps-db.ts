@@ -7,9 +7,17 @@
  * technique, pas le boundary public.
  *
  * Diffère d'Ameli sur 3 points :
- * - couverture : libéraux + salariés + retraités (vs Ameli libéraux conventionnés)
+ * - couverture : libéraux + salariés + étudiants + agents publics
+ *   (vs Ameli libéraux conventionnés uniquement)
  * - identifiant stable : `rpps_id` (IDNPS national) → lookup individuel + dédup
  * - pivot structure : `num_finess` exposé en colonne → croisement avec FINESS
+ *
+ * IMPORTANT : la base ne contient QUE des PS actifs. L'ANS pré-filtre le
+ * fichier `PS_LibreAcces_Personne_activite` à la source : retraités, décédés,
+ * radiés et suspendus n'apparaissent jamais dans cette extraction (cf. DSFT
+ * v3.1 §5.1.2). Le filtre par `categorie_code` discrimine donc des **statuts
+ * juridiques d'enregistrement** (Civil / Étudiant / Agent public), pas des
+ * statuts d'activité.
  */
 
 import { metersToKm } from "../core/numbers.js";
@@ -30,7 +38,7 @@ import {
   validateCoords,
   validateRadiusKm,
 } from "./db-helpers.js";
-import type { GeoJsonPoint } from "./rpps-types.js";
+import { type GeoJsonPoint, TRE_R09_URL } from "./rpps-types.js";
 
 // --- Public result shapes --------------------------------------------------
 
@@ -46,11 +54,7 @@ export interface RppsResult {
   /** Spécialité fine (DES/DESC). Plus riche que la spécialité Ameli simple. */
   savoir_faire: { code: string | null; libelle: string | null };
   mode_exercice: { code: string | null; libelle: string | null };
-  /**
-   * Catégorie professionnelle ANS — distingue actifs (Civil C, Militaire M)
-   * de Retraité (R) / Étudiant (E) / Suspendu (S) / Décédé (D). Le filtre
-   * default des RPCs masque les inactifs sauf si `include_inactifs:true`.
-   */
+  /** Catégorie professionnelle ANS (TRE_R09) — voir `CATEGORIE_CODE_*` / `buildCategorieCodes`. */
   categorie: { code: string | null; libelle: string | null };
   /** Pivot vers FINESS / SIRENE. Souvent rempli pour les salariés, plus rare en libéral pur. */
   structure: {
@@ -88,9 +92,10 @@ export interface RppsInRadiusInput {
   /** Codes mode exercice (L libéral, S salarié, M mixte, R remplaçant…). */
   modeExerciceCodes?: string[];
   /**
-   * Codes catégorie professionnelle ANS. Vide ou omis → filtre default actifs
-   * (`C` Civil + `M` Militaire + `IS NULL`). Sinon → filtre exact ANY. Pour
-   * « tous les statuts » passer la liste exhaustive `CATEGORIE_CODES_TOUS_STATUTS`.
+   * Codes catégorie professionnelle ANS (table TRE_R09). Vide ou omis →
+   * filtre default = `[CATEGORIE_CODE_CIVIL]` (cf. `buildCategorieCodes`).
+   * Sinon → filtre exact ANY (le helper SQL `rpps_categorie_match` ajoute
+   * `OR IS NULL` défensif pour ne pas exclure les rows à code absent).
    */
   categorieCodes?: string[];
   limit?: number;
@@ -116,19 +121,47 @@ export interface RppsDansEtablissementInput {
 }
 
 /**
- * Codes catégorie ANS « actifs » (Civil + Militaire). Default appliqué côté
- * caller TS quand l'input MCP n'explicite pas `categorieCodes` — la RPC SQL
- * de `rpps_par_specialite_dept` (V0.5.2) attend désormais une liste non-vide
- * pour rester inlinable (`LANGUAGE sql STABLE`).
+ * Codes catégorie professionnelle ANS — table de référence TRE_R09 (cf.
+ * `TRE_R09_URL`). Le code `F` déprécié 2026-02-23 a été fusionné dans `M`,
+ * et le fichier `PS_LibreAcces_Personne_activite` est pré-filtré aux actifs
+ * à la source — d'où l'absence de codes `R`/`S`/`D` (cf. JSDoc de tête).
  */
-export const CATEGORIE_CODES_ACTIFS = ["C", "M"];
+export const CATEGORIE_CODE_CIVIL = "C";
+export const CATEGORIE_CODE_ETUDIANT = "E";
+export const CATEGORIE_CODE_AGENT_PUBLIC = "M";
+
+/** Codes valides dans TRE_R09 actuellement présents en base. */
+export const CATEGORIE_CODES_OFFICIELS = Object.freeze([
+  CATEGORIE_CODE_CIVIL,
+  CATEGORIE_CODE_ETUDIANT,
+  CATEGORIE_CODE_AGENT_PUBLIC,
+] as const);
 
 /**
- * Liste exhaustive des codes catégorie ANS (actifs + inactifs). Sert de
- * sentinelle pour les callers MCP qui veulent désactiver le filtre default
- * (`include_inactifs: true`).
+ * Default appliqué TS-side dans `getRppsParSpecialiteDept`. La RPC V0.5.4
+ * (`EXECUTE format`) porte aussi son propre `COALESCE(... ARRAY['C'])` en
+ * défense — KEEP IN SYNC si on change le default.
  */
-export const CATEGORIE_CODES_TOUS_STATUTS = ["C", "M", "R", "E", "S", "D"];
+export const CATEGORIE_CODES_DEFAUT = Object.freeze([
+  CATEGORIE_CODE_CIVIL,
+] as const) satisfies readonly string[];
+
+/**
+ * Construit `categorieCodes` à partir des 2 flags MCP. Source unique
+ * consommée par les 3 handlers tools.
+ */
+export function buildCategorieCodes(opts: {
+  includeEtudiants?: boolean;
+  includeAgentsPublics?: boolean;
+}): string[] {
+  const codes: string[] = [CATEGORIE_CODE_CIVIL];
+  if (opts.includeAgentsPublics) codes.push(CATEGORIE_CODE_AGENT_PUBLIC);
+  if (opts.includeEtudiants) codes.push(CATEGORIE_CODE_ETUDIANT);
+  return codes;
+}
+
+/** Référence stable de la nomenclature ANS. Alias re-exporté pour la doc. */
+export { TRE_R09_URL };
 
 export interface RppsQueryResult {
   count: number;
@@ -171,13 +204,14 @@ export async function getRppsParSpecialiteDept(
   // Le client untyped ne contraint pas les types des params RPC — on peut
   // passer `null` directement pour les filtres optionnels (le RPC PostgreSQL
   // gère `NULL → pas de filtre` via `IS NULL OR ... = ...`).
-  // `categorieCodes` vide ou omis → default actifs (C + M). La RPC V0.5.2
-  // (LANGUAGE sql STABLE inlinable) exige une liste non-vide pour rester
-  // performante sur dept dense — la résolution du default est explicite ici.
+  // `categorieCodes` vide ou omis → default = `[C]` (Civil seul). La RPC
+  // V0.5.4 (LANGUAGE plpgsql + EXECUTE format) accepte `[]` et retombe sur
+  // son propre default `['C']` côté SQL, mais on explicite ici pour rester
+  // cohérent avec les 2 autres callers et faciliter le debug.
   const categorieCodes =
     input.categorieCodes && input.categorieCodes.length > 0
       ? input.categorieCodes
-      : CATEGORIE_CODES_ACTIFS;
+      : [...CATEGORIE_CODES_DEFAUT];
   const { data, error } = await supabase.rpc("rpps_par_specialite_dept", {
     p_departement: input.departement,
     p_profession_code: input.professionCode ?? null,

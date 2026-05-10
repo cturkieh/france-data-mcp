@@ -21,7 +21,7 @@ Brings together the most useful French government data sources (FINESS healthcar
 
 ## Status
 
-✅ **v0.5.4 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing 17 tools. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. 374 tests passing, TypeScript strict, Biome clean. v0.5.2/.3/.4 stabilized `professionnels_rpps_par_dept` on dense departments (75/13): timeout 15 s → < 1 s. See [CHANGELOG](CHANGELOG.md) for diagnostic details.
+✅ **v0.5.5 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing 17 tools. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. TypeScript strict, Biome clean. v0.5.5 aligns the RPPS professional-category filter on the official ANS [TRE_R09](https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/) nomenclature: 3 codes only (`C` Civil, `E` Student, `M` Public agent), default returns Civils only, breaking change `include_inactifs` → `include_etudiants` + `include_agents_publics`. See [CHANGELOG](CHANGELOG.md) for diagnostic details.
 
 ## Tools (17)
 
@@ -29,7 +29,7 @@ Brings together the most useful French government data sources (FINESS healthcar
 - **Companies (2)**: `entreprises_in_radius`, `entreprise_by_siren` (with INSEE SIRENE V3.11 fallback)
 - **FINESS healthcare facilities (3)**: `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
 - **Ameli licensed practitioners (4)**: `professionnels_in_radius`, `professionnels_par_specialite_dept`, `lister_specialites_ameli`, `lister_types_ps_ameli`
-- **RPPS / ANS — all practitioners (4, V0.5.0)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `professionnel_by_rpps` (with live FHIR ANS fallback)
+- **RPPS / ANS — all active practitioners (4, V0.5.5)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `professionnel_by_rpps` (with live FHIR ANS fallback). ANS source is pre-filtered to active PS only — no retired, suspended, struck-off or deceased records ever appear.
 
 ## Use cases
 

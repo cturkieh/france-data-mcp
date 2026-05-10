@@ -31,13 +31,13 @@ import {
   searchEntreprises,
 } from "../src/sante/index.js";
 import {
-  CATEGORIE_CODES_TOUS_STATUTS,
+  buildCategorieCodes,
   getRppsById,
   getRppsDansEtablissement,
   getRppsInRadius,
   getRppsParSpecialiteDept,
 } from "../src/sante/rpps-db.js";
-import { RPPS_CGU_NOTICE, RPPS_MODE_EXERCICE } from "../src/sante/rpps-types.js";
+import { RPPS_CGU_NOTICE, RPPS_MODE_EXERCICE, TRE_R09_URL } from "../src/sante/rpps-types.js";
 import { deptFromCodeInsee } from "../src/territoire/dept-codes.js";
 import {
   geocode,
@@ -49,8 +49,45 @@ import {
 /** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
 const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
 
-const RPPS_INCLUDE_INACTIFS_HINT =
-  "Par défaut, ne renvoie que les PS en activité (catégorie professionnelle Civil C ou Militaire M). Passer `include_inactifs: true` pour inclure aussi Retraité (R), Étudiant (E), Suspendu (S), Décédé (D).";
+/**
+ * Hint user-facing exposé dans la description des 3 tools RPPS query. Source
+ * unique de vérité pour la sémantique des flags catégorie professionnelle ;
+ * les LLM lisent cette chaîne au tool-discovery. La base RPPS ne contient
+ * QUE des PS actifs (ANS pré-filtre `PS_LibreAcces_Personne_activite` à la
+ * source — cf. DSFT v3.1 §5.1.2) ; ces flags discriminent un statut
+ * juridique d'enregistrement, pas une activité.
+ */
+const RPPS_INCLUDE_CATEGORIES_HINT = `Par défaut, ne renvoie que les PS de catégorie Civil (C) — droit privé : libéraux, salariés privés, hospitaliers contractuels, ~97 % de la base. Passer \`include_agents_publics: true\` pour inclure aussi les Agents publics (M) — fonctionnaires d'État + collectivités + militaires SSA, ~0,3 % (PH titulaires, médecins inspecteurs ARS, médecins conseils CNAM, médecins scolaires Éducation nationale, médecins PMI). Passer \`include_etudiants: true\` pour inclure aussi les Étudiants (E) — internes, externes, élèves IDE/SF, ~2,5 %. Source nomenclature : ${TRE_R09_URL}.`;
+
+/** Sous-schéma JSON Schema partagé par les 3 tools RPPS query. */
+const RPPS_INCLUDE_CATEGORIES_SCHEMA = {
+  include_etudiants: { type: "boolean" },
+  include_agents_publics: { type: "boolean" },
+} as const;
+
+/**
+ * Traduit les flags MCP `include_etudiants` / `include_agents_publics` en
+ * array `categorieCodes` consommable par les 3 RPCs RPPS. Source unique
+ * pour garantir la même sémantique sur les 3 handlers.
+ *
+ * Throw explicite si le legacy `include_inactifs` (V0.5.4) est passé : la
+ * sémantique a changé en V0.5.5 (cf. CHANGELOG breaking change). Sans ce
+ * throw, un caller cache hit sur l'ancienne tools/list reçoit silencieusement
+ * un sous-ensemble (`[C]` au lieu de `[C,M]` historique) — exactement le
+ * silent failure que la règle projet interdit.
+ */
+export function categorieCodesFromArgs(args: Record<string, unknown>): string[] {
+  if (args.include_inactifs !== undefined) {
+    throw new RangeError(
+      "include_inactifs (V0.5.4) a été retiré en V0.5.5 : utiliser include_agents_publics (=true équivalent au comportement V0.5.4 par défaut, ajoute le code 'M' Agent public) et/ou include_etudiants (ajoute le code 'E' Étudiant). Voir CHANGELOG pour le mapping détaillé.",
+    );
+  }
+  return buildCategorieCodes({
+    includeEtudiants: coerceBoolean(args.include_etudiants, "include_etudiants") === true,
+    includeAgentsPublics:
+      coerceBoolean(args.include_agents_publics, "include_agents_publics") === true,
+  });
+}
 
 export type McpTool = {
   name: string;
@@ -935,7 +972,7 @@ export const TOOLS: McpTool[] = [
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
   {
     name: "professionnels_rpps_in_radius",
-    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_INACTIFS_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. ${RPPS_CGU_NOTICE}`,
+    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -951,7 +988,7 @@ export const TOOLS: McpTool[] = [
         profession_codes: { type: "array", items: { type: "string" } },
         savoir_faire_codes: { type: "array", items: { type: "string" } },
         mode_exercice_codes: { type: "array", items: { type: "string" } },
-        include_inactifs: { type: "boolean" },
+        ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: { type: "number" },
       },
       required: ["center", "radius_km"],
@@ -969,16 +1006,14 @@ export const TOOLS: McpTool[] = [
       if (professionCodes) input.professionCodes = professionCodes;
       if (savoirFaireCodes) input.savoirFaireCodes = savoirFaireCodes;
       if (modeExerciceCodes) input.modeExerciceCodes = modeExerciceCodes;
-      if (coerceBoolean(args.include_inactifs, "include_inactifs") === true) {
-        input.categorieCodes = CATEGORIE_CODES_TOUS_STATUTS;
-      }
+      input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       return await getRppsInRadius(input);
     },
   },
   {
     name: "professionnels_rpps_par_dept",
-    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_INACTIFS_HINT} ${RPPS_CGU_NOTICE}`,
+    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_CATEGORIES_HINT} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -986,7 +1021,7 @@ export const TOOLS: McpTool[] = [
         profession_code: { type: "string" },
         savoir_faire_code: { type: "string" },
         mode_exercice_code: { type: "string" },
-        include_inactifs: { type: "boolean" },
+        ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: { type: "number" },
         offset: { type: "number" },
       },
@@ -1004,9 +1039,7 @@ export const TOOLS: McpTool[] = [
       if (professionCode) input.professionCode = professionCode;
       if (savoirFaireCode) input.savoirFaireCode = savoirFaireCode;
       if (modeExerciceCode) input.modeExerciceCode = modeExerciceCode;
-      if (coerceBoolean(args.include_inactifs, "include_inactifs") === true) {
-        input.categorieCodes = CATEGORIE_CODES_TOUS_STATUTS;
-      }
+      input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
       return await getRppsParSpecialiteDept(input);
@@ -1014,12 +1047,12 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "rpps_dans_etablissement",
-    description: `Liste les professionnels de santé rattachés à un établissement FINESS (par numéro FINESS site, 9 chiffres). C'est le pivot RPPS↔FINESS — répond à "qui travaille dans ce labo / hôpital / clinique ?". Le \`mode_exercice\` distingue les libéraux exerçant sur place (vacations) des salariés. Couverture : RPPS expose ce lien quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts. ${RPPS_INCLUDE_INACTIFS_HINT} ${RPPS_CGU_NOTICE}`,
+    description: `Liste les professionnels de santé rattachés à un établissement FINESS (par numéro FINESS site, 9 chiffres). C'est le pivot RPPS↔FINESS — répond à "qui travaille dans ce labo / hôpital / clinique ?". Le \`mode_exercice\` distingue les libéraux exerçant sur place (vacations) des salariés. Couverture : RPPS expose ce lien quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts. ${RPPS_INCLUDE_CATEGORIES_HINT} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
         num_finess: { type: "string", pattern: "^\\d{9}$" },
-        include_inactifs: { type: "boolean" },
+        ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: { type: "number" },
       },
       required: ["num_finess"],
@@ -1029,9 +1062,7 @@ export const TOOLS: McpTool[] = [
       if (!numFiness) throw new Error("num_finess (string, 9 chiffres) requis");
       const limit = coerceNumber(args.limit, "limit");
       const input: Parameters<typeof getRppsDansEtablissement>[0] = { numFiness };
-      if (coerceBoolean(args.include_inactifs, "include_inactifs") === true) {
-        input.categorieCodes = CATEGORIE_CODES_TOUS_STATUTS;
-      }
+      input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       return await getRppsDansEtablissement(input);
     },

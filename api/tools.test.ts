@@ -3,7 +3,7 @@ import * as ameliDb from "../src/sante/ameli-db.js";
 import * as finessDb from "../src/sante/finess-db.js";
 import * as dinum from "../src/sante/index.js";
 import * as geocode from "../src/territoire/geocode.js";
-import { deptFromCommune, findTool } from "./tools.js";
+import { categorieCodesFromArgs, deptFromCommune, findTool } from "./tools.js";
 
 describe("deptFromCommune", () => {
   it("extrait le département pour la métropole standard", () => {
@@ -740,5 +740,47 @@ describe("coerceNumber loud-failure (silent default guard)", () => {
     await tool?.handler({ lon: 4.72, lat: 49.77, radius_km: null });
     expect(spy).toHaveBeenNthCalledWith(1, expect.objectContaining({ radiusKm: 5 }));
     expect(spy).toHaveBeenNthCalledWith(2, expect.objectContaining({ radiusKm: 5 }));
+  });
+});
+
+// Boundary MCP→TS du filtre catégorie professionnelle RPPS. `buildCategorieCodes`
+// est testé côté lib (`rpps-db.test.ts`) ; ici on verrouille la traduction
+// flags MCP → array et le rejet du legacy `include_inactifs` (silent failure
+// dual : un caller V0.5.4 cache hit recevait sinon `[C]` au lieu de `[C,M]`).
+
+describe("categorieCodesFromArgs", () => {
+  it("retourne Civils seuls quand aucun flag n'est passé", () => {
+    expect(categorieCodesFromArgs({})).toEqual(["C"]);
+  });
+
+  it("ajoute Agents publics (M) quand include_agents_publics=true", () => {
+    expect(categorieCodesFromArgs({ include_agents_publics: true })).toEqual(["C", "M"]);
+  });
+
+  it("ajoute Étudiants (E) quand include_etudiants=true", () => {
+    expect(categorieCodesFromArgs({ include_etudiants: true })).toEqual(["C", "E"]);
+  });
+
+  it("inclut les 3 codes quand les 2 flags sont true", () => {
+    expect(
+      categorieCodesFromArgs({ include_etudiants: true, include_agents_publics: true }),
+    ).toEqual(["C", "M", "E"]);
+  });
+
+  it('accepte la coercition string `"true"` / `"1"` (transports MCP qui stringifient)', () => {
+    expect(categorieCodesFromArgs({ include_agents_publics: "true" })).toEqual(["C", "M"]);
+    expect(categorieCodesFromArgs({ include_etudiants: "1" })).toEqual(["C", "E"]);
+  });
+
+  it("propage en RangeError une valeur ambiguë (mappé -32602 par api/mcp.ts)", () => {
+    expect(() => categorieCodesFromArgs({ include_agents_publics: "yes" })).toThrow(RangeError);
+    expect(() => categorieCodesFromArgs({ include_etudiants: 2 })).toThrow(RangeError);
+  });
+
+  it("rejette explicitement le legacy include_inactifs (V0.5.4 → V0.5.5 breaking)", () => {
+    expect(() => categorieCodesFromArgs({ include_inactifs: true })).toThrow(/V0\.5\.5/);
+    // Même `false` est rejeté : le caller doit migrer vers les nouveaux flags
+    // pour ne pas continuer à propager une intention périmée.
+    expect(() => categorieCodesFromArgs({ include_inactifs: false })).toThrow(/V0\.5\.5/);
   });
 });
