@@ -199,9 +199,13 @@ const ehpad = await searchEtablissements({
 
 ## État du projet
 
-✅ **Version 0.5.4 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS** ingérés (V0.5.1 récupère les ~970 K PS skippés par V0.5.0 via enrichissement FINESS post-INSERT). 374 tests verts, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+✅ **Version 0.5.6 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS actifs** ingérés (l'ANS pré-filtre `PS_LibreAcces_Personne_activite` aux PS actifs à la source — cf. DSFT v3.1 §5.1.2 — donc aucun retraité, suspendu, radié ou décédé en base). 417 tests verts (398 unit + 19 integration), TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
 
-V0.5.2/.3/.4 ont stabilisé `professionnels_rpps_par_dept` sur dept dense (75/13) : timeout 15 s → < 1 s. Diagnostic et fix dans le [CHANGELOG](CHANGELOG.md#054-2026-05-10) (PostgREST `json_to_record LATERAL` + `EXECUTE format ... %L` pour custom plan + index couvrant `(code_departement, code_insee, nom, prenom, id)`).
+**V0.5.6 (10 mai 2026)** — Canary RPPS : remplacement des 3 IDNPS placeholder V0.5.0 par 3 référents stables sourcés via le serveur MCP lui-même (Dr ABABEI psychiatre Paris, IDE ABBAS MOUSSA Aix, Pharmacien BLANCHARD Réunion). Bug pré-existant V0.5.0 → V0.5.5 fixé : regex `getRppsById` `/^\d{11}$/` rejetait les vrais IDs 12 chars en base (préfixe `81` Type d'identifiant PP nomenclature TRE_G08 ANS) — tool MCP `professionnel_by_rpps` était cassé en prod sans détection. Voir [CHANGELOG](CHANGELOG.md#056-2026-05-10).
+
+**V0.5.5 (10 mai 2026)** — Catégories ANS [TRE_R09](https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/) : breaking change MCP, `include_inactifs` retiré, remplacé par `include_etudiants` + `include_agents_publics`. Default = Civils seuls. Validation empirique base prod = 3 codes seulement (`C` 97,2 %, `E` 2,5 %, `M` 0,3 %), codes fictifs `R/S/D` supprimés. Voir [CHANGELOG](CHANGELOG.md#055-2026-05-10).
+
+**V0.5.2/.3/.4** ont stabilisé `professionnels_rpps_par_dept` sur dept dense (75/13) : timeout 15 s → < 1 s. Diagnostic et fix dans le [CHANGELOG](CHANGELOG.md#054-2026-05-10) (PostgREST `json_to_record LATERAL` + `EXECUTE format ... %L` pour custom plan + index couvrant `(code_departement, code_insee, nom, prenom, id)`).
 
 ### Fait
 
@@ -209,8 +213,10 @@ V0.5.2/.3/.4 ont stabilisé `professionnels_rpps_par_dept` sur dept dense (75/13
 - [x] `entreprises` — DINUM Recherche Entreprises + fallback INSEE SIRENE V3.11 (2 tools)
 - [x] `FINESS` — ingestion data.gouv → Supabase + PostGIS, 24 familles, atomic swap, canary post-swap (3 tools)
 - [x] `Annuaire Santé Ameli` — pipeline weekly, géocodage centroïde commune, libellés data-driven (4 tools)
-- [x] **`RPPS / Annuaire Santé ANS`** — pipeline mensuel ~2,2 M PS, ID national stable, pivot PS↔FINESS, enrichissement FINESS post-INSERT, filtre catégorie pro, fallback live FHIR ANS (4 tools, V0.5.1)
-- [x] **Perf dept dense** — timeout 15s → < 1 s sur dept 75/13 via index couvrant `(code_departement, code_insee, nom, prenom, id)` + `EXECUTE format` plpgsql pour custom plan PostgREST (V0.5.2 → V0.5.4)
+- [x] **`RPPS / Annuaire Santé ANS`** — pipeline mensuel ~2,2 M PS actifs, ID national stable (11 ou 12 chiffres), pivot PS↔FINESS, enrichissement FINESS post-INSERT, filtre catégorie pro granulaire (`include_etudiants` / `include_agents_publics`), fallback live FHIR ANS (4 tools, V0.5.6)
+- [x] **Perf dept dense** — timeout 15 s → < 1 s sur dept 75/13 via index couvrant `(code_departement, code_insee, nom, prenom, id)` + `EXECUTE format` plpgsql pour custom plan PostgREST (V0.5.2 → V0.5.4)
+- [x] **Nomenclature ANS TRE_R09 alignée** — 3 codes catégorie réels (Civil / Étudiant / Agent public), codes fictifs `R/S/D` supprimés, garde-fou runtime sur legacy `include_inactifs` (V0.5.5)
+- [x] **Canary RPPS référents stables** — 3 IDNPS sourcés en prod (couverture 75/13/974 + Médecin/IDE/Pharmacien) au lieu des placeholders sentinel V0.5.0 (V0.5.6)
 - [x] Pipeline ingestion durci — SHA256 short-circuit, threshold parsedCoordRejected, atomic swap reversible
 - [x] Serveur MCP HTTP déployé sur Vercel
 - [x] Documentation Charleville-Mézières reproductible (`examples/charleville.ts`)
