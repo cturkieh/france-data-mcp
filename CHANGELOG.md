@@ -4,6 +4,120 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.5.7] — 2026-05-11
+
+**Garde-fous publics : rate limit + observabilité structurée sur l'endpoint MCP**
+
+Avant cette version, `https://france-data-mcp.vercel.app/mcp` était totalement
+ouvert et sans logging structuré. Un scraper agressif (ou un bot d'indexation
+mal configuré) pouvait faire exploser la facture Vercel/Supabase, et il n'y
+avait aucun moyen de distinguer trafic humain vs trafic bot dans les logs ops.
+Cette version pose les fondations minimales avant le lancement public
+(Smithery + listings MCP).
+
+### Ajouté
+- **Rate limit 60 req/min par IP sur `tools/call`** (`api/_lib/rate-limit.ts`).
+  Backend principal : Upstash Redis sliding window via REST (latence ~50 ms
+  depuis Vercel Frankfurt). Fallback in-memory `Map<string, bucket>` cappé à
+  10 000 IPs distinctes par instance chaude — déclenché si les env Upstash
+  sont absentes OU si l'appel Upstash throw. Politique fail-open documentée :
+  un blip Redis ne casse pas l'endpoint pour tous les users.
+- **Logging JSON structuré par requête** (`api/_lib/observability.ts`).
+  Une ligne par sous-requête JSON-RPC avec `ts`, `component`, `method`, `tool`,
+  `ip_hash`, `user_agent`, `duration_ms`, `status`, `outcome` (union fermé
+  `success | rate_limited | not_found | bad_request | internal_error`) et
+  `extra` (champs custom). Niveau auto via `levelFromStatus()` : ≥500 →
+  `console.error`, ≥400 → `console.warn`, sinon `console.log`. Vercel logs
+  capture stdout/stderr ; chaque ligne JSON est aggregable jq/BigQuery/Datadog.
+- **Variables d'env (toutes optionnelles)** dans `.env.example` :
+  `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`,
+  `RATE_LIMIT_PER_MINUTE` (default 60), `RATE_LIMIT_ENABLED` (default true,
+  `false` désactive complètement pour dev local).
+- **Émission d'event sur HTTP 405 / 400 early reject** : un client mal
+  configuré (GET ou POST vide) apparaît désormais dans les logs structurés
+  avec `outcome: "bad_request"`. Permet d'agréger le bruit côté ops et de
+  détecter un DoS log-silent.
+- **`scripts/smoke-mcp.ts`** : smoke test local du handler MCP (handshake +
+  rate limit + batch JSON-RPC partiel). Exécutable via
+  `pnpm exec tsx scripts/smoke-mcp.ts`.
+- 31 tests unitaires : `api/_lib/rate-limit.test.ts` (16 tests : extractIp
+  anti-spoofing, hashIp stable, getRateLimitPerMinute, checkRateLimit
+  désactivé/in-memory), `api/_lib/observability.test.ts` (15 tests :
+  extractUserAgent, format payload, niveau de log, protection canoniques,
+  serialize-safe sur objet circulaire).
+
+### Sécurité
+- **CRITICAL `extractIp` anti-spoofing** — le réflexe naïf est de prendre le
+  premier segment de `x-forwarded-for`, mais ce header est trivialement
+  spoofable côté client (Vercel APPEND la vraie IP edge en queue, pas en
+  tête). Implémentation finale : prioriser `x-real-ip` (single-value posé
+  par l'edge Vercel, non-spoofable), fallback sur le DERNIER segment non
+  vide de `x-forwarded-for`, fallback final `socket.remoteAddress`. Test
+  explicite : `x-forwarded-for: "1.1.1.1, 203.0.113.42"` → on prend bien
+  `203.0.113.42`.
+- **`extra` ne peut écraser AUCUN champ canonique** — le spread de
+  `event.extra` est placé AVANT les champs canoniques (`ts`, `component`,
+  `method`, `tool`, `ip_hash`, `user_agent`, `duration_ms`, `status`,
+  `outcome`) dans le payload final. Garantie testée : un caller malveillant
+  ne peut pas envoyer `extra: { status: 999, outcome: "spoofed" }` pour
+  polluer les agrégations ops.
+- **IP hashée SHA-256 tronquée 16 chars** avant tout log/stockage Redis
+  (zéro IP en clair persistée, RGPD-friendly).
+
+### Robustesse
+- **Throttle log Upstash par signature d'erreur** — un outage Upstash 1 h
+  émettrait normalement des centaines de milliers de lignes
+  `console.error` (1 par tools/call rate-limité). On limite à 1 ligne par
+  minute PAR SIGNATURE d'erreur (`Map<string, number>`) : si l'erreur passe
+  de `ECONNRESET` (blip réseau) à `WRONGPASS` (token révoqué), le second
+  mode loggue immédiatement plutôt que d'être masqué par le throttle du
+  premier.
+- **`serializeSafe` pour `JSON.stringify(payload)`** — si `extra` contient
+  un objet circulaire (Error avec `cause` self-référencée, par ex.), on
+  émet un payload dégradé (champs canoniques seuls + `log_serialize_error`)
+  plutôt que de throw et perdre toute la ligne.
+- **Guard `tool.handler() === undefined`** — `JSON.stringify(undefined)`
+  retourne la string `"undefined"` (pas un JSON valide), qui passait
+  silencieusement au client MCP comme `text: undefined`. Désormais retourne
+  `-32603 Tool X returned no value` + log `outcome: "internal_error"`.
+- **Distinction `malformed_request` vs `unknown`** dans le batch loop catch
+  — permet d'isoler les payloads cassés (request null ou non-objet) des
+  pannes internes.
+
+### Architecture
+- **Rate limit appliqué UNIQUEMENT sur `tools/call`** — les méthodes meta
+  `initialize`, `tools/list`, `ping`, `notifications/initialized` restent
+  libres. Sinon le handshake MCP casse pour les clients qui
+  re-`tools/list` souvent (Claude Desktop refresh périodique, Cursor reload,
+  etc.). Le rate limit existe pour protéger les ressources Supabase, pas
+  le handshake stateless.
+- **Helper `emit()` unifié** dans `api/mcp.ts` — un seul site de log par
+  sous-requête JSON-RPC (vs 8 invocations dupliquées avant
+  refactorisation), garantit `durationMs`/`ipHash`/`userAgent` toujours
+  présents.
+
+### Modifié
+- `api/mcp.ts` : branchement rate limit + logging, refactor `emit()`,
+  `extractIp`/`hashIp`/`extractUserAgent` posés en `ctx` une fois par
+  requête HTTP, cascade `isClientError` → `if/else` explicite.
+- `package.json` : ajout deps `@upstash/ratelimit ^2.0.8`,
+  `@upstash/redis ^1.38.0`.
+- `.env.example` : documentation des 4 nouvelles variables d'env Upstash /
+  rate limit.
+
+### Notes opérationnelles
+- Sans `UPSTASH_REDIS_REST_*` configurés en prod Vercel, le rate limit tombe
+  sur le fallback in-memory : protège les bursts dans une instance chaude
+  unique, **pas les flood distribués sur plusieurs instances serverless en
+  parallèle**. Recommandation forte : créer une base Upstash gratuite
+  (Frankfurt eu-west-1) et configurer les 2 env vars avant le lancement
+  public.
+- Aucun argument tool n'est loggé par défaut (sécurité). Pour activer pour
+  debug ponctuel, créer un flag `LOG_TOOL_ARGS=true` plutôt que de l'activer
+  en dur.
+- 429/429 tests verts (398 unit + 31 nouveaux rate-limit/observability),
+  tsc clean, Biome clean.
+
 ## [0.5.6] — 2026-05-10
 
 **Canary RPPS — remplacement des 3 IDNPS placeholder par des référents stables**

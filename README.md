@@ -197,9 +197,49 @@ const ehpad = await searchEtablissements({
 
 ---
 
+## Garde-fous publics (V0.5.7)
+
+L'endpoint MCP public est protégé par 2 mécanismes minimaux :
+
+### Rate limit — 60 req/min par IP sur `tools/call`
+
+- Sliding window Upstash Redis (latence ~50 ms depuis Vercel Frankfurt), fallback in-memory si Upstash indispo.
+- **Ne s'applique PAS aux méthodes meta** `initialize`, `tools/list`, `ping` — sinon le handshake MCP casse pour les clients qui re-listent les tools souvent (Claude Desktop refresh périodique, etc.).
+- Réponse en dépassement : JSON-RPC error code `-32000 Rate limit exceeded`, avec `data.retryAfterSeconds`, `data.limit`, `data.resetAt`. Le statut HTTP reste 200 (conformité JSON-RPC 2.0).
+- **Anti-spoofing** : l'IP est extraite de `x-real-ip` (header non-spoofable posé par l'edge Vercel) en priorité, et seulement à défaut du DERNIER segment de `x-forwarded-for` (Vercel append la vraie IP en queue, pas en tête — prendre le premier segment serait un bypass trivial).
+- IP hashée SHA-256 tronquée 16 chars avant tout log/stockage Redis (zéro IP en clair, RGPD-friendly).
+
+### Logging JSON structuré — 1 ligne par requête
+
+Chaque sous-requête JSON-RPC émet une ligne JSON dans `vercel logs` :
+
+```json
+{"ts":"2026-05-11T08:42:13.521Z","component":"mcp-endpoint","method":"tools/call","tool":"autocomplete_commune","ip_hash":"deadbeefcafe1234","user_agent":"Claude/1.0 (claude.ai)","duration_ms":42,"status":200,"outcome":"success","rl_remaining":59}
+```
+
+- `outcome` est un union fermé : `success | rate_limited | not_found | bad_request | internal_error`. Permet l'agrégation jq/BigQuery/Datadog sans surprise.
+- Niveau auto : ≥500 → `console.error`, ≥400 → `console.warn`, sinon `console.log`.
+- Aucun argument tool n'est loggé par défaut (sécurité). Pour debug ponctuel, prévoir un flag `LOG_TOOL_ARGS=true` à activer manuellement.
+- Le payload des early-rejects (`405 method not allowed`, `400 missing body`) est aussi loggé → un client mal configuré ou un scraper apparaît dans les agrégations ops.
+
+### Variables d'environnement (toutes optionnelles)
+
+| Variable | Default | Effet |
+|---|---|---|
+| `UPSTASH_REDIS_REST_URL` | _vide_ | Active le rate limit Upstash. Sans cette var, fallback in-memory. |
+| `UPSTASH_REDIS_REST_TOKEN` | _vide_ | Token associé à l'URL Upstash. |
+| `RATE_LIMIT_PER_MINUTE` | `60` | Plafond requêtes / minute / IP. |
+| `RATE_LIMIT_ENABLED` | `true` | `false` désactive le rate limit (dev local uniquement). |
+
+Pour le **self-hosting** : créer une base Upstash gratuite sur [console.upstash.com/redis](https://console.upstash.com/redis), région Frankfurt eu-west-1 recommandée (colocalisée avec Vercel CDG), copier l'URL + token depuis l'onglet "REST API", coller dans les env vars Vercel. Tier free suffit largement pour un MCP public.
+
+---
+
 ## État du projet
 
-✅ **Version 0.5.6 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS actifs** ingérés (l'ANS pré-filtre `PS_LibreAcces_Personne_activite` aux PS actifs à la source — cf. DSFT v3.1 §5.1.2 — donc aucun retraité, suspendu, radié ou décédé en base). 417 tests verts (398 unit + 19 integration), TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+✅ **Version 0.5.7 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS actifs** ingérés (l'ANS pré-filtre `PS_LibreAcces_Personne_activite` aux PS actifs à la source — cf. DSFT v3.1 §5.1.2 — donc aucun retraité, suspendu, radié ou décédé en base). 429 tests verts (398 + 31 nouveaux rate-limit/observability), TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+
+**V0.5.7 (11 mai 2026)** — Garde-fous publics avant lancement Smithery / listings MCP : **rate limit 60 req/min par IP** sur `tools/call` (Upstash Redis sliding window + fallback in-memory), **logging JSON structuré** par requête (ts, method, tool, ip_hash SHA-256, user_agent, duration_ms, status, outcome). Anti-spoofing `extractIp` priorise `x-real-ip` (non-spoofable Vercel) plutôt que `x-forwarded-for[0]`. Voir section [Garde-fous publics](#garde-fous-publics-v057) ci-dessous et [CHANGELOG](CHANGELOG.md#057-2026-05-11).
 
 **V0.5.6 (10 mai 2026)** — Canary RPPS : remplacement des 3 IDNPS placeholder V0.5.0 par 3 référents stables sourcés via le serveur MCP lui-même (Dr ABABEI psychiatre Paris, IDE ABBAS MOUSSA Aix, Pharmacien BLANCHARD Réunion). Bug pré-existant V0.5.0 → V0.5.5 fixé : regex `getRppsById` `/^\d{11}$/` rejetait les vrais IDs 12 chars en base (préfixe `81` Type d'identifiant PP nomenclature TRE_G08 ANS) — tool MCP `professionnel_by_rpps` était cassé en prod sans détection. Voir [CHANGELOG](CHANGELOG.md#056-2026-05-10).
 
@@ -217,6 +257,7 @@ const ehpad = await searchEtablissements({
 - [x] **Perf dept dense** — timeout 15 s → < 1 s sur dept 75/13 via index couvrant `(code_departement, code_insee, nom, prenom, id)` + `EXECUTE format` plpgsql pour custom plan PostgREST (V0.5.2 → V0.5.4)
 - [x] **Nomenclature ANS TRE_R09 alignée** — 3 codes catégorie réels (Civil / Étudiant / Agent public), codes fictifs `R/S/D` supprimés, garde-fou runtime sur legacy `include_inactifs` (V0.5.5)
 - [x] **Canary RPPS référents stables** — 3 IDNPS sourcés en prod (couverture 75/13/974 + Médecin/IDE/Pharmacien) au lieu des placeholders sentinel V0.5.0 (V0.5.6)
+- [x] **Garde-fous publics V0.5.7** — rate limit 60 req/min par IP (Upstash + fallback in-memory), logging JSON structuré, anti-spoofing `x-real-ip`, throttle log Upstash par signature d'erreur, serialize-safe fallback
 - [x] Pipeline ingestion durci — SHA256 short-circuit, threshold parsedCoordRejected, atomic swap reversible
 - [x] Serveur MCP HTTP déployé sur Vercel
 - [x] Documentation Charleville-Mézières reproductible (`examples/charleville.ts`)

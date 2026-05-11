@@ -21,7 +21,7 @@ Brings together the most useful French government data sources (FINESS healthcar
 
 ## Status
 
-✅ **v0.5.5 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing 17 tools. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. TypeScript strict, Biome clean. v0.5.5 aligns the RPPS professional-category filter on the official ANS [TRE_R09](https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/) nomenclature: 3 codes only (`C` Civil, `E` Student, `M` Public agent), default returns Civils only, breaking change `include_inactifs` → `include_etudiants` + `include_agents_publics`. See [CHANGELOG](CHANGELOG.md) for diagnostic details.
+✅ **v0.5.7 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing 17 tools. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. TypeScript strict, Biome clean, 429 tests passing. v0.5.7 ships public-facing safeguards before Smithery / MCP-registry listings: **60 req/min per-IP rate limit** on `tools/call` (Upstash sliding window + in-memory fallback), **structured JSON logging** per request, anti-spoofing IP extraction (prefer `x-real-ip` over `x-forwarded-for[0]`). See [CHANGELOG](CHANGELOG.md#057-2026-05-11).
 
 ## Tools (17)
 
@@ -49,6 +49,10 @@ URL: https://france-data-mcp.vercel.app/mcp
 ```
 
 See [docs/installation-claude.md](docs/installation-claude.md) for client-by-client setup (claude.ai, Claude Desktop, Cursor, Claude Code).
+
+## Public limits (V0.5.7)
+
+The public endpoint enforces **60 req/min per IP** on `tools/call` (handshake methods `initialize` / `tools/list` / `ping` stay free). Over the limit, the server returns a JSON-RPC error code `-32000` with `data.retryAfterSeconds`. Heavy / batch users should throttle client-side or self-host. Every request is logged as structured JSON (`ts`, `method`, `tool`, `ip_hash` SHA-256, `user_agent`, `duration_ms`, `status`, `outcome`). No tool arguments are persisted; IPs are hashed before any log or Redis store (GDPR-friendly).
 
 ## Roadmap
 
