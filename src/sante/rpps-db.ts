@@ -26,6 +26,7 @@ import {
   rppsDeptMetadata,
   rppsEtablissementMetadata,
   rppsRadiusMetadata,
+  rppsSearchByNameMetadata,
 } from "../core/query-metadata.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";
@@ -73,6 +74,12 @@ export interface RppsResult {
   coords: { lat: number; lon: number } | null;
   distance_km: number | null;
   telephone: string | null;
+  /**
+   * Score de pertinence trigram (0..1) — présent uniquement pour les retours
+   * de `rpps_search_by_name`. Permet au caller de filtrer les homonymies
+   * partielles (typiquement `< 0.5`).
+   */
+  match_score?: number;
 }
 
 export interface RppsLookupResult extends RppsResult {
@@ -116,6 +123,21 @@ export interface RppsDansEtablissementInput {
   /** Numéro FINESS (9 chiffres) du site d'exercice. */
   numFiness: string;
   /** Voir `RppsInRadiusInput.categorieCodes`. */
+  categorieCodes?: string[];
+  limit?: number;
+}
+
+export interface RppsSearchByNameInput {
+  /** Nom de famille (obligatoire, non vide après trim). */
+  nom: string;
+  /** Prénom (optionnel — sans, le matching ne porte que sur le nom). */
+  prenom?: string;
+  /** Code département (2 chiffres métropole/Corse, 3 pour DOM). Optionnel. */
+  departement?: string;
+  /**
+   * Codes catégorie ANS TRE_R09. Vide ou omis → default `[C]` (Civil seul),
+   * cohérent avec les 3 autres tools RPPS.
+   */
   categorieCodes?: string[];
   limit?: number;
 }
@@ -258,6 +280,58 @@ export async function getRppsDansEtablissement(
 }
 
 /**
+ * Recherche fuzzy par identité (nom, prenom?, departement?). Utilise pg_trgm
+ * `similarity()` côté SQL avec index GIN trigram sur `lower(nom)` et
+ * `lower(prenom)` (migration `20260511T100000_rpps_search_by_name`). Tri par
+ * score décroissant.
+ *
+ * Comportement edge cases :
+ * - `nom` vide ou whitespace → throw `RangeError` (validation côté SQL aussi)
+ * - `departement` mal formé → throw via la RPC (ERRCODE 22023)
+ * - aucune correspondance → `{ count: 0, results: [] }`
+ */
+export async function getRppsByName(input: RppsSearchByNameInput): Promise<RppsQueryResult> {
+  const nom = input.nom.trim();
+  if (nom.length === 0) {
+    throw new RangeError(
+      "[france-data-mcp] rpps_search_by_name: nom est requis (non vide après trim).",
+    );
+  }
+  const prenom = input.prenom?.trim();
+  const limit = clampLimit(input.limit);
+  if (input.departement !== undefined) assertValidDept(input.departement);
+  // Default `[C]` (Civil seul) cohérent avec les 3 autres tools RPPS — un
+  // caller cherchant un PS par nom récupère par défaut les libéraux + salariés
+  // privés + hospitaliers contractuels, pas les étudiants ni les agents publics.
+  const categorieCodes =
+    input.categorieCodes && input.categorieCodes.length > 0
+      ? input.categorieCodes
+      : [...CATEGORIE_CODES_DEFAUT];
+
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("rpps_search_by_name", {
+    p_nom: nom,
+    // RPC accepte NULL pour "pas de filtre prenom". `??` couvre prenom omis
+    // (undefined) ET vide après trim (chaîne vide).
+    p_prenom: prenom && prenom.length > 0 ? prenom : null,
+    p_departement: input.departement ?? null,
+    p_categorie_codes: categorieCodes,
+    p_limit: limit + 1,
+  });
+
+  if (error) throw new Error(formatRpcError("rpps_search_by_name", error));
+  const rows = expectRpcRows<RawRppsSearchRow>("rpps_search_by_name", data);
+  const truncated = rows.length > limit;
+  const sliced = truncated ? rows.slice(0, limit) : rows;
+  return {
+    count: sliced.length,
+    truncated,
+    results: sliced.map(toSearchResult),
+    query_metadata: rppsSearchByNameMetadata(),
+  };
+}
+
+/**
  * Lookup individuel par RPPS ID. Renvoie N rows quand un PS multi-sites
  * existe (1 ligne par site). Le caller MCP aplatit en `(rpps_id, sites[])`.
  */
@@ -350,6 +424,11 @@ interface RawRppsLookupRow extends RawRppsRow {
   email: string | null;
 }
 
+interface RawRppsSearchRow extends RawRppsRow {
+  /** Score trigram pg_trgm (0..1) — voir migration `20260511T100000_rpps_search_by_name`. */
+  match_score: number | null;
+}
+
 function toResult(row: RawRppsRow): RppsResult {
   // Si geom est présent mais coordinates malformé (entry undefined), on retombe
   // explicitement sur null plutôt qu'un (0, 0) golfe de Guinée silencieux.
@@ -425,4 +504,15 @@ function toLookupResult(row: RawRppsLookupRow): RppsLookupResult {
     siren: row.siren,
     email: row.email,
   };
+}
+
+function toSearchResult(row: RawRppsSearchRow): RppsResult {
+  // `match_score` est ajouté uniquement quand la RPC l'a calculé (numeric
+  // valide). Si la RPC renvoie `null` (cas dégénéré improbable), on omet le
+  // champ plutôt que de leak un `match_score: null` côté caller MCP.
+  const base = toResult(row);
+  if (typeof row.match_score === "number" && Number.isFinite(row.match_score)) {
+    return { ...base, match_score: row.match_score };
+  }
+  return base;
 }

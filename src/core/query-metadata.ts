@@ -93,3 +93,18 @@ export const rppsDeptMetadata = (): QueryMetadata => buildMetadata("centroide_co
 
 export const rppsEtablissementMetadata = (): QueryMetadata =>
   buildMetadata("structure_finess", false);
+
+/**
+ * Métadonnées pour `rpps_search_by_name` : recherche fuzzy par identité. La
+ * géo précision reste celle d'ANS (centroïde commune) ; l'ajout sémantique est
+ * la note de scoring trigram qui prévient le caller que les résultats sont
+ * triés par pertinence et non par exactitude, et qu'un `match_score < 0.5`
+ * indique souvent une homonymie partielle.
+ */
+export const rppsSearchByNameMetadata = (): QueryMetadata => {
+  const md = buildMetadata("centroide_commune_ans", false);
+  md.notes.push(
+    "Résultats triés par similarité trigram (pg_trgm) sur nom + prénom. Le champ `match_score` (0..1) indique la pertinence — un score < 0.5 = homonymie partielle, à confirmer côté caller.",
+  );
+  return md;
+};

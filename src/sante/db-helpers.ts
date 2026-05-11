@@ -118,6 +118,22 @@ export function trimOrNull(s: string | null | undefined): string | null {
 }
 
 /**
+ * Valide un numéro FINESS site (9 chiffres) côté boundary public. Renvoie le
+ * `numFiness` trimmed pour que le caller forward la version normalisée à la
+ * RPC. Throw `RangeError` (mappé JSON-RPC -32602 par `api/mcp.ts`) sur format
+ * invalide. Aligné sur `assertValidDept` (territoire/dept-codes.ts).
+ */
+export function assertValidNumFiness(numFiness: string): string {
+  const trimmed = numFiness.trim();
+  if (!/^\d{9}$/.test(trimmed)) {
+    throw new RangeError(
+      `[france-data-mcp] num_finess invalide "${numFiness}" — attendu 9 chiffres (FINESS site).`,
+    );
+  }
+  return trimmed;
+}
+
+/**
  * Normalise le `data` retourné par un RPC supabase-js en array typé.
  *
  * Supabase RPC convention : sur un SETOF, `error == null` ⇒ `data` est un

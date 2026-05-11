@@ -21,6 +21,7 @@ import {
   CATEGORIE_CODE_ETUDIANT,
   buildCategorieCodes,
   getRppsById,
+  getRppsByName,
 } from "./rpps-db.js";
 
 // Pure unit tests pour les helpers catégorie ANS TRE_R09. Verrouille le
@@ -183,5 +184,171 @@ describe("getRppsById — format rpps_id (V0.5.6 fix)", () => {
     await expect(getRppsById("  810005156566  ")).resolves.toEqual([]);
     // Le rpps_id passé à la RPC est trimmed (pas avec les whitespaces).
     expect(mockRpc).toHaveBeenCalledWith("rpps_lookup_by_id", { p_rpps_id: "810005156566" });
+  });
+});
+
+describe("getRppsByName — V0.6.0 search par identité", () => {
+  beforeEach(() => {
+    mockRpc.mockClear();
+    mockRpc.mockResolvedValue({ data: [], error: null });
+  });
+
+  it("nom seul → p_prenom null, p_departement null", async () => {
+    await getRppsByName({ nom: "MARTIN" });
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    expect(mockRpc).toHaveBeenCalledWith("rpps_search_by_name", {
+      p_nom: "MARTIN",
+      p_prenom: null,
+      p_departement: null,
+      p_categorie_codes: ["C"],
+      p_limit: 101,
+    });
+  });
+
+  it("nom + prenom + dept → tous les params passés à la RPC", async () => {
+    await getRppsByName({ nom: "Martin", prenom: "Jean", departement: "75" });
+    expect(mockRpc).toHaveBeenCalledWith("rpps_search_by_name", {
+      p_nom: "Martin",
+      p_prenom: "Jean",
+      p_departement: "75",
+      p_categorie_codes: ["C"],
+      p_limit: 101,
+    });
+  });
+
+  it("trim systématique sur nom/prenom (cohérent avec les autres tools)", async () => {
+    await getRppsByName({ nom: "  Martin  ", prenom: "  Jean  " });
+    expect(mockRpc).toHaveBeenCalledWith("rpps_search_by_name", {
+      p_nom: "Martin",
+      p_prenom: "Jean",
+      p_departement: null,
+      p_categorie_codes: ["C"],
+      p_limit: 101,
+    });
+  });
+
+  it("prenom vide après trim → traité comme absent (p_prenom null)", async () => {
+    await getRppsByName({ nom: "Martin", prenom: "   " });
+    expect(mockRpc).toHaveBeenCalledWith("rpps_search_by_name", {
+      p_nom: "Martin",
+      p_prenom: null,
+      p_departement: null,
+      p_categorie_codes: ["C"],
+      p_limit: 101,
+    });
+  });
+
+  it("nom vide ou whitespace → RangeError AVANT appel RPC", async () => {
+    await expect(getRppsByName({ nom: "" })).rejects.toThrow(RangeError);
+    await expect(getRppsByName({ nom: "   " })).rejects.toThrow(RangeError);
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  it("departement malformé → throw via assertValidDept AVANT appel RPC", async () => {
+    await expect(getRppsByName({ nom: "Martin", departement: "ZZ" })).rejects.toThrow();
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  it("Corse 2A/2B accepté par assertValidDept", async () => {
+    await getRppsByName({ nom: "Martin", departement: "2A" });
+    expect(mockRpc).toHaveBeenCalled();
+  });
+
+  it("DOM/COM 3-chiffres accepté (974, 988, 971…)", async () => {
+    await getRppsByName({ nom: "Martin", departement: "974" });
+    expect(mockRpc).toHaveBeenCalled();
+  });
+
+  it("limit custom propagé en p_limit + 1 (détection truncated)", async () => {
+    await getRppsByName({ nom: "Martin", limit: 5 });
+    expect(mockRpc).toHaveBeenCalledWith(
+      "rpps_search_by_name",
+      expect.objectContaining({ p_limit: 6 }),
+    );
+  });
+
+  it("mappe match_score depuis row.match_score quand finite", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [
+        {
+          id: 1,
+          rpps_id: "810005156566",
+          civilite: null,
+          nom: "MARTIN",
+          prenom: "JEAN",
+          profession_code: null,
+          profession_libelle: null,
+          savoir_faire_code: null,
+          savoir_faire_libelle: null,
+          mode_exercice_code: null,
+          mode_exercice_libelle: null,
+          categorie_code: "C",
+          categorie_libelle: "Civil",
+          num_finess: null,
+          num_finess_ej: null,
+          siret: null,
+          raison_sociale: null,
+          adresse: null,
+          code_postal: null,
+          ville: null,
+          code_departement: "75",
+          code_insee: null,
+          telephone: null,
+          geom: null,
+          match_score: 0.87,
+        },
+      ],
+      error: null,
+    });
+
+    const result = await getRppsByName({ nom: "Martin" });
+    expect(result.count).toBe(1);
+    expect(result.results[0]?.match_score).toBe(0.87);
+  });
+
+  it("omet match_score quand row.match_score est null ou non-finite", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [
+        {
+          id: 1,
+          rpps_id: "810005156566",
+          civilite: null,
+          nom: "MARTIN",
+          prenom: "JEAN",
+          profession_code: null,
+          profession_libelle: null,
+          savoir_faire_code: null,
+          savoir_faire_libelle: null,
+          mode_exercice_code: null,
+          mode_exercice_libelle: null,
+          categorie_code: "C",
+          categorie_libelle: "Civil",
+          num_finess: null,
+          num_finess_ej: null,
+          siret: null,
+          raison_sociale: null,
+          adresse: null,
+          code_postal: null,
+          ville: null,
+          code_departement: "75",
+          code_insee: null,
+          telephone: null,
+          geom: null,
+          match_score: null,
+        },
+      ],
+      error: null,
+    });
+
+    const result = await getRppsByName({ nom: "Martin" });
+    expect(result.results[0]).not.toHaveProperty("match_score");
+  });
+
+  it("attache rppsSearchByNameMetadata (note trigram dans query_metadata.notes)", async () => {
+    const result = await getRppsByName({ nom: "Martin" });
+    expect(result.query_metadata?.geo_precision).toBe("centroide_commune_ans");
+    const notesJoined = result.query_metadata?.notes.join(" ") ?? "";
+    expect(notesJoined).toContain("similarité trigram");
+    expect(notesJoined).toContain("match_score");
   });
 });

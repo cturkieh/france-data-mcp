@@ -4,6 +4,120 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.6.2] — 2026-05-11
+
+**Croisement multi-source FINESS ↔ RPPS ↔ SIRENE — 3 nouveaux tools de réconciliation**
+
+Cette version conclut le cycle V0.6 (7 nouveaux tools ajoutés en cumulé) en
+livrant les primitives de croisement multi-source. Détecte les divergences
+factuelles entre référentiels FINESS DREES (bimestriel), RPPS / Annuaire
+Santé ANS (mensuel) et SIRENE INSEE V3.11 (live). Aucune interprétation
+métier : les tools renvoient les faits, le caller décide.
+
+### Ajouté
+
+- **`compare_raison_sociale_finess_vs_rpps(num_finess)`** : compare la raison
+  sociale FINESS DREES vs RPPS / Annuaire Santé ANS pour un même `num_finess`.
+  Retourne `exact_match` / `divergent_after_normalization` / `rpps_absent`.
+  Utile pour détecter les rebrandings post-M&A que FINESS n'a pas encore
+  propagés. Pas d'interprétation : le tool ne dit pas qui a racheté qui.
+- **`historique_etablissement(num_finess)`** : reconstitue la timeline
+  complète (toutes les périodes administratives) d'un établissement via
+  SIRENE INSEE V3.11 pour chaque SIRET candidat trouvé en RPPS. Permet
+  d'identifier la date de fermeture exacte d'un SIRET encore listé actif
+  côté FINESS, ou de comprendre une cascade de rebrandings via les
+  changements de `enseigne1Etablissement`.
+- **`reconcilier_finess_sirene(num_finess)`** : calcule un score de cohérence
+  Sørensen-Dice (sur bigrammes) entre FINESS DREES et SIRENE pour chaque
+  SIRET candidat. Trois sous-scores (nom 0.5, adresse 0.4, téléphone 0.1)
+  + verdict brut `match` (≥0.8) / `partial` (0.5..0.8) / `mismatch` (<0.5).
+  Algorithme public (Sørensen-Dice depuis 1948), aucune valeur propriétaire.
+  Le champ `skipped[]` expose les SIRET qu'on n'a pas pu réconcilier
+  (lookup SIRENE rejected ou not_found) avec la raison.
+- **`lookupSiretHistoriqueViaInsee(siret)`** côté lib : variante de
+  `lookupSiretViaInsee` qui retourne en plus les `periodes` historiques
+  triées chronologiquement (timeline complète actif/fermé/NAF/enseigne).
+
+### Modifié
+
+- Boucles de lookup INSEE parallélisées via `Promise.allSettled` dans
+  `verifierSiteActif` / `historiqueEtablissement` / `reconcilierFinessSirene` :
+  p99 latency divisée par N (typiquement N ≤ 3 SIRET candidats).
+- Helper `assertValidNumFiness` factorisé dans `src/sante/db-helpers.ts`
+  (élimine 4 duplications du regex `/^\d{9}$/` côté cross-source).
+- 5 handlers MCP cross-source : `throw new Error` → `throw new RangeError`
+  pour input manquant (cohérence convention JSON-RPC -32602).
+
+## [0.6.1] — 2026-05-11
+
+**`data_freshness` + `verifier_site_actif` : observabilité fraîcheur dump + détection SIRET fermé**
+
+Réponse à un besoin évident : un agent LLM ne peut pas juger de la fiabilité
+d'un résultat sans savoir QUAND la dernière ingestion s'est terminée. Et
+FINESS DREES garde parfois actifs des SIRET fermés depuis 1-2 mois côté
+SIRENE — il fallait un tool pour trancher.
+
+### Ajouté
+
+- **`data_freshness`** : retourne pour chaque source DB-backed (FINESS, Ameli,
+  RPPS) le `last_success_at` ISO, `last_success_row_count`, `last_attempt_at`,
+  `staleness_days`, `cadence_hint`. Cache mémoire 5 min côté serveur pour ne
+  pas marteler `ingest_log` à chaque appel MCP. Helper `getDataFreshness()`
+  dans `src/storage/ingest-log.ts`.
+- **`verifier_site_actif(num_finess)`** : croise FINESS DREES ↔ RPPS
+  (pivot SIRET) ↔ SIRENE INSEE V3.11. Verdict consolidé `actif` / `ferme` /
+  `indetermine_pas_de_siret` / `indetermine_pas_de_cle_insee` /
+  `indetermine_insee_unreachable` / `indetermine_sirene_partiel`. Quand
+  `num_finess` est absent de FINESS DREES, retourne `LookupResult.not_found`.
+  Helper `verifierSiteActif()` dans `src/sante/cross-source.ts` (nouveau
+  module dédié au croisement multi-source, brick par brick).
+
+## [0.6.0] — 2026-05-11
+
+**`etablissement_by_siret` + `rpps_search_by_name` : 2 primitives de lookup manquantes**
+
+L'audit de la couverture des tools a révélé 2 manques évidents : pas de
+lookup unitaire par SIRET (alors qu'on l'a par SIREN et par num_finess), et
+pas de recherche RPPS par identité (alors qu'on a radius, dept+spécialité,
+et par FINESS). Comble.
+
+### Ajouté
+
+- **`etablissement_by_siret(siret)`** : lookup SIRET via SIRENE INSEE V3.11
+  (`/siret/<siret>`). Retourne `LookupResult<EtablissementSireneDetail>`
+  avec raison sociale unité légale, enseigne, NAF, dates création/fermeture,
+  statut actif, adresse complète, tranche d'effectif. Pas de coords (endpoint
+  INSEE ne les renvoie pas — géocoder côté caller via `geocode_adresse`).
+  Si `INSEE_SIRENE_API_KEY` non configurée, retourne `not_found` avec message
+  orienté config plutôt que de throw.
+- **`rpps_search_by_name(nom, prenom?, departement?)`** : recherche fuzzy
+  trigram (pg_trgm) sur la table RPPS. Score `match_score` ∈ [0..1] dans
+  chaque résultat. Default catégorie `[C]` (Civil seul, cohérent avec les
+  3 autres tools RPPS) ; flags `include_etudiants` + `include_agents_publics`
+  pour étendre. Migration `supabase/migrations/20260511T100000_rpps_search_by_name.sql`
+  ajoute extension `pg_trgm`, index GIN trigram sur `lower(nom)` et
+  `lower(prenom)`, et RPC `rpps_search_by_name(p_nom, p_prenom, p_departement,
+  p_categorie_codes, p_limit)`.
+
+## [0.5.8] — 2026-05-11
+
+**Hotfix : crash `Cannot read properties of null (reading 'replace')`**
+
+Bug bloquant introduit silencieusement : l'API DINUM renvoie `null` (pas
+`undefined`) pour les coordonnées GPS quand un établissement n'est pas
+géocodé. Le helper `parseLooseNumber` ne distinguait pas les deux cas, et
+crashait sur le `.replace(",", ".")`. Symptômes observés en prod : crash
+sur `naf="8690B" + q="biogroup"` et sur `q="eurofins"` seul.
+
+### Corrigé
+
+- `parseLooseNumber` dans `src/core/coords.ts` accepte maintenant `null`
+  en plus de `undefined`. Le type d'input devient `string | number | null
+  | undefined` pour refléter la réalité runtime de l'API DINUM.
+- Type `ApiSiege.latitude`/`longitude` dans `src/sante/dinum.ts` ajusté
+  pour autoriser `null` (alignement TS/runtime).
+- 8 tests de régression dans `src/core/coords.test.ts` (nouveau fichier).
+
 ## [0.5.7] — 2026-05-11
 
 **Garde-fous publics : rate limit + observabilité structurée sur l'endpoint MCP**

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as ameliDb from "../src/sante/ameli-db.js";
+import * as crossSource from "../src/sante/cross-source.js";
 import * as finessDb from "../src/sante/finess-db.js";
 import * as dinum from "../src/sante/index.js";
+import * as inseeSirene from "../src/sante/insee-sirene.js";
+import * as rppsDb from "../src/sante/rpps-db.js";
+import * as ingestLog from "../src/storage/ingest-log.js";
 import * as geocode from "../src/territoire/geocode.js";
 import { categorieCodesFromArgs, deptFromCommune, findTool } from "./tools.js";
 
@@ -782,5 +786,299 @@ describe("categorieCodesFromArgs", () => {
     // Même `false` est rejeté : le caller doit migrer vers les nouveaux flags
     // pour ne pas continuer à propager une intention périmée.
     expect(() => categorieCodesFromArgs({ include_inactifs: false })).toThrow(/V0\.5\.5/);
+  });
+});
+
+describe("etablissement_by_siret (MCP tool — V0.6.0)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré dans la liste des tools", () => {
+    const tool = findTool("etablissement_by_siret");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["siret"]);
+  });
+
+  it("rejette un SIRET non 14 chiffres avec RangeError (loud failure)", async () => {
+    const tool = findTool("etablissement_by_siret");
+    await expect(tool?.handler({ siret: "12345" })).rejects.toThrow(RangeError);
+    await expect(tool?.handler({ siret: "abcdefghijklmn" })).rejects.toThrow(RangeError);
+    await expect(tool?.handler({ siret: "123456789012345" })).rejects.toThrow(RangeError); // 15 chars
+  });
+
+  it("rejette siret absent avec RangeError (cohérent convention -32602)", async () => {
+    const tool = findTool("etablissement_by_siret");
+    await expect(tool?.handler({})).rejects.toThrow(/siret/);
+  });
+
+  it("trim les whitespaces avant validation", async () => {
+    const siret = "78712043500015";
+    const spy = vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockResolvedValue({
+      found: false,
+      lookupStatus: "not_found",
+      key: siret,
+      message: "noop",
+    });
+    const tool = findTool("etablissement_by_siret");
+    await tool?.handler({ siret: `  ${siret}  ` });
+    expect(spy).toHaveBeenCalledWith(siret);
+  });
+
+  it("forward le SIRET validé à lookupSiretViaInsee + retourne le LookupResult tel quel", async () => {
+    const siret = "78712043500015";
+    const fakeFound = {
+      found: true as const,
+      lookupStatus: "found" as const,
+      siret,
+      siren: "787120435",
+      raisonSocialeUniteLegale: "LABO ACME",
+      enseigne: null,
+      denominationUsuelle: null,
+      naf: "86.90B",
+      actif: true,
+      dateCreation: "2020-01-01",
+      dateFermeture: null,
+      estSiege: true,
+      trancheEffectif: "11",
+      adresse: {
+        libelle: "1 RUE TEST 75001 PARIS",
+        numeroVoie: "1",
+        typeVoie: "RUE",
+        libelleVoie: "TEST",
+        codePostal: "75001",
+        libelleCommune: "PARIS",
+        codeCommune: "75101",
+      },
+    };
+    vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockResolvedValue(fakeFound);
+    const tool = findTool("etablissement_by_siret");
+    await expect(tool?.handler({ siret })).resolves.toEqual(fakeFound);
+  });
+});
+
+describe("rpps_search_by_name (MCP tool — V0.6.0)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré + nom requis", () => {
+    const tool = findTool("rpps_search_by_name");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["nom"]);
+  });
+
+  it("rejette nom absent avec RangeError (loud failure)", async () => {
+    const tool = findTool("rpps_search_by_name");
+    await expect(tool?.handler({})).rejects.toThrow(RangeError);
+    await expect(tool?.handler({ nom: "" })).rejects.toThrow(RangeError);
+    await expect(tool?.handler({ nom: "   " })).rejects.toThrow(RangeError);
+  });
+
+  it("forward nom + prenom + dept + limit + categorieCodes default au wrapper TS", async () => {
+    const spy = vi
+      .spyOn(rppsDb, "getRppsByName")
+      .mockResolvedValue({ count: 0, truncated: false, results: [] });
+    const tool = findTool("rpps_search_by_name");
+    await tool?.handler({ nom: "Martin", prenom: "Jean", departement: "75", limit: 10 });
+    expect(spy).toHaveBeenCalledWith({
+      nom: "Martin",
+      prenom: "Jean",
+      departement: "75",
+      categorieCodes: ["C"],
+      limit: 10,
+    });
+  });
+
+  it("omet prenom/dept/limit quand absents mais inclut toujours categorieCodes default", async () => {
+    const spy = vi
+      .spyOn(rppsDb, "getRppsByName")
+      .mockResolvedValue({ count: 0, truncated: false, results: [] });
+    const tool = findTool("rpps_search_by_name");
+    await tool?.handler({ nom: "Martin" });
+    expect(spy).toHaveBeenCalledWith({ nom: "Martin", categorieCodes: ["C"] });
+  });
+
+  it("propage include_etudiants / include_agents_publics au wrapper TS", async () => {
+    const spy = vi
+      .spyOn(rppsDb, "getRppsByName")
+      .mockResolvedValue({ count: 0, truncated: false, results: [] });
+    const tool = findTool("rpps_search_by_name");
+    await tool?.handler({ nom: "Martin", include_etudiants: true, include_agents_publics: true });
+    expect(spy).toHaveBeenCalledWith({
+      nom: "Martin",
+      categorieCodes: ["C", "M", "E"],
+    });
+  });
+
+  it("rejette limit non-coercible (silent default guard, cohérent autres tools)", async () => {
+    const tool = findTool("rpps_search_by_name");
+    await expect(tool?.handler({ nom: "Martin", limit: "abc" })).rejects.toThrow(/limit/);
+  });
+});
+
+describe("data_freshness (MCP tool — V0.6.1)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré sans paramètre requis", () => {
+    const tool = findTool("data_freshness");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toBeUndefined();
+  });
+
+  it("retourne un objet `{ sources: [...] }` listant les 3 sources DB-backed", async () => {
+    vi.spyOn(ingestLog, "getDataFreshness").mockResolvedValue([
+      {
+        source: "finess",
+        last_success_at: "2026-04-30T00:00:00Z",
+        last_success_row_count: 90000,
+        last_attempt_at: "2026-04-30T00:00:00Z",
+        last_attempt_status: "success",
+        staleness_days: 11,
+        cadence_hint: "bimestrielle (~tous les 2 mois côté DREES)",
+      },
+      {
+        source: "ameli_ps",
+        last_success_at: "2026-05-10T00:00:00Z",
+        last_success_row_count: 130000,
+        last_attempt_at: "2026-05-10T00:00:00Z",
+        last_attempt_status: "success",
+        staleness_days: 1,
+        cadence_hint: "hebdomadaire (côté Annuaire Santé Ameli)",
+      },
+      {
+        source: "rpps",
+        last_success_at: null,
+        last_success_row_count: null,
+        last_attempt_at: null,
+        last_attempt_status: null,
+        staleness_days: null,
+        cadence_hint: "mensuelle (côté Annuaire Santé ANS)",
+      },
+    ]);
+
+    const tool = findTool("data_freshness");
+    const result = (await tool?.handler({})) as { sources: Array<{ source: string }> };
+    expect(result.sources).toHaveLength(3);
+    expect(result.sources.map((s) => s.source)).toEqual(["finess", "ameli_ps", "rpps"]);
+  });
+
+  it("propage les erreurs DB (pas de silent fallback)", async () => {
+    vi.spyOn(ingestLog, "getDataFreshness").mockRejectedValue(new Error("DB down"));
+    const tool = findTool("data_freshness");
+    await expect(tool?.handler({})).rejects.toThrow(/DB down/);
+  });
+});
+
+describe("verifier_site_actif (MCP tool — V0.6.1)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré avec num_finess requis", () => {
+    const tool = findTool("verifier_site_actif");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["num_finess"]);
+  });
+
+  it("rejette num_finess absent avec RangeError", async () => {
+    const tool = findTool("verifier_site_actif");
+    await expect(tool?.handler({})).rejects.toThrow(/num_finess/);
+  });
+
+  it("forward num_finess à verifierSiteActif", async () => {
+    const spy = vi.spyOn(crossSource, "verifierSiteActif").mockResolvedValue({
+      found: false,
+      key: "590048997",
+      lookupStatus: "not_found",
+      message: "introuvable",
+    });
+    const tool = findTool("verifier_site_actif");
+    await tool?.handler({ num_finess: "590048997" });
+    expect(spy).toHaveBeenCalledWith("590048997");
+  });
+});
+
+describe("compare_raison_sociale_finess_vs_rpps (MCP tool — V0.6.2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré avec num_finess requis", () => {
+    const tool = findTool("compare_raison_sociale_finess_vs_rpps");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["num_finess"]);
+  });
+
+  it("rejette num_finess absent", async () => {
+    const tool = findTool("compare_raison_sociale_finess_vs_rpps");
+    await expect(tool?.handler({})).rejects.toThrow(/num_finess/);
+  });
+
+  it("forward au wrapper TS", async () => {
+    const spy = vi
+      .spyOn(crossSource, "compareRaisonSocialeFinessVsRpps")
+      .mockResolvedValue({
+        found: true,
+        lookupStatus: "found",
+        num_finess: "590048997",
+        finess_raison_sociale: "DIAGNOVIE",
+        rpps_raisons_sociales: ["BIOGROUP NORD"],
+        statut: "divergent_after_normalization",
+      });
+    const tool = findTool("compare_raison_sociale_finess_vs_rpps");
+    await tool?.handler({ num_finess: "590048997" });
+    expect(spy).toHaveBeenCalledWith("590048997");
+  });
+});
+
+describe("historique_etablissement (MCP tool — V0.6.2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré avec num_finess requis", () => {
+    const tool = findTool("historique_etablissement");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["num_finess"]);
+  });
+
+  it("forward au wrapper TS", async () => {
+    const spy = vi.spyOn(crossSource, "historiqueEtablissement").mockResolvedValue({
+      found: false,
+      key: "590048997",
+      lookupStatus: "not_found",
+      message: "noop",
+    });
+    const tool = findTool("historique_etablissement");
+    await tool?.handler({ num_finess: "590048997" });
+    expect(spy).toHaveBeenCalledWith("590048997");
+  });
+});
+
+describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré avec num_finess requis", () => {
+    const tool = findTool("reconcilier_finess_sirene");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["num_finess"]);
+  });
+
+  it("forward au wrapper TS", async () => {
+    const spy = vi.spyOn(crossSource, "reconcilierFinessSirene").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      num_finess: "590048997",
+      candidates: [],
+      skipped: [],
+    });
+    const tool = findTool("reconcilier_finess_sirene");
+    await tool?.handler({ num_finess: "590048997" });
+    expect(spy).toHaveBeenCalledWith("590048997");
   });
 });

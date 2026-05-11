@@ -24,6 +24,7 @@
  */
 
 import { HttpError, fetchJson } from "../core/http.js";
+import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import type { Entreprise } from "./dinum.js";
 
 const SIRENE_BASE_URL = "https://api.insee.fr/api-sirene/3.11";
@@ -183,4 +184,302 @@ function deriveNomComplet(periode: ApiInseePeriode | undefined, siren: string): 
   if (prenom && nom) return `${prenom} ${nom}`;
   if (nom) return nom;
   return siren;
+}
+
+// === Établissement (SIRET) lookup ============================================
+
+/**
+ * Détail d'un établissement SIRENE retourné par `lookupSiretViaInsee`. Distinct
+ * de `Etablissement` (dinum.ts) qui ne contient qu'une vue partielle obtenue
+ * dans un résultat de recherche par SIREN. Ce type expose en plus :
+ *
+ * - `enseigne` et `denominationUsuelle` (commerciales — souvent l'enseigne
+ *   visible publiquement vs la raison sociale légale de l'unité légale)
+ * - `dateFermeture` (présent quand `actif === false`)
+ * - `raisonSocialeUniteLegale` (parent SIREN)
+ *
+ * Pas de `coords` : l'endpoint INSEE `/siret/<siret>` ne renvoie pas les coords
+ * WGS84. Pour la géoloc, croiser avec `entreprises_in_radius` ou géocoder
+ * l'adresse côté caller via `geocode_adresse`.
+ */
+export interface EtablissementSireneDetail {
+  siret: string;
+  siren: string;
+  /** Raison sociale légale de l'unité légale parente. */
+  raisonSocialeUniteLegale: string;
+  /** Enseigne commerciale 1 (souvent affichée en façade). */
+  enseigne: string | null;
+  /** Dénomination usuelle (alias enseigne, parfois distinct). */
+  denominationUsuelle: string | null;
+  /** Code NAF de l'établissement (peut différer du NAF de l'unité légale). */
+  naf: string | null;
+  /** `true` si la période courante est `etatAdministratifEtablissement = 'A'`. */
+  actif: boolean;
+  /** Date de création (première `dateDebut` chronologique). */
+  dateCreation: string | null;
+  /**
+   * Date de fermeture (dernière `dateDebut` quand `etatAdministratifEtablissement
+   * = 'F'`). `null` si l'établissement est actif. C'est cette info qui débloque
+   * la détection d'un SIRET fermé encore listé comme actif côté FINESS (DREES
+   * a 1-2 mois de retard sur la cessation effective).
+   */
+  dateFermeture: string | null;
+  /**
+   * `true` si ce SIRET est le siège de l'unité légale. L'endpoint INSEE
+   * `/siret/<siret>` n'expose PAS le SIRET du siège quand on consulte un
+   * établissement secondaire — pour récupérer le siège, appeler
+   * `entreprise_by_siren(siren)` qui retourne `siretSiege` côté unité légale.
+   */
+  estSiege: boolean;
+  /** Tranche d'effectif salarié (codes INSEE 00..53). */
+  trancheEffectif: string | null;
+  adresse: {
+    /** Adresse complète assemblée (numéro + voie + CP + ville). */
+    libelle: string;
+    numeroVoie: string | null;
+    typeVoie: string | null;
+    libelleVoie: string | null;
+    codePostal: string | null;
+    libelleCommune: string | null;
+    codeCommune: string | null;
+  };
+}
+
+type ApiInseePeriodeEtablissement = {
+  dateDebut?: string | null;
+  dateFin?: string | null;
+  etatAdministratifEtablissement?: string | null;
+  enseigne1Etablissement?: string | null;
+  denominationUsuelleEtablissement?: string | null;
+  activitePrincipaleEtablissement?: string | null;
+};
+
+type ApiInseeAdresseEtablissement = {
+  numeroVoieEtablissement?: string | null;
+  typeVoieEtablissement?: string | null;
+  libelleVoieEtablissement?: string | null;
+  codePostalEtablissement?: string | null;
+  libelleCommuneEtablissement?: string | null;
+  codeCommuneEtablissement?: string | null;
+};
+
+type ApiInseeEtablissement = {
+  siren?: string;
+  siret?: string;
+  etablissementSiege?: boolean;
+  trancheEffectifsEtablissement?: string | null;
+  uniteLegale?: ApiInseeUniteLegale;
+  adresseEtablissement?: ApiInseeAdresseEtablissement;
+  periodesEtablissement?: ApiInseePeriodeEtablissement[];
+};
+
+type ApiInseeSiretResponse = {
+  etablissement?: ApiInseeEtablissement;
+};
+
+/**
+ * Récupère un établissement par son SIRET via l'API SIRENE INSEE V3.11.
+ *
+ * Comportement contractuel (aligné sur `getEntrepriseBySiren` côté wrapper) :
+ * - Pas de clé `INSEE_SIRENE_API_KEY` configurée → `LookupResult` not_found
+ *   avec message orientant le caller vers la config. Pas de throw : le tool
+ *   MCP doit rester appelable même sans clé INSEE (pour ne pas casser les
+ *   tools qui ne dépendent pas d'INSEE).
+ * - HTTP 404 → `LookupResult` not_found (SIRET vraiment absent SIRENE)
+ * - HTTP 401/403/5xx/timeout → throw (le caller décide quoi faire)
+ * - HTTP 200 mais payload incohérent → throw
+ *
+ * @param siret 14 chiffres. Validation côté caller via le tool MCP.
+ */
+export async function lookupSiretViaInsee(
+  siret: string,
+): Promise<LookupResult<EtablissementSireneDetail>> {
+  const raw = await fetchSiretRawFromInsee(siret);
+  if (raw.kind !== "ok") return raw.lookup;
+  return lookupFound(toEtablissementSireneDetail(raw.etablissement));
+}
+
+/**
+ * Récupère l'historique complet (toutes les périodes) d'un établissement SIRET
+ * via SIRENE INSEE V3.11. Permet de reconstruire la timeline ouvert/fermé
+ * d'un site et de détecter une fermeture encore listée active côté FINESS.
+ *
+ * Contractuellement aligné sur `lookupSiretViaInsee` : retourne `LookupResult`,
+ * pas de clé INSEE → not_found avec message, etc.
+ */
+export async function lookupSiretHistoriqueViaInsee(
+  siret: string,
+): Promise<LookupResult<EtablissementSireneHistorique>> {
+  const raw = await fetchSiretRawFromInsee(siret);
+  if (raw.kind !== "ok") return raw.lookup;
+  const detail = toEtablissementSireneDetail(raw.etablissement);
+  const periodes = (raw.etablissement.periodesEtablissement ?? [])
+    .map(toPeriodeHistorique)
+    // Ordre chronologique croissant (la plus ancienne en premier). Plus
+    // lisible pour un caller LLM qui lit la timeline en séquence.
+    .sort((a, b) => (a.dateDebut ?? "").localeCompare(b.dateDebut ?? ""));
+  return lookupFound({ ...detail, periodes });
+}
+
+/**
+ * Période historique mappée. Volontairement compacte : on garde uniquement
+ * les champs qui changent au fil des changements administratifs (état, NAF,
+ * enseigne). Le caller LLM peut ainsi lire la timeline sans noise.
+ */
+export interface PeriodeHistorique {
+  dateDebut: string | null;
+  dateFin: string | null;
+  actif: boolean;
+  naf: string | null;
+  enseigne: string | null;
+  denominationUsuelle: string | null;
+}
+
+export interface EtablissementSireneHistorique extends EtablissementSireneDetail {
+  periodes: PeriodeHistorique[];
+}
+
+function toPeriodeHistorique(p: ApiInseePeriodeEtablissement): PeriodeHistorique {
+  return {
+    dateDebut: p.dateDebut ?? null,
+    dateFin: p.dateFin ?? null,
+    actif: p.etatAdministratifEtablissement === "A",
+    naf: p.activitePrincipaleEtablissement ?? null,
+    enseigne: p.enseigne1Etablissement?.trim() || null,
+    denominationUsuelle: p.denominationUsuelleEtablissement?.trim() || null,
+  };
+}
+
+/**
+ * Discriminated union : soit la requête INSEE a réussi (`ok` + payload), soit
+ * elle est terminée par un `LookupResult` not_found (clé absente, 404,
+ * payload incohérent). Les vrais incidents (401/5xx/timeout) sont propagés
+ * via throw et n'arrivent pas ici.
+ */
+type FetchSiretRawResult =
+  | { kind: "ok"; etablissement: ApiInseeEtablissement }
+  | { kind: "lookup"; lookup: LookupResult<never> };
+
+async function fetchSiretRawFromInsee(siret: string): Promise<FetchSiretRawResult> {
+  const apiKey = getInseeApiKey();
+  if (!apiKey) {
+    return {
+      kind: "lookup",
+      lookup: lookupNotFound(
+        siret,
+        "INSEE_SIRENE_API_KEY non configurée — ce tool requiert une clé INSEE pour interroger l'endpoint /siret/<siret> de l'API SIRENE V3.11. Inscription gratuite : https://api.insee.fr/catalogue/. Une fois la clé obtenue, définir la variable d'env INSEE_SIRENE_API_KEY sur le déploiement.",
+      ),
+    };
+  }
+
+  const url = `${SIRENE_BASE_URL}/siret/${encodeURIComponent(siret)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let data: ApiInseeSiretResponse;
+  try {
+    data = await fetchJson<ApiInseeSiretResponse>(url, {
+      headers: { [INSEE_AUTH_HEADER]: apiKey },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const httpStatus = err instanceof HttpError ? err.status : null;
+    if (httpStatus === 404) {
+      console.warn(`[france-data-mcp] INSEE SIRENE SIRET ${siret} — HTTP 404 (introuvable)`);
+      return {
+        kind: "lookup",
+        lookup: lookupNotFound(
+          siret,
+          `SIRET "${siret}" introuvable dans SIRENE INSEE. Causes possibles : SIRET inexistant, erreur de saisie, ou statut de diffusion partielle INSEE (rare). Pour vérifier la diffusion, croiser avec entreprise_by_siren.`,
+        ),
+      };
+    }
+    // Vrais incidents : 401/403/5xx/timeout/réseau. On les propage pour que
+    // le caller puisse retry ou alerter, plutôt que masquer en `not_found`.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[france-data-mcp] INSEE SIRENE SIRET ${siret} — ${httpStatus !== null ? `HTTP ${httpStatus}` : `network/parse error: ${errMsg}`}`,
+    );
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const et = data.etablissement;
+  if (!et || !et.siret || !et.siren) {
+    console.warn(
+      `[france-data-mcp] INSEE SIRENE SIRET ${siret} — payload incohérent (etablissement, siret ou siren absent)`,
+    );
+    return {
+      kind: "lookup",
+      lookup: lookupNotFound(
+        siret,
+        `Réponse INSEE incohérente pour SIRET "${siret}" (etablissement absent ou champs critiques manquants). Réessayer plus tard ou signaler.`,
+      ),
+    };
+  }
+
+  return { kind: "ok", etablissement: et };
+}
+
+function toEtablissementSireneDetail(api: ApiInseeEtablissement): EtablissementSireneDetail {
+  const periodes = api.periodesEtablissement ?? [];
+  // Période courante = `dateFin === null`. L'API présente antéchronologiquement
+  // mais on ne s'y fie pas (cf. note dans `lookupSirenViaInsee`).
+  const periodeCourante = periodes.find((p) => p.dateFin === null || p.dateFin === undefined);
+  // `actif` ne se déduit PAS de l'existence d'une période courante : un
+  // établissement fermé garde une période courante avec `etatAdministratif = 'F'`.
+  const actif = periodeCourante?.etatAdministratifEtablissement === "A";
+
+  // dateCreation : la `dateDebut` la plus ancienne (la première période, en
+  // ordre chronologique). dateFermeture : la `dateDebut` de la période
+  // courante quand elle est 'F' (= date du basculement actif → fermé).
+  const periodesChrono = [...periodes].sort((a, b) =>
+    (a.dateDebut ?? "").localeCompare(b.dateDebut ?? ""),
+  );
+  const dateCreation = periodesChrono[0]?.dateDebut ?? null;
+  const dateFermeture = !actif ? (periodeCourante?.dateDebut ?? null) : null;
+
+  // Raison sociale de l'unité légale parente : on lit la même logique que
+  // `deriveNomComplet` (denomination > nom+prénom > siren) sur la période
+  // courante de l'uniteLegale embarquée dans la réponse SIRET.
+  const ulPeriodes = api.uniteLegale?.periodesUniteLegale ?? [];
+  const ulPeriodeCourante = ulPeriodes.find(
+    (p) => p.dateFin === null || p.dateFin === undefined,
+  );
+  const raisonSocialeUniteLegale = deriveNomComplet(ulPeriodeCourante, api.siren ?? "");
+
+  const a = api.adresseEtablissement ?? {};
+  const adresseLibelle = [
+    a.numeroVoieEtablissement,
+    a.typeVoieEtablissement,
+    a.libelleVoieEtablissement,
+    a.codePostalEtablissement,
+    a.libelleCommuneEtablissement,
+  ]
+    .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    .join(" ")
+    .trim();
+
+  return {
+    siret: api.siret ?? "",
+    siren: api.siren ?? "",
+    raisonSocialeUniteLegale,
+    enseigne: periodeCourante?.enseigne1Etablissement?.trim() || null,
+    denominationUsuelle: periodeCourante?.denominationUsuelleEtablissement?.trim() || null,
+    naf: periodeCourante?.activitePrincipaleEtablissement ?? null,
+    actif,
+    dateCreation,
+    dateFermeture,
+    estSiege: api.etablissementSiege === true,
+    trancheEffectif: api.trancheEffectifsEtablissement ?? null,
+    adresse: {
+      libelle: adresseLibelle,
+      numeroVoie: a.numeroVoieEtablissement ?? null,
+      typeVoie: a.typeVoieEtablissement ?? null,
+      libelleVoie: a.libelleVoieEtablissement ?? null,
+      codePostal: a.codePostalEtablissement ?? null,
+      libelleCommune: a.libelleCommuneEtablissement ?? null,
+      codeCommune: a.codeCommuneEtablissement ?? null,
+    },
+  };
 }

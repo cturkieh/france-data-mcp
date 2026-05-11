@@ -21,15 +21,16 @@ Brings together the most useful French government data sources (FINESS healthcar
 
 ## Status
 
-✅ **v0.5.7 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing 17 tools. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. TypeScript strict, Biome clean, 429 tests passing. v0.5.7 ships public-facing safeguards before Smithery / MCP-registry listings: **60 req/min per-IP rate limit** on `tools/call` (Upstash sliding window + in-memory fallback), **structured JSON logging** per request, anti-spoofing IP extraction (prefer `x-real-ip` over `x-forwarded-for[0]`). See [CHANGELOG](CHANGELOG.md#057-2026-05-11).
+✅ **v0.6.2 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing **24 tools**. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. TypeScript strict, Biome clean, **517 tests passing**. v0.6 adds multi-source cross-checking (FINESS ↔ RPPS ↔ SIRENE) to detect closed SIRETs still listed active in FINESS, M&A renamings not yet propagated, and reconcile FINESS records against SIRENE via Sørensen-Dice scoring. See [CHANGELOG](CHANGELOG.md#062--2026-05-11).
 
-## Tools (17)
+## Tools (24)
 
 - **Territory (4)**: `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
-- **Companies (2)**: `entreprises_in_radius`, `entreprise_by_siren` (with INSEE SIRENE V3.11 fallback)
+- **Companies (3)**: `entreprises_in_radius`, `entreprise_by_siren` (with INSEE SIRENE V3.11 fallback), `etablissement_by_siret` (V0.6.0, SIRENE V3.11)
 - **FINESS healthcare facilities (3)**: `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
 - **Ameli licensed practitioners (4)**: `professionnels_in_radius`, `professionnels_par_specialite_dept`, `lister_specialites_ameli`, `lister_types_ps_ameli`
-- **RPPS / ANS — all active practitioners (4, V0.5.5)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `professionnel_by_rpps` (with live FHIR ANS fallback). ANS source is pre-filtered to active PS only — no retired, suspended, struck-off or deceased records ever appear.
+- **RPPS / ANS — all active practitioners (5, V0.6.0)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name` (fuzzy trigram by identity), `professionnel_by_rpps` (with live FHIR ANS fallback). ANS source is pre-filtered to active PS only — no retired, suspended, struck-off or deceased records ever appear.
+- **Multi-source cross-checks (5, V0.6.1 / V0.6.2)**: `data_freshness` (ingestion staleness per source), `verifier_site_actif` (FINESS ↔ RPPS ↔ SIRENE active/closed verdict), `compare_raison_sociale_finess_vs_rpps` (raw diff for M&A renaming detection), `historique_etablissement` (full SIRENE periods timeline), `reconcilier_finess_sirene` (Sørensen-Dice scoring with `match` / `partial` / `mismatch` verdict). No business interpretation — facts only, the caller decides.
 
 ## Use cases
 

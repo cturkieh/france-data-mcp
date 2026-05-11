@@ -31,8 +31,17 @@ import {
   searchEntreprises,
 } from "../src/sante/index.js";
 import {
+  compareRaisonSocialeFinessVsRpps,
+  historiqueEtablissement,
+  reconcilierFinessSirene,
+  verifierSiteActif,
+} from "../src/sante/cross-source.js";
+import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
+import { getDataFreshness } from "../src/storage/ingest-log.js";
+import {
   buildCategorieCodes,
   getRppsById,
+  getRppsByName,
   getRppsDansEtablissement,
   getRppsInRadius,
   getRppsParSpecialiteDept,
@@ -703,6 +712,110 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
+    name: "data_freshness",
+    description:
+      "Retourne la fraîcheur des dumps de données ingérés côté serveur : FINESS DREES (bimestriel), Annuaire Santé Ameli (hebdomadaire), RPPS / Annuaire Santé ANS (mensuel). Pour chaque source : `last_success_at` ISO timestamp, `last_success_row_count`, `last_attempt_at`, `last_attempt_status`, `staleness_days` (jours depuis la dernière ingestion réussie), `cadence_hint` (cadence attendue côté éditeur).\n\nUsage typique : avant un audit territorial ou une analyse temporelle, le caller appelle ce tool pour savoir si les données sont à jour. Une `staleness_days > 90` côté FINESS = alerte (dernier sync DREES manqué), `> 14` côté Ameli = alerte (job hebdo cassé), `> 45` côté RPPS = alerte (job mensuel cassé).\n\nLes sources LIVE (DINUM Recherche Entreprises, INSEE SIRENE V3.11, ANS FHIR live) ne sont PAS listées ici puisqu'elles n'ont pas de cycle d'ingestion — leur fraîcheur est celle des API amont (live, ~secondes).\n\nCache serveur : 5 minutes. Coût : 1 SELECT sur `ingest_log` au pire (sinon hit cache).",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+    handler: async () => {
+      const rows = await getDataFreshness();
+      return { sources: rows };
+    },
+  },
+  {
+    name: "compare_raison_sociale_finess_vs_rpps",
+    description:
+      "Compare la raison sociale FINESS DREES vs RPPS / Annuaire Santé ANS pour un même num_finess. Primitive brute SANS interprétation métier — retourne juste les deux libellés + un statut de comparaison. Le caller décide quoi faire de la divergence.\n\nUtilité : RPPS reflète souvent plus rapidement les rebrandings post-M&A que FINESS DREES (ex: un site racheté reste 'DIAGNOVIE' chez DREES alors qu'il est déjà 'BIOGROUP NORD' chez l'ANS). Ce tool expose la divergence factuelle ; il NE DIT PAS qui a racheté qui (ça repose sur de la connaissance d'enseignes commerciales non publique).\n\n**Statut renvoyé** (champ `statut` présent uniquement sur la branche `found: true`) :\n- `exact_match` : FINESS et ≥1 RPPS sont strictement égaux après normalisation\n- `divergent_after_normalization` : aucune RPPS ne matche FINESS — vraie divergence\n- `rpps_absent` : aucune RPPS n'a déclaré ce FINESS (pivot impossible)\n\nFormat : objet `LookupResult` discriminé par `found`. Quand `num_finess` est absent de FINESS DREES, le tool retourne `{found: false, lookupStatus: 'not_found', message, ...}` — il n'y a PAS de champ `statut` dans ce cas.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: { type: "string", description: "Numéro FINESS exact (9 chiffres)." },
+      },
+      required: ["num_finess"],
+    },
+    handler: async (args) => {
+      const numFiness = asString(args.num_finess);
+      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      return compareRaisonSocialeFinessVsRpps(numFiness);
+    },
+  },
+  {
+    name: "historique_etablissement",
+    description:
+      "Reconstitue la timeline complète d'un établissement de santé (ouvertures, fermetures, changements de NAF/enseigne) en croisant FINESS DREES ↔ RPPS (pivot SIRET) ↔ SIRENE INSEE V3.11. Lit les `periodesEtablissement` complètes (toutes les périodes administratives, pas juste la courante) pour chaque SIRET candidat.\n\nUsage typique :\n- Tracer l'historique d'un site après une fusion-acquisition\n- Identifier la date de fermeture exacte d'un SIRET encore listé actif côté FINESS (DREES a 1-2 mois de retard)\n- Comprendre une cascade de rebrandings via les changements de `enseigne1Etablissement` au fil des périodes\n\nFormat : objet `LookupResult`. Quand `found: true`, retourne `finess` (vue DREES synthétique) + `siret_timelines` (1 entrée par SIRET candidat avec `periodes` chronologiques).\n\nCoût : 1 RPC FINESS + 1 SELECT rpps + N appels INSEE en parallèle (N ≤ 3 typiquement). Pas de cache.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: { type: "string", description: "Numéro FINESS exact (9 chiffres)." },
+      },
+      required: ["num_finess"],
+    },
+    handler: async (args) => {
+      const numFiness = asString(args.num_finess);
+      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      return historiqueEtablissement(numFiness);
+    },
+  },
+  {
+    name: "reconcilier_finess_sirene",
+    description:
+      "Croise FINESS DREES ↔ SIRENE INSEE V3.11 et calcule un score de cohérence (Sørensen-Dice sur bigrammes) pour chaque SIRET candidat. Utile pour confirmer/infirmer un appariement num_finess ↔ SIRET avant prospection ou cross-check qualité.\n\nLogique :\n1. Récupère FINESS (raison sociale + adresse libellée)\n2. Récupère SIRET candidats via la table RPPS\n3. Pour chaque SIRET, lookup SIRENE puis calcule 3 sous-scores :\n   - `nom` : Dice sur raison sociale (FINESS vs SIRENE.uniteLegale)\n   - `adresse` : Dice sur adresse complète\n   - `telephone` : binaire 0/1 (toujours 0 actuellement : SIRENE n'expose pas le tel)\n4. Score global = pondération (nom 0.5, adresse 0.4, tel 0.1)\n5. Verdict brut : `match` (≥0.8) / `partial` (0.5..0.8) / `mismatch` (<0.5)\n\nAlgorithme PUBLIC (Sørensen-Dice est dans la littérature depuis 1948). Aucune valeur ajoutée Unilabs ici — c'est une primitive ouverte. La connaissance propriétaire (mapping enseignes ↔ SELAS) reste côté Geo Intel.\n\nFormat : objet `LookupResult`. Quand `found: true`, retourne `{ num_finess, candidates, skipped }` :\n- `candidates` : tableau trié par `score_global` décroissant (meilleur match en premier)\n- `skipped` : SIRET candidats qu'on n'a PAS pu réconcilier (lookup SIRENE rejected ou not_found) avec la `reason`. Permet au caller de distinguer 'aucun SIRET candidat trouvé' (`found: false` LookupResult.not_found) de 'N SIRETs candidats mais tous rejetés par SIRENE' (`candidates: []` + `skipped: [...]`).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: { type: "string", description: "Numéro FINESS exact (9 chiffres)." },
+      },
+      required: ["num_finess"],
+    },
+    handler: async (args) => {
+      const numFiness = asString(args.num_finess);
+      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      return reconcilierFinessSirene(numFiness);
+    },
+  },
+  {
+    name: "verifier_site_actif",
+    description:
+      "Vérifie si un établissement de santé FINESS est encore en activité en croisant FINESS DREES ↔ RPPS (pivot SIRET) ↔ SIRENE INSEE V3.11. Détecte les SIRET fermés encore listés actifs côté FINESS (DREES a 1-2 mois de retard sur la cessation effective).\n\nLogique :\n1. Lookup FINESS pour récupérer raison sociale + adresse + téléphone DREES\n2. Récupération des SIRET candidats via la table RPPS (colonne `siret` enrichie au moment de l'ingest, JOIN sur `num_finess`)\n3. Pour chaque SIRET (en parallèle), lookup SIRENE INSEE V3.11 pour lire `actif` + `dateFermeture`\n4. Verdict consolidé :\n  - `actif` : ≥1 SIRET candidat actif côté SIRENE → site ouvert\n  - `ferme` : tous les SIRET candidats sont fermés ET ≥1 a une dateFermeture → site fermé (FINESS en retard)\n  - `indetermine_pas_de_siret` : aucun SIRET candidat trouvé en RPPS → pivot impossible, cross-check manuel\n  - `indetermine_pas_de_cle_insee` : clé INSEE_SIRENE_API_KEY non configurée → vérification SIRENE impossible\n  - `indetermine_insee_unreachable` : ≥1 SIRET candidat mais aucun lookup SIRENE n'a abouti (5xx, timeout, 404 inattendu) → API INSEE indisponible, réessayer\n  - `indetermine_sirene_partiel` : INSEE a répondu mais aucun SIRET n'est ni actif ni n'a de dateFermeture → données SIRENE partielles, inspecter `insee_error` individuels\n\n**Format de retour** : objet `LookupResult` discriminé par `found`. Quand `found: true`, le payload contient `finess` (vue DREES), `siret_candidates` (détail SIRENE par SIRET), `verdict`, `explication`. Quand `num_finess` est absent de FINESS DREES, le tool retourne `{found: false, lookupStatus: 'not_found', message, ...}` — PAS un verdict.\n\nCoût : 1 RPC FINESS + 1 SELECT rpps + N appels INSEE en parallèle (N ≤ 3 typiquement). Pas de cache (data critique, ne pas servir stale).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: { type: "string", description: "Numéro FINESS exact (9 chiffres)." },
+      },
+      required: ["num_finess"],
+    },
+    handler: async (args) => {
+      const numFiness = asString(args.num_finess);
+      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      return verifierSiteActif(numFiness);
+    },
+  },
+  {
+    name: "etablissement_by_siret",
+    description:
+      "Récupère le détail d'un établissement par son SIRET (14 chiffres) via l'API SIRENE INSEE V3.11 : raison sociale de l'unité légale, enseigne commerciale, NAF de l'établissement, dates de création/fermeture, statut administratif actif/fermé, adresse complète, tranche d'effectif. Source : SIRENE INSEE V3.11 (api.insee.fr).\n\n**Format de retour** : objet `LookupResult` discriminé par `found`.\n- `found: true` → établissement à plat (`siret`, `siren`, `actif`, `dateFermeture`, `enseigne`, `adresse`, …)\n- `found: false` → `{ found: false, key, lookupStatus: 'not_found', message }`. Cas typiques : clé `INSEE_SIRENE_API_KEY` non configurée côté serveur (message explicite), SIRET inexistant SIRENE, diffusion partielle INSEE.\n\n⚠️ Différence avec `entreprise_by_siren` : ce tool renvoie UN établissement précis (un site), alors que `entreprise_by_siren` renvoie l'unité légale + sa liste d'établissements. Pour détecter un SIRET fermé encore listé actif côté FINESS, lire `actif: false` + `dateFermeture`.\n\n**Pas de coords** : l'endpoint INSEE `/siret/<siret>` ne renvoie pas les coordonnées GPS. Pour géolocaliser, croiser avec `geocode_adresse` côté caller ou utiliser `entreprises_in_radius`.\n\nRate limit INSEE : 30 req/min (retry-after géré côté serveur).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        siret: { type: "string", description: "SIRET exact, 14 chiffres." },
+      },
+      required: ["siret"],
+    },
+    handler: async (args) => {
+      const siret = asString(args.siret);
+      if (!siret) throw new RangeError("siret (string, 14 chiffres) requis");
+      const trimmed = siret.trim();
+      if (!/^\d{14}$/.test(trimmed)) {
+        throw new RangeError(
+          `siret invalide "${siret}" — attendu 14 chiffres (siège ou établissement secondaire).`,
+        );
+      }
+      return lookupSiretViaInsee(trimmed);
+    },
+  },
+  {
     name: "etablissements_finess_in_radius",
     description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public).`,
     inputSchema: {
@@ -814,7 +927,7 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new Error("num_finess (string, 9 chiffres) requis");
+      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
       return getFinessByNumFiness(numFiness);
     },
   },
@@ -1059,12 +1172,52 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new Error("num_finess (string, 9 chiffres) requis");
+      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
       const limit = coerceNumber(args.limit, "limit");
       const input: Parameters<typeof getRppsDansEtablissement>[0] = { numFiness };
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       return await getRppsDansEtablissement(input);
+    },
+  },
+  {
+    name: "rpps_search_by_name",
+    description: `Recherche fuzzy de professionnels de santé par identité (nom + prénom optionnel + département optionnel). Utilise un matching trigram (pg_trgm) tolérant aux accents, typos et variations d'orthographe. Tri par pertinence décroissante. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).\n\nUsage typique : "trouve-moi le Dr Martin à Paris" (nom obligatoire, prénom et département facultatifs pour affiner). Sans département, recherche nationale (peut renvoyer beaucoup d'homonymes — utiliser le \`match_score\` pour trier).\n\n**Format de retour** : objet \`{ count, truncated, results, query_metadata }\` aligné sur les autres tools RPPS de listing. Chaque résultat porte un champ \`match_score\` ∈ [0..1] (score trigram pg_trgm). Un score < 0.5 indique souvent une homonymie partielle à confirmer côté caller.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        nom: { type: "string", description: "Nom de famille (obligatoire, non vide)." },
+        prenom: {
+          type: "string",
+          description: "Prénom (optionnel — affine le score si fourni).",
+        },
+        departement: {
+          type: "string",
+          description: "Code département (2 chiffres métropole/Corse, 3 pour DOM/COM). Optionnel.",
+        },
+        ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats (1-500, défaut 100).",
+          minimum: 1,
+          maximum: 500,
+          default: 100,
+        },
+      },
+      required: ["nom"],
+    },
+    handler: async (args) => {
+      const nom = asString(args.nom)?.trim();
+      if (!nom) throw new RangeError("nom (string non vide) requis");
+      const prenom = asString(args.prenom)?.trim();
+      const departement = asString(args.departement);
+      const limit = coerceNumber(args.limit, "limit");
+      const input: Parameters<typeof getRppsByName>[0] = { nom };
+      if (prenom) input.prenom = prenom;
+      if (departement) input.departement = departement;
+      input.categorieCodes = categorieCodesFromArgs(args);
+      if (limit !== undefined) input.limit = limit;
+      return getRppsByName(input);
     },
   },
   {

@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type ApiInseePeriode, getInseeApiKey, lookupSirenViaInsee } from "./insee-sirene.js";
+import {
+  type ApiInseePeriode,
+  getInseeApiKey,
+  lookupSirenViaInsee,
+  lookupSiretViaInsee,
+} from "./insee-sirene.js";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -279,6 +284,173 @@ describe("lookupSirenViaInsee", () => {
     const result = await lookupSirenViaInsee("787120435");
     expect(result).toBeNull();
     expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+});
+
+describe("lookupSiretViaInsee", () => {
+  const SIRET = "78712043500015";
+
+  function siretResponse(opts: {
+    etatPeriode?: "A" | "F";
+    dateFin?: string | null;
+    dateDebut?: string;
+    enseigne?: string | null;
+    denomination?: string | null;
+    naf?: string;
+    siege?: boolean;
+    denomUniteLegale?: string;
+    extraPeriodes?: Array<{ dateDebut: string; dateFin: string | null; etat: "A" | "F" }>;
+  }): Response {
+    const periodeCourante = {
+      dateDebut: opts.dateDebut ?? "2020-01-01",
+      dateFin: opts.dateFin ?? null,
+      etatAdministratifEtablissement: opts.etatPeriode ?? "A",
+      enseigne1Etablissement: opts.enseigne ?? "ACME LABO",
+      denominationUsuelleEtablissement: opts.denomination ?? null,
+      activitePrincipaleEtablissement: opts.naf ?? "86.90B",
+    };
+    const periodes = [
+      ...(opts.extraPeriodes?.map((p) => ({
+        dateDebut: p.dateDebut,
+        dateFin: p.dateFin,
+        etatAdministratifEtablissement: p.etat,
+      })) ?? []),
+      periodeCourante,
+    ];
+    return jsonResponse({
+      etablissement: {
+        siren: SIRET.slice(0, 9),
+        siret: SIRET,
+        etablissementSiege: opts.siege ?? true,
+        trancheEffectifsEtablissement: "11",
+        uniteLegale: {
+          periodesUniteLegale: [
+            {
+              dateFin: null,
+              denominationUniteLegale: opts.denomUniteLegale ?? "LABORATOIRE ACME SAS",
+              etatAdministratifUniteLegale: "A",
+            },
+          ],
+        },
+        adresseEtablissement: {
+          numeroVoieEtablissement: "27",
+          typeVoieEtablissement: "BD",
+          libelleVoieEtablissement: "BIZET",
+          codePostalEtablissement: "59290",
+          libelleCommuneEtablissement: "WASQUEHAL",
+          codeCommuneEtablissement: "59646",
+        },
+        periodesEtablissement: periodes,
+      },
+    });
+  }
+
+  it("retourne LookupResult not_found quand INSEE_SIRENE_API_KEY est absente", async () => {
+    const result = await lookupSiretViaInsee(SIRET);
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.lookupStatus).toBe("not_found");
+      expect(result.message).toContain("INSEE_SIRENE_API_KEY");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("envoie le header INSEE et hit /siret/<siret>", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key-uuid");
+    fetchMock.mockResolvedValueOnce(siretResponse({}));
+
+    await lookupSiretViaInsee(SIRET);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe(`https://api.insee.fr/api-sirene/3.11/siret/${SIRET}`);
+    const headers = (init as RequestInit | undefined)?.headers as Record<string, string>;
+    expect(headers["X-INSEE-Api-Key-Integration"]).toBe("key-uuid");
+  });
+
+  it("HTTP 404 → LookupResult not_found avec message orienté caller", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
+
+    const result = await lookupSiretViaInsee(SIRET);
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.lookupStatus).toBe("not_found");
+      expect(result.message).toContain("introuvable");
+    }
+    warnSpy.mockRestore();
+  });
+
+  it("HTTP 401 → throw (incident, pas not_found silencieux)", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "bad-key");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+
+    await expect(lookupSiretViaInsee(SIRET)).rejects.toBeDefined();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("HTTP 200 actif → LookupResult found avec champs essentiels", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    fetchMock.mockResolvedValueOnce(
+      siretResponse({
+        denomUniteLegale: "EUROFINS BIOMNIS",
+        enseigne: "EUROFINS LBM",
+        naf: "86.90B",
+      }),
+    );
+
+    const result = await lookupSiretViaInsee(SIRET);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.siret).toBe(SIRET);
+      expect(result.siren).toBe(SIRET.slice(0, 9));
+      expect(result.raisonSocialeUniteLegale).toBe("EUROFINS BIOMNIS");
+      expect(result.enseigne).toBe("EUROFINS LBM");
+      expect(result.naf).toBe("86.90B");
+      expect(result.actif).toBe(true);
+      expect(result.dateFermeture).toBeNull();
+      expect(result.estSiege).toBe(true);
+      expect(result.trancheEffectif).toBe("11");
+      expect(result.adresse.codePostal).toBe("59290");
+      expect(result.adresse.libelleCommune).toBe("WASQUEHAL");
+      expect(result.adresse.libelle).toContain("BIZET");
+    }
+  });
+
+  it("HTTP 200 fermé → actif=false + dateFermeture renseignée", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    fetchMock.mockResolvedValueOnce(
+      siretResponse({
+        etatPeriode: "F",
+        dateDebut: "2024-06-30",
+        extraPeriodes: [{ dateDebut: "2010-01-01", dateFin: "2024-06-29", etat: "A" }],
+      }),
+    );
+
+    const result = await lookupSiretViaInsee(SIRET);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.actif).toBe(false);
+      expect(result.dateFermeture).toBe("2024-06-30");
+      expect(result.dateCreation).toBe("2010-01-01");
+    }
+  });
+
+  it("payload incohérent (etablissement absent) → LookupResult not_found", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(jsonResponse({ header: {} }));
+
+    const result = await lookupSiretViaInsee(SIRET);
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.lookupStatus).toBe("not_found");
+      expect(result.message).toContain("incohérente");
+    }
     warnSpy.mockRestore();
   });
 });

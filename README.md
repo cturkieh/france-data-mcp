@@ -45,7 +45,7 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 
 ---
 
-## Outils MCP exposés (17 tools — V0.5.0)
+## Outils MCP exposés (24 tools — V0.6.2)
 
 ### 🗺️ Territoire (4 tools)
 
@@ -56,12 +56,13 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 | `geocode_adresse` | Adresse → coordonnées GPS (avec score de confiance) | IGN Géoplateforme |
 | `reverse_geocode` | Coordonnées GPS → adresse postale + commune | IGN Géoplateforme |
 
-### 🏢 Entreprises (2 tools)
+### 🏢 Entreprises (3 tools)
 
 | Tool | Description | Source |
 |---|---|---|
 | `entreprises_in_radius` | Recherche d'entreprises dans un rayon par code(s) NAF | DINUM Recherche Entreprises (+ fallback Haversine côté client) |
 | `entreprise_by_siren` | Fiche complète d'une entreprise par SIREN (sites, finances, dirigeants) | DINUM (+ fallback INSEE SIRENE V3.11 pour les SIREN diffusion partielle) |
+| `etablissement_by_siret` | **V0.6.0** — Fiche complète d'un établissement par SIRET (14 chiffres) : enseigne, NAF, dates création/fermeture, statut actif | INSEE SIRENE V3.11 (clé requise) |
 
 ### 🏥 Établissements de santé — FINESS (3 tools)
 
@@ -109,14 +110,27 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 
 > Couverture Ameli : libéraux **conventionnés uniquement** (~462 K). Pour les salariés (hospitaliers, salariés en LBM/cabinet), voir RPPS ci-dessous.
 
-### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (4 tools — V0.5.5)
+### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (5 tools — V0.6.0)
 
 | Tool | Description |
 |---|---|
 | `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice, `include_etudiants`, `include_agents_publics` |
 | `professionnels_rpps_par_dept` | Listing départemental + pagination. Idéal pour compter ou lister tout le monde (vs Ameli libéraux uniquement) |
 | `rpps_dans_etablissement` | **Killer feature** — répond à *"qui travaille dans ce labo / hôpital ?"*. Filtre par numéro FINESS site |
+| `rpps_search_by_name` | **V0.6.0** — Recherche fuzzy par identité (nom + prénom optionnel + département optionnel). Trigram pg_trgm tolérant accents/typos. `match_score` ∈ [0..1] dans chaque résultat |
 | `professionnel_by_rpps` | Fiche par identifiant national (11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe `81` qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Fallback live FHIR ANS si non trouvé en base locale |
+
+### 🔀 Croisement multi-source (4 tools — V0.6.1 / V0.6.2)
+
+Primitives de réconciliation FINESS DREES ↔ RPPS ANS ↔ SIRENE INSEE pour détecter les divergences factuelles entre référentiels (SIRET fermés, rebrandings post-M&A, raisons sociales périmées). Aucune interprétation métier : ces tools renvoient les faits, le caller décide.
+
+| Tool | Description |
+|---|---|
+| `data_freshness` | **V0.6.1** — Retourne la fraîcheur des dumps ingérés (FINESS, Ameli, RPPS) : `last_success_at`, `staleness_days`, `cadence_hint`. Cache mémoire 5 min |
+| `verifier_site_actif` | **V0.6.1** — Vérifie si un FINESS est encore en activité en croisant DREES ↔ RPPS (pivot SIRET) ↔ SIRENE. Détecte les SIRET fermés encore listés actifs côté FINESS (DREES retard 1-2 mois) |
+| `compare_raison_sociale_finess_vs_rpps` | **V0.6.2** — Compare la raison sociale FINESS vs RPPS sur un même `num_finess`. Détecte les rebrandings post-M&A non encore propagés côté DREES |
+| `historique_etablissement` | **V0.6.2** — Reconstitue la timeline complète (ouvertures, fermetures, changements de NAF/enseigne) d'un site via les `periodesEtablissement` SIRENE pour chaque SIRET candidat RPPS |
+| `reconcilier_finess_sirene` | **V0.6.2** — Calcule un score de cohérence Sørensen-Dice (nom + adresse) entre FINESS DREES et SIRENE pour chaque SIRET candidat. Verdict `match` / `partial` / `mismatch` |
 
 > Couverture RPPS : **~2,2 M PS actifs** (libéraux + salariés privés + hospitaliers contractuels + agents publics + étudiants + remplaçants). L'ANS pré-filtre la source aux PS actifs (cf. DSFT v3.1 §5.1.2 — pas de date de décès, activité ouverte) : aucun retraité, suspendu, radié ou décédé n'est exposé. ID national stable + lien `num_finess` (pivot PS↔FINESS). Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
 
@@ -237,7 +251,7 @@ Pour le **self-hosting** : créer une base Upstash gratuite sur [console.upstash
 
 ## État du projet
 
-✅ **Version 0.5.7 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose 17 tools. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS actifs** ingérés (l'ANS pré-filtre `PS_LibreAcces_Personne_activite` aux PS actifs à la source — cf. DSFT v3.1 §5.1.2 — donc aucun retraité, suspendu, radié ou décédé en base). 429 tests verts (398 + 31 nouveaux rate-limit/observability), TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+✅ **Version 0.6.2 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose **24 tools**. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS actifs** ingérés (l'ANS pré-filtre `PS_LibreAcces_Personne_activite` aux PS actifs à la source — cf. DSFT v3.1 §5.1.2 — donc aucun retraité, suspendu, radié ou décédé en base). **517 tests verts** (429 + 88 nouveaux : 8 régression coords, 27 lookup SIRET, 13 cross-source, 11 rpps_search_by_name, 5 ingest-log + tools MCP), TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
 
 **V0.5.7 (11 mai 2026)** — Garde-fous publics avant lancement Smithery / listings MCP : **rate limit 60 req/min par IP** sur `tools/call` (Upstash Redis sliding window + fallback in-memory), **logging JSON structuré** par requête (ts, method, tool, ip_hash SHA-256, user_agent, duration_ms, status, outcome). Anti-spoofing `extractIp` priorise `x-real-ip` (non-spoofable Vercel) plutôt que `x-forwarded-for[0]`. Voir section [Garde-fous publics](#garde-fous-publics-v057) ci-dessous et [CHANGELOG](CHANGELOG.md#057-2026-05-11).
 
