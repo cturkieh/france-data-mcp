@@ -1,6 +1,6 @@
 # france-data-mcp
 
-> Boîte à outils pour interroger les données publiques françaises depuis Claude, Cursor et toute application TypeScript. Un serveur MCP prêt à brancher + une bibliothèque npm.
+> MCP TypeScript qui **croise et réconcilie** 6 référentiels publics français (INSEE SIRENE, FINESS DREES, RPPS / Annuaire Santé ANS, Annuaire Santé Ameli, IGN, DINUM). Détecte les SIRET fermés que DREES n'a pas encore propagés, distingue site vs groupe, expose la fraîcheur de chaque source.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
@@ -10,42 +10,36 @@
 
 ---
 
-## À quoi ça sert ?
+## Pourquoi ce projet
 
-Les API et MCP officiels du gouvernement français existent (data.gouv.fr, service-public.fr, INSEE, IGN, ANS, DINUM…) mais ils sont éclatés, parfois sous-documentés, et chacun a ses pièges (rate limits, formats CSV propriétaires, migrations en cours, etc.).
+Les API et MCP officiels (data.gouv.fr, service-public.fr, INSEE, IGN, ANS, DINUM…) existent mais ils sont **éclatés, sous-documentés et chacun a ses pièges** : rate limits, formats CSV propriétaires, latences DREES de 1-2 mois, diffusion partielle INSEE, mappings de codes inconsistants entre Ameli et RPPS, etc.
 
-`france-data-mcp` rassemble **les sources les plus utiles pour de l'intelligence territoriale** dans une seule lib TypeScript et un seul serveur MCP, avec :
+`france-data-mcp` est **le premier MCP qui croise factuellement ces sources** pour répondre à des questions concrètes :
 
-- une API uniforme et typée (zéro `any`),
-- une gestion homogène des rate limits (retry exponentiel, respect de `retry-after`),
-- un cache sensible (TTL adapté à la fréquence de mise à jour de chaque source),
-- une documentation honnête sur ce que chaque source contient, comment elle évolue, et quels écueils éviter.
+- « Ce site FINESS est-il encore actif aujourd'hui ? » → cascade RPPS → DINUM avec scoring d'adresse Dice, distingue verdict site vs verdict groupe, capture les SIRET fermés invisibles côté DREES.
+- « Quelle est la timeline complète d'un cabinet post-M&A ? » → reconstitution chronologique via SIRENE `periodesEtablissement` enrichie par DINUM.
+- « FINESS et RPPS sont-ils d'accord sur la raison sociale ? » → primitive de comparaison brute, sans interprétation propriétaire d'enseignes.
+- « Mes données sont-elles fraîches ? » → opt-in `include_freshness: true` sur tous les tools DB-backed.
+
+Le tout avec une discipline production : API uniforme et typée (zéro `any`), rate limits gérés (retry exponentiel + `retry-after`), cache TTL par source, observabilité structurée (logs JSON, status discriminés `rejected` / `not_found` / `ambiguous` / `api_error`), documentation honnête sur les pièges de chaque source.
 
 ---
 
 ## Périmètre
 
-### 🗺️ Territoire (`france-data-mcp/territoire`)
+**6 sources publiques croisées en une API unifiée :**
 
-| Source | Usage type |
-|--------|------------|
-| **geo.api.gouv.fr** (DINUM) | Autocomplétion de communes par nom / code postal / code INSEE |
-| **IGN Géoplateforme** (`data.geopf.fr`) | Géocodage d'adresse → coordonnées GPS, géocodage inverse |
-| **INSEE Population IRIS** | Démographie infra-communale (tranches d'âge, CSP) |
+- 🗺️ **Territoire** : geo.api.gouv.fr (DINUM, communes), IGN Géoplateforme (géocodage adresse), INSEE Population IRIS (démographie infra-communale)
+- 🏥 **Santé** : FINESS / DREES (établissements sanitaires & médico-sociaux), Annuaire Santé Ameli (libéraux conventionnés), RPPS / Annuaire Santé ANS (tous les PS, libéraux + salariés)
+- 🏢 **Entreprises** : DINUM Recherche Entreprises + INSEE SIRENE V3.11 (fallback diffusion partielle)
 
-### 🏥 Santé (`france-data-mcp/sante`)
-
-| Source | Usage type |
-|--------|------------|
-| **FINESS** (data.gouv.fr) | Recherche d'établissements sanitaires et médico-sociaux par catégorie / zone (CH, CHU, EHPAD, MSP, CPTS, pharmacies, laboratoires…) |
-| **Annuaire Santé Ameli** (CNAM) | Recherche de professionnels de santé libéraux conventionnés (médecins, IDE, sages-femmes, pharmaciens) par spécialité / zone |
-| **DINUM Recherche Entreprises** (filtrée NAF santé) | Identification d'entreprises de santé (NAF 8690B labos, 8610Z hôpitaux, 8690A SSR, etc.) avec CA, dirigeants, effectifs |
+**Cross-source** (V0.7.0+) : pivot FINESS ↔ RPPS ↔ SIRENE via le resolver `siret-resolver` — détecte les SIRET fermés invisibles côté DREES, distingue verdict site vs verdict groupe.
 
 D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter dans `src/<domaine>/` si besoin.
 
 ---
 
-## Outils MCP exposés (24 tools — V0.6.2)
+## Outils MCP exposés (24 tools — V0.7.0)
 
 ### 🗺️ Territoire (4 tools)
 
@@ -120,17 +114,17 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 | `rpps_search_by_name` | **V0.6.0** — Recherche fuzzy par identité (nom + prénom optionnel + département optionnel). Trigram pg_trgm tolérant accents/typos. `match_score` ∈ [0..1] dans chaque résultat |
 | `professionnel_by_rpps` | Fiche par identifiant national (11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe `81` qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Fallback live FHIR ANS si non trouvé en base locale |
 
-### 🔀 Croisement multi-source (4 tools — V0.6.1 / V0.6.2)
+### 🔀 Croisement multi-source (5 tools — V0.6.1 → V0.7.0)
 
 Primitives de réconciliation FINESS DREES ↔ RPPS ANS ↔ SIRENE INSEE pour détecter les divergences factuelles entre référentiels (SIRET fermés, rebrandings post-M&A, raisons sociales périmées). Aucune interprétation métier : ces tools renvoient les faits, le caller décide.
 
 | Tool | Description |
 |---|---|
 | `data_freshness` | **V0.6.1** — Retourne la fraîcheur des dumps ingérés (FINESS, Ameli, RPPS) : `last_success_at`, `staleness_days`, `cadence_hint`. Cache mémoire 5 min |
-| `verifier_site_actif` | **V0.6.1** — Vérifie si un FINESS est encore en activité en croisant DREES ↔ RPPS (pivot SIRET) ↔ SIRENE. Détecte les SIRET fermés encore listés actifs côté FINESS (DREES retard 1-2 mois) |
+| `verifier_site_actif` | **V0.7.0** — Croise DREES ↔ resolver RPPS+DINUM avec scoring d'adresse Dice. Détecte les SIRET fermés invisibles côté RPPS. Retourne `verdict_site` et `verdict_groupe` distincts, `best_match` SIRET physique, `dinum_errors` discriminés |
 | `compare_raison_sociale_finess_vs_rpps` | **V0.6.2** — Compare la raison sociale FINESS vs RPPS sur un même `num_finess`. Détecte les rebrandings post-M&A non encore propagés côté DREES |
-| `historique_etablissement` | **V0.6.2** — Reconstitue la timeline complète (ouvertures, fermetures, changements de NAF/enseigne) d'un site via les `periodesEtablissement` SIRENE pour chaque SIRET candidat RPPS |
-| `reconcilier_finess_sirene` | **V0.6.2** — Calcule un score de cohérence Sørensen-Dice (nom + adresse) entre FINESS DREES et SIRENE pour chaque SIRET candidat. Verdict `match` / `partial` / `mismatch` |
+| `historique_etablissement` | **V0.7.0** — Reconstitue la timeline complète (ouvertures, fermetures, changements de NAF/enseigne) en interrogeant SIRENE `periodesEtablissement` pour chaque SIRET candidat du resolver (RPPS + DINUM matches). `status: success / partial / all_sirene_failed / all_sirene_not_found` |
+| `reconcilier_finess_sirene` | **V0.7.0** — Score de cohérence Sørensen-Dice (nom + adresse) entre FINESS DREES et SIRENE pour chaque candidat du resolver. Verdict `match` / `partial` / `mismatch`. `status` aligné sur historique_etablissement |
 
 > Couverture RPPS : **~2,2 M PS actifs** (libéraux + salariés privés + hospitaliers contractuels + agents publics + étudiants + remplaçants). L'ANS pré-filtre la source aux PS actifs (cf. DSFT v3.1 §5.1.2 — pas de date de décès, activité ouverte) : aucun retraité, suspendu, radié ou décédé n'est exposé. ID national stable + lien `num_finess` (pivot PS↔FINESS). Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
 
@@ -251,7 +245,9 @@ Pour le **self-hosting** : créer une base Upstash gratuite sur [console.upstash
 
 ## État du projet
 
-✅ **Version 0.6.2 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose **24 tools**. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS actifs** ingérés (l'ANS pré-filtre `PS_LibreAcces_Personne_activite` aux PS actifs à la source — cf. DSFT v3.1 §5.1.2 — donc aucun retraité, suspendu, radié ou décédé en base). **517 tests verts** (429 + 88 nouveaux : 8 régression coords, 27 lookup SIRET, 13 cross-source, 11 rpps_search_by_name, 5 ingest-log + tools MCP), TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+✅ **Version 0.7.0 — en production.** Le serveur MCP est live sur `https://france-data-mcp.vercel.app/mcp` et expose **24 tools**. ~95 K établissements FINESS, ~462 K professionnels Ameli et **~2,2 M PS RPPS actifs** ingérés (l'ANS pré-filtre `PS_LibreAcces_Personne_activite` aux PS actifs à la source — cf. DSFT v3.1 §5.1.2 — donc aucun retraité, suspendu, radié ou décédé en base). **525 tests unitaires verts**, TypeScript strict, Biome lint clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel).
+
+**V0.7.0 (11 mai 2026)** — Refonte cross-source : pivot SIRET élargi via DINUM (capture les SIRET fermés invisibles côté DREES, cf. cas Biogroup Bd Bizet), dual verdict site/groupe, opt-in `include_freshness` sur 12 tools, discriminant 4 états sur fallback FHIR ANS. Fix bug critique SIRENE V3.11 `/siret/` (raisonSocialeUniteLegale retournait le SIREN brut sur **tous** les SIRET). Breaking changes documentés dans [CHANGELOG](CHANGELOG.md#070-2026-05-11).
 
 **V0.5.7 (11 mai 2026)** — Garde-fous publics avant lancement Smithery / listings MCP : **rate limit 60 req/min par IP** sur `tools/call` (Upstash Redis sliding window + fallback in-memory), **logging JSON structuré** par requête (ts, method, tool, ip_hash SHA-256, user_agent, duration_ms, status, outcome). Anti-spoofing `extractIp` priorise `x-real-ip` (non-spoofable Vercel) plutôt que `x-forwarded-for[0]`. Voir section [Garde-fous publics](#garde-fous-publics-v057) ci-dessous et [CHANGELOG](CHANGELOG.md#057-2026-05-11).
 

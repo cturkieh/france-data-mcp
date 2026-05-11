@@ -49,39 +49,39 @@ describe("getAnsFhirBaseUrl", () => {
   });
 });
 
-describe("lookupPractitionerByRpps", () => {
-  it("retourne null sans appeler fetch quand la clé n'est pas configurée", async () => {
+describe("lookupPractitionerByRpps (V0.7.0 — discriminated result)", () => {
+  it("status='no_key' sans appeler fetch quand la clé n'est pas configurée", async () => {
     const result = await lookupPractitionerByRpps("810009647990");
-    expect(result).toBeNull();
+    expect(result.found).toBe(false);
+    if (!result.found) expect(result.status).toBe("no_key");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("retourne null quand rpps_id est vide ou whitespace", async () => {
+  it("status='invalid_format' quand rpps_id est vide ou whitespace", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
-    expect(await lookupPractitionerByRpps("")).toBeNull();
-    expect(await lookupPractitionerByRpps("   ")).toBeNull();
+    const emptyResult = await lookupPractitionerByRpps("");
+    const wsResult = await lookupPractitionerByRpps("   ");
+    expect(emptyResult.found).toBe(false);
+    expect(wsResult.found).toBe(false);
+    if (!emptyResult.found) expect(emptyResult.status).toBe("invalid_format");
+    if (!wsResult.found) expect(wsResult.status).toBe("invalid_format");
   });
 
-  it("retourne null sans appeler l'API si rpps_id n'est pas au format 11 ou 12 chiffres (V0.5.6)", async () => {
-    // Garde symétrique avec `getRppsById` (rpps-db.ts). Sans elle, un
-    // caller TS direct contournant la DB ferait un round-trip réseau ANS
-    // inutile pour un id manifestement invalide. fetchMock n'est PAS armé
-    // ici → si l'implémentation appelait quand même fetch, le test failerait.
-    // `console.warn` mocké pour vérifier le signal de format-rejected qui
-    // distingue ce cas de « PS non trouvé / API down » côté caller.
+  it("status='invalid_format' sans appeler l'API si rpps_id n'a pas le bon format", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(await lookupPractitionerByRpps("1234567890")).toBeNull(); // 10 chars
-    expect(await lookupPractitionerByRpps("8100051565666")).toBeNull(); // 13 chars
-    expect(await lookupPractitionerByRpps("abcdefghijk")).toBeNull(); // alpha
+    for (const bad of ["1234567890", "8100051565666", "abcdefghijk"]) {
+      const r = await lookupPractitionerByRpps(bad);
+      expect(r.found).toBe(false);
+      if (!r.found) expect(r.status).toBe("invalid_format");
+    }
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledTimes(3);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("rejeté par la garde format"));
     warnSpy.mockRestore();
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("envoie le header ESANTE-API-KEY et le filtre identifier=", async () => {
+  it("found=true avec practitioner peuplé quand ANS répond OK", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key-uuid");
     fetchMock.mockResolvedValueOnce(
       fhirBundle([
@@ -105,14 +105,16 @@ describe("lookupPractitionerByRpps", () => {
 
     const result = await lookupPractitionerByRpps("810009647990");
 
-    expect(result).not.toBeNull();
-    expect(result?.rpps_id).toBe("810009647990");
-    expect(result?.nom).toBe("DOE");
-    expect(result?.prenom).toBe("Jane");
-    expect(result?.civilite).toBe("Dr");
-    expect(result?.active).toBe(true);
-    expect(result?.source).toBe("ans_fhir");
-    expect(result?.ans_internal_id).toBe("003-5711959-5858827");
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.practitioner.rpps_id).toBe("810009647990");
+      expect(result.practitioner.nom).toBe("DOE");
+      expect(result.practitioner.prenom).toBe("Jane");
+      expect(result.practitioner.civilite).toBe("Dr");
+      expect(result.practitioner.active).toBe(true);
+      expect(result.practitioner.source).toBe("ans_fhir");
+      expect(result.practitioner.ans_internal_id).toBe("003-5711959-5858827");
+    }
 
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(String(url)).toContain("/fhir/v2/Practitioner?identifier=");
@@ -123,29 +125,38 @@ describe("lookupPractitionerByRpps", () => {
     expect(headers.Accept).toBe("application/fhir+json");
   });
 
-  it("retourne null quand le Bundle est vide", async () => {
+  it("status='not_found' quand le Bundle est vide", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     fetchMock.mockResolvedValueOnce(fhirBundle([]));
     const result = await lookupPractitionerByRpps("00000000000");
-    expect(result).toBeNull();
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.status).toBe("not_found");
+      expect(result.message).toContain("Bundle vide");
+    }
   });
 
-  it("retourne null sur 404 et log en warn (outcome attendu)", async () => {
+  it("status='not_found' + warn sur 404 (outcome attendu, retry inutile)", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fetchMock.mockResolvedValueOnce(new Response("{}", { status: 404 }));
     const result = await lookupPractitionerByRpps("00000000000");
-    expect(result).toBeNull();
+    expect(result.found).toBe(false);
+    if (!result.found) expect(result.status).toBe("not_found");
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("HTTP 404"));
     warnSpy.mockRestore();
   });
 
-  it("retourne null sur 401 et log en error", async () => {
+  it("status='api_error' + error log sur 401 (retry justifié)", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     fetchMock.mockResolvedValueOnce(new Response("{}", { status: 401 }));
     const result = await lookupPractitionerByRpps("810009647990");
-    expect(result).toBeNull();
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.status).toBe("api_error");
+      expect(result.message).toContain("Retry recommandé");
+    }
     expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("HTTP 401"));
     errSpy.mockRestore();
   });
@@ -167,10 +178,13 @@ describe("lookupPractitionerByRpps", () => {
       ]),
     );
     const result = await lookupPractitionerByRpps("810009647990");
-    expect(result?.rpps_id).toBe("810009647990");
-    expect(result?.nom).toBe("DOE");
-    expect(result?.prenom).toBe("John");
-    expect(result?.civilite).toBeNull();
-    expect(result?.active).toBeNull();
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.practitioner.rpps_id).toBe("810009647990");
+      expect(result.practitioner.nom).toBe("DOE");
+      expect(result.practitioner.prenom).toBe("John");
+      expect(result.practitioner.civilite).toBeNull();
+      expect(result.practitioner.active).toBeNull();
+    }
   });
 });

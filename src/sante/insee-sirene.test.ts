@@ -453,4 +453,152 @@ describe("lookupSiretViaInsee", () => {
     }
     warnSpy.mockRestore();
   });
+
+  // Régression V0.6.3 : SIRENE V3.11 sur /siret/{siret} retourne `uniteLegale`
+  // À PLAT (denominationUniteLegale, nomUniteLegale, etatAdministratifUniteLegale
+  // sont des champs directs de l'objet uniteLegale). C'est différent de /siren/{siren}
+  // qui les expose dans `uniteLegale.periodesUniteLegale[]`. Avant le fix, le mapper
+  // cherchait dans `periodesUniteLegale` sur la réponse /siret/, ne trouvait rien,
+  // et tombait sur le fallback `siren` brut comme raison sociale (cas réel observé
+  // sur 50781594200333 / BIOGROUP NORD → "507815942", 30116075000966 / CLINEA → "301160750").
+  it("HTTP 200 sur /siret/ avec uniteLegale à plat (vraie shape V3.11) → raison sociale correctement extraite", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        etablissement: {
+          siren: "507815942",
+          siret: SIRET,
+          etablissementSiege: true,
+          trancheEffectifsEtablissement: "11",
+          uniteLegale: {
+            // Vraie shape V3.11 sur /siret/ : champs à plat, PAS dans periodesUniteLegale
+            etatAdministratifUniteLegale: "A",
+            denominationUniteLegale: "BIOGROUP NORD",
+            categorieJuridiqueUniteLegale: "5785",
+            activitePrincipaleUniteLegale: "86.90B",
+          },
+          adresseEtablissement: {
+            numeroVoieEtablissement: "46",
+            typeVoieEtablissement: "RUE",
+            libelleVoieEtablissement: "DES FUSILLES",
+            codePostalEtablissement: "59493",
+            libelleCommuneEtablissement: "VILLENEUVE-D'ASCQ",
+            codeCommuneEtablissement: "59009",
+          },
+          periodesEtablissement: [
+            {
+              dateDebut: "2024-02-16",
+              dateFin: null,
+              etatAdministratifEtablissement: "A",
+              enseigne1Etablissement: null,
+              activitePrincipaleEtablissement: "86.90B",
+            },
+          ],
+        },
+      }),
+    );
+
+    const result = await lookupSiretViaInsee(SIRET);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.raisonSocialeUniteLegale).toBe("BIOGROUP NORD");
+      expect(result.raisonSocialeUniteLegale).not.toBe("507815942"); // pas le SIREN brut
+    }
+  });
+
+  it("HTTP 200 sur /siret/ avec uniteLegale à plat — entrepreneur individuel (nom+prenom)", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        etablissement: {
+          siren: "123456789",
+          siret: "12345678900001",
+          etablissementSiege: true,
+          trancheEffectifsEtablissement: "00",
+          uniteLegale: {
+            // Entrepreneur individuel : pas de denomination, à la place nom+prénom
+            etatAdministratifUniteLegale: "A",
+            denominationUniteLegale: null,
+            nomUniteLegale: "DUPONT",
+            prenomUsuelUniteLegale: "JEAN",
+            categorieJuridiqueUniteLegale: "1000",
+            activitePrincipaleUniteLegale: "86.21Z",
+          },
+          adresseEtablissement: {
+            numeroVoieEtablissement: "1",
+            typeVoieEtablissement: "RUE",
+            libelleVoieEtablissement: "DE LA PAIX",
+            codePostalEtablissement: "75001",
+            libelleCommuneEtablissement: "PARIS",
+            codeCommuneEtablissement: "75101",
+          },
+          periodesEtablissement: [
+            {
+              dateDebut: "2020-01-01",
+              dateFin: null,
+              etatAdministratifEtablissement: "A",
+              activitePrincipaleEtablissement: "86.21Z",
+            },
+          ],
+        },
+      }),
+    );
+
+    const result = await lookupSiretViaInsee("12345678900001");
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.raisonSocialeUniteLegale).toBe("JEAN DUPONT");
+    }
+  });
+
+  it("HTTP 200 sur /siret/ — robuste si payload contient ENCORE periodesUniteLegale (cas dégénéré)", async () => {
+    // Cas défensif : on ne sait pas si une future version V3.12 réintroduira
+    // periodesUniteLegale sur /siret/. Le mapper doit gérer les 2 shapes sans
+    // régresser. Le test simule un payload avec les 2 (à plat + période) — la
+    // période doit prendre le pas (plus précise, dateFin null = courante).
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        etablissement: {
+          siren: "507815942",
+          siret: SIRET,
+          etablissementSiege: true,
+          trancheEffectifsEtablissement: "11",
+          uniteLegale: {
+            etatAdministratifUniteLegale: "A",
+            denominationUniteLegale: "ANCIENNE DENOMINATION",
+            periodesUniteLegale: [
+              {
+                dateFin: null,
+                denominationUniteLegale: "BIOGROUP NORD",
+                etatAdministratifUniteLegale: "A",
+              },
+            ],
+          },
+          adresseEtablissement: {
+            numeroVoieEtablissement: "46",
+            typeVoieEtablissement: "RUE",
+            libelleVoieEtablissement: "DES FUSILLES",
+            codePostalEtablissement: "59493",
+            libelleCommuneEtablissement: "VILLENEUVE-D'ASCQ",
+            codeCommuneEtablissement: "59009",
+          },
+          periodesEtablissement: [
+            {
+              dateDebut: "2024-02-16",
+              dateFin: null,
+              etatAdministratifEtablissement: "A",
+            },
+          ],
+        },
+      }),
+    );
+
+    const result = await lookupSiretViaInsee(SIRET);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // periodesUniteLegale prend le pas car elle est plus précise
+      expect(result.raisonSocialeUniteLegale).toBe("BIOGROUP NORD");
+    }
+  });
 });

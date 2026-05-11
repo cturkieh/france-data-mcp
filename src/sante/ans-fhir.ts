@@ -104,38 +104,54 @@ export interface AnsFhirPractitioner {
 }
 
 /**
- * Lookup FHIR ANS par IDNPS / rpps_id. Retourne `null` si :
- * - pas de clé configurée (no-op gracieux)
- * - PS non trouvé (Bundle vide ou 404)
- * - erreur réseau / 5xx / 401 / 403 (loggée, pas propagée)
+ * Résultat discriminé d'un lookup ANS FHIR. **V0.7.0 breaking** — avant V0.7.0,
+ * la fonction retournait `null` indifféremment pour 4 cas (pas de clé, format
+ * invalide, PS absent, API down), masquant l'information critique au caller.
  *
- * Utilisé en fallback du lookup DB. Latence p99 ~1-2s. Pas de cache local
- * (ANS est rafraîchi quotidiennement, le cache deviendrait vite obsolète).
+ * - `found: true` → `practitioner` peuplé, source ANS live.
+ * - `status: "no_key"` → clé `ESANTE-API-KEY` non configurée côté serveur.
+ *   Fallback indisponible — le caller doit s'appuyer sur la DB locale.
+ * - `status: "invalid_format"` → `rpps_id` rejeté par la garde format
+ *   (11 ou 12 chiffres requis). Pas d'I/O réseau.
+ * - `status: "not_found"` → ANS a répondu, PS réellement absent (Bundle vide
+ *   ou 404). Retry inutile, PS pas inscrit à l'ANS.
+ * - `status: "api_error"` → ANS indisponible (5xx, timeout, 401, 403, network).
+ *   Retry justifié dans quelques minutes.
+ */
+export type AnsFhirLookupResult =
+  | { found: true; practitioner: AnsFhirPractitioner }
+  | { found: false; status: "no_key" | "invalid_format" | "not_found" | "api_error"; message: string };
+
+/**
+ * Lookup FHIR ANS par IDNPS / rpps_id. Utilisé en fallback du lookup DB.
+ * Latence p99 ~1-2s. Pas de cache local (ANS est rafraîchi quotidiennement).
+ *
+ * Retourne un `AnsFhirLookupResult` discriminé — voir le type pour les 5 cas
+ * possibles. **Aucun `null` silencieux** (V0.7.0 breaking, cf. JSDoc du type).
  */
 export async function lookupPractitionerByRpps(
   rppsId: string,
-): Promise<AnsFhirPractitioner | null> {
+): Promise<AnsFhirLookupResult> {
   const apiKey = getAnsFhirApiKey();
-  if (!apiKey) return null;
+  if (!apiKey) {
+    return {
+      found: false,
+      status: "no_key",
+      message:
+        "ESANTE-API-KEY non configurée côté serveur. Fallback FHIR ANS indisponible — s'appuyer sur la DB locale (snapshot mensuel J-30 max).",
+    };
+  }
 
   const trimmed = rppsId.trim();
-  // Garde format symétrique avec `getRppsById` (rpps-db.ts) : un caller TS
-  // direct qui contournerait la DB pour ne tester que le fallback FHIR ne
-  // doit pas envoyer un id malformé à l'API ANS (round-trip réseau inutile,
-  // bruit dans les quotas). Same regex que le tool MCP `professionnel_by_rpps`.
-  //
-  // Sémantique : `getRppsById` throw RangeError, `lookupPractitionerByRpps`
-  // retourne `null` (no-op gracieux, contrat existant — la lib reste utilisable
-  // sans ANS configuré ou pour un PS absent). Pour distinguer « format rejeté »
-  // de « PS non trouvé / API down », un `console.warn` est émis quand l'input
-  // était non-vide mais ne matche pas la regex — sinon le caller debug à
-  // l'aveugle sur les outcomes confondants.
-  if (trimmed === "") return null;
-  if (!/^\d{11,12}$/.test(trimmed)) {
+  if (trimmed === "" || !/^\d{11,12}$/.test(trimmed)) {
     console.warn(
-      `[france-data-mcp] ANS FHIR lookup skipped — rpps_id "${rppsId}" rejeté par la garde format /^\\d{11,12}$/ (format IDNPS attendu : 11 ou 12 chiffres).`,
+      `[france-data-mcp] ANS FHIR lookup skipped — rpps_id "${rppsId}" rejeté par la garde format /^\\d{11,12}$/.`,
     );
-    return null;
+    return {
+      found: false,
+      status: "invalid_format",
+      message: `rpps_id "${rppsId}" invalide — format IDNPS attendu : 11 ou 12 chiffres.`,
+    };
   }
 
   const baseUrl = getAnsFhirBaseUrl();
@@ -160,27 +176,55 @@ export async function lookupPractitionerByRpps(
     // de catch, log différencié 404 (warn, outcome attendu) vs reste (error).
     const httpStatus = err instanceof HttpError ? err.status : null;
     const errMsg = err instanceof Error ? err.message : String(err);
+    const detail = httpStatus !== null ? `HTTP ${httpStatus}` : `network/parse error: ${errMsg}`;
     const logFn = httpStatus === 404 ? console.warn : console.error;
-    logFn(
-      `[france-data-mcp] ANS FHIR lookup terminated for rpps=${trimmed} — ${httpStatus !== null ? `HTTP ${httpStatus}` : `network/parse error: ${errMsg}`}`,
-    );
-    return null;
+    logFn(`[france-data-mcp] ANS FHIR lookup terminated for rpps=${trimmed} — ${detail}`);
+    // 404 = identifier vraiment inconnu ANS → `not_found`. Tout autre statut
+    // (5xx, 401, 403, network, timeout) = panne API → `api_error` justifie un
+    // retry caller. Distinction critique pour ne pas mentir au caller LLM.
+    if (httpStatus === 404) {
+      return {
+        found: false,
+        status: "not_found",
+        message: `IDNPS ${trimmed} introuvable côté ANS FHIR (HTTP 404).`,
+      };
+    }
+    return {
+      found: false,
+      status: "api_error",
+      message: `ANS FHIR lookup failed for rpps=${trimmed} — ${detail}. Retry recommandé.`,
+    };
   } finally {
     clearTimeout(timeout);
   }
 
-  // Bundle vide = identifier inconnu côté ANS. Outcome légitime (PS pas
-  // encore inscrit, identifier corrompu côté caller). Pas un incident.
+  // Bundle vide = identifier inconnu côté ANS. Outcome légitime (PS pas encore
+  // inscrit, identifier corrompu côté caller). Pas un incident.
   const entries = bundle.entry ?? [];
-  if (entries.length === 0) return null;
+  if (entries.length === 0) {
+    return {
+      found: false,
+      status: "not_found",
+      message: `IDNPS ${trimmed} introuvable côté ANS FHIR (Bundle vide).`,
+    };
+  }
 
   // FHIR garantit l'unicité par identifier=IDNPS, donc on prend le premier.
   // Les éventuels doublons côté ANS seraient une anomalie qu'on n'essaie pas
   // de résoudre côté client (signaler à ans-annuaire@esante.gouv.fr).
   const resource = entries[0]?.resource;
-  if (!resource || resource.resourceType !== "Practitioner") return null;
+  if (!resource || resource.resourceType !== "Practitioner") {
+    console.warn(
+      `[france-data-mcp] ANS FHIR Practitioner attendu mais resource=${resource?.resourceType ?? "null"} pour rpps=${trimmed} — réponse incohérente`,
+    );
+    return {
+      found: false,
+      status: "api_error",
+      message: `ANS FHIR a renvoyé un payload incohérent pour ${trimmed} (resourceType inattendu).`,
+    };
+  }
 
-  return mapPractitioner(resource, trimmed);
+  return { found: true, practitioner: mapPractitioner(resource, trimmed) };
 }
 
 function mapPractitioner(

@@ -4,6 +4,111 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.7.0] — 2026-05-11
+
+**Pivot SIRET élargi + dual verdict site/groupe + discipline observabilité — breaking**
+
+Refonte des helpers cross-source pour capter les **SIRET fermés invisibles
+côté DREES** (cas reproductible : FINESS 590048997 LABORATOIRE SECONDAIRE
+DIAGNOVIE BD BIZET, fermé SIRENE depuis 2024-02-16 mais toujours actif DREES).
+La cascade RPPS → DINUM + scoring d'adresse Dice ramène désormais TOUS les
+SIRET du SIREN parent et identifie le SIRET physique du site, pas juste le
+SIRET du siège employeur déclaré par les PS.
+
+Bug critique corrigé sur l'API SIRENE V3.11 `/siret/` : `raisonSocialeUniteLegale`
+retournait le SIREN brut au lieu du nom (ex: "267500452" au lieu d'"AP-HP",
+"301160750" au lieu de "CLINEA"). Le mapper cherchait dans
+`uniteLegale.periodesUniteLegale[]` qui n'existe que sur l'endpoint `/siren/`,
+pas `/siret/` (qui expose les champs à plat). Touchait `etablissement_by_siret`
+et tous les helpers cross-source. Régression test couvre les 2 shapes
+(personnes morales + entrepreneurs individuels).
+
+### Ajouté
+
+- **`src/sante/siret-resolver.ts`** : nouveau module qui résout les SIRET
+  candidats pour un FINESS via cascade RPPS → DINUM. Expose
+  `SiretResolution` avec `candidates` enrichis (score adresse + état actif +
+  source `rpps` / `dinum_address_match`), `best_match` (= SIRET physique le
+  plus probable, threshold 0.6), `sirens_explored`, `sirens_actif`,
+  `dinum_errors` (`rejected` / `not_found` / `ambiguous`).
+- **`src/sante/address-match.ts`** : primitives partagées
+  `diceCoefficient` + `normalizeForCompare` (NFD + lowercase + ponctuation
+  + collapse whitespace) + `buildFinessAdresseLibelle`. Élimine la
+  divergence d'algo entre cross-source et siret-resolver.
+- **`src/core/freshness.ts`** : helper `withFreshness(result, includeFreshness,
+  sources)` qui injecte `data_freshness` (filtré par sources) dans le payload
+  quand `include_freshness: true`. Graceful degradation : si
+  `getDataFreshness` throw, injecte `data_freshness_error` sans casser le tool.
+- **`include_freshness: boolean` (default false)** opt-in sur **12 tools**
+  FINESS / RPPS / Ameli : `etablissements_finess_in_radius`,
+  `etablissements_finess_by_categorie`, `etablissement_by_finess`,
+  `professionnels_in_radius`, `professionnels_par_specialite_dept`,
+  `lister_specialites_ameli`, `lister_types_ps_ameli`,
+  `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`,
+  `rpps_dans_etablissement`, `rpps_search_by_name`, `professionnel_by_rpps`
+  (uniquement sur path `source: "db"`).
+- Régression tests : 3 nouveaux scénarios `verifierSiteActif` (cas Bd Bizet
+  fermé / site actif / address no-match), 3 tests `historiqueEtablissement`
+  / `reconcilierFinessSirene` sur `status: all_sirene_failed` vs
+  `all_sirene_not_found` vs propagation `dinum_errors`. 7 tests pour
+  `lookupPractitionerByRpps` discriminated result, 3 tests pour la vraie
+  shape SIRENE V3.11 `/siret/` à plat.
+
+### Modifié — **BREAKING**
+
+- **`verifierSiteActif`** retourne désormais `{ candidates, best_match,
+  sirens_explored, dinum_errors, verdict_site, verdict_groupe, explication }`
+  au lieu de `{ siret_candidates, verdict, explication }`. Les
+  `VerdictSite` / `VerdictGroupe` sont distincts (`actif` / `ferme` /
+  `indetermine`) — un site peut être fermé tandis que son groupe (SIREN)
+  reste actif. L'ancien `VerifierVerdict` (6 valeurs) est supprimé.
+- **`historiqueEtablissement`** ajoute `dinum_errors` + `status`
+  (`success` / `partial` / `all_sirene_failed` / `all_sirene_not_found`).
+  Pivot SIRET élargi via le resolver — capture les SIRET fermés invisibles
+  côté RPPS.
+- **`reconcilierFinessSirene`** ajoute `dinum_errors` + `status` aligné sur
+  `historiqueEtablissement`. Pivot SIRET élargi.
+- **`lookupPractitionerByRpps`** retourne désormais un
+  `AnsFhirLookupResult` discriminé (`{ found: true, practitioner }` ou
+  `{ found: false, status: "no_key" | "invalid_format" | "not_found" |
+  "api_error", message }`) au lieu de `AnsFhirPractitioner | null`.
+  Le caller distingue désormais "clé absente" / "format rejeté" / "PS
+  absent ANS" / "panne ANS" — avant V0.7.0, les 4 cas renvoyaient `null`
+  indifféremment, ce qui mentait au caller LLM (`api_error` ressemblait à
+  `not_found`). Handler MCP `professionnel_by_rpps` propage le `status`
+  dans le payload `ans_fhir_status`.
+
+### Corrigé
+
+- **SIRENE V3.11 `/siret/` mapper** : `pickUniteLegaleFields` gère les 2
+  shapes de `uniteLegale` (champs à plat sur `/siret/`, dans
+  `periodesUniteLegale[]` sur `/siren/`). Avant : `raisonSocialeUniteLegale`
+  retournait le SIREN brut sur tout SIRET requêté. Bug confirmé sur 3
+  catégories non-bio (AP-HP hôpital public, CLINEA cliniques privées,
+  ARPAVIE EHPAD associatif).
+- **`withFreshness`** ne fait plus crasher un tool entier si le freshness
+  lookup `getDataFreshness` throw (ingest_log down / RLS broken /
+  network) — injecte `data_freshness_error` et préserve la donnée métier.
+- **`siret-resolver`** log `console.warn` + status discriminé
+  (`rejected` / `not_found` / `ambiguous`) sur tout lookup DINUM échoué.
+  Avant : les `not_found` étaient silencieusement absorbés dans le
+  `dinum_errors` array sans `console.error`, masquant les dégradations
+  systémiques en prod.
+- **Explication `verifier_site_actif`** : suffix `dinumDiag` injecté dans
+  TOUTES les branches (avant : seulement quand `verdict_site === "indetermine"`),
+  pour que le caller voit toujours qu'un SIREN a échoué même si le site
+  est confirmé actif/fermé.
+
+### Supprimé
+
+- `VerifierVerdict` (6 valeurs `indetermine_pas_de_siret` /
+  `indetermine_pas_de_cle_insee` / etc.) — remplacé par les deux
+  `VerdictSite` / `VerdictGroupe` orthogonaux.
+- `SiretVerification` (helper interne de l'ancien shape) — remplacé par
+  `SiretCandidate` du resolver.
+- `diceCoefficient` exporté de `cross-source.ts` — déplacé vers
+  `address-match.ts` (export public préservé).
+
 ## [0.6.2] — 2026-05-11
 
 **Croisement multi-source FINESS ↔ RPPS ↔ SIRENE — 3 nouveaux tools de réconciliation**

@@ -15,54 +15,54 @@
 
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
+import {
+  buildFinessAdresseLibelle,
+  diceCoefficient,
+  normalizeForCompare,
+} from "./address-match.js";
 import { assertValidNumFiness } from "./db-helpers.js";
-import { type FinessResult, getFinessByNumFiness } from "./finess-db.js";
+import { getFinessByNumFiness } from "./finess-db.js";
 import {
   type EtablissementSireneDetail,
   type EtablissementSireneHistorique,
   lookupSiretHistoriqueViaInsee,
   lookupSiretViaInsee,
 } from "./insee-sirene.js";
+import { type DinumLookupError, type SiretCandidate, resolveSiretsForFiness } from "./siret-resolver.js";
 
 /**
- * Verdict consolidé pour `verifier_site_actif`. Chaque champ traduit un
- * niveau de certitude distinct. Si `num_finess` est absent de FINESS DREES,
- * la fonction retourne directement `lookupNotFound` (pas un verdict).
+ * Verdict pour `verifier_site_actif`. **V0.7.0 breaking** : on distingue
+ * désormais le verdict **site** (le LIEU physique correspondant au FINESS)
+ * du verdict **groupe** (l'unité légale parente, le SIREN).
  *
- * - `actif` : SIRENE renvoie au moins un SIRET candidat avec `actif=true`.
- *   Site considéré ouvert.
- * - `ferme` : tous les SIRET candidats sont `actif=false` ET ≥1 a une
- *   `dateFermeture`. Site considéré fermé — FINESS DREES probablement
- *   en retard (1-2 mois).
- * - `indetermine_pas_de_siret` : aucun SIRET candidat trouvé en base RPPS
- *   pour ce FINESS. Le pivot n'a pas pu être fait — caller doit cross-check
- *   manuellement via SIRENE/recherche-entreprises.
- * - `indetermine_pas_de_cle_insee` : clé `INSEE_SIRENE_API_KEY` non
- *   configurée côté serveur. SIRET candidat existe mais la vérification
- *   SIRENE est impossible.
- * - `indetermine_insee_unreachable` : ≥1 SIRET candidat trouvé mais aucun
- *   lookup SIRENE n'a abouti (5xx, timeout, 404 SIRENE inattendu). API
- *   INSEE indisponible — réessayer.
- * - `indetermine_sirene_partiel` : INSEE a répondu sur ≥1 SIRET mais aucun
- *   n'est ni actif ni n'a de `dateFermeture` (cessation SIRENE incomplète).
- *   Données partielles — vérifier les `insee_error` individuels.
+ * Pourquoi : un site peut être fermé alors que son groupe (SIREN) reste
+ * actif via d'autres établissements. Avant V0.7.0, on n'avait qu'un verdict
+ * global qui retournait "actif" tant qu'au moins un SIRET RPPS-déclaré
+ * (typiquement le siège) était actif — masquant les fermetures de site.
+ *
+ * - `actif` : pour le site, le SIRET physique (= `best_match`) est ACTIF
+ *   côté SIRENE/DINUM ; pour le groupe, l'UL est en état administratif `A`.
+ * - `ferme` : pour le site, `best_match.actif === false` (= site cessé
+ *   côté SIRENE, FINESS DREES probablement en retard 1-2 mois) ; pour le
+ *   groupe, UL en état `C`.
+ * - `indetermine` : impossible de trancher — soit parce qu'aucun SIRET
+ *   candidat n'a un score d'adresse suffisant pour être déclaré
+ *   `best_match` (≥ 0.6, cf. `siret-resolver.ts`), soit parce que le SIREN
+ *   parent n'a pas pu être résolu côté DINUM (diffusion partielle, panne,
+ *   timeout). Le caller doit cross-checker via `etablissement_by_siret`.
  */
-export type VerifierVerdict =
-  | "actif"
-  | "ferme"
-  | "indetermine_pas_de_siret"
-  | "indetermine_pas_de_cle_insee"
-  | "indetermine_insee_unreachable"
-  | "indetermine_sirene_partiel";
+export type VerdictSite = "actif" | "ferme" | "indetermine";
+export type VerdictGroupe = "actif" | "ferme" | "indetermine";
 
-export interface SiretVerification {
-  siret: string;
-  /** Source de la candidature `siret` : `rpps_db` = enrichissement post-INSERT. */
-  source: "rpps_db";
-  /** Résultat SIRENE INSEE V3.11. `null` si lookup non tenté ou échoué. */
-  insee: EtablissementSireneDetail | null;
-  /** Présent quand le lookup INSEE a échoué (timeout, 5xx, payload incohérent). */
-  insee_error?: string;
+/**
+ * Mappe le tri-état `actif: boolean | null` (DINUM/SIRENE) sur le verdict.
+ * `null` = donnée manquante (lookup échoué, SIREN diffusion partielle…) →
+ * `indetermine`. Évite la duplication de la logique site vs groupe.
+ */
+function verdictFromActif(actif: boolean | null): VerdictSite {
+  if (actif === true) return "actif";
+  if (actif === false) return "ferme";
+  return "indetermine";
 }
 
 export interface VerifierSiteActifResult {
@@ -78,29 +78,56 @@ export interface VerifierSiteActifResult {
     telephone: string | null;
   };
   /**
-   * SIRET candidats trouvés via la table `rpps` (colonne enrichie au moment
-   * de l'ingest RPPS — JOIN sur `num_finess`). Peut être vide si aucun PS
-   * RPPS n'a déclaré ce FINESS comme site d'exercice.
+   * Tous les SIRET candidats identifiés via la cascade RPPS → DINUM, triés
+   * par `score_adresse` décroissant. Inclut le SIRET du siège RPPS-déclaré
+   * ET les SIRET DINUM qui matchent l'adresse FINESS (= SIRET physique du
+   * site, y compris fermés). Cf. `siret-resolver.ts`.
    */
-  siret_candidates: SiretVerification[];
-  verdict: VerifierVerdict;
+  candidates: SiretCandidate[];
   /**
-   * Message actionnable pour le caller LLM. Explique le verdict et oriente
-   * vers les tools complémentaires (ex: `etablissement_by_siret` pour cross-check).
+   * Meilleur match adresse FINESS↔SIRENE (score_adresse ≥ 0.6). `null` quand
+   * aucun candidat ne matche l'adresse FINESS — typique des structures
+   * émergentes (DREES en retard) ou des SIREN diffusion partielle.
+   */
+  best_match: SiretCandidate | null;
+  /** Liste des SIREN explorés via DINUM (1 dans 99% des cas). */
+  sirens_explored: string[];
+  /**
+   * Diagnostic par SIREN qui a échoué côté DINUM (`rejected` / `not_found` /
+   * `ambiguous`). Permet au caller de distinguer "vraiment pas de site"
+   * (DINUM OK + 0 match) de "DINUM en panne" (`status: rejected`).
+   * Vide quand tous les lookups DINUM ont réussi.
+   */
+  dinum_errors: DinumLookupError[];
+  /** Verdict niveau SITE — basé sur `best_match.actif`. */
+  verdict_site: VerdictSite;
+  /**
+   * Verdict niveau GROUPE (UL parente) — basé sur l'état admin DINUM du
+   * SIREN du `best_match` (ou du premier SIREN exploré si pas de best_match).
+   */
+  verdict_groupe: VerdictGroupe;
+  /**
+   * Message actionnable pour le caller LLM. Explique les 2 verdicts et
+   * oriente vers les tools complémentaires (ex: `etablissement_by_siret`
+   * pour creuser un SIRET ambigu, `historique_etablissement` pour la timeline).
    */
   explication: string;
 }
 
 /**
  * Croise FINESS (raison sociale + adresse + tél de la DREES) avec SIRENE
- * (état administratif réel) via le pivot RPPS (qui expose `siret` à côté de
- * `num_finess`). Détecte les fermetures SIRENE non flaggées par FINESS.
+ * (état administratif réel) en élargissant le pivot RPPS via DINUM. **V0.7.0**
+ * remplace l'ancien pivot RPPS-only par une cascade RPPS → DINUM avec scoring
+ * d'adresse, ce qui permet de capter les **SIRET fermés** (post-déménagement,
+ * post-M&A) qui n'apparaissent plus dans la table RPPS (logique : aucun PS
+ * actif ne déclare un SIRET fermé).
  *
  * Retourne un `LookupResult` parce que `num_finess` peut être absent — même
  * shape que `getFinessByNumFiness` pour cohérence du contrat caller.
  *
- * Coût : 1 RPC + 1 DB query SELECT DISTINCT + N appels INSEE (rate-limited
- * 30/min, en pratique N ≤ 3 sites par FINESS → coût négligeable).
+ * Coût : 1 RPC FINESS + 1 SELECT RPPS + N appels DINUM (N = nombre de SIREN
+ * distincts, typiquement 1). Pas d'appel INSEE direct ici — DINUM gère son
+ * propre fallback INSEE V3.11 en interne pour les SIREN diffusion partielle.
  */
 export async function verifierSiteActif(
   numFiness: string,
@@ -114,112 +141,70 @@ export async function verifierSiteActif(
     );
   }
 
-  const candidateSirets = await getDistinctSiretsForFiness(trimmed);
+  const resolution = await resolveSiretsForFiness(trimmed, finess);
 
-  // Cas 1 : aucun SIRET candidat → indéterminé (pas de pivot possible).
-  if (candidateSirets.length === 0) {
-    return lookupFound<VerifierSiteActifResult>({
-      num_finess: trimmed,
-      finess: extractFinessSummary(finess),
-      siret_candidates: [],
-      verdict: "indetermine_pas_de_siret",
-      explication: `Aucun SIRET RPPS rattaché à ce FINESS — pivot SIRENE impossible automatiquement. Cross-check manuel : entreprises_in_radius autour de l'adresse FINESS, ou recherche directe sur recherche-entreprises.api.gouv.fr.`,
-    });
-  }
-
-  // Cas 2 : SIRET candidats → on lookup chaque SIRET via INSEE en parallèle.
-  // `Promise.allSettled` plutôt que séquentiel : INSEE rate-limit 30/min mais
-  // N ≤ 5 SIRETs en pratique, donc 0 risque de saturer. Gain : p99 latency / N.
-  // Rate limit côté serveur géré par fetchJson (retry-after sur 429).
-  const settled = await Promise.allSettled(
-    candidateSirets.map((siret) => lookupSiretViaInsee(siret)),
+  const verdictSite: VerdictSite = verdictFromActif(resolution.best_match?.actif ?? null);
+  // SIREN du best_match (SIRET physique) prioritaire ; sinon le premier
+  // SIREN exploré pour rester informatif quand aucun candidat n'a matché.
+  const sirenForGroupe =
+    resolution.best_match?.siret.slice(0, 9) ?? resolution.sirens_explored[0];
+  const verdictGroupe: VerdictGroupe = verdictFromActif(
+    sirenForGroupe ? (resolution.sirens_actif[sirenForGroupe] ?? null) : null,
   );
-  const verifications: SiretVerification[] = [];
-  let anyInseeUnauthorized = false;
-  for (let i = 0; i < candidateSirets.length; i++) {
-    const siret = candidateSirets[i] as string;
-    const outcome = settled[i] as PromiseSettledResult<
-      Awaited<ReturnType<typeof lookupSiretViaInsee>>
-    >;
-    if (outcome.status === "rejected") {
-      const msg = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
-      console.error(
-        `[france-data-mcp] verifier_site_actif: INSEE lookup failed for siret=${siret}: ${msg}`,
-      );
-      verifications.push({ siret, source: "rpps_db", insee: null, insee_error: msg });
-      continue;
-    }
-    const result = outcome.value;
-    if (result.found) {
-      verifications.push({ siret, source: "rpps_db", insee: result });
-    } else {
-      // not_found peut être : SIRET introuvable SIRENE (rare) OU clé INSEE
-      // absente. La distinction est dans `message` — on garde la trace mais
-      // on flagge le manque de clé pour le verdict global.
-      const isMissingKey = result.message.includes("INSEE_SIRENE_API_KEY");
-      if (isMissingKey) anyInseeUnauthorized = true;
-      verifications.push({
-        siret,
-        source: "rpps_db",
-        insee: null,
-        insee_error: result.message,
-      });
-    }
-  }
-
-  // Cas 3 : clé INSEE manquante → on ne peut pas trancher.
-  if (anyInseeUnauthorized) {
-    return lookupFound<VerifierSiteActifResult>({
-      num_finess: trimmed,
-      finess: extractFinessSummary(finess),
-      siret_candidates: verifications,
-      verdict: "indetermine_pas_de_cle_insee",
-      explication: `${candidateSirets.length} SIRET candidat(s) trouvé(s) côté RPPS, mais la clé INSEE_SIRENE_API_KEY n'est pas configurée côté serveur — vérification SIRENE impossible. Configurer la clé sur api.insee.fr pour activer.`,
-    });
-  }
-
-  // Cas 4 : tous les SIRET candidats ont reçu une réponse SIRENE. On consolide.
-  const inseeFound = verifications.filter((v): v is SiretVerification & {
-    insee: EtablissementSireneDetail;
-  } => v.insee !== null);
-  const anyActif = inseeFound.some((v) => v.insee.actif === true);
-  const anyHasDateFermeture = inseeFound.some((v) => v.insee.dateFermeture !== null);
-
-  let verdict: VerifierVerdict;
-  let explication: string;
-  if (anyActif) {
-    verdict = "actif";
-    const activeSirets = inseeFound.filter((v) => v.insee.actif).map((v) => v.siret);
-    explication = `Au moins un SIRET candidat est actif côté SIRENE INSEE (${activeSirets.join(", ")}). Site considéré ouvert.`;
-  } else if (anyHasDateFermeture) {
-    verdict = "ferme";
-    const dates = inseeFound
-      .filter((v) => v.insee.dateFermeture !== null)
-      .map((v) => `${v.siret}@${v.insee.dateFermeture}`)
-      .join(", ");
-    explication = `Tous les SIRET candidats sont fermés côté SIRENE INSEE (${dates}). Site considéré fermé — FINESS DREES probablement en retard sur la fermeture (latence 1-2 mois).`;
-  } else if (inseeFound.length === 0) {
-    // Aucun lookup INSEE n'a réussi : on ne peut PAS conclure "pas de SIRET"
-    // (les SIRET candidats existent côté RPPS, c'est SIRENE qui n'a rien
-    // donné d'exploitable — 5xx, timeout, 404 SIRET inattendu, etc.).
-    verdict = "indetermine_insee_unreachable";
-    const errors = verifications.map((v) => v.insee_error ?? "unknown").join(" | ");
-    explication = `${candidateSirets.length} SIRET candidat(s) trouvé(s) côté RPPS mais aucun lookup SIRENE n'a abouti (${errors}). API INSEE probablement indisponible ou SIRET inconnus de SIRENE — réessayer dans quelques minutes.`;
-  } else {
-    // INSEE a répondu mais aucun SIRET n'est ni actif ni n'a de dateFermeture
-    // (cessation sans date côté SIRENE). Verdict dédié pour ne pas masquer la
-    // présence de SIRET candidats derrière le label "pas_de_siret".
-    verdict = "indetermine_sirene_partiel";
-    explication = `${candidateSirets.length} SIRET candidat(s) mais aucun statut SIRENE exploitable (ni actif ni dateFermeture). Données SIRENE partielles — vérifier les insee_error individuels.`;
-  }
 
   return lookupFound<VerifierSiteActifResult>({
     num_finess: trimmed,
     finess: extractFinessSummary(finess),
-    siret_candidates: verifications,
-    verdict,
-    explication,
+    candidates: resolution.candidates,
+    best_match: resolution.best_match,
+    sirens_explored: resolution.sirens_explored,
+    dinum_errors: resolution.dinum_errors,
+    verdict_site: verdictSite,
+    verdict_groupe: verdictGroupe,
+    explication: buildVerifierExplication(resolution, verdictSite, verdictGroupe),
   });
+}
+
+/**
+ * Texte LLM-friendly qui décrit les 2 verdicts ensemble. Objectif : que le
+ * caller comprenne en une lecture la nuance site vs groupe, et sache vers
+ * quel tool aller pour creuser (étoilement vers `etablissement_by_siret`,
+ * `historique_etablissement`, ou `entreprise_by_siren` selon le cas).
+ */
+function buildVerifierExplication(
+  resolution: Awaited<ReturnType<typeof resolveSiretsForFiness>>,
+  verdictSite: VerdictSite,
+  verdictGroupe: VerdictGroupe,
+): string {
+  const best = resolution.best_match;
+  // Suffix DINUM ajouté à toutes les branches : utile même quand le verdict
+  // est confirmé (signal de résolution non complète, peut justifier un retry).
+  const dinumDiagSuffix = formatDinumDiag(resolution.dinum_errors);
+  if (verdictSite === "actif" && best) {
+    return `Site actif côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué actif. Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}.${dinumDiagSuffix}`;
+  }
+  if (verdictSite === "ferme" && best) {
+    return `Site fermé côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué inactif (date_creation: ${best.date_creation ?? "?"}). FINESS DREES probablement en retard sur la fermeture (latence 1-2 mois). Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}. Pour la timeline complète : historique_etablissement(num_finess).${dinumDiagSuffix}`;
+  }
+  if (resolution.candidates.length === 0) {
+    return `Aucun SIRET candidat trouvé via RPPS pour ce FINESS — pivot impossible. Cross-check manuel : entreprises_in_radius autour de l'adresse FINESS, ou recherche directe sur recherche-entreprises.api.gouv.fr.${dinumDiagSuffix}`;
+  }
+  // best_match null mais candidats RPPS présents → l'adresse RPPS-déclarée ne
+  // matche pas l'adresse FINESS (cas typique : le PS a déclaré le SIRET du
+  // siège, distant du site). Le caller peut investiguer manuellement.
+  const sirenCandidates = resolution.sirens_explored.join(", ");
+  return `Indéterminé : ${resolution.candidates.length} SIRET candidat(s) côté RPPS mais aucun ne matche l'adresse FINESS (score adresse < 0.6). SIREN exploré(s) : ${sirenCandidates}. Groupe : ${verdictGroupe}.${dinumDiagSuffix} Cross-check manuel via etablissement_by_siret sur les candidats.`;
+}
+
+/**
+ * Format LLM-friendly d'une liste d'erreurs DINUM. Retourne `""` quand vide
+ * (no-op safe en concat suffix). Inclut le `status` discriminé pour que le
+ * caller sache si retry (rejected) ou abandon (not_found) ou alerter
+ * (ambiguous = régression API).
+ */
+function formatDinumDiag(errors: DinumLookupError[]): string {
+  if (errors.length === 0) return "";
+  return ` ⚠ DINUM erreurs : ${errors.map((e) => `${e.siren} (${e.status}: ${e.message})`).join(" | ")}.`;
 }
 
 function extractFinessSummary(
@@ -326,6 +311,23 @@ export interface HistoriqueEtablissementResult {
     sirene: EtablissementSireneHistorique | null;
     sirene_error?: string;
   }>;
+  /**
+   * Diagnostic SIREN-level depuis le resolver (DINUM rejected / not_found /
+   * ambiguous). Distinct des `sirene_error` SIRET-level dans `siret_timelines`.
+   * Vide quand tous les lookups DINUM ont réussi.
+   */
+  dinum_errors: DinumLookupError[];
+  /**
+   * État global de la récupération :
+   * - `success` : ≥ 1 timeline SIRENE a une donnée
+   * - `partial` : certaines timelines OK, d'autres en erreur
+   * - `all_sirene_failed` : toutes les timelines sont en `sirene_error` ET
+   *   au moins une est une vraie panne (5xx, timeout, network) → retry justifié.
+   * - `all_sirene_not_found` : toutes les timelines sont en `sirene_error`
+   *   mais TOUTES sont des `not_found` SIRENE → SIRET candidats légitimement
+   *   absents, retry inutile. Cross-check FINESS / numéro mal formé.
+   */
+  status: "success" | "partial" | "all_sirene_failed" | "all_sirene_not_found";
 }
 
 export async function historiqueEtablissement(
@@ -340,16 +342,18 @@ export async function historiqueEtablissement(
     );
   }
 
-  const candidateSirets = await getDistinctSiretsForFiness(trimmed);
-  if (candidateSirets.length === 0) {
+  const resolution = await resolveSiretsForFiness(trimmed, finess);
+  if (resolution.candidates.length === 0) {
     return lookupNotFound(
       trimmed,
-      `FINESS ${trimmed} trouvé mais aucun SIRET candidat côté RPPS — pivot SIRENE impossible automatiquement. Cross-check via entreprises_in_radius autour de l'adresse FINESS.`,
+      `FINESS ${trimmed} trouvé mais aucun SIRET candidat (RPPS vide + pas de match DINUM). Cross-check via entreprises_in_radius autour de l'adresse FINESS.`,
     );
   }
 
-  // Parallélisation des lookups INSEE : N ≤ 5 SIRETs typiquement → gain p99
-  // latency / N sans risque de saturer la limite INSEE 30 req/min.
+  // INSEE est nécessaire ici (pas DINUM) car seul `lookupSiretHistoriqueViaInsee`
+  // retourne `periodesEtablissement[]` (timeline actif↔fermé) ; DINUM ne donne
+  // que l'état courant. Parallélisation pour gain p99 latency / N ≤ 5 SIRETs.
+  const candidateSirets = resolution.candidates.map((c) => c.siret);
   const settled = await Promise.allSettled(
     candidateSirets.map((siret) => lookupSiretHistoriqueViaInsee(siret)),
   );
@@ -375,6 +379,8 @@ export async function historiqueEtablissement(
     }
   }
 
+  const status = classifyTimelineStatus(timelines);
+
   return lookupFound<HistoriqueEtablissementResult>({
     num_finess: trimmed,
     finess: {
@@ -386,7 +392,43 @@ export async function historiqueEtablissement(
       },
     },
     siret_timelines: timelines,
+    dinum_errors: resolution.dinum_errors,
+    status,
   });
+}
+
+/**
+ * Classifie l'état global d'une liste de timelines. `all_sirene_failed`
+ * (panne, retry justifié) est distinct de `all_sirene_not_found` (SIRET
+ * réellement absent SIRENE, retry inutile) — le second se reconnaît au
+ * libellé `introuvable` dans `sirene_error` (cohérent avec le message
+ * généré par `lookupSiretHistoriqueViaInsee` sur 404).
+ */
+function classifyTimelineStatus(
+  timelines: HistoriqueEtablissementResult["siret_timelines"],
+): HistoriqueEtablissementResult["status"] {
+  if (timelines.length === 0) return "all_sirene_failed";
+  const okCount = timelines.filter((t) => t.sirene !== null).length;
+  if (okCount === timelines.length) return "success";
+  if (okCount > 0) return "partial";
+  const allNotFound = timelines.every((t) => (t.sirene_error ?? "").includes("introuvable"));
+  return allNotFound ? "all_sirene_not_found" : "all_sirene_failed";
+}
+
+/**
+ * Classifie l'état d'une réconciliation. Logique alignée sur
+ * `classifyTimelineStatus` mais sur la dichotomie `candidates` / `skipped` :
+ * - 0 candidat + tous skipped en `introuvable` → `all_sirene_not_found`
+ * - 0 candidat + ≥ 1 skip non-not_found → `all_sirene_failed` (panne)
+ */
+function classifyReconciliationStatus(
+  candidatesCount: number,
+  skipped: ReconciliationResult["skipped"],
+): ReconciliationResult["status"] {
+  if (candidatesCount > 0) return skipped.length === 0 ? "success" : "partial";
+  if (skipped.length === 0) return "all_sirene_failed";
+  const allNotFound = skipped.every((s) => s.reason.includes("introuvable"));
+  return allNotFound ? "all_sirene_not_found" : "all_sirene_failed";
 }
 
 export interface ReconciliationScore {
@@ -435,13 +477,27 @@ export interface ReconciliationResult {
   /** Candidats triés par score_global décroissant (meilleur match en premier). */
   candidates: ReconciliationCandidate[];
   /**
-   * SIRET qui ont été déclarés côté RPPS mais qu'on n'a pas pu réconcilier
-   * (lookup SIRENE rejected ou retourné not_found). Présent pour que le
-   * caller distingue "0 SIRET candidat trouvé" (LookupNotFound) de
-   * "N SIRET candidats mais tous rejetés par SIRENE" (`candidates: []` +
-   * `skipped: [...]`).
+   * SIRET candidats qu'on n'a pas pu réconcilier (lookup SIRENE rejected ou
+   * retourné not_found). Présent pour que le caller distingue "0 SIRET
+   * candidat trouvé" (LookupNotFound) de "N SIRET candidats mais tous
+   * rejetés par SIRENE" (`candidates: []` + `skipped: [...]`).
    */
   skipped: Array<{ siret: string; reason: string }>;
+  /**
+   * Diagnostic SIREN-level depuis le resolver (DINUM rejected / not_found /
+   * ambiguous). Distinct de `skipped` (SIRET-level INSEE).
+   */
+  dinum_errors: DinumLookupError[];
+  /**
+   * État global :
+   * - `success` : tous les candidats réconciliés sans skip
+   * - `partial` : certains réconciliés, d'autres skipped
+   * - `all_sirene_failed` : 0 candidat réconcilié ET au moins un skip est
+   *   une vraie panne (5xx, timeout, network) → retry justifié.
+   * - `all_sirene_not_found` : 0 candidat réconcilié mais TOUS les skips sont
+   *   des `not_found` SIRENE → SIRET candidats légitimement absents, retry inutile.
+   */
+  status: "success" | "partial" | "all_sirene_failed" | "all_sirene_not_found";
 }
 
 export async function reconcilierFinessSirene(
@@ -456,14 +512,19 @@ export async function reconcilierFinessSirene(
     );
   }
 
-  const candidateSirets = await getDistinctSiretsForFiness(trimmed);
-  if (candidateSirets.length === 0) {
+  // Le resolver fournit la liste élargie de SIRET candidats (RPPS + DINUM
+  // match adresse) avec leur score adresse déjà calculé. Ici on lui demande
+  // d'enrichir avec le score nom — qui exige un lookup INSEE pour récupérer
+  // `raisonSocialeUniteLegale`.
+  const resolution = await resolveSiretsForFiness(trimmed, finess);
+  if (resolution.candidates.length === 0) {
     return lookupNotFound(
       trimmed,
-      `Aucun SIRET candidat trouvé côté RPPS pour FINESS ${trimmed} — réconciliation impossible automatiquement.`,
+      `Aucun SIRET candidat trouvé (RPPS vide + pas de match DINUM) pour FINESS ${trimmed} — réconciliation impossible automatiquement.`,
     );
   }
 
+  const candidateSirets = resolution.candidates.map((c) => c.siret);
   const finessAdresseLibelle = buildFinessAdresseLibelle(finess);
   // Parallélisation des lookups INSEE : voir verifierSiteActif pour rationale.
   const settled = await Promise.allSettled(
@@ -531,55 +592,20 @@ export async function reconcilierFinessSirene(
   }
 
   candidates.sort((a, b) => b.score_global - a.score_global);
-  return lookupFound<ReconciliationResult>({ num_finess: trimmed, candidates, skipped });
+  const status = classifyReconciliationStatus(candidates.length, skipped);
+  return lookupFound<ReconciliationResult>({
+    num_finess: trimmed,
+    candidates,
+    skipped,
+    dinum_errors: resolution.dinum_errors,
+    status,
+  });
 }
 
 // === internals ===============================================================
 
-/** Normalise pour comparaison textuelle : lowercase + trim + collapse whitespace. */
-function normalizeForCompare(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function buildFinessAdresseLibelle(f: FinessResult): string {
-  return [f.adresse.voie, f.adresse.code_postal, f.adresse.ville]
-    .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
-    .join(" ");
-}
-
-/**
- * Coefficient de Sørensen-Dice sur les bigrammes — robuste aux typos / ordre
- * mots / accents pour des libellés courts (raisons sociales, adresses). Plus
- * approprié qu'une similarity trigram côté SQL : on n'a pas besoin d'index
- * ici, juste d'un nombre 0..1 par paire. Implémentation 20 lignes, dépendance
- * externe non justifiée.
- *
- * Pour chaînes < 2 chars : égalité stricte (Dice classique = 0 pour les
- * unigrammes seuls, ce qui sous-évalue les match exacts courts type "CH").
- */
-export function diceCoefficient(a: string, b: string): number {
-  if (a === b) return 1;
-  if (a.length < 2 || b.length < 2) return a === b ? 1 : 0;
-  const bigramsA = new Map<string, number>();
-  for (let i = 0; i < a.length - 1; i++) {
-    const bg = a.slice(i, i + 2);
-    bigramsA.set(bg, (bigramsA.get(bg) ?? 0) + 1);
-  }
-  let intersection = 0;
-  let totalB = 0;
-  for (let i = 0; i < b.length - 1; i++) {
-    const bg = b.slice(i, i + 2);
-    totalB++;
-    const inA = bigramsA.get(bg);
-    if (inA !== undefined && inA > 0) {
-      intersection++;
-      bigramsA.set(bg, inA - 1);
-    }
-  }
-  const totalA = a.length - 1;
-  if (totalA + totalB === 0) return 0;
-  return (2 * intersection) / (totalA + totalB);
-}
+// Helpers de normalisation, de scoring Dice et de libellé d'adresse FINESS
+// sont importés de `address-match.ts` (partagés avec `siret-resolver.ts`).
 
 async function getDistinctRaisonsSocialesFromRpps(numFiness: string): Promise<string[]> {
   const supabase = getUntypedAnonClient();
@@ -601,40 +627,3 @@ async function getDistinctRaisonsSocialesFromRpps(numFiness: string): Promise<st
   return [...seen];
 }
 
-/**
- * Lit la table `rpps` pour récupérer la liste DISTINCT des SIRET déclarés
- * sur ce `num_finess`. Filtre les sentinelles `'finess_unmatched'` que
- * l'ingestion RPPS écrit quand un PS déclare un SIRET non rattachable à un
- * FINESS connu — sans ce filtre, le résultat contiendrait des SIRET
- * inexistants côté SIRENE.
- */
-async function getDistinctSiretsForFiness(numFiness: string): Promise<string[]> {
-  const supabase = getUntypedAnonClient();
-  const { data, error } = await supabase
-    .from("rpps")
-    .select("siret")
-    .eq("num_finess", numFiness)
-    .not("siret", "is", null);
-  if (error) {
-    throw new Error(`rpps.siret lookup for num_finess=${numFiness} failed: ${error.message}`);
-  }
-  const seen = new Set<string>();
-  for (const row of (data ?? []) as Array<{ siret: string | null }>) {
-    const s = row.siret?.trim();
-    if (!s) continue;
-    // Sentinelle attendue : un PS dont le SIRET n'a pas pu être rattaché à un
-    // FINESS pendant l'ingestion. À ignorer silencieusement.
-    if (s === "finess_unmatched") continue;
-    if (!/^\d{14}$/.test(s)) {
-      // Donnée corrompue inattendue (régression d'ingest, troncature CSV…).
-      // On loggue pour qu'un futur bug d'écriture en base soit détectable
-      // dans les logs Vercel structurés (V0.5.7).
-      console.warn(
-        `[france-data-mcp] getDistinctSiretsForFiness: SIRET malformé ignoré pour num_finess=${numFiness}: ${JSON.stringify(s)}`,
-      );
-      continue;
-    }
-    seen.add(s);
-  }
-  return [...seen];
-}

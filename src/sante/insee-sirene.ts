@@ -72,10 +72,54 @@ export type ApiInseePeriode = {
   categorieJuridiqueUniteLegale?: string | null;
 };
 
-type ApiInseeUniteLegale = {
+/**
+ * Shape `uniteLegale` SIRENE V3.11. Volontairement permissive sur les deux
+ * formats que l'API expose :
+ *
+ * - Endpoint **`/siren/{siren}`** → `uniteLegale.periodesUniteLegale[]` (historisé
+ *   chronologiquement, période courante = `dateFin: null`).
+ * - Endpoint **`/siret/{siret}`** → `uniteLegale` **à plat** : `denominationUniteLegale`,
+ *   `nomUniteLegale`, `etatAdministratifUniteLegale`, etc. exposés directement
+ *   comme champs de l'objet `uniteLegale`, SANS `periodesUniteLegale`.
+ *
+ * On laisse les deux shapes coexister via `ApiInseePeriode & { periodesUniteLegale? }`
+ * pour que `pickUniteLegaleFields` puisse extraire les champs courants quelle
+ * que soit la source. Avant V0.6.3, le mapper lisait uniquement
+ * `periodesUniteLegale[]` → la réponse `/siret/` (champs à plat) tombait sur
+ * un tableau vide, et `deriveNomComplet` retournait le SIREN brut comme
+ * raison sociale (cas reproduit sur 50781594200333 / BIOGROUP NORD →
+ * "507815942", 30116075000966 / CLINEA → "301160750").
+ */
+type ApiInseeUniteLegale = ApiInseePeriode & {
   siren?: string;
   periodesUniteLegale?: ApiInseePeriode[];
 };
+
+/**
+ * Extrait les champs métier courants (denomination, nom, prénom, état admin,
+ * NAF, catégorie juridique) d'un `uniteLegale` SIRENE quelle que soit la shape :
+ *
+ * - Si `periodesUniteLegale` est présent ET non vide → période courante
+ *   (`dateFin: null`) ou fallback `[0]`.
+ * - Sinon → l'objet `uniteLegale` lui-même (cas `/siret/` champs à plat).
+ *
+ * Retourne `undefined` si aucune source de champs n'est disponible (payload
+ * dégradé). Le caller (`deriveNomComplet`) tombe alors sur le SIREN brut.
+ */
+function pickUniteLegaleFields(
+  ul: ApiInseeUniteLegale | undefined,
+): ApiInseePeriode | undefined {
+  if (!ul) return undefined;
+  const periodes = ul.periodesUniteLegale;
+  if (periodes && periodes.length > 0) {
+    return periodes.find((p) => p.dateFin === null || p.dateFin === undefined) ?? periodes[0];
+  }
+  // Destructure explicite pour ne renvoyer que les champs `ApiInseePeriode` :
+  // évite que `siren` / `periodesUniteLegale` (extras du type union) ne
+  // fuitent en aval et fasse croire au caller qu'il a un objet plus riche.
+  const { siren: _siren, periodesUniteLegale: _periodes, ...periodeFields } = ul;
+  return periodeFields;
+}
 
 type ApiInseeResponse = {
   uniteLegale?: ApiInseeUniteLegale;
@@ -439,14 +483,14 @@ function toEtablissementSireneDetail(api: ApiInseeEtablissement): EtablissementS
   const dateCreation = periodesChrono[0]?.dateDebut ?? null;
   const dateFermeture = !actif ? (periodeCourante?.dateDebut ?? null) : null;
 
-  // Raison sociale de l'unité légale parente : on lit la même logique que
-  // `deriveNomComplet` (denomination > nom+prénom > siren) sur la période
-  // courante de l'uniteLegale embarquée dans la réponse SIRET.
-  const ulPeriodes = api.uniteLegale?.periodesUniteLegale ?? [];
-  const ulPeriodeCourante = ulPeriodes.find(
-    (p) => p.dateFin === null || p.dateFin === undefined,
+  // Raison sociale de l'unité légale parente : SIRENE V3.11 expose les champs
+  // de l'uniteLegale À PLAT sur l'endpoint `/siret/` (pas dans
+  // `periodesUniteLegale[]`, contrairement à `/siren/`). `pickUniteLegaleFields`
+  // gère les deux shapes pour rester robuste si V3.12 réintroduit l'historisation.
+  const raisonSocialeUniteLegale = deriveNomComplet(
+    pickUniteLegaleFields(api.uniteLegale),
+    api.siren ?? "",
   );
-  const raisonSocialeUniteLegale = deriveNomComplet(ulPeriodeCourante, api.siren ?? "");
 
   const a = api.adresseEtablissement ?? {};
   const adresseLibelle = [

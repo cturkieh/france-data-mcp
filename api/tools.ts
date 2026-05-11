@@ -36,6 +36,7 @@ import {
   reconcilierFinessSirene,
   verifierSiteActif,
 } from "../src/sante/cross-source.js";
+import { INCLUDE_FRESHNESS_SCHEMA, withFreshness } from "../src/core/freshness.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { getDataFreshness } from "../src/storage/ingest-log.js";
 import {
@@ -744,7 +745,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "historique_etablissement",
     description:
-      "Reconstitue la timeline complète d'un établissement de santé (ouvertures, fermetures, changements de NAF/enseigne) en croisant FINESS DREES ↔ RPPS (pivot SIRET) ↔ SIRENE INSEE V3.11. Lit les `periodesEtablissement` complètes (toutes les périodes administratives, pas juste la courante) pour chaque SIRET candidat.\n\nUsage typique :\n- Tracer l'historique d'un site après une fusion-acquisition\n- Identifier la date de fermeture exacte d'un SIRET encore listé actif côté FINESS (DREES a 1-2 mois de retard)\n- Comprendre une cascade de rebrandings via les changements de `enseigne1Etablissement` au fil des périodes\n\nFormat : objet `LookupResult`. Quand `found: true`, retourne `finess` (vue DREES synthétique) + `siret_timelines` (1 entrée par SIRET candidat avec `periodes` chronologiques).\n\nCoût : 1 RPC FINESS + 1 SELECT rpps + N appels INSEE en parallèle (N ≤ 3 typiquement). Pas de cache.",
+      "Reconstitue la timeline complète d'un établissement de santé (ouvertures, fermetures, changements de NAF/enseigne) en croisant FINESS DREES ↔ resolver SIRET (RPPS + DINUM) ↔ SIRENE INSEE V3.11. Lit les `periodesEtablissement` complètes pour chaque SIRET candidat.\n\n**V0.7.0** : SIRET candidats élargis via le resolver — inclut désormais les SIRET fermés du SIREN parent qui matchent l'adresse FINESS (invisibles côté RPPS seul). Permet de tracer la fermeture exacte d'un site même quand FINESS le liste encore actif.\n\nUsage typique :\n- Tracer l'historique d'un site après une fusion-acquisition\n- Identifier la date de fermeture exacte d'un SIRET encore listé actif côté FINESS\n- Comprendre une cascade de rebrandings via les changements de `enseigne1Etablissement` au fil des périodes\n\nFormat : objet `LookupResult`. Quand `found: true`, retourne `finess` (vue DREES synthétique) + `siret_timelines` (1 entrée par SIRET candidat avec `periodes` chronologiques).\n\nCoût : 1 RPC FINESS + 1 SELECT rpps + N appels DINUM + N appels INSEE en parallèle (N ≤ 5 typiquement). Pas de cache.",
     inputSchema: {
       type: "object",
       properties: {
@@ -778,7 +779,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "verifier_site_actif",
     description:
-      "Vérifie si un établissement de santé FINESS est encore en activité en croisant FINESS DREES ↔ RPPS (pivot SIRET) ↔ SIRENE INSEE V3.11. Détecte les SIRET fermés encore listés actifs côté FINESS (DREES a 1-2 mois de retard sur la cessation effective).\n\nLogique :\n1. Lookup FINESS pour récupérer raison sociale + adresse + téléphone DREES\n2. Récupération des SIRET candidats via la table RPPS (colonne `siret` enrichie au moment de l'ingest, JOIN sur `num_finess`)\n3. Pour chaque SIRET (en parallèle), lookup SIRENE INSEE V3.11 pour lire `actif` + `dateFermeture`\n4. Verdict consolidé :\n  - `actif` : ≥1 SIRET candidat actif côté SIRENE → site ouvert\n  - `ferme` : tous les SIRET candidats sont fermés ET ≥1 a une dateFermeture → site fermé (FINESS en retard)\n  - `indetermine_pas_de_siret` : aucun SIRET candidat trouvé en RPPS → pivot impossible, cross-check manuel\n  - `indetermine_pas_de_cle_insee` : clé INSEE_SIRENE_API_KEY non configurée → vérification SIRENE impossible\n  - `indetermine_insee_unreachable` : ≥1 SIRET candidat mais aucun lookup SIRENE n'a abouti (5xx, timeout, 404 inattendu) → API INSEE indisponible, réessayer\n  - `indetermine_sirene_partiel` : INSEE a répondu mais aucun SIRET n'est ni actif ni n'a de dateFermeture → données SIRENE partielles, inspecter `insee_error` individuels\n\n**Format de retour** : objet `LookupResult` discriminé par `found`. Quand `found: true`, le payload contient `finess` (vue DREES), `siret_candidates` (détail SIRENE par SIRET), `verdict`, `explication`. Quand `num_finess` est absent de FINESS DREES, le tool retourne `{found: false, lookupStatus: 'not_found', message, ...}` — PAS un verdict.\n\nCoût : 1 RPC FINESS + 1 SELECT rpps + N appels INSEE en parallèle (N ≤ 3 typiquement). Pas de cache (data critique, ne pas servir stale).",
+      "Vérifie si un établissement de santé FINESS est encore en activité en croisant FINESS DREES ↔ RPPS (pivot SIRET) ↔ DINUM (liste complète des SIRET du SIREN, incluant les fermés). Détecte les SIRET fermés encore listés actifs côté FINESS (DREES a 1-2 mois de retard).\n\n**V0.7.0 — breaking** : pivot SIRET élargi. Avant V0.7.0, on ne testait que les SIRET RPPS-déclarés (= SIRET du siège employeur typiquement) → on ratait le SIRET physique fermé du site. Désormais, le resolver récupère TOUS les SIRET du SIREN via DINUM puis fuzzy-matche leur adresse contre FINESS — ce qui capte aussi les SIRET fermés invisibles côté RPPS.\n\nLogique :\n1. Lookup FINESS pour récupérer raison sociale + adresse + téléphone DREES\n2. Récupération des SIRET candidats via le resolver (RPPS + DINUM avec scoring d'adresse Dice)\n3. `best_match` = SIRET avec le meilleur score d'adresse ≥ 0.6 (= site physique)\n4. **2 verdicts distincts** :\n  - `verdict_site` (`actif` / `ferme` / `indetermine`) : basé sur `best_match.actif`. C'est le verdict qui compte pour un audit territorial.\n  - `verdict_groupe` (`actif` / `ferme` / `indetermine`) : basé sur l'état admin de l'UL parente (champ `actif` DINUM). Une UL active peut très bien avoir un site fermé.\n\n**Format de retour** : objet `LookupResult` discriminé par `found`. Quand `found: true`, le payload contient `finess` (vue DREES), `candidates` (liste enrichie tri score), `best_match`, `sirens_explored`, `verdict_site`, `verdict_groupe`, `explication`. Quand `num_finess` est absent de FINESS DREES, le tool retourne `{found: false, lookupStatus: 'not_found', message, ...}`.\n\nCoût : 1 RPC FINESS + 1 SELECT rpps + N appels DINUM (N = nombre de SIREN distincts, typiquement 1). DINUM gère son propre fallback INSEE V3.11 pour les SIREN diffusion partielle.",
     inputSchema: {
       type: "object",
       properties: {
@@ -843,6 +844,7 @@ export const TOOLS: McpTool[] = [
           maximum: 500,
           default: 100,
         },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["lon", "lat"],
     },
@@ -863,7 +865,7 @@ export const TOOLS: McpTool[] = [
       };
       if (familles) input.familles = familles;
       if (limit !== undefined) input.limit = limit;
-      return getFinessInRadius(input);
+      return withFreshness(await getFinessInRadius(input), args.include_freshness, ["finess"]);
     },
   },
   {
@@ -893,6 +895,7 @@ export const TOOLS: McpTool[] = [
           maximum: 500,
           default: 100,
         },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["categorie"],
     },
@@ -908,7 +911,7 @@ export const TOOLS: McpTool[] = [
       if (departement) input.departement = departement;
       if (codeInsee) input.code_insee = codeInsee;
       if (limit !== undefined) input.limit = limit;
-      return getFinessByCategorie(input);
+      return withFreshness(await getFinessByCategorie(input), args.include_freshness, ["finess"]);
     },
   },
   {
@@ -922,13 +925,19 @@ export const TOOLS: McpTool[] = [
           type: "string",
           description: "Numéro FINESS exact (9 chiffres).",
         },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["num_finess"],
     },
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
-      return getFinessByNumFiness(numFiness);
+      const result = await getFinessByNumFiness(numFiness);
+      // LookupResult discriminé par `found`. On n'injecte la freshness que sur
+      // les payloads `found: true` (le not_found est par construction sans
+      // metadata métier — l'injecter ferait du bruit pour le caller).
+      if (!result.found) return result;
+      return withFreshness(result, args.include_freshness, ["finess"]);
     },
   },
   {
@@ -971,6 +980,7 @@ export const TOOLS: McpTool[] = [
             "Regrouper les entrées par praticien (nom + prénom + code spécialité) et lister chaque adresse d'exercice dans `sites[]`. Défaut false (comportement V0.4 historique : un PS multi-sites = N entrées).",
           default: false,
         },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["lon", "lat"],
     },
@@ -994,7 +1004,11 @@ export const TOOLS: McpTool[] = [
       if (typePsCodes) input.typePsCodes = typePsCodes;
       if (limit !== undefined) input.limit = limit;
       const result = await getAmeliInRadius(input);
-      return dedupe ? dedupeAmeliByPs(result) : result;
+      return withFreshness(
+        dedupe ? dedupeAmeliByPs(result) : result,
+        args.include_freshness,
+        ["ameli_ps"],
+      );
     },
   },
   {
@@ -1038,6 +1052,7 @@ export const TOOLS: McpTool[] = [
             "Regrouper les entrées par praticien (nom + prénom + code spécialité) et lister chaque adresse d'exercice dans `sites[]`. Défaut false.",
           default: false,
         },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["departement"],
     },
@@ -1055,7 +1070,11 @@ export const TOOLS: McpTool[] = [
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
       const result = await getAmeliBySpecialiteDept(input);
-      return dedupe ? dedupeAmeliByPs(result) : result;
+      return withFreshness(
+        dedupe ? dedupeAmeliByPs(result) : result,
+        args.include_freshness,
+        ["ameli_ps"],
+      );
     },
   },
   {
@@ -1063,11 +1082,17 @@ export const TOOLS: McpTool[] = [
     description: `Liste les codes spécialité Ameli effectivement présents en base, avec leur libellé natif, leur \`type_ps_code\` de rattachement et leur count. Triés par fréquence décroissante. Utile pour découvrir la nomenclature avant de filtrer un \`professionnels_in_radius\` ou \`professionnels_par_specialite_dept\`. Le champ \`libelle_clarifie\` désambigüise les libellés partagés par plusieurs codes (ex: "Médecin généraliste" regroupe les codes 01/22/23, "Chirurgien-dentiste" 19/53/54, "Psychiatre" 33/75, "Gynécologue / Obstétricien" 07/70/77/79). Format quand partagé : \`'{libelle} (code {code}, {count_compact})'\` (ex: "Médecin généraliste (code 01, 55K)"). Sinon identique à \`libelle\`. \`is_libelle_partage: true\` quand au moins 2 codes utilisent le même libellé — utiliser ce flag côté caller pour décider d'afficher le code à l'utilisateur. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
+      },
     },
-    handler: async () => {
+    handler: async (args) => {
       const specialites = await listAmeliSpecialites();
-      return { count: specialites.length, results: specialites };
+      return withFreshness(
+        { count: specialites.length, results: specialites },
+        args.include_freshness,
+        ["ameli_ps"],
+      );
     },
   },
   {
@@ -1075,11 +1100,17 @@ export const TOOLS: McpTool[] = [
     description: `Liste les codes \`type_ps\` Ameli présents en base, avec leur libellé natif (\`libelle_source\`), un libellé clarifié (\`libelle_clarifie\`) résolvant l'ambiguïté du code "2" fourre-tout, leur count total, et \`specialites_presentes\` (la liste effective des spécialités regroupées sous chaque type_ps avec leurs counts). Pas de dictionnaire inventé : la clarification est dérivée de la donnée live à chaque appel. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
+      },
     },
-    handler: async () => {
+    handler: async (args) => {
       const typesPs = await listAmeliTypesPs();
-      return { count: typesPs.length, results: typesPs };
+      return withFreshness(
+        { count: typesPs.length, results: typesPs },
+        args.include_freshness,
+        ["ameli_ps"],
+      );
     },
   },
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
@@ -1103,6 +1134,7 @@ export const TOOLS: McpTool[] = [
         mode_exercice_codes: { type: "array", items: { type: "string" } },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: { type: "number" },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["center", "radius_km"],
     },
@@ -1121,7 +1153,7 @@ export const TOOLS: McpTool[] = [
       if (modeExerciceCodes) input.modeExerciceCodes = modeExerciceCodes;
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
-      return await getRppsInRadius(input);
+      return withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]);
     },
   },
   {
@@ -1137,6 +1169,7 @@ export const TOOLS: McpTool[] = [
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: { type: "number" },
         offset: { type: "number" },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["departement"],
     },
@@ -1155,7 +1188,7 @@ export const TOOLS: McpTool[] = [
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
-      return await getRppsParSpecialiteDept(input);
+      return withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, ["rpps"]);
     },
   },
   {
@@ -1167,6 +1200,7 @@ export const TOOLS: McpTool[] = [
         num_finess: { type: "string", pattern: "^\\d{9}$" },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: { type: "number" },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["num_finess"],
     },
@@ -1177,7 +1211,7 @@ export const TOOLS: McpTool[] = [
       const input: Parameters<typeof getRppsDansEtablissement>[0] = { numFiness };
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
-      return await getRppsDansEtablissement(input);
+      return withFreshness(await getRppsDansEtablissement(input), args.include_freshness, ["rpps"]);
     },
   },
   {
@@ -1203,6 +1237,7 @@ export const TOOLS: McpTool[] = [
           maximum: 500,
           default: 100,
         },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["nom"],
     },
@@ -1217,16 +1252,17 @@ export const TOOLS: McpTool[] = [
       if (departement) input.departement = departement;
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
-      return getRppsByName(input);
+      return withFreshness(await getRppsByName(input), args.include_freshness, ["rpps"]);
     },
   },
   {
     name: "professionnel_by_rpps",
-    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe "81" qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). ${RPPS_CGU_NOTICE}`,
+    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe "81" qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). \`include_freshness\` n'affecte que les retours \`source: "db"\` (FHIR ANS étant live). ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
         rpps_id: { type: "string", pattern: "^\\s*\\d{11,12}\\s*$" },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["rpps_id"],
     },
@@ -1235,28 +1271,43 @@ export const TOOLS: McpTool[] = [
       if (!rppsId) throw new RangeError("rpps_id (string) requis");
       const sites = await getRppsById(rppsId);
       if (sites.length > 0) {
-        return { found: true, source: "db", rpps_id: rppsId, count: sites.length, sites };
+        return withFreshness(
+          { found: true, source: "db", rpps_id: rppsId, count: sites.length, sites },
+          args.include_freshness,
+          ["rpps"],
+        );
       }
       // Fallback live — ne renvoie QU'un summary identité (pas les sites). Le
       // FHIR retourne un Practitioner sans les PractitionerRole (qui portent
       // les rattachements site) ; pour la richesse complète, faire un suivi
       // par appels FHIR PractitionerRole. V0.5 expose juste l'existence + nom.
       const fhir = await lookupPractitionerByRpps(rppsId);
-      if (fhir) {
+      if (fhir.found) {
         return {
           found: true,
           source: "ans_fhir",
           rpps_id: rppsId,
-          fhir,
+          fhir: fhir.practitioner,
           message:
             "Trouvé via fallback FHIR ANS live ; aucun site rattaché en base locale (snapshot mensuel J-30). Pour la liste des structures d'exercice live, requêter PractitionerRole côté ANS.",
         };
       }
+      // V0.7.0 : on propage le `status` discriminé du fallback pour distinguer
+      // PS réellement absent (`not_found` → cross-check format / annuaire) de
+      // panne ANS (`api_error` → retry justifié) de config manquante (`no_key`).
       return {
         found: false,
         rpps_id: rppsId,
+        source: "ans_fhir_lookup",
+        ans_fhir_status: fhir.status,
         message:
-          "rpps_id introuvable en base locale ET via fallback FHIR ANS. Vérifier le format (11 ou 12 chiffres) ou consulter annuaire.sante.fr.",
+          fhir.status === "api_error"
+            ? `rpps_id absent en base locale ET fallback FHIR ANS a échoué : ${fhir.message}`
+            : fhir.status === "no_key"
+              ? `rpps_id absent en base locale (snapshot mensuel J-30). ${fhir.message}`
+              : fhir.status === "invalid_format"
+                ? fhir.message
+                : `rpps_id introuvable en base locale ET via fallback FHIR ANS. Vérifier le format (11 ou 12 chiffres) ou consulter annuaire.sante.fr.`,
       };
     },
   },

@@ -18,11 +18,12 @@ vi.mock("../storage/supabase.js", () => ({
   }),
 }));
 
+import { diceCoefficient } from "./address-match.js";
+import * as dinum from "./dinum.js";
 import * as finessDb from "./finess-db.js";
 import * as inseeSirene from "./insee-sirene.js";
 import {
   compareRaisonSocialeFinessVsRpps,
-  diceCoefficient,
   historiqueEtablissement,
   reconcilierFinessSirene,
   verifierSiteActif,
@@ -109,13 +110,45 @@ beforeEach(() => {
   mockFrom.mockReturnValue({ select: mockSelect });
   mockSelect.mockReturnValue({ eq: mockEq });
   mockEq.mockReturnValue({ not: mockNot });
+  // Stub DINUM par défaut : `not_found` pour que les tests focus RPPS-only
+  // passent sans I/O réseau. Les tests qui exercent le pivot DINUM override
+  // via `vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(...)`.
+  vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue({
+    found: false,
+    key: "default-mock",
+    lookupStatus: "not_found",
+    message: "default test mock: DINUM not_found",
+  });
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("verifierSiteActif", () => {
+/**
+ * Helper : construit une `Entreprise` DINUM minimale avec une liste
+ * d'établissements. Permet aux tests V0.7.0 d'exercer le pivot DINUM du
+ * resolver sans avoir à dupliquer le shape complet à chaque test.
+ */
+function fakeEntrepriseDinum(opts: {
+  siren: string;
+  actif?: boolean;
+  etablissements?: dinum.Etablissement[];
+}): Awaited<ReturnType<typeof dinum.getEntrepriseBySiren>> {
+  return {
+    found: true,
+    lookupStatus: "found",
+    siren: opts.siren,
+    nomComplet: "BIOGROUP NORD",
+    finances: [],
+    dirigeants: [],
+    actif: opts.actif ?? true,
+    etablissements: opts.etablissements ?? [],
+    siren_source: "dinum",
+  };
+}
+
+describe("verifierSiteActif (V0.7.0 — pivot SIRET élargi via DINUM)", () => {
   it("throw RangeError quand num_finess est mal formé (avant tout I/O)", async () => {
     await expect(verifierSiteActif("123")).rejects.toThrow(RangeError);
     await expect(verifierSiteActif("abcdefghi")).rejects.toThrow(RangeError);
@@ -130,66 +163,125 @@ describe("verifierSiteActif", () => {
     }
   });
 
-  it("verdict 'indetermine_pas_de_siret' quand aucun SIRET candidat en RPPS", async () => {
+  it("verdict 'indetermine' quand aucun SIRET candidat en RPPS (pivot impossible)", async () => {
     vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
     mockNot.mockResolvedValue({ data: [], error: null });
     const result = await verifierSiteActif(VALID_FINESS);
     expect(result.found).toBe(true);
     if (result.found) {
-      expect(result.verdict).toBe("indetermine_pas_de_siret");
-      expect(result.siret_candidates).toEqual([]);
+      expect(result.verdict_site).toBe("indetermine");
+      expect(result.verdict_groupe).toBe("indetermine");
+      expect(result.candidates).toEqual([]);
+      expect(result.best_match).toBeNull();
       expect(result.finess.raison_sociale).toBe("DIAGNOVIE");
     }
   });
 
-  it("verdict 'actif' quand ≥1 SIRET candidat est actif côté SIRENE", async () => {
+  it("verdict_site='actif' + verdict_groupe='actif' quand DINUM matche l'adresse FINESS sur un SIRET actif", async () => {
     vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
     mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
-    vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockResolvedValue(
-      fakeInseeLookupFound({ actif: true }),
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_A.slice(0, 9),
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_A,
+            adresse: "27 BD BIZET 59290 WASQUEHAL",
+            actif: true,
+            dateCreation: "2020-01-01",
+          },
+        ],
+      }),
     );
 
     const result = await verifierSiteActif(VALID_FINESS);
     expect(result.found).toBe(true);
     if (result.found) {
-      expect(result.verdict).toBe("actif");
-      expect(result.siret_candidates).toHaveLength(1);
-      expect(result.siret_candidates[0]?.insee?.actif).toBe(true);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.verdict_groupe).toBe("actif");
+      expect(result.best_match?.siret).toBe(SIRET_A);
+      expect(result.best_match?.actif).toBe(true);
     }
   });
 
-  it("verdict 'ferme' quand tous les SIRETs sont fermés avec dateFermeture", async () => {
-    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
-    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
-    vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockResolvedValue(
-      fakeInseeLookupFound({ actif: false, dateFermeture: "2024-06-30" }),
+  it("verdict_site='ferme' + verdict_groupe='actif' quand le SIRET physique est fermé mais l'UL reste active (cas Biogroup Bd Bizet 2024)", async () => {
+    // Cas réel reproductible : FINESS 590048997 LABORATOIRE SECONDAIRE
+    // DIAGNOVIE BD BIZET, 27 BD BIZET 59491 VILLENEUVE D ASCQ. SIRENE V3.11
+    // confirme que le SIRET 218 est FERMÉ depuis 2024-02-16 mais l'UL
+    // (Biogroup Nord, SIREN 507815942) reste active via le SIRET 333 siège
+    // (rue des Fusillés).
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        adresse: {
+          voie: "27 BD BIZET",
+          code_postal: "59491",
+          ville: "VILLENEUVE D ASCQ",
+          code_departement: "59",
+          code_insee: "59009",
+        },
+      }),
+    );
+    const SIRET_SIEGE = "50781594200333";
+    const SIRET_FERME = "50781594200218";
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_SIEGE }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: "507815942",
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_SIEGE,
+            adresse: "46 RUE DES FUSILLES 59493 VILLENEUVE-D'ASCQ",
+            actif: true,
+            dateCreation: "2024-02-16",
+          },
+          {
+            siret: SIRET_FERME,
+            adresse: "27 BD BIZET 59491 VILLENEUVE-D'ASCQ",
+            actif: false,
+            dateCreation: "2018-07-31",
+          },
+        ],
+      }),
     );
 
     const result = await verifierSiteActif(VALID_FINESS);
     expect(result.found).toBe(true);
     if (result.found) {
-      expect(result.verdict).toBe("ferme");
-      expect(result.explication).toContain("2024-06-30");
+      expect(result.best_match?.siret).toBe(SIRET_FERME);
+      expect(result.verdict_site).toBe("ferme");
+      expect(result.verdict_groupe).toBe("actif");
     }
   });
 
-  it("verdict 'indetermine_pas_de_cle_insee' quand INSEE renvoie not_found avec message clé absente", async () => {
+  it("verdict_site='indetermine' quand aucun SIRET DINUM ne matche l'adresse FINESS (score<0.6)", async () => {
     vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
     mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
-    vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockResolvedValue({
-      found: false,
-      key: SIRET_A,
-      lookupStatus: "not_found",
-      message:
-        "INSEE_SIRENE_API_KEY non configurée — ce tool requiert une clé INSEE pour interroger l'endpoint /siret/<siret>.",
-    });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_A.slice(0, 9),
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_A,
+            adresse: "999 RUE COMPLETEMENT AUTRE 75001 PARIS",
+            actif: true,
+            dateCreation: "2020-01-01",
+          },
+        ],
+      }),
+    );
 
     const result = await verifierSiteActif(VALID_FINESS);
     expect(result.found).toBe(true);
     if (result.found) {
-      expect(result.verdict).toBe("indetermine_pas_de_cle_insee");
-      expect(result.siret_candidates[0]?.insee).toBeNull();
-      expect(result.siret_candidates[0]?.insee_error).toContain("INSEE_SIRENE_API_KEY");
+      expect(result.best_match).toBeNull();
+      expect(result.verdict_site).toBe("indetermine");
+      expect(result.verdict_groupe).toBe("actif");
+      // Le candidat RPPS est tout de même listé (donnée déclarative)
+      expect(result.candidates).toHaveLength(1);
+      expect(result.candidates[0]?.sources).toEqual(["rpps"]);
     }
   });
 
@@ -204,14 +296,14 @@ describe("verifierSiteActif", () => {
       ],
       error: null,
     });
-    const inseeSpy = vi
-      .spyOn(inseeSirene, "lookupSiretViaInsee")
-      .mockResolvedValue(fakeInseeLookupFound());
+    const dinumSpy = vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({ siren: SIRET_A.slice(0, 9) }),
+    );
 
     await verifierSiteActif(VALID_FINESS);
-    // Seul SIRET_A (14 chiffres valides) doit avoir été passé à INSEE.
-    expect(inseeSpy).toHaveBeenCalledTimes(1);
-    expect(inseeSpy).toHaveBeenCalledWith(SIRET_A);
+    // Seul SIRET_A (14 chiffres valides) a un SIREN dérivé → 1 appel DINUM.
+    expect(dinumSpy).toHaveBeenCalledTimes(1);
+    expect(dinumSpy).toHaveBeenCalledWith(SIRET_A.slice(0, 9));
   });
 
   it("propage le throw quand l'accès à `rpps.siret` échoue (pas de fallback silencieux)", async () => {
@@ -220,19 +312,22 @@ describe("verifierSiteActif", () => {
     await expect(verifierSiteActif(VALID_FINESS)).rejects.toThrow(/permission denied/);
   });
 
-  it("collecte les insee_error quand le lookup INSEE throw (5xx/timeout)", async () => {
+  it("verdict_groupe reste 'indetermine' quand DINUM échoue (panne / not_found / rejected)", async () => {
     vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
     mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
-    vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockRejectedValue(new Error("HTTP 503"));
+    // DINUM rejette (panne) — le mock default not_found est override.
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockRejectedValue(new Error("HTTP 503"));
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const result = await verifierSiteActif(VALID_FINESS);
     expect(result.found).toBe(true);
     if (result.found) {
-      expect(result.siret_candidates[0]?.insee).toBeNull();
-      expect(result.siret_candidates[0]?.insee_error).toContain("HTTP 503");
-      // Tous les lookups INSEE ont échoué → verdict dédié (pas "pas de SIRET").
-      expect(result.verdict).toBe("indetermine_insee_unreachable");
+      expect(result.verdict_site).toBe("indetermine");
+      expect(result.verdict_groupe).toBe("indetermine");
+      // Le SIRET RPPS reste dans les candidats (donnée déclarative)
+      expect(result.candidates).toHaveLength(1);
+      expect(result.candidates[0]?.sources).toEqual(["rpps"]);
+      expect(result.candidates[0]?.actif).toBeNull();
     }
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
@@ -398,6 +493,61 @@ describe("historiqueEtablissement (V0.6.2)", () => {
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
   });
+
+  it("V0.7.0 status='all_sirene_failed' quand tous les INSEE rejettent (panne) → retry justifié", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValueOnce({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(inseeSirene, "lookupSiretHistoriqueViaInsee").mockRejectedValue(new Error("HTTP 503"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await historiqueEtablissement(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.status).toBe("all_sirene_failed");
+      // Le mock DINUM default retourne not_found pour le SIREN extrait du SIRET RPPS,
+      // ce qui alimente bien dinum_errors avec status: "not_found".
+      expect(result.dinum_errors).toHaveLength(1);
+      expect(result.dinum_errors[0]?.status).toBe("not_found");
+    }
+    errSpy.mockRestore();
+  });
+
+  it("V0.7.0 status='all_sirene_not_found' quand tous les SIRET sont introuvables côté SIRENE (légitime, pas de retry)", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValueOnce({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(inseeSirene, "lookupSiretHistoriqueViaInsee").mockResolvedValue({
+      found: false,
+      key: SIRET_A,
+      lookupStatus: "not_found",
+      message: `SIRET "${SIRET_A}" introuvable dans SIRENE INSEE.`,
+    });
+
+    const result = await historiqueEtablissement(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.status).toBe("all_sirene_not_found");
+    }
+  });
+
+  it("V0.7.0 dinum_errors propagé depuis le resolver quand DINUM échoue", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValueOnce({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockRejectedValue(new Error("DINUM HTTP 500"));
+    vi.spyOn(inseeSirene, "lookupSiretHistoriqueViaInsee").mockResolvedValue({
+      ...fakeInseeLookupFound(),
+      periodes: [],
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await historiqueEtablissement(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.dinum_errors).toHaveLength(1);
+      expect(result.dinum_errors[0]?.status).toBe("rejected");
+      expect(result.dinum_errors[0]?.message).toContain("HTTP 500");
+    }
+    errSpy.mockRestore();
+  });
 });
 
 describe("reconcilierFinessSirene (V0.6.2)", () => {
@@ -547,6 +697,42 @@ describe("reconcilierFinessSirene (V0.6.2)", () => {
       expect(result.skipped[0]?.reason).toContain("introuvable");
     }
     expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("V0.7.0 status='all_sirene_failed' quand tous les INSEE rejettent (panne)", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValueOnce({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockRejectedValue(new Error("HTTP 503"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await reconcilierFinessSirene(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.status).toBe("all_sirene_failed");
+    }
+    errSpy.mockRestore();
+  });
+
+  it("V0.7.0 status='all_sirene_not_found' + dinum_errors exposé", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValueOnce({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockResolvedValue({
+      found: false,
+      key: SIRET_A,
+      lookupStatus: "not_found",
+      message: `SIRET "${SIRET_A}" introuvable dans SIRENE INSEE.`,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await reconcilierFinessSirene(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.status).toBe("all_sirene_not_found");
+      // Cohérent avec mock DINUM par défaut qui retourne not_found.
+      expect(result.dinum_errors).toHaveLength(1);
+      expect(result.dinum_errors[0]?.status).toBe("not_found");
+    }
     warnSpy.mockRestore();
   });
 });
