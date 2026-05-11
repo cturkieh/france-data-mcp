@@ -39,7 +39,7 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 
 ---
 
-## Outils MCP exposés (24 tools — V0.7.0)
+## Outils MCP exposés (24 tools)
 
 ### 🗺️ Territoire (4 tools)
 
@@ -56,7 +56,7 @@ D'autres domaines (éducation, transport, économie, justice) pourront s'ajouter
 |---|---|---|
 | `entreprises_in_radius` | Recherche d'entreprises dans un rayon par code(s) NAF | DINUM Recherche Entreprises (+ fallback Haversine côté client) |
 | `entreprise_by_siren` | Fiche complète d'une entreprise par SIREN (sites, finances, dirigeants) | DINUM (+ fallback INSEE SIRENE V3.11 pour les SIREN diffusion partielle) |
-| `etablissement_by_siret` | **V0.6.0** — Fiche complète d'un établissement par SIRET (14 chiffres) : enseigne, NAF, dates création/fermeture, statut actif | INSEE SIRENE V3.11 (clé requise) |
+| `etablissement_by_siret` | Fiche complète d'un établissement par SIRET (14 chiffres) : enseigne, NAF, dates création/fermeture, statut actif | INSEE SIRENE V3.11 (clé requise) |
 
 ### 🏥 Établissements de santé — FINESS (3 tools)
 
@@ -91,7 +91,7 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 - Les DOM-COM ne sont pas encore ingérés (v0.3 garde un `code_insee CHAR(5)` strict métropole + Corse ; v0.4 prévoit l'élargissement).
 - **Latence DREES** : la base est régénérée bimestriellement par la DREES. Pour les structures émergentes (CPTS récemment agréées, MSP en cours d'ouverture), comptez **1 à 2 mois de retard** sur le terrain. Si une structure réelle n'apparaît pas dans FINESS, cross-checker avec l'ARS régionale ou Service Public (`mcp__claude_ai_Service_Public__rechercher_service_local`) avant de conclure à son inexistence.
 
-**Métadonnées de réponse (v0.4.3)** : les retours `etablissements_finess_in_radius` / `etablissements_finess_by_categorie` exposent un champ `query_metadata` documentant la précision géo (`lambert93_natif_finess`), le type de distance (`haversine_postgis`) et les notes actionnables (latence DREES, distance non-routière). À lire pour ne pas surinterpréter les résultats.
+**Métadonnées de réponse** : les retours `etablissements_finess_in_radius` / `etablissements_finess_by_categorie` exposent un champ `query_metadata` documentant la précision géo (`lambert93_natif_finess`), le type de distance (`haversine_postgis`) et les notes actionnables (latence DREES, distance non-routière). À lire pour ne pas surinterpréter les résultats.
 
 ### 👨‍⚕️ Professionnels de santé libéraux — Annuaire Ameli (4 tools)
 
@@ -104,33 +104,33 @@ Data is refreshed bimonthly from the ANS official extract. See [docs/ingestion.m
 
 > Couverture Ameli : libéraux **conventionnés uniquement** (~462 K). Pour les salariés (hospitaliers, salariés en LBM/cabinet), voir RPPS ci-dessous.
 
-### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (5 tools — V0.6.0)
+### 🩺 Tous les professionnels — RPPS / Annuaire Santé ANS (5 tools)
 
 | Tool | Description |
 |---|---|
 | `professionnels_rpps_in_radius` | Recherche de PS dans un rayon (libéraux + salariés). Filtres : profession ANS, savoir-faire (DES/DESC), mode d'exercice, `include_etudiants`, `include_agents_publics` |
 | `professionnels_rpps_par_dept` | Listing départemental + pagination. Idéal pour compter ou lister tout le monde (vs Ameli libéraux uniquement) |
-| `rpps_dans_etablissement` | **Killer feature** — répond à *"qui travaille dans ce labo / hôpital ?"*. Filtre par numéro FINESS site |
-| `rpps_search_by_name` | **V0.6.0** — Recherche fuzzy par identité (nom + prénom optionnel + département optionnel). Trigram pg_trgm tolérant accents/typos. `match_score` ∈ [0..1] dans chaque résultat |
+| `rpps_dans_etablissement` | Répond à *"qui travaille dans ce labo / hôpital ?"*. Filtre par numéro FINESS site |
+| `rpps_search_by_name` | Recherche fuzzy par identité (nom + prénom optionnel + département optionnel). Trigram pg_trgm tolérant accents/typos. `match_score` ∈ [0..1] dans chaque résultat |
 | `professionnel_by_rpps` | Fiche par identifiant national (11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe `81` qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Fallback live FHIR ANS si non trouvé en base locale |
 
-### 🔀 Croisement multi-source (5 tools — V0.6.1 → V0.7.0)
+### 🔀 Croisement multi-source (5 tools)
 
 Primitives de réconciliation FINESS DREES ↔ RPPS ANS ↔ SIRENE INSEE pour détecter les divergences factuelles entre référentiels (SIRET fermés, rebrandings post-M&A, raisons sociales périmées). Aucune interprétation métier : ces tools renvoient les faits, le caller décide.
 
 | Tool | Description |
 |---|---|
-| `data_freshness` | **V0.6.1** — Retourne la fraîcheur des dumps ingérés (FINESS, Ameli, RPPS) : `last_success_at`, `staleness_days`, `cadence_hint`. Cache mémoire 5 min |
-| `verifier_site_actif` | **V0.7.0** — Croise DREES ↔ resolver RPPS+DINUM avec scoring d'adresse Dice. Détecte les SIRET fermés invisibles côté RPPS. Retourne `verdict_site` et `verdict_groupe` distincts, `best_match` SIRET physique, `dinum_errors` discriminés |
-| `compare_raison_sociale_finess_vs_rpps` | **V0.6.2** — Compare la raison sociale FINESS vs RPPS sur un même `num_finess`. Détecte les rebrandings post-M&A non encore propagés côté DREES |
-| `historique_etablissement` | **V0.7.0** — Reconstitue la timeline complète (ouvertures, fermetures, changements de NAF/enseigne) en interrogeant SIRENE `periodesEtablissement` pour chaque SIRET candidat du resolver (RPPS + DINUM matches). `status: success / partial / all_sirene_failed / all_sirene_not_found` |
-| `reconcilier_finess_sirene` | **V0.7.0** — Score de cohérence Sørensen-Dice (nom + adresse) entre FINESS DREES et SIRENE pour chaque candidat du resolver. Verdict `match` / `partial` / `mismatch`. `status` aligné sur historique_etablissement |
+| `data_freshness` | Retourne la fraîcheur des dumps ingérés (FINESS, Ameli, RPPS) : `last_success_at`, `staleness_days`, `cadence_hint`. Cache mémoire 5 min |
+| `verifier_site_actif` | Croise DREES ↔ resolver RPPS+DINUM avec scoring d'adresse Dice. Détecte les SIRET fermés invisibles côté RPPS. Retourne `verdict_site` et `verdict_groupe` distincts, `best_match` SIRET physique, `dinum_errors` discriminés |
+| `compare_raison_sociale_finess_vs_rpps` | Compare la raison sociale FINESS vs RPPS sur un même `num_finess`. Détecte les rebrandings post-M&A non encore propagés côté DREES |
+| `historique_etablissement` | Reconstitue la timeline complète (ouvertures, fermetures, changements de NAF/enseigne) en interrogeant SIRENE `periodesEtablissement` pour chaque SIRET candidat du resolver (RPPS + DINUM matches). `status: success / partial / all_sirene_failed / all_sirene_not_found` |
+| `reconcilier_finess_sirene` | Score de cohérence Sørensen-Dice (nom + adresse) entre FINESS DREES et SIRENE pour chaque candidat du resolver. Verdict `match` / `partial` / `mismatch`. `status` aligné sur historique_etablissement |
 
 > Couverture RPPS : **~2,2 M PS actifs** (libéraux + salariés privés + hospitaliers contractuels + agents publics + étudiants + remplaçants). L'ANS pré-filtre la source aux PS actifs (cf. DSFT v3.1 §5.1.2 — pas de date de décès, activité ouverte) : aucun retraité, suspendu, radié ou décédé n'est exposé. ID national stable + lien `num_finess` (pivot PS↔FINESS). Snapshot mensuel data.gouv + fallback live FHIR ANS pour les lookups individuels.
 
 **V0.5.1 — enrichissement FINESS post-INSERT.** Les PS sans adresse de structure exploitable (étudiants, salariés CH/CHU sans adresse site déclarée, libéraux à domicile — ~970 K rows skippées en V0.5.0) sont désormais ingérés avec `geom NULL`, puis géolocalisés à la précision adresse FINESS via JOIN sur `num_finess`. Champ `geom_source` interne = `commune_centroid` (~3 km moyenne) ou `finess_join` (adresse FINESS).
 
-**Filtre catégorie professionnelle (V0.5.5).** Nomenclature officielle ANS [TRE_R09](https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/) — 3 codes en base :
+**Filtre catégorie professionnelle.** Nomenclature officielle ANS [TRE_R09](https://mos.esante.gouv.fr/NOS/TRE_R09-CategorieProfessionnelle/) — 3 codes en base :
 
 | Code | Libellé ANS | Périmètre | Volume |
 |---|---|---|---|
