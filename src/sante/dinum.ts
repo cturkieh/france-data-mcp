@@ -181,8 +181,11 @@ type ApiSiege = {
   adresse?: string;
   code_postal?: string;
   libelle_commune?: string;
-  latitude?: string | number;
-  longitude?: string | number;
+  // L'API DINUM peut renvoyer `null` (pas seulement `undefined`) pour les
+  // sites sans géocodage SIRENE. `parseCoordinates` ci-dessous accepte les
+  // deux et renvoie `undefined` proprement.
+  latitude?: string | number | null;
+  longitude?: string | number | null;
   activite_principale?: string;
   etat_administratif?: string;
   tranche_effectif_salarie?: string;
