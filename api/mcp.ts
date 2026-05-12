@@ -24,16 +24,18 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import {
   type LogLevel,
   type McpOutcome,
+  type McpRequestContext,
   extractUserAgent,
   logMcpEvent,
 } from "./_lib/observability.js";
 import { checkRateLimit, extractIp, hashIp } from "./_lib/rate-limit.js";
+import { captureMcpError, flushSentry } from "./_lib/sentry.js";
 import { TOOLS, findTool } from "./tools.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = {
   name: "france-data-mcp",
-  version: "0.5.7",
+  version: "0.7.2",
 };
 
 type JsonRpcRequest = {
@@ -59,104 +61,126 @@ type JsonRpcError = {
   };
 };
 
-/** Shared logging context, populated once per HTTP request. */
-type RequestContext = {
-  ipHash: string;
-  userAgent: string;
-};
+/**
+ * Shared logging context, populated once per HTTP request. Réexporté depuis
+ * `observability.ts` pour rester source-of-truth et éviter la divergence avec
+ * `SentryContext`.
+ */
+type RequestContext = McpRequestContext;
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
-  if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
-  }
+  try {
+    if (req.method === "OPTIONS") {
+      res.status(204).end();
+      return;
+    }
 
-  if (req.method === "GET") {
-    res.status(200).json({
-      message: "france-data-mcp — serveur MCP HTTP",
-      protocol: "MCP Streamable HTTP",
-      version: SERVER_INFO.version,
-      docs: "https://github.com/cturkieh/france-data-mcp",
-      transport: "Send POST requests with JSON-RPC 2.0 messages.",
-    });
-    return;
-  }
+    if (req.method === "GET") {
+      res.status(200).json({
+        message: "france-data-mcp — serveur MCP HTTP",
+        protocol: "MCP Streamable HTTP",
+        version: SERVER_INFO.version,
+        docs: "https://github.com/cturkieh/france-data-mcp",
+        transport: "Send POST requests with JSON-RPC 2.0 messages.",
+      });
+      return;
+    }
 
-  // À partir d'ici on tracera tout — les rejets HTTP 405/400 doivent
-  // apparaître dans les logs structurés pour qu'un spam GET/POST-vide
-  // soit visible et aggregable côté ops, et pour qu'un éventuel DoS
-  // log-silent ne reste pas invisible.
-  const ctx: RequestContext = {
-    ipHash: hashIp(extractIp(req)),
-    userAgent: extractUserAgent(req),
-  };
+    // À partir d'ici on tracera tout — les rejets HTTP 405/400 doivent
+    // apparaître dans les logs structurés pour qu'un spam GET/POST-vide
+    // soit visible et aggregable côté ops, et pour qu'un éventuel DoS
+    // log-silent ne reste pas invisible.
+    const ctx: RequestContext = {
+      ipHash: hashIp(extractIp(req)),
+      userAgent: extractUserAgent(req),
+    };
 
-  if (req.method !== "POST") {
-    emit(ctx, 0, `http_${req.method ?? "unknown"}`, {
-      status: 405,
-      outcome: "bad_request",
-      level: "warn",
-    });
-    res.status(405).json({ error: "Method not allowed" });
-    return;
-  }
+    if (req.method !== "POST") {
+      emit(ctx, 0, `http_${req.method ?? "unknown"}`, {
+        status: 405,
+        outcome: "bad_request",
+        level: "warn",
+      });
+      res.status(405).json({ error: "Method not allowed" });
+      return;
+    }
 
-  const body = req.body as JsonRpcRequest | JsonRpcRequest[] | undefined;
-  if (!body) {
-    emit(ctx, 0, "http_post_empty", {
-      status: 400,
-      outcome: "bad_request",
-      level: "warn",
-    });
-    res.status(400).json({ error: "Missing JSON-RPC payload" });
-    return;
-  }
+    const body = req.body as JsonRpcRequest | JsonRpcRequest[] | undefined;
+    if (!body) {
+      emit(ctx, 0, "http_post_empty", {
+        status: 400,
+        outcome: "bad_request",
+        level: "warn",
+      });
+      res.status(400).json({ error: "Missing JSON-RPC payload" });
+      return;
+    }
 
-  const isBatch = Array.isArray(body);
-  const requests: JsonRpcRequest[] = isBatch ? body : [body];
+    const isBatch = Array.isArray(body);
+    const requests: JsonRpcRequest[] = isBatch ? body : [body];
 
-  // Batch JSON-RPC : on traite les requêtes en parallèle. handleRpc catch déjà
-  // toutes ses exceptions internes, donc aucune promise ne reject — Promise.all
-  // ne court-circuite pas. L'ordre des réponses suit l'ordre des requêtes (sémantique
-  // Promise.all). Win typique : un batch de 5 tools/call qui font chacun un appel
-  // réseau ~300ms passe de ~1.5s à ~300ms.
-  const settled = await Promise.all(
-    requests.map(async (request) => {
-      const start = Date.now();
-      try {
-        if (!request || typeof request !== "object") {
-          emit(ctx, start, "invalid", { status: 400, outcome: "bad_request" });
-          return error(null, -32600, "Invalid Request: not a JSON-RPC object");
+    // Batch JSON-RPC : on traite les requêtes en parallèle. handleRpc catch déjà
+    // toutes ses exceptions internes, donc aucune promise ne reject — Promise.all
+    // ne court-circuite pas. L'ordre des réponses suit l'ordre des requêtes (sémantique
+    // Promise.all). Win typique : un batch de 5 tools/call qui font chacun un appel
+    // réseau ~300ms passe de ~1.5s à ~300ms.
+    const settled = await Promise.all(
+      requests.map(async (request) => {
+        const start = Date.now();
+        try {
+          if (!request || typeof request !== "object") {
+            emit(ctx, start, "invalid", { status: 400, outcome: "bad_request" });
+            return error(null, -32600, "Invalid Request: not a JSON-RPC object");
+          }
+          return await handleRpc(request, ctx, start);
+        } catch (err) {
+          // Filet de sécurité pour exceptions synchrones hors du try interne de
+          // handleRpc (ex: request.id null, JSON.stringify circulaire). En pratique
+          // handleRpc catch déjà tout — ce filet ne devrait jamais s'activer.
+          // reportInternalError centralise console.error + emit + Sentry.captureException.
+          const method = request?.method ?? "malformed_request";
+          const message = reportInternalError(err, ctx, start, method, {
+            layer: "batch_loop",
+            logPrefix: "unexpected error in batch loop",
+          });
+          return error(null, -32603, `Internal error in batch handling: ${message}`);
         }
-        return await handleRpc(request, ctx, start);
-      } catch (err) {
-        // Filet de sécurité pour les exceptions synchrones hors du try interne
-        // de handleRpc (ex: accès à request.id sur un null, JSON.stringify d'un
-        // objet circulaire). Sans ce filet, la fonction Vercel crash sans réponse
-        // et le client MCP timeout sans diagnostic.
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[france-data-mcp] unexpected error in batch loop: ${message}`);
-        // Si `request.method` est manquant, c'est un request structurellement
-        // cassé — distingué de "unknown" pour ne pas mélanger les buckets
-        // d'aggregation côté ops (panne interne vs payload malformé).
-        emit(ctx, start, request?.method ?? "malformed_request", {
-          status: 500,
-          outcome: "internal_error",
-          extra: { error: message },
-        });
-        return error(null, -32603, `Internal error in batch handling: ${message}`);
-      }
-    }),
-  );
-  const responses: Array<JsonRpcSuccess | JsonRpcError> = settled.filter(
-    (r): r is JsonRpcSuccess | JsonRpcError => r !== null,
-  );
+      }),
+    );
+    const responses: Array<JsonRpcSuccess | JsonRpcError> = settled.filter(
+      (r): r is JsonRpcSuccess | JsonRpcError => r !== null,
+    );
 
-  if (responses.length === 0) {
-    res.status(204).end();
-    return;
+    if (responses.length === 0) {
+      res.status(204).end();
+      return;
+    }
+    res.status(200).json(isBatch ? responses : responses[0]);
+  } catch (err) {
+    // Filet root : capture les exceptions qui throw HORS de la boucle batch
+    // (ex: extractIp/hashIp/extractUserAgent en cold start exotique, ou un
+    // accesseur req.body qui throw sur un body mal-formé). Sans ce filet,
+    // l'invariant "100% des 500 sont capturés par Sentry" serait cassé sur
+    // ces chemins très improbables mais possibles. console.error + Sentry.captureException
+    // garantis via captureMcpError. On re-throw pour que Vercel renvoie le 500.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[france-data-mcp] handler root error: ${message}`);
+    captureMcpError(err, {
+      method: "handler_root",
+      outcome: "internal_error",
+      ipHash: "unknown",
+      userAgent: "unknown",
+      extra: { layer: "handler_root", error: message },
+    });
+    throw err;
+  } finally {
+    // Flush APRÈS la réponse pour ne pas pénaliser la latence côté client.
+    // Vercel garde le process en vie jusqu'au resolve du handler async — on a
+    // donc le temps de flush avant kill. Le `finally` garantit que tout chemin
+    // de retour (incluant les early returns OPTIONS/GET/405/400 et l'exception
+    // re-throw du catch root) flush si un event Sentry est en attente.
+    await flushSentry();
   }
-  res.status(200).json(isBatch ? responses : responses[0]);
 }
 
 async function handleRpc(
@@ -205,8 +229,24 @@ async function handleRpc(
 
     if (request.method === "tools/call") {
       const params = request.params ?? {};
-      const name = params.name as string;
-      const args = (params.arguments ?? {}) as Record<string, unknown>;
+      // Validation explicite : un cast `as string` masquerait un caller qui
+      // envoie un number/object/null/undefined. Sans cette garde, le tag Sentry
+      // `mcp.tool` est corrompu ("[object Object]") et l'outcome part en
+      // `not_found` (faux signal — c'est un `bad_request` côté caller).
+      if (typeof params.name !== "string" || params.name.length === 0) {
+        emit(ctx, start, request.method, {
+          status: 400,
+          outcome: "bad_request",
+          level: "warn",
+          extra: { error: "missing_or_invalid_tool_name" },
+        });
+        return error(id, -32602, "Invalid params: 'name' must be a non-empty string");
+      }
+      const name = params.name;
+      const args =
+        params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments)
+          ? (params.arguments as Record<string, unknown>)
+          : {};
 
       // Rate limit appliqué uniquement aux tools/call (les méthodes meta
       // restent libres pour ne pas casser le handshake MCP des clients qui
@@ -241,26 +281,28 @@ async function handleRpc(
       // qui passe silencieusement au client MCP comme `text: undefined` → réponse cassée.
       // On bloque ici pour signaler le bug du tool plutôt que de dégrader silencieusement.
       if (result === undefined) {
-        console.error(`[france-data-mcp] tool ${name} returned undefined`);
-        emit(ctx, start, request.method, {
-          tool: name,
-          status: 500,
-          outcome: "internal_error",
-          extra: { error: "tool_returned_undefined" },
-        });
+        reportInternalError(
+          new Error(`Tool ${name} returned undefined`),
+          ctx,
+          start,
+          request.method,
+          {
+            tool: name,
+            layer: "tool_result_check",
+            logPrefix: `tool ${name} returned undefined`,
+          },
+        );
         return error(id, -32603, `Tool ${name} returned no value`);
       }
       let resultText: string;
       try {
         resultText = JSON.stringify(result, null, 2);
       } catch (stringifyErr) {
-        const msg = stringifyErr instanceof Error ? stringifyErr.message : String(stringifyErr);
-        console.error(`[france-data-mcp] tools/call ${name}: JSON.stringify failed: ${msg}`);
-        emit(ctx, start, request.method, {
+        // reportInternalError centralise console.error + emit + Sentry.captureException.
+        const msg = reportInternalError(stringifyErr, ctx, start, request.method, {
           tool: name,
-          status: 500,
-          outcome: "internal_error",
-          extra: { error: msg },
+          layer: "json_stringify",
+          logPrefix: `tools/call ${name}: JSON.stringify failed`,
         });
         return error(id, -32603, `Tool ${name} returned a non-serialisable value: ${msg}`);
       }
@@ -278,16 +320,15 @@ async function handleRpc(
     emit(ctx, start, request.method, { status: 404, outcome: "not_found" });
     return error(id, -32601, `Method not found: ${request.method}`);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[france-data-mcp] handler error on ${request.method}: ${message}`);
-    // JSON-RPC 2.0 §5.1 distingue Invalid params (-32602, faute du caller) de
+    // JSON-RPC 2.0 §5.1 distingue Invalid params (-32602, faute caller) de
     // Internal error (-32603, faute serveur). Les validators (clampLimit /
-    // clampOffset / validateCoords / validateRadiusKm / validateDepartement)
-    // throw RangeError pour signaler un input client invalide. Sans ce mapping,
-    // un client typé voit -32603 et conclut "panne serveur, retry plus tard"
-    // alors qu'il faut juste corriger sa saisie. Le message reste verbatim
-    // donc le caller MCP a toujours le diagnostic actionnable.
+    // validateCoords / validateRadiusKm / etc.) throw RangeError pour signaler
+    // un input client invalide. Sans ce mapping, un client typé voit -32603
+    // et conclut "panne serveur, retry plus tard" alors qu'il faut juste
+    // corriger sa saisie. reportInternalError gère console.error + Sentry.captureException.
     if (err instanceof RangeError) {
+      const message = err.message;
+      console.warn(`[france-data-mcp] bad_request on ${request.method}: ${message}`);
       emit(ctx, start, request.method, {
         status: 400,
         outcome: "bad_request",
@@ -296,14 +337,48 @@ async function handleRpc(
       });
       return error(id, -32602, message);
     }
-    emit(ctx, start, request.method, {
-      status: 500,
-      outcome: "internal_error",
-      level: "error",
-      extra: { error: message },
+    const tool = typeof request.params?.name === "string" ? request.params.name : undefined;
+    const message = reportInternalError(err, ctx, start, request.method, {
+      tool,
+      layer: "handle_rpc",
     });
     return error(id, -32603, message);
   }
+}
+
+/**
+ * Pipe unique « erreur 500 → log + metric + Sentry » : applique mécaniquement
+ * la discipline CLAUDE.md (zéro catch silencieux, console.error + Sentry
+ * obligatoires) et empêche l'oubli d'une sortie sur un nouveau chemin d'erreur.
+ *
+ * Retourne le message normalisé pour que le caller puisse l'embarquer dans
+ * la réponse JSON-RPC sans le re-calculer.
+ */
+function reportInternalError(
+  err: unknown,
+  ctx: RequestContext,
+  start: number,
+  method: string,
+  opts: { layer: string; tool?: string; logPrefix?: string },
+): string {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[france-data-mcp] ${opts.logPrefix ?? `handler ${method}`}: ${message}`);
+  emit(ctx, start, method, {
+    tool: opts.tool,
+    status: 500,
+    outcome: "internal_error",
+    level: "error",
+    extra: { error: message, layer: opts.layer },
+  });
+  captureMcpError(err, {
+    method,
+    tool: opts.tool,
+    outcome: "internal_error",
+    ipHash: ctx.ipHash,
+    userAgent: ctx.userAgent,
+    extra: { layer: opts.layer },
+  });
+  return message;
 }
 
 /**

@@ -17,6 +17,16 @@ import type { VercelRequest } from "@vercel/node";
 export type LogLevel = "info" | "warn" | "error";
 
 /**
+ * Contexte partagé d'une requête HTTP MCP, calculé une fois en début de
+ * handler et réutilisé sur tous les logs / events Sentry / metrics. Vit ici
+ * pour rester source-of-truth — `sentry.ts` et `mcp.ts` l'importent.
+ */
+export type McpRequestContext = {
+  ipHash: string;
+  userAgent: string;
+};
+
+/**
  * Outcomes possibles d'une requête MCP. Union fermé pour catch les fautes de
  * frappe au compile time et garder l'agrégation BigQuery/jq fiable côté ops.
  */

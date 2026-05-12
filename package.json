@@ -91,6 +91,7 @@
     "vitest": "^2.1.5"
   },
   "dependencies": {
+    "@sentry/node": "^10.53.1",
     "@supabase/supabase-js": "^2.45.0",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.38.0",
