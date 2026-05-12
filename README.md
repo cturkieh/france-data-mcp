@@ -6,6 +6,7 @@
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
 [![MCP](https://img.shields.io/badge/MCP-live-success)](https://france-data-mcp.vercel.app/mcp)
 [![npm](https://img.shields.io/npm/v/france-data-mcp.svg)](https://www.npmjs.com/package/france-data-mcp)
+[![smithery](https://smithery.ai/badge/@cturkieh/france-data)](https://smithery.ai/server/@cturkieh/france-data)
 
 🇫🇷 Documentation principale en français. [English version →](README.en.md)
 
