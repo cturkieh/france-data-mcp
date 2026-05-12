@@ -129,9 +129,9 @@ ALTER TABLE finess_failed RENAME TO finess_previous;
 COMMIT;
 ```
 
-## V0.4.2 — Conventions à connaître (post-incident 2026-05-08)
+## Conventions importantes — pipeline d'ingestion
 
-**Pourquoi V0.4.2 existe** : sur free tier Supabase (1 GB), la table `annuaire_ameli` a saturé le disque pendant l'ingestion en stockant la ligne CSV brute dans une colonne JSONB `raw` (~70-80 % du poids row × 462 K rows = 561 MB). DB en read-only mode → projet à recréer. Fix : passer en Pro tier 8 GB ET vider le `raw` à l'ingestion. Pour FINESS, la projection Lambert 93 → WGS84 lisait encore `raw->>'coordxet'`, donc on a typé les coords en colonnes dédiées.
+**Contexte** : la table `annuaire_ameli` peut saturer le disque si la ligne CSV brute est stockée dans une colonne JSONB `raw` (~70-80 % du poids row × 462 K rows = ~560 MB). Le pipeline vide désormais `raw` à l'ingestion. Pour FINESS, la projection Lambert 93 → WGS84 utilise des colonnes typées dédiées.
 
 ### Loading des env vars (`scripts/ingest/load-env.ts`)
 

@@ -9,3 +9,5 @@ coverage
 .vercel
 .turbo
 .tsbuildinfo
+docs/backlog.md
+docs/superpowers/

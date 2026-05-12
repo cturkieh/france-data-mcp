@@ -1,6 +1,6 @@
 # france-data-mcp
 
-> A toolkit to query French public data from Claude, Cursor and any TypeScript app. A ready-to-plug MCP server.
+> A TypeScript MCP server that **cross-references and reconciles** 6 French public registries (INSEE SIRENE, FINESS DREES, RPPS / ANS Health Directory, Ameli Health Directory, IGN, DINUM). Detects closed SIRETs not yet propagated by DREES, distinguishes site vs group, exposes data freshness per source.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
@@ -10,57 +10,64 @@
 
 ---
 
+## Quick install
+
+**Public URL**: `https://france-data-mcp.vercel.app/mcp`
+
+See [docs/installation-claude.md](docs/installation-claude.md) for client-by-client setup (claude.ai, Claude Desktop, Cursor, Claude Code) and self-hosting instructions.
+
+---
+
 ## What it does
 
-Brings together the most useful French government data sources (FINESS healthcare facilities, Annuaire Santé Ameli licensed practitioners, DINUM Recherche Entreprises, IGN geocoding, geo.api.gouv.fr, INSEE SIRENE) under a uniform TypeScript API and a single MCP server, with:
+Brings together the most useful French government data sources under a uniform typed API and a single MCP server endpoint, with:
 
-- Typed API (no `any`)
-- Uniform rate-limit handling (exponential retry, `retry-after` aware)
-- Hardened ingestion pipeline (SHA256 short-circuit, atomic swap, post-swap canary)
-- Honest documentation about what each source contains and the gotchas
+- Typed API (zero `any`), uniform rate-limit handling (exponential retry, `retry-after` aware)
+- Hardened ingestion pipeline (SHA-256 short-circuit, atomic swap, post-swap canary)
+- Cross-source reconciliation FINESS ↔ RPPS ↔ SIRENE to detect closed SIRETs still listed active, M&A renamings not yet propagated, and inconsistent company names across registries
+- Honest documentation about what each source contains and its gotchas
 
-## Status
-
-✅ **v0.6.2 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing **24 tools**. ~95K FINESS facilities, ~462K Ameli practitioners and ~2.23M RPPS practitioners ingested and geocoded in WGS84. TypeScript strict, Biome clean, **517 tests passing**. v0.6 adds multi-source cross-checking (FINESS ↔ RPPS ↔ SIRENE) to detect closed SIRETs still listed active in FINESS, M&A renamings not yet propagated, and reconcile FINESS records against SIRENE via Sørensen-Dice scoring. See [CHANGELOG](CHANGELOG.md#062--2026-05-11).
+---
 
 ## Tools (24)
 
 - **Territory (4)**: `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
-- **Companies (3)**: `entreprises_in_radius`, `entreprise_by_siren` (with INSEE SIRENE V3.11 fallback), `etablissement_by_siret` (V0.6.0, SIRENE V3.11)
+- **Companies (3)**: `entreprises_in_radius`, `entreprise_by_siren` (+ INSEE SIRENE V3.11 fallback), `etablissement_by_siret`
 - **FINESS healthcare facilities (3)**: `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
 - **Ameli licensed practitioners (4)**: `professionnels_in_radius`, `professionnels_par_specialite_dept`, `lister_specialites_ameli`, `lister_types_ps_ameli`
-- **RPPS / ANS — all active practitioners (5, V0.6.0)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name` (fuzzy trigram by identity), `professionnel_by_rpps` (with live FHIR ANS fallback). ANS source is pre-filtered to active PS only — no retired, suspended, struck-off or deceased records ever appear.
-- **Multi-source cross-checks (5, V0.6.1 / V0.6.2)**: `data_freshness` (ingestion staleness per source), `verifier_site_actif` (FINESS ↔ RPPS ↔ SIRENE active/closed verdict), `compare_raison_sociale_finess_vs_rpps` (raw diff for M&A renaming detection), `historique_etablissement` (full SIRENE periods timeline), `reconcilier_finess_sirene` (Sørensen-Dice scoring with `match` / `partial` / `mismatch` verdict). No business interpretation — facts only, the caller decides.
+- **RPPS / ANS — all active practitioners (5)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name` (fuzzy trigram), `professionnel_by_rpps` (+ live FHIR ANS fallback)
+- **Multi-source cross-checks (5)**: `data_freshness`, `verifier_site_actif`, `compare_raison_sociale_finess_vs_rpps`, `historique_etablissement`, `reconcilier_finess_sirene`
+
+---
 
 ## Use cases
 
-- Site location analysis (where to open a clinic, lab, pharmacy)
-- Healthcare territorial intelligence
+- Healthcare territorial analysis (supply mapping, access to care)
+- Market research and competitive intelligence
 - Local journalism with data
 - Civic tech applications
-- Market studies for healthcare and services
-- Anything that needs *"what's around this point?"* with French open data
+- Any use case requiring *"what's around this point?"* with French open data
 
-## Install
+---
 
-As an MCP server (recommended):
+## Status
 
-```
-URL: https://france-data-mcp.vercel.app/mcp
-```
-
-See [docs/installation-claude.md](docs/installation-claude.md) for client-by-client setup (claude.ai, Claude Desktop, Cursor, Claude Code).
-
-## Public limits (V0.5.7)
-
-The public endpoint enforces **60 req/min per IP** on `tools/call` (handshake methods `initialize` / `tools/list` / `ping` stay free). Over the limit, the server returns a JSON-RPC error code `-32000` with `data.retryAfterSeconds`. Heavy / batch users should throttle client-side or self-host. Every request is logged as structured JSON (`ts`, `method`, `tool`, `ip_hash` SHA-256, `user_agent`, `duration_ms`, `status`, `outcome`). No tool arguments are persisted; IPs are hashed before any log or Redis store (GDPR-friendly).
+✅ **v0.7.0 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing **24 tools**. ~95K FINESS facilities, ~462K Ameli practitioners, ~2.2M active RPPS practitioners. TypeScript strict, Biome clean, **525 tests passing**. See [CHANGELOG](CHANGELOG.md) for the full history.
 
 ## Roadmap
 
-- **v0.5.x** — INSEE Melodi (commune-level macro series, free, no key) for population denominators.
-- **v0.6** — Composite tools (`panorama_sante_territoire`, density-per-specialty, PS-per-facility pivots) to make multi-source queries trivial for LLMs.
-- **v0.7+** — INSEE IRIS demographics, CNAM dept-level, DVF real estate.
+- **v0.7.1** — INSEE `/siret?q=siren:XXX` fallback for multi-site SIRENs when DINUM returns `enrichmentStatus: "partial"`
+- **v0.8** — Composite health tools (`panorama_sante_territoire`, density analytics), INSEE Melodi (commune-level macro series)
+- **v0.9+** — DOM-COM support, INSEE IRIS (infra-communal demographics)
+
+---
+
+## Public limits
+
+The public endpoint enforces **60 req/min per IP** on `tools/call` (handshake methods stay free). Over the limit: JSON-RPC error `-32000` with `data.retryAfterSeconds`. Every request is logged as structured JSON with IPs hashed SHA-256 (GDPR-friendly). For heavy use, throttle client-side or self-host.
+
+---
 
 ## License
 
-MIT for the code. Each data source keeps its own license (mostly Etalab Open License). See [main README](README.md) for attribution requirements.
+MIT for the code. Each data source keeps its own license (mostly Etalab Open License). See [main README](README.md#licence) for attribution requirements.

@@ -104,19 +104,21 @@ Pour l'ingestion des CSV source (FINESS bimestriel ~95 K rows, Ameli hebdo ~462 
 
 ---
 
-## Outils exposés (17 — V0.5.7)
+## Outils exposés (24 — V0.7.0)
 
 **🗺️ Territoire** : `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
 
-**🏢 Entreprises** : `entreprises_in_radius`, `entreprise_by_siren`
+**🏢 Entreprises** : `entreprises_in_radius`, `entreprise_by_siren`, `etablissement_by_siret`
 
 **🏥 Établissements FINESS** : `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
 
 **👨‍⚕️ Professionnels Ameli (libéraux conventionnés)** : `professionnels_in_radius`, `professionnels_par_specialite_dept`, `lister_specialites_ameli`, `lister_types_ps_ameli`
 
-**🩺 Tous les PS — RPPS / Annuaire Santé ANS (libéraux + salariés + hospitaliers)** : `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `professionnel_by_rpps`
+**🩺 Tous les PS — RPPS / Annuaire Santé ANS** : `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name`, `professionnel_by_rpps`
 
-Voir le [README](../README.md#outils-mcp-exposés-17-tools--v050) pour la description détaillée de chaque tool.
+**🔀 Croisement multi-source** : `data_freshness`, `verifier_site_actif`, `compare_raison_sociale_finess_vs_rpps`, `historique_etablissement`, `reconcilier_finess_sirene`
+
+Voir le [README](../README.md#outils-mcp-exposés-24-tools) pour la description détaillée de chaque tool.
 
 ---
 
