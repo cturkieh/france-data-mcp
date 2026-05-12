@@ -21,6 +21,7 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { VERSION } from "../src/core/version.js";
 import {
   type LogLevel,
   type McpOutcome,
@@ -35,7 +36,7 @@ import { TOOLS, findTool } from "./tools.js";
 const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = {
   name: "france-data-mcp",
-  version: "0.7.2",
+  version: VERSION,
 };
 
 type JsonRpcRequest = {

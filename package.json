@@ -1,6 +1,6 @@
 {
   "name": "france-data-mcp",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "MCP TypeScript pour combiner et réconcilier 6 référentiels publics français (INSEE SIRENE, FINESS DREES, RPPS Annuaire Santé ANS, Annuaire Santé Ameli, IGN, DINUM) — avec cross-source FINESS↔RPPS↔SIRENE, détection des SIRET fermés invisibles côté DREES, scoring d'adresse Dice, rate limit & observabilité structurée. Production-ready pour Claude, Cursor et toute app TypeScript.",
   "keywords": [
     "mcp",
@@ -39,6 +39,9 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "france-data-mcp": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
