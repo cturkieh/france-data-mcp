@@ -106,9 +106,7 @@ type ApiInseeUniteLegale = ApiInseePeriode & {
  * Retourne `undefined` si aucune source de champs n'est disponible (payload
  * dégradé). Le caller (`deriveNomComplet`) tombe alors sur le SIREN brut.
  */
-function pickUniteLegaleFields(
-  ul: ApiInseeUniteLegale | undefined,
-): ApiInseePeriode | undefined {
+function pickUniteLegaleFields(ul: ApiInseeUniteLegale | undefined): ApiInseePeriode | undefined {
   if (!ul) return undefined;
   const periodes = ul.periodesUniteLegale;
   if (periodes && periodes.length > 0) {
@@ -465,6 +463,123 @@ async function fetchSiretRawFromInsee(siret: string): Promise<FetchSiretRawResul
   return { kind: "ok", etablissement: et };
 }
 
+// === Lookup établissements par SIREN (endpoint /siret?q=siren:XXX) ===========
+
+/**
+ * Shape de la réponse de l'endpoint de recherche `GET /siret?q=siren:{siren}`.
+ *
+ * Distinct de `ApiInseeSiretResponse` (qui mappe l'endpoint `/siret/{siret}`) :
+ * ici le top-level est un tableau `etablissements[]` + une section `header`
+ * avec les métadonnées de pagination.
+ */
+type ApiInseeSearchSiretResponse = {
+  header?: {
+    statut?: number;
+    message?: string;
+    total?: number;
+    debut?: number;
+    nombre?: number;
+  };
+  etablissements?: ApiInseeEtablissement[];
+};
+
+/**
+ * Récupère la liste de **tous les établissements** d'un SIREN via l'endpoint
+ * de recherche SIRENE V3.11 `GET /siret?q=siren:{siren}&nombre=1000`.
+ *
+ * Pourquoi : `getEntrepriseBySiren` (DINUM) retourne `enrichmentStatus: "partial"`
+ * pour les SIREN multi-sites (≥ ~20 établissements) et n'expose que le siège.
+ * Ce helper comble le manque en interrogeant SIRENE directement — il est appelé
+ * en fallback par `resolveSiretsForFiness` uniquement quand DINUM est partial.
+ *
+ * Comportement contractuel :
+ * - Pas de clé `INSEE_SIRENE_API_KEY` → `LookupResult` not_found avec message
+ *   explicatif orientant le caller vers la config. Pas de throw (no-op gracieux).
+ * - HTTP 404 → `LookupResult` not_found (SIREN absent SIRENE)
+ * - HTTP 401/403/5xx/timeout → throw (incident, le caller gère via graceful degradation)
+ * - Pagination : charge la première page (1000 items). Si `header.total > 1000`,
+ *   émet un `console.warn` pour signaler que des établissements sont tronqués
+ *   (V0.7.2 gèrera la pagination complète le cas échéant).
+ *
+ * @param siren 9 chiffres. Validé côté caller.
+ */
+export async function lookupSiretsBySirenViaInsee(
+  siren: string,
+): Promise<LookupResult<{ etablissements: EtablissementSireneDetail[] }>> {
+  const apiKey = getInseeApiKey();
+  if (!apiKey) {
+    return lookupNotFound(
+      siren,
+      "INSEE_SIRENE_API_KEY non configurée — fallback INSEE désactivé. Pour activer la résolution des SIREN multi-sites (enrichmentStatus=partial DINUM), définir INSEE_SIRENE_API_KEY (clé gratuite : https://api.insee.fr/catalogue/).",
+    );
+  }
+
+  // L'endpoint de recherche attend des paramètres de query (`q` avec syntaxe
+  // Solr-like), contrairement à `/siret/{siret}` qui est un lookup direct.
+  // `nombre=1000` = taille de page maximale documentée (V3.11 — largement
+  // suffisant pour les SIREN les plus multi-sites, ex: Biogroup = 38 sites).
+  const url = `${SIRENE_BASE_URL}/siret?q=siren:${encodeURIComponent(siren)}&nombre=1000`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  let data: ApiInseeSearchSiretResponse;
+  try {
+    data = await fetchJson<ApiInseeSearchSiretResponse>(url, {
+      headers: { [INSEE_AUTH_HEADER]: apiKey },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    const httpStatus = err instanceof HttpError ? err.status : null;
+    if (httpStatus === 404) {
+      console.warn(
+        `[france-data-mcp] INSEE SIRENE fallback: siren=${siren} — HTTP 404 (SIREN absent SIRENE)`,
+      );
+      return lookupNotFound(
+        siren,
+        `SIREN "${siren}" introuvable via l'endpoint de recherche SIRENE (HTTP 404). Causes possibles : SIREN inexistant ou statut de diffusion partielle totale.`,
+      );
+    }
+    // Incidents vrais (401/403/5xx/timeout/réseau) : on propage pour que
+    // le caller `resolveSiretsForFiness` puisse les capturer dans `dinum_errors`
+    // avec status "rejected" — cohérent avec la convention V0.6.x.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[france-data-mcp] INSEE SIRENE fallback: siren=${siren} — ${httpStatus !== null ? `HTTP ${httpStatus}` : `network/parse error: ${errMsg}`}`,
+    );
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const rawEtabs = data.etablissements ?? [];
+  if (rawEtabs.length === 0) {
+    console.warn(
+      `[france-data-mcp] INSEE SIRENE fallback: siren=${siren} — réponse vide (0 établissements)`,
+    );
+    return lookupNotFound(
+      siren,
+      `Aucun établissement trouvé côté SIRENE pour siren="${siren}" (liste vide). SIREN absent ou diffusion partielle totale.`,
+    );
+  }
+
+  // Signal de troncation : si header.total > nombre de résultats retournés,
+  // des établissements sont hors page 1. Rare en prod (Biogroup = 38, max
+  // connu ~200 pour les grandes chaînes) mais un SIREN avec >1000 SIRET
+  // (ex: grande distribution, banque) déclencherait un warn ici.
+  const total = data.header?.total ?? rawEtabs.length;
+  if (total > 1000) {
+    console.warn(
+      `[france-data-mcp] INSEE SIRENE fallback: siren=${siren} — header.total=${total} > 1000 (page 1 tronquée, V0.7.2 pagination requise)`,
+    );
+  }
+
+  return lookupFound({ etablissements: rawEtabs.map(toEtablissementSireneDetail) });
+}
+
+/**
+ * Convertit un payload `ApiInseeEtablissement` brut en `EtablissementSireneDetail`.
+ * Helper interne réutilisé par `lookupSiretViaInsee`, `lookupSiretHistoriqueViaInsee`
+ * et `lookupSiretsBySirenViaInsee`.
+ */
 function toEtablissementSireneDetail(api: ApiInseeEtablissement): EtablissementSireneDetail {
   const periodes = api.periodesEtablissement ?? [];
   // Période courante = `dateFin === null`. L'API présente antéchronologiquement

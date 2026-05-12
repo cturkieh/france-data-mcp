@@ -1018,16 +1018,14 @@ describe("compare_raison_sociale_finess_vs_rpps (MCP tool — V0.6.2)", () => {
   });
 
   it("forward au wrapper TS", async () => {
-    const spy = vi
-      .spyOn(crossSource, "compareRaisonSocialeFinessVsRpps")
-      .mockResolvedValue({
-        found: true,
-        lookupStatus: "found",
-        num_finess: "590048997",
-        finess_raison_sociale: "DIAGNOVIE",
-        rpps_raisons_sociales: ["BIOGROUP NORD"],
-        statut: "divergent_after_normalization",
-      });
+    const spy = vi.spyOn(crossSource, "compareRaisonSocialeFinessVsRpps").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      num_finess: "590048997",
+      finess_raison_sociale: "DIAGNOVIE",
+      rpps_raisons_sociales: ["BIOGROUP NORD"],
+      statut: "divergent_after_normalization",
+    });
     const tool = findTool("compare_raison_sociale_finess_vs_rpps");
     await tool?.handler({ num_finess: "590048997" });
     expect(spy).toHaveBeenCalledWith("590048997");

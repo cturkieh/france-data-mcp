@@ -120,7 +120,11 @@ export interface AnsFhirPractitioner {
  */
 export type AnsFhirLookupResult =
   | { found: true; practitioner: AnsFhirPractitioner }
-  | { found: false; status: "no_key" | "invalid_format" | "not_found" | "api_error"; message: string };
+  | {
+      found: false;
+      status: "no_key" | "invalid_format" | "not_found" | "api_error";
+      message: string;
+    };
 
 /**
  * Lookup FHIR ANS par IDNPS / rpps_id. Utilisé en fallback du lookup DB.
@@ -129,9 +133,7 @@ export type AnsFhirLookupResult =
  * Retourne un `AnsFhirLookupResult` discriminé — voir le type pour les 5 cas
  * possibles. **Aucun `null` silencieux** (V0.7.0 breaking, cf. JSDoc du type).
  */
-export async function lookupPractitionerByRpps(
-  rppsId: string,
-): Promise<AnsFhirLookupResult> {
+export async function lookupPractitionerByRpps(rppsId: string): Promise<AnsFhirLookupResult> {
   const apiKey = getAnsFhirApiKey();
   if (!apiKey) {
     return {

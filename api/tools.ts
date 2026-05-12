@@ -7,6 +7,7 @@
  * Les CSV bruts restent disponibles dans la lib pour les usages hors MCP.
  */
 
+import { INCLUDE_FRESHNESS_SCHEMA, withFreshness } from "../src/core/freshness.js";
 import {
   type AmeliQueryResult,
   type AmeliResult,
@@ -16,6 +17,13 @@ import {
   listAmeliTypesPs,
 } from "../src/sante/ameli-db.js";
 import { lookupPractitionerByRpps } from "../src/sante/ans-fhir.js";
+import { type CoverageInput, getCoverageFinessVsSireneInRadius } from "../src/sante/coverage.js";
+import {
+  compareRaisonSocialeFinessVsRpps,
+  historiqueEtablissement,
+  reconcilierFinessSirene,
+  verifierSiteActif,
+} from "../src/sante/cross-source.js";
 import { RADIUS_MAX_KM, RADIUS_MIN_KM } from "../src/sante/db-helpers.js";
 import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
 import {
@@ -30,15 +38,7 @@ import {
   getEntrepriseBySiren,
   searchEntreprises,
 } from "../src/sante/index.js";
-import {
-  compareRaisonSocialeFinessVsRpps,
-  historiqueEtablissement,
-  reconcilierFinessSirene,
-  verifierSiteActif,
-} from "../src/sante/cross-source.js";
-import { INCLUDE_FRESHNESS_SCHEMA, withFreshness } from "../src/core/freshness.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
-import { getDataFreshness } from "../src/storage/ingest-log.js";
 import {
   buildCategorieCodes,
   getRppsById,
@@ -48,6 +48,7 @@ import {
   getRppsParSpecialiteDept,
 } from "../src/sante/rpps-db.js";
 import { RPPS_CGU_NOTICE, RPPS_MODE_EXERCICE, TRE_R09_URL } from "../src/sante/rpps-types.js";
+import { getDataFreshness } from "../src/storage/ingest-log.js";
 import { deptFromCodeInsee } from "../src/territoire/dept-codes.js";
 import {
   geocode,
@@ -1004,11 +1005,9 @@ export const TOOLS: McpTool[] = [
       if (typePsCodes) input.typePsCodes = typePsCodes;
       if (limit !== undefined) input.limit = limit;
       const result = await getAmeliInRadius(input);
-      return withFreshness(
-        dedupe ? dedupeAmeliByPs(result) : result,
-        args.include_freshness,
-        ["ameli_ps"],
-      );
+      return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
+        "ameli_ps",
+      ]);
     },
   },
   {
@@ -1070,11 +1069,9 @@ export const TOOLS: McpTool[] = [
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
       const result = await getAmeliBySpecialiteDept(input);
-      return withFreshness(
-        dedupe ? dedupeAmeliByPs(result) : result,
-        args.include_freshness,
-        ["ameli_ps"],
-      );
+      return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
+        "ameli_ps",
+      ]);
     },
   },
   {
@@ -1106,11 +1103,9 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args) => {
       const typesPs = await listAmeliTypesPs();
-      return withFreshness(
-        { count: typesPs.length, results: typesPs },
-        args.include_freshness,
-        ["ameli_ps"],
-      );
+      return withFreshness({ count: typesPs.length, results: typesPs }, args.include_freshness, [
+        "ameli_ps",
+      ]);
     },
   },
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
@@ -1307,8 +1302,70 @@ export const TOOLS: McpTool[] = [
               ? `rpps_id absent en base locale (snapshot mensuel J-30). ${fhir.message}`
               : fhir.status === "invalid_format"
                 ? fhir.message
-                : `rpps_id introuvable en base locale ET via fallback FHIR ANS. Vérifier le format (11 ou 12 chiffres) ou consulter annuaire.sante.fr.`,
+                : "rpps_id introuvable en base locale ET via fallback FHIR ANS. Vérifier le format (11 ou 12 chiffres) ou consulter annuaire.sante.fr.",
       };
+    },
+  },
+  {
+    name: "finess_sirene_coverage_in_radius",
+    description:
+      "Compare la couverture du référentiel FINESS DREES (sites physiques agréés LBM/pharmacie/etc.) " +
+      "au référentiel SIRENE DINUM (SIRET physiques actifs au NAF cible) dans un rayon géographique. " +
+      "Métrique : ratio sites FINESS / SIRET SIRENE. Utile pour détecter une sur-déclaration FINESS " +
+      "(sites encore listés mais SIRET fermés) ou une sous-déclaration DREES (sites SIRENE non agréés FINESS). " +
+      "Inclut une méthodologie explicite + caveats. " +
+      "Source : FINESS DREES + DINUM Recherche Entreprises + SIRENE INSEE.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lon: { type: "number", description: "Longitude WGS84 du centre de la zone." },
+        lat: { type: "number", description: "Latitude WGS84 du centre de la zone." },
+        radius_km: {
+          type: "number",
+          minimum: 0.1,
+          maximum: 50,
+          default: 5,
+          description: "Rayon de la zone en km (0.1-50, défaut 5).",
+        },
+        naf: {
+          type: "string",
+          description:
+            "Code NAF SIRENE à comparer (ex: '8690B' labos d'analyses médicales, '4773Z' pharmacies, '8621Z' médecine générale).",
+        },
+        familles: {
+          type: "array",
+          items: { type: "string", enum: [...FINESS_FAMILLE_INPUTS] },
+          description: `Familles FINESS à inclure côté DREES (défaut : toutes). Valeurs : ${FAMILLES_LIST}.`,
+        },
+        max_unites_legales: {
+          type: "number",
+          minimum: 1,
+          maximum: 25,
+          default: 10,
+          description:
+            "Nombre maximum d'unités légales DINUM à déplier (1-25, défaut 10). Au-delà : truncated_unites_legales=true.",
+        },
+      },
+      required: ["lon", "lat", "naf"],
+    },
+    handler: async (args) => {
+      const lon = coerceNumber(args.lon, "lon");
+      const lat = coerceNumber(args.lat, "lat");
+      if (lon === undefined) throw new RangeError("lon (number) requis");
+      if (lat === undefined) throw new RangeError("lat (number) requis");
+      const naf = asString(args.naf);
+      if (!naf) throw new RangeError("naf (string) requis");
+      const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
+      const maxUnitesLegales = coerceNumber(args.max_unites_legales, "max_unites_legales") ?? 10;
+      const familles = parseFamilles(args.familles);
+      const input: CoverageInput = {
+        center: { lon, lat },
+        radiusKm,
+        naf,
+        maxUnitesLegales,
+      };
+      if (familles) input.familles = familles;
+      return getCoverageFinessVsSireneInRadius(input);
     },
   },
 ];

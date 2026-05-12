@@ -28,7 +28,11 @@ import {
   lookupSiretHistoriqueViaInsee,
   lookupSiretViaInsee,
 } from "./insee-sirene.js";
-import { type DinumLookupError, type SiretCandidate, resolveSiretsForFiness } from "./siret-resolver.js";
+import {
+  type DinumLookupError,
+  type SiretCandidate,
+  resolveSiretsForFiness,
+} from "./siret-resolver.js";
 
 /**
  * Verdict pour `verifier_site_actif`. **V0.7.0 breaking** : on distingue
@@ -53,6 +57,16 @@ import { type DinumLookupError, type SiretCandidate, resolveSiretsForFiness } fr
  */
 export type VerdictSite = "actif" | "ferme" | "indetermine";
 export type VerdictGroupe = "actif" | "ferme" | "indetermine";
+
+/**
+ * Seuils empiriques du verdict de réconciliation FINESS↔SIRENE (Sørensen-Dice).
+ * Calibrés sur la base FINESS / DINUM observée (cf. `buildReconciliationCandidate`) :
+ * au-dessus de 0.8 = matching solide, en dessous de 0.5 = vraie divergence.
+ * Distincts du `BEST_MATCH_THRESHOLD = 0.6` du resolver (qui pivote sur l'adresse
+ * SEULE) car le score global ici pondère nom (0.5) + adresse (0.4) + tel (0.1).
+ */
+const RECONCILIATION_MATCH_THRESHOLD = 0.8;
+const RECONCILIATION_PARTIAL_THRESHOLD = 0.5;
 
 /**
  * Mappe le tri-état `actif: boolean | null` (DINUM/SIRENE) sur le verdict.
@@ -146,8 +160,7 @@ export async function verifierSiteActif(
   const verdictSite: VerdictSite = verdictFromActif(resolution.best_match?.actif ?? null);
   // SIREN du best_match (SIRET physique) prioritaire ; sinon le premier
   // SIREN exploré pour rester informatif quand aucun candidat n'a matché.
-  const sirenForGroupe =
-    resolution.best_match?.siret.slice(0, 9) ?? resolution.sirens_explored[0];
+  const sirenForGroupe = resolution.best_match?.siret.slice(0, 9) ?? resolution.sirens_explored[0];
   const verdictGroupe: VerdictGroupe = verdictFromActif(
     sirenForGroupe ? (resolution.sirens_actif[sirenForGroupe] ?? null) : null,
   );
@@ -198,13 +211,25 @@ function buildVerifierExplication(
 
 /**
  * Format LLM-friendly d'une liste d'erreurs DINUM. Retourne `""` quand vide
- * (no-op safe en concat suffix). Inclut le `status` discriminé pour que le
- * caller sache si retry (rejected) ou abandon (not_found) ou alerter
- * (ambiguous = régression API).
+ * (no-op safe en concat suffix). Discrimine deux familles pour ne pas mélanger
+ * les vrais incidents DINUM (rejected/not_found/ambiguous/enrichment_failed)
+ * avec les problèmes de configuration serveur (config_missing) qui sont du
+ * ressort de l'admin du déploiement et non pas d'une absence de donnée SIRENE.
  */
 function formatDinumDiag(errors: DinumLookupError[]): string {
   if (errors.length === 0) return "";
-  return ` ⚠ DINUM erreurs : ${errors.map((e) => `${e.siren} (${e.status}: ${e.message})`).join(" | ")}.`;
+  const config = errors.filter((e) => e.status === "config_missing");
+  const incidents = errors.filter((e) => e.status !== "config_missing");
+  const parts: string[] = [];
+  if (incidents.length > 0) {
+    parts.push(
+      `⚠ DINUM erreurs : ${incidents.map((e) => `${e.siren} (${e.status}: ${e.message})`).join(" | ")}`,
+    );
+  }
+  if (config.length > 0) {
+    parts.push(`⚠ Config serveur : ${config.map((e) => `${e.siren} → ${e.message}`).join(" | ")}`);
+  }
+  return ` ${parts.join(". ")}.`;
 }
 
 function extractFinessSummary(
@@ -506,10 +531,7 @@ export async function reconcilierFinessSirene(
   const trimmed = assertValidNumFiness(numFiness);
   const finess = await getFinessByNumFiness(trimmed);
   if (!finess.found) {
-    return lookupNotFound(
-      trimmed,
-      `num_finess "${trimmed}" introuvable dans FINESS DREES.`,
-    );
+    return lookupNotFound(trimmed, `num_finess "${trimmed}" introuvable dans FINESS DREES.`);
   }
 
   // Le resolver fournit la liste élargie de SIRET candidats (RPPS + DINUM
@@ -524,71 +546,91 @@ export async function reconcilierFinessSirene(
     );
   }
 
-  const candidateSirets = resolution.candidates.map((c) => c.siret);
   const finessAdresseLibelle = buildFinessAdresseLibelle(finess);
-  // Parallélisation des lookups INSEE : voir verifierSiteActif pour rationale.
-  const settled = await Promise.allSettled(
-    candidateSirets.map((siret) => lookupSiretViaInsee(siret)),
-  );
+  const finessBlock = {
+    raison_sociale: finess.raison_sociale,
+    adresse_libelle: finessAdresseLibelle,
+    telephone: finess.telephone,
+  } as const;
   const candidates: ReconciliationCandidate[] = [];
   const skipped: ReconciliationResult["skipped"] = [];
-  for (let i = 0; i < candidateSirets.length; i++) {
-    const siret = candidateSirets[i] as string;
-    const outcome = settled[i] as PromiseSettledResult<
-      Awaited<ReturnType<typeof lookupSiretViaInsee>>
-    >;
-    if (outcome.status === "rejected") {
-      const msg = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
-      console.error(
-        `[france-data-mcp] reconcilier_finess_sirene: INSEE failed for siret=${siret}: ${msg}`,
-      );
-      skipped.push({ siret, reason: msg });
-      continue;
-    }
-    if (!outcome.value.found) {
-      console.warn(
-        `[france-data-mcp] reconcilier_finess_sirene: SIRET ${siret} not_found SIRENE: ${outcome.value.message}`,
-      );
-      skipped.push({ siret, reason: outcome.value.message });
-      continue;
-    }
-    const sirene: EtablissementSireneDetail = outcome.value;
 
-    const scoreNom = diceCoefficient(
-      normalizeForCompare(finess.raison_sociale),
-      normalizeForCompare(sirene.raisonSocialeUniteLegale),
-    );
-    const scoreAdresse = diceCoefficient(
-      normalizeForCompare(finessAdresseLibelle),
-      normalizeForCompare(sirene.adresse.libelle),
-    );
-    // SIRENE n'expose pas le téléphone via /siret — le score reste 0 sauf si
-    // un jour on intègre une 2e source (Pages Jaunes, Google Places). Pour
-    // l'instant : binaire FINESS-only → 0 car comparaison impossible.
-    const scoreTel = 0;
-    const scoreGlobal = scoreNom * 0.5 + scoreAdresse * 0.4 + scoreTel * 0.1;
-    let verdict: ReconciliationCandidate["verdict"];
-    if (scoreGlobal >= 0.8) verdict = "match";
-    else if (scoreGlobal >= 0.5) verdict = "partial";
-    else verdict = "mismatch";
+  // === P2.3 : séparer les candidats DINUM-enriched (raison_sociale_ul non-null)
+  // des candidats RPPS-only (raison_sociale_ul null) pour éviter des appels
+  // INSEE redondants. Économie : ~÷5 sur le rate limit INSEE 30/min quand
+  // DINUM a déjà fourni `nomComplet` (= raison sociale UL) et `adresse`.
+  //
+  // - `dinumEnriched` : candidats dont `raison_sociale_ul` ET `adresse_libelle`
+  //   sont disponibles → on calcule les scores directement depuis DINUM, sans
+  //   appel INSEE.
+  // - `inseeRequired` : candidats RPPS-only (`raison_sociale_ul === null`) →
+  //   appel INSEE `/siret/{siret}` comme avant V0.7.1.
+  const dinumEnriched: typeof resolution.candidates = [];
+  const inseeRequired: typeof resolution.candidates = [];
+  for (const c of resolution.candidates) {
+    if (c.raison_sociale_ul !== null && c.adresse_libelle !== null) {
+      dinumEnriched.push(c);
+    } else {
+      inseeRequired.push(c);
+    }
+  }
 
-    candidates.push({
-      siret,
-      finess: {
-        raison_sociale: finess.raison_sociale,
-        adresse_libelle: finessAdresseLibelle,
-        telephone: finess.telephone,
-      },
-      sirene: {
-        raison_sociale: sirene.raisonSocialeUniteLegale,
-        enseigne: sirene.enseigne,
-        adresse_libelle: sirene.adresse.libelle,
-        telephone: null,
-      },
-      scores: { nom: scoreNom, adresse: scoreAdresse, telephone: scoreTel },
-      score_global: Number(scoreGlobal.toFixed(3)),
-      verdict,
-    });
+  // --- Branche 1 : DINUM-enriched — scores calculés sans appel réseau --------
+  for (const c of dinumEnriched) {
+    // Re-narrow non-null après la partition (TS ne propage pas le guard à
+    // travers `.push`). DINUM n'expose pas l'enseigne côté resolver, donc null.
+    if (c.raison_sociale_ul === null || c.adresse_libelle === null) continue;
+    candidates.push(
+      buildReconciliationCandidate({
+        siret: c.siret,
+        finessBlock,
+        finessRaisonSociale: finess.raison_sociale,
+        finessAdresseLibelle,
+        sireneRaisonSociale: c.raison_sociale_ul,
+        sireneAdresseLibelle: c.adresse_libelle,
+        sireneEnseigne: null,
+      }),
+    );
+  }
+
+  // --- Branche 2 : RPPS-only — appel INSEE /siret/{siret} (comportement V0.7.0)
+  if (inseeRequired.length > 0) {
+    const settled = await Promise.allSettled(
+      inseeRequired.map((c) => lookupSiretViaInsee(c.siret)),
+    );
+    for (let i = 0; i < inseeRequired.length; i++) {
+      const siret = (inseeRequired[i] as (typeof inseeRequired)[number]).siret;
+      const outcome = settled[i];
+      if (!outcome) continue;
+      if (outcome.status === "rejected") {
+        const msg =
+          outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+        console.error(
+          `[france-data-mcp] reconcilier_finess_sirene: INSEE failed for siret=${siret}: ${msg}`,
+        );
+        skipped.push({ siret, reason: msg });
+        continue;
+      }
+      if (!outcome.value.found) {
+        console.warn(
+          `[france-data-mcp] reconcilier_finess_sirene: SIRET ${siret} not_found SIRENE: ${outcome.value.message}`,
+        );
+        skipped.push({ siret, reason: outcome.value.message });
+        continue;
+      }
+      const sirene: EtablissementSireneDetail = outcome.value;
+      candidates.push(
+        buildReconciliationCandidate({
+          siret,
+          finessBlock,
+          finessRaisonSociale: finess.raison_sociale,
+          finessAdresseLibelle,
+          sireneRaisonSociale: sirene.raisonSocialeUniteLegale,
+          sireneAdresseLibelle: sirene.adresse.libelle,
+          sireneEnseigne: sirene.enseigne,
+        }),
+      );
+    }
   }
 
   candidates.sort((a, b) => b.score_global - a.score_global);
@@ -606,6 +648,54 @@ export async function reconcilierFinessSirene(
 
 // Helpers de normalisation, de scoring Dice et de libellé d'adresse FINESS
 // sont importés de `address-match.ts` (partagés avec `siret-resolver.ts`).
+
+/**
+ * Construit un `ReconciliationCandidate` à partir des libellés FINESS et SIRENE
+ * déjà résolus. Factorise les 35 lignes dupliquées entre les deux branches de
+ * `reconcilierFinessSirene` (DINUM-enriched vs INSEE-required) : calcul des
+ * scores Dice nom/adresse, pondération empirique 0.5/0.4/0.1, seuils verdict
+ * (match ≥ 0.8, partial ≥ 0.5, mismatch sinon) et assemblage final.
+ *
+ * Le téléphone reste fixé à 0 / null côté SIRENE — ni DINUM ni INSEE /siret
+ * n'exposent ce champ (cf. note inline dans le code original).
+ */
+function buildReconciliationCandidate(args: {
+  siret: string;
+  finessBlock: ReconciliationCandidate["finess"];
+  finessRaisonSociale: string;
+  finessAdresseLibelle: string;
+  sireneRaisonSociale: string;
+  sireneAdresseLibelle: string;
+  sireneEnseigne: string | null;
+}): ReconciliationCandidate {
+  const scoreNom = diceCoefficient(
+    normalizeForCompare(args.finessRaisonSociale),
+    normalizeForCompare(args.sireneRaisonSociale),
+  );
+  const scoreAdresse = diceCoefficient(
+    normalizeForCompare(args.finessAdresseLibelle),
+    normalizeForCompare(args.sireneAdresseLibelle),
+  );
+  const scoreTel = 0;
+  const scoreGlobal = scoreNom * 0.5 + scoreAdresse * 0.4 + scoreTel * 0.1;
+  let verdict: ReconciliationCandidate["verdict"];
+  if (scoreGlobal >= RECONCILIATION_MATCH_THRESHOLD) verdict = "match";
+  else if (scoreGlobal >= RECONCILIATION_PARTIAL_THRESHOLD) verdict = "partial";
+  else verdict = "mismatch";
+  return {
+    siret: args.siret,
+    finess: args.finessBlock,
+    sirene: {
+      raison_sociale: args.sireneRaisonSociale,
+      enseigne: args.sireneEnseigne,
+      adresse_libelle: args.sireneAdresseLibelle,
+      telephone: null,
+    },
+    scores: { nom: scoreNom, adresse: scoreAdresse, telephone: scoreTel },
+    score_global: Number(scoreGlobal.toFixed(3)),
+    verdict,
+  };
+}
 
 async function getDistinctRaisonsSocialesFromRpps(numFiness: string): Promise<string[]> {
   const supabase = getUntypedAnonClient();
@@ -626,4 +716,3 @@ async function getDistinctRaisonsSocialesFromRpps(numFiness: string): Promise<st
   }
   return [...seen];
 }
-

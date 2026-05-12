@@ -34,10 +34,15 @@
  * typiquement 1, rarement 2-3). DINUM gère son propre cache + rate limit.
  */
 
-import { buildFinessAdresseLibelle, diceCoefficient, normalizeForCompare } from "./address-match.js";
+import { getUntypedAnonClient } from "../storage/supabase.js";
+import {
+  buildFinessAdresseLibelle,
+  diceCoefficient,
+  normalizeForCompare,
+} from "./address-match.js";
 import { getEntrepriseBySiren } from "./dinum.js";
 import type { FinessResult } from "./finess-db.js";
-import { getUntypedAnonClient } from "../storage/supabase.js";
+import { lookupSiretsBySirenViaInsee } from "./insee-sirene.js";
 
 /**
  * Origine d'un SIRET candidat. Un même SIRET peut cumuler plusieurs sources
@@ -58,11 +63,19 @@ export type SiretCandidateSource = "rpps" | "dinum_address_match";
  * - `not_found` : SIREN absent DINUM ET fallback INSEE V3.11 négatif. Définitif.
  * - `ambiguous` : DINUM a renvoyé N résultats full-text sans match exact —
  *   régression API DINUM probable, à surveiller.
+ * - `config_missing` : clé d'API absente (ex: `INSEE_SIRENE_API_KEY` non définie).
+ *   Distingué de `not_found` car ce n'est pas une absence de donnée côté SIRENE
+ *   mais un problème de configuration serveur. Le caller peut filtrer ces entrées
+ *   pour ne pas les comptabiliser comme "SIREN absent SIRENE".
+ * - `enrichment_failed` : DINUM a répondu mais l'enrichissement multi-sites
+ *   (second appel) a échoué (`enrichmentStatus: "failed"`). Le siège seul est
+ *   listé alors que `nombreEtablissements > 1`. Distinct de `rejected` (premier
+ *   appel KO) car le caller peut retry uniquement le second appel. Retry justifié.
  */
 export type DinumLookupError = {
   siren: string;
   message: string;
-  status: "rejected" | "not_found" | "ambiguous";
+  status: "rejected" | "not_found" | "ambiguous" | "config_missing" | "enrichment_failed";
 };
 
 export interface SiretCandidate {
@@ -86,6 +99,17 @@ export interface SiretCandidate {
   adresse_libelle: string | null;
   /** Date de création (depuis DINUM). `null` si origine RPPS pure. */
   date_creation: string | null;
+  /**
+   * Raison sociale de l'unité légale parente (DINUM `nomComplet`, ou
+   * `raisonSocialeUniteLegale` côté fallback INSEE). `null` quand le candidat
+   * vient uniquement de RPPS sans cross-vérification DINUM (lookup SIREN
+   * non tenté ou échoué).
+   *
+   * Utilisé par `reconcilierFinessSirene` (Fix P2.3) pour éviter des appels
+   * INSEE redondants : quand ce champ est non-null, la raison sociale est déjà
+   * disponible sans nouvel appel à `/siret/{siret}`.
+   */
+  raison_sociale_ul: string | null;
 }
 
 export interface SiretResolution {
@@ -171,6 +195,7 @@ export async function resolveSiretsForFiness(
       actif: null,
       adresse_libelle: null,
       date_creation: null,
+      raison_sociale_ul: null,
     });
   }
 
@@ -202,16 +227,119 @@ export async function resolveSiretsForFiness(
     }
     sirensActif[siren] = lookup.actif;
     for (const etab of lookup.etablissements) {
-      mergeOrInsertDinumCandidate(candidates, etab, finessAddrNorm);
+      mergeOrInsertDinumCandidate(candidates, etab, finessAddrNorm, lookup.nomComplet);
+    }
+  }
+
+  // === Fallback INSEE pour les SIREN DINUM partial/failed ===================
+  //
+  // DINUM retourne `enrichmentStatus: "partial"` pour les SIREN multi-sites
+  // (≥ ~20 établissements, ex: Biogroup Nord SIREN 507815942 = 38 sites) et ne
+  // liste QUE le siège. Conséquence : les SIRET fermés (ex: 50781594200218
+  // Bd Bizet, fermé 2024-02-16) sont invisibles, et `verifier_site_actif`
+  // répond `indetermine` au lieu de `ferme`. Le fallback INSEE corrige ça.
+  //
+  // On identifie les SIREN à fallbacker : ceux dont le lookup DINUM a réussi
+  // (found:true) et avec enrichmentStatus === "partial" (DINUM multi-sites
+  // tronqué, liste incomplète). Restreint à "partial" uniquement :
+  // - "failed" = second appel DINUM en panne transitoire. Déclencher INSEE
+  //   dans ce cas serait inutile (le manque est une panne, pas une troncature
+  //   structurelle) ET coûteux (rate limit INSEE 30/min). En revanche on
+  //   pousse une entrée `enrichment_failed` dans `dinum_errors` pour ne pas
+  //   laisser le caller croire que le siège est la liste complète.
+  // - "success" = liste complète, "not_attempted" = monosite, undefined = non
+  //   renseigné par certains callers de test → aucun appel supplémentaire.
+  const sirensNeedingInseeRefinement: string[] = [];
+  for (let i = 0; i < dinumResults.length; i++) {
+    const settled = dinumResults[i] as PromiseSettledResult<{
+      siren: string;
+      lookup: Awaited<ReturnType<typeof getEntrepriseBySiren>>;
+    }>;
+    if (settled.status !== "fulfilled" || !settled.value.lookup.found) continue;
+    if (settled.value.lookup.enrichmentStatus === "partial") {
+      sirensNeedingInseeRefinement.push(settled.value.siren);
+    } else if (settled.value.lookup.enrichmentStatus === "failed") {
+      // Signal visible au caller : DINUM a paniqué sur le second appel, le
+      // siège seul est listé. Pas de fallback INSEE (rate limit) mais retry
+      // justifié — d'où le status "enrichment_failed" distinct de "rejected".
+      const warning =
+        settled.value.lookup.enrichmentWarning ?? "DINUM enrichment failed (no warning provided)";
+      console.warn(
+        `[france-data-mcp] siret-resolver: DINUM enrichment_failed for siren=${settled.value.siren}: ${warning}`,
+      );
+      dinumErrors.push({
+        siren: settled.value.siren,
+        message: `DINUM enrichment failed (siège seul listé) : ${warning}`,
+        status: "enrichment_failed",
+      });
+    }
+  }
+
+  if (sirensNeedingInseeRefinement.length > 0) {
+    const inseeResults = await Promise.allSettled(
+      sirensNeedingInseeRefinement.map((siren) => lookupSiretsBySirenViaInsee(siren)),
+    );
+
+    for (let i = 0; i < inseeResults.length; i++) {
+      const settled = inseeResults[i];
+      const siren = sirensNeedingInseeRefinement[i] as string;
+      if (!settled) continue;
+
+      if (settled.status === "rejected") {
+        const msg =
+          settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
+        console.error(
+          `[france-data-mcp] siret-resolver: INSEE fallback rejected for siren=${siren}: ${msg}`,
+        );
+        dinumErrors.push({
+          siren,
+          message: `insee_fallback error: ${msg}`,
+          status: "rejected",
+        });
+        continue;
+      }
+
+      const result = settled.value;
+      if (!result.found) {
+        // Distinguer "clé absente" (config_missing) de "SIREN vraiment absent SIRENE"
+        // (not_found) : le caller peut filtrer config_missing sans comptabiliser
+        // ces entrées comme preuve d'un SIREN inexistant.
+        const isConfigMissing = result.message.includes("INSEE_SIRENE_API_KEY non configurée");
+        const errorStatus: DinumLookupError["status"] = isConfigMissing
+          ? "config_missing"
+          : "not_found";
+        console.warn(
+          `[france-data-mcp] siret-resolver: INSEE fallback ${errorStatus} for siren=${siren}: ${result.message}`,
+        );
+        dinumErrors.push({
+          siren,
+          message: `insee_fallback not_found: ${result.message}`,
+          status: errorStatus,
+        });
+        continue;
+      }
+
+      // `raisonSocialeUniteLegale` est déjà dérivé par INSEE → passé comme nomComplet.
+      for (const etabSirene of result.etablissements) {
+        mergeOrInsertDinumCandidate(
+          candidates,
+          {
+            siret: etabSirene.siret,
+            adresse: etabSirene.adresse.libelle,
+            actif: etabSirene.actif,
+            dateCreation: etabSirene.dateCreation ?? undefined,
+          },
+          finessAddrNorm,
+          etabSirene.raisonSocialeUniteLegale,
+        );
+      }
     }
   }
 
   const sorted = [...candidates.values()].sort(compareByScoreDesc);
   const top = sorted[0];
   const bestMatch =
-    top && top.score_adresse !== null && top.score_adresse >= BEST_MATCH_THRESHOLD
-      ? top
-      : null;
+    top && top.score_adresse !== null && top.score_adresse >= BEST_MATCH_THRESHOLD ? top : null;
 
   return {
     candidates: sorted,
@@ -233,7 +361,8 @@ function compareByScoreDesc(a: SiretCandidate, b: SiretCandidate): number {
 }
 
 /**
- * Merge un établissement DINUM dans la map des candidats. Trois branches :
+ * Merge un établissement DINUM (ou fallback INSEE) dans la map des candidats.
+ * Trois branches :
  *
  * 1. SIRET déjà seedé via RPPS → enrichit les champs DINUM. Ajoute
  *    `dinum_address_match` aux sources UNIQUEMENT si l'adresse matche réellement,
@@ -243,23 +372,36 @@ function compareByScoreDesc(a: SiretCandidate, b: SiretCandidate): number {
  *    cas typique du SIRET fermé invisible côté RPPS.
  * 3. SIRET nouveau ET adresse ne matche pas → bruit (autre site du SIREN sans
  *    lien avec le FINESS). Ignoré.
+ *
+ * Le paramètre `nomComplet` (raison sociale UL, depuis DINUM ou fallback INSEE)
+ * est stocké dans `raison_sociale_ul` pour éviter des appels INSEE redondants
+ * dans `reconcilierFinessSirene` (Fix P2.3).
  */
 function mergeOrInsertDinumCandidate(
   candidates: Map<string, SiretCandidate>,
   etab: { siret: string; adresse?: string; actif: boolean; dateCreation?: string },
   finessAddrNorm: string,
+  nomComplet: string | null = null,
 ): void {
   const adresse = etab.adresse?.trim() || null;
-  const score = adresse
-    ? diceCoefficient(finessAddrNorm, normalizeForCompare(adresse))
-    : null;
+  const score = adresse ? diceCoefficient(finessAddrNorm, normalizeForCompare(adresse)) : null;
   const existing = candidates.get(etab.siret);
   if (existing) {
     existing.adresse_libelle = adresse;
     existing.actif = etab.actif;
     existing.date_creation = etab.dateCreation ?? null;
     existing.score_adresse = score;
-    if (score !== null && score >= BEST_MATCH_THRESHOLD && !existing.sources.includes("dinum_address_match")) {
+    // Surcharger raison_sociale_ul si le caller passe une valeur (DINUM/INSEE
+    // est plus fiable que null RPPS). Ne pas écraser une valeur déjà renseignée
+    // par une null (si plusieurs passages, garder la première valeur trouvée).
+    if (nomComplet !== null) {
+      existing.raison_sociale_ul = nomComplet;
+    }
+    if (
+      score !== null &&
+      score >= BEST_MATCH_THRESHOLD &&
+      !existing.sources.includes("dinum_address_match")
+    ) {
       existing.sources.push("dinum_address_match");
     }
     return;
@@ -272,6 +414,7 @@ function mergeOrInsertDinumCandidate(
       actif: etab.actif,
       adresse_libelle: adresse,
       date_creation: etab.dateCreation ?? null,
+      raison_sociale_ul: nomComplet,
     });
   }
 }

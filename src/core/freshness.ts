@@ -46,7 +46,7 @@ export async function getFreshnessFor(
  * `1`, `undefined`, …) garde le comportement par défaut "pas de freshness".
  * Évite les faux positifs sur les agents qui auraient un schema JSON loose.
  */
-export async function withFreshness<T extends Record<string, unknown>>(
+export async function withFreshness<T extends object>(
   result: T,
   includeFreshness: unknown,
   sources: readonly IngestSource[],
@@ -68,7 +68,7 @@ export async function withFreshness<T extends Record<string, unknown>>(
     );
   }
   if (!freshness && !freshnessError) return result;
-  const existingMeta = result.query_metadata;
+  const existingMeta = (result as { query_metadata?: unknown }).query_metadata;
   const hasMetaObject =
     typeof existingMeta === "object" && existingMeta !== null && !Array.isArray(existingMeta);
   const freshnessFields: Record<string, unknown> = freshness

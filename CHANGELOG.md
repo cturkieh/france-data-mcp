@@ -4,6 +4,87 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.7.1] — 2026-05-12
+
+**Fallback INSEE multi-sites + optimisation rate limit reconcilier**
+
+### Ajouté
+
+- **`lookupSiretsBySirenViaInsee(siren)`** dans `src/sante/insee-sirene.ts` :
+  nouveau helper qui interroge l'endpoint de recherche SIRENE V3.11
+  `GET /siret?q=siren:{siren}&nombre=1000`. Retourne
+  `LookupResult<{ etablissements: EtablissementSireneDetail[] }>`. No-op
+  gracieux sans clé INSEE (not_found avec message). 404 → not_found.
+  401/5xx/timeout → throw (cohérent convention V0.6.x). Signal
+  `console.warn` si `header.total > 1000` (pagination V0.7.2 backlogée).
+- **`toEtablissementSireneDetail`** exportée (était privée) pour réutilisation
+  par le nouveau helper sans duplication du mapper.
+- **`SiretCandidate.raison_sociale_ul: string | null`** : nouveau champ
+  optionnel sur l'interface `SiretCandidate` (non-breaking). Populé depuis
+  `nomComplet` DINUM ou `raisonSocialeUniteLegale` fallback INSEE. Permet à
+  `reconcilierFinessSirene` d'éviter des appels `/siret/{siret}` redondants.
+- **P2.2 — Tool MCP `finess_sirene_coverage_in_radius`** (25e tool du serveur) :
+  compare la couverture du référentiel FINESS DREES (sites physiques agréés)
+  au référentiel SIRENE DINUM (SIRET physiques actifs au NAF cible) dans un
+  rayon géographique. Résout le biais méthodologique où comparer N sites FINESS
+  à M unités légales DINUM était mathématiquement incohérent. Algorithme :
+  `getFinessInRadius` → `reverseGeocode` → département → `searchEntreprises` →
+  `getEntrepriseBySiren` (cap `maxUnitesLegales`, Promise.allSettled) → filtre
+  Haversine SIRET physiques actifs du NAF cible → matching greedy Dice ≥ 0.7.
+  Retourne `coverage_ratio`, `matched_count`, `finess_only_count`,
+  `sirene_only_count`, samples top 10 par catégorie, `methodology` LLM-friendly
+  et `caveats[]` (discipline zéro overclaim). Nouveaux fichiers :
+  `src/sante/coverage.ts` (module métier) + `src/sante/coverage.test.ts`.
+
+### Modifié
+
+- **`resolveSiretsForFiness`** (`src/sante/siret-resolver.ts`) : après le
+  `Promise.allSettled` DINUM, fallback automatique `lookupSiretsBySirenViaInsee`
+  pour les SIREN dont `enrichmentStatus === "partial"` UNIQUEMENT. Les
+  établissements INSEE sont mergés via `mergeOrInsertDinumCandidate`. Erreurs
+  de fallback collectées dans `dinum_errors` avec status discriminé
+  (`rejected` / `not_found` / `config_missing`) et mention `insee_fallback` —
+  pas de propagation d'exception (graceful degradation). Pour
+  `enrichmentStatus === "failed"` : pas de fallback INSEE (rate limit), mais
+  une entrée `dinum_errors` avec status `enrichment_failed` est poussée pour
+  signaler au caller que le siège seul est listé alors qu'un retry serait
+  justifié (discipline observabilité — pas de panne DINUM silencieuse).
+- **`DinumLookupError["status"]`** étendu : ajout de `"config_missing"` (clé
+  INSEE absente — distinct de `not_found` qui signifie "vrai SIREN absent
+  SIRENE") et `"enrichment_failed"` (DINUM second appel KO — retry second
+  appel justifié, distinct de `rejected` = premier appel KO).
+- **`formatDinumDiag`** (`src/sante/cross-source.ts`) : discrimination des
+  préfixes — `⚠ DINUM erreurs` pour `rejected` / `not_found` / `ambiguous` /
+  `enrichment_failed` (vrais incidents data) vs `⚠ Config serveur` pour
+  `config_missing` (problème admin déploiement, pas une absence de donnée).
+- **`mergeOrInsertDinumCandidate`** : paramètre `nomComplet: string | null`
+  ajouté (défaut `null` — non-breaking). Popule `raison_sociale_ul` sur le
+  candidat inséré ou enrichi.
+- **`reconcilierFinessSirene`** (`src/sante/cross-source.ts`) : séparation en
+  deux branches avant les appels INSEE. `dinumEnriched` (candidats avec
+  `raison_sociale_ul !== null` et `adresse_libelle !== null`) : scores calculés
+  directement depuis DINUM, zéro appel `/siret/{siret}`. `inseeRequired`
+  (candidats RPPS-only) : comportement V0.7.0 préservé. Économie ~÷5 sur le
+  rate limit INSEE 30/min sur les FINESS multi-sites.
+
+### Tests
+
+- 40 nouveaux tests unitaires (525 → 565 verts) :
+  - `insee-sirene.test.ts` : 7 tests `lookupSiretsBySirenViaInsee`
+    (no-op, URL/header, 404, 5xx throw, 200 liste, réponse vide, warn >1000)
+  - `cross-source.test.ts` : 4 tests fix V0.7.1 (pin Biogroup Bd Bizet,
+    pas de fallback si success, not_found gracieux, 5xx gracieux) + 3 tests
+    P2.3 (all DINUM-enriched zéro INSEE, mixed 1 appel, all RPPS-only préservé)
+  - `coverage.test.ts` (P2.2) : 5 tests (cas heureux 3F/3S, FINESS vide,
+    SIRENE vide, truncated maxUL=2, dinum_errors rejected sans crash)
+
+### Cas reproductible corrigé
+
+`verifier_site_actif("590048997")` (Biogroup Bd Bizet, fermé 2024-02-16)
+retournait `verdict_site: "indetermine"` car DINUM retournait `partial` pour
+ce SIREN 38 sites et ne listait que le siège actif. Retourne désormais
+`verdict_site: "ferme"` + `best_match.siret = "50781594200218"`.
+
 ## [0.7.0] — 2026-05-11
 
 **Pivot SIRET élargi + dual verdict site/groupe + discipline observabilité — breaking**

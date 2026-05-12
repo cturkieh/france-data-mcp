@@ -4,6 +4,7 @@ import {
   getInseeApiKey,
   lookupSirenViaInsee,
   lookupSiretViaInsee,
+  lookupSiretsBySirenViaInsee,
 } from "./insee-sirene.js";
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -600,5 +601,184 @@ describe("lookupSiretViaInsee", () => {
       // periodesUniteLegale prend le pas car elle est plus précise
       expect(result.raisonSocialeUniteLegale).toBe("BIOGROUP NORD");
     }
+  });
+});
+
+describe("lookupSiretsBySirenViaInsee (V0.7.1 — fallback multi-sites)", () => {
+  const SIREN = "507815942";
+
+  /** Construit une réponse INSEE pour l'endpoint de recherche /siret?q=siren:XXX */
+  function searchSiretResponse(
+    etablissements: Array<{
+      siret: string;
+      siren?: string;
+      etat?: "A" | "F";
+      dateDebut?: string;
+      denomination?: string;
+      adresse?: {
+        numVoie?: string;
+        typeVoie?: string;
+        libelleVoie?: string;
+        cp?: string;
+        commune?: string;
+      };
+    }>,
+    total?: number,
+  ): Response {
+    return jsonResponse({
+      header: { total: total ?? etablissements.length, debut: 0, nombre: etablissements.length },
+      etablissements: etablissements.map((e) => ({
+        siren: e.siren ?? SIREN,
+        siret: e.siret,
+        etablissementSiege: false,
+        trancheEffectifsEtablissement: null,
+        uniteLegale: {
+          denominationUniteLegale: e.denomination ?? "BIOGROUP NORD",
+          etatAdministratifUniteLegale: "A",
+        },
+        adresseEtablissement: {
+          numeroVoieEtablissement: e.adresse?.numVoie ?? null,
+          typeVoieEtablissement: e.adresse?.typeVoie ?? null,
+          libelleVoieEtablissement: e.adresse?.libelleVoie ?? null,
+          codePostalEtablissement: e.adresse?.cp ?? null,
+          libelleCommuneEtablissement: e.adresse?.commune ?? null,
+          codeCommuneEtablissement: null,
+        },
+        periodesEtablissement: [
+          {
+            dateDebut: e.dateDebut ?? "2020-01-01",
+            dateFin: null,
+            etatAdministratifEtablissement: e.etat ?? "A",
+            enseigne1Etablissement: null,
+            activitePrincipaleEtablissement: "86.90B",
+          },
+        ],
+      })),
+    });
+  }
+
+  it("not_found (no-op) quand INSEE_SIRENE_API_KEY est absente — pas de fetch", async () => {
+    const result = await lookupSiretsBySirenViaInsee(SIREN);
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.message).toContain("INSEE_SIRENE_API_KEY");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("appelle l'endpoint /siret?q=siren:XXX&nombre=1000 avec le bon header", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "test-key");
+    fetchMock.mockResolvedValueOnce(searchSiretResponse([{ siret: `${SIREN}00333` }]));
+
+    await lookupSiretsBySirenViaInsee(SIREN);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toContain(`/siret?q=siren:${SIREN}&nombre=1000`);
+    const headers = (init as RequestInit | undefined)?.headers as Record<string, string>;
+    expect(headers["X-INSEE-Api-Key-Integration"]).toBe("test-key");
+  });
+
+  it("HTTP 404 → LookupResult not_found avec message explicatif", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 404 }));
+
+    const result = await lookupSiretsBySirenViaInsee(SIREN);
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.message).toContain("introuvable");
+    }
+    warnSpy.mockRestore();
+  });
+
+  it("HTTP 5xx → throw (incident, pas silent not_found)", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValue(new Response(null, { status: 503 }));
+
+    const promise = lookupSiretsBySirenViaInsee(SIREN);
+    // Attache le handler de rejection AVANT d'avancer les timers : sinon le
+    // throw fetchJson (qui survient pendant runAllTimersAsync) est observé
+    // comme "rejection sans handler" par Node, ce qui produit un
+    // PromiseRejectionHandledWarning même si le test l'awaitra ensuite.
+    const expectation = expect(promise).rejects.toBeDefined();
+    // Avance les 4 retries fetchJson (~0.5+1+2+4 = 7.5s) sans atteindre le
+    // timeout AbortController (60s), pour éviter qu'un abort() asynchrone
+    // génère une seconde rejection après la première.
+    await vi.advanceTimersByTimeAsync(8_000);
+    await expectation;
+    vi.useRealTimers();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("HTTP 200 → LookupResult found avec la liste des établissements mappés", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    fetchMock.mockResolvedValueOnce(
+      searchSiretResponse([
+        {
+          siret: `${SIREN}00333`,
+          etat: "A",
+          denomination: "BIOGROUP NORD",
+          adresse: {
+            numVoie: "46",
+            typeVoie: "RUE",
+            libelleVoie: "DES FUSILLES",
+            cp: "59493",
+            commune: "VILLENEUVE-D'ASCQ",
+          },
+        },
+        {
+          siret: `${SIREN}00218`,
+          etat: "F",
+          dateDebut: "2024-02-16",
+          denomination: "BIOGROUP NORD",
+          adresse: {
+            numVoie: "27",
+            typeVoie: "BD",
+            libelleVoie: "BIZET",
+            cp: "59491",
+            commune: "VILLENEUVE-D'ASCQ",
+          },
+        },
+      ]),
+    );
+
+    const result = await lookupSiretsBySirenViaInsee(SIREN);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.etablissements).toHaveLength(2);
+      const ferme = result.etablissements.find((e) => e.siret === `${SIREN}00218`);
+      expect(ferme?.actif).toBe(false);
+      expect(ferme?.raisonSocialeUniteLegale).toBe("BIOGROUP NORD");
+      expect(ferme?.adresse.libelle).toContain("BIZET");
+      const actif = result.etablissements.find((e) => e.siret === `${SIREN}00333`);
+      expect(actif?.actif).toBe(true);
+    }
+  });
+
+  it("réponse vide (0 établissements) → LookupResult not_found + console.warn", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(jsonResponse({ header: { total: 0 }, etablissements: [] }));
+
+    const result = await lookupSiretsBySirenViaInsee(SIREN);
+    expect(result.found).toBe(false);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("émet console.warn si header.total > 1000 (pagination tronquée)", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "key");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Simuler 1001 total mais on ne retourne qu'1 établissement (page 1)
+    fetchMock.mockResolvedValueOnce(searchSiretResponse([{ siret: `${SIREN}00333` }], 1001));
+
+    const result = await lookupSiretsBySirenViaInsee(SIREN);
+    expect(result.found).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("V0.7.2 pagination requise"));
+    warnSpy.mockRestore();
   });
 });

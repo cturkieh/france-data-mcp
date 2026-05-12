@@ -19,15 +19,20 @@ vi.mock("../storage/supabase.js", () => ({
 }));
 
 import { diceCoefficient } from "./address-match.js";
-import * as dinum from "./dinum.js";
-import * as finessDb from "./finess-db.js";
-import * as inseeSirene from "./insee-sirene.js";
 import {
   compareRaisonSocialeFinessVsRpps,
   historiqueEtablissement,
   reconcilierFinessSirene,
   verifierSiteActif,
 } from "./cross-source.js";
+import * as dinum from "./dinum.js";
+import * as finessDb from "./finess-db.js";
+import * as inseeSirene from "./insee-sirene.js";
+
+// SIREN Biogroup Nord + SIRETs du cas reproductible (Fix V0.7.1).
+const SIREN_BIOGROUP = "507815942";
+const SIRET_SIEGE = "50781594200333";
+const SIRET_FERME = "50781594200218";
 
 const VALID_FINESS = "590048997";
 const SIRET_A = "78712043500015";
@@ -296,9 +301,9 @@ describe("verifierSiteActif (V0.7.0 — pivot SIRET élargi via DINUM)", () => {
       ],
       error: null,
     });
-    const dinumSpy = vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
-      fakeEntrepriseDinum({ siren: SIRET_A.slice(0, 9) }),
-    );
+    const dinumSpy = vi
+      .spyOn(dinum, "getEntrepriseBySiren")
+      .mockResolvedValue(fakeEntrepriseDinum({ siren: SIRET_A.slice(0, 9) }));
 
     await verifierSiteActif(VALID_FINESS);
     // Seul SIRET_A (14 chiffres valides) a un SIREN dérivé → 1 appel DINUM.
@@ -734,5 +739,385 @@ describe("reconcilierFinessSirene (V0.6.2)", () => {
       expect(result.dinum_errors[0]?.status).toBe("not_found");
     }
     warnSpy.mockRestore();
+  });
+});
+
+// ============================================================================
+// Fix V0.7.1 — Fallback INSEE /siret?q=siren:XXX quand DINUM partial
+// ============================================================================
+
+describe("verifierSiteActif (V0.7.1 — fallback INSEE quand DINUM partial)", () => {
+  /**
+   * Construit un fake LookupResult lookupSiretsBySirenViaInsee pour simuler
+   * le cas où DINUM retourne partial et INSEE retourne la liste complète.
+   */
+  function fakeInseeSearchFound(etabs: Array<inseeSirene.EtablissementSireneDetail>): {
+    found: true;
+    lookupStatus: "found";
+    etablissements: inseeSirene.EtablissementSireneDetail[];
+  } {
+    return { found: true, lookupStatus: "found", etablissements: etabs };
+  }
+
+  it("pin Biogroup Bd Bizet : verdict_site='ferme' + best_match=SIRET_FERME quand DINUM partial + fallback INSEE retourne le SIRET fermé", async () => {
+    // Scénario exact du brief : FINESS 590048997 = "BD BIZET 59491 VILLENEUVE D ASCQ".
+    // RPPS déclare uniquement SIRET_SIEGE (siège actuel). DINUM retourne partial
+    // (38 sites Biogroup) et ne liste QUE le siège. Sans fallback, verdict = indetermine.
+    // Avec fallback INSEE, le SIRET fermé 50781594200218 (BD BIZET) est retrouvé.
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        adresse: {
+          voie: "BD BIZET",
+          code_postal: "59491",
+          ville: "VILLENEUVE D ASCQ",
+          code_departement: "59",
+          code_insee: "59009",
+        },
+      }),
+    );
+    // RPPS : seul le siège est déclaré
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_SIEGE }], error: null });
+
+    // DINUM partial : ne liste que le siège (cas réel Biogroup Nord 38 sites)
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      siren: SIREN_BIOGROUP,
+      nomComplet: "BIOGROUP NORD",
+      finances: [],
+      dirigeants: [],
+      actif: true,
+      etablissements: [
+        {
+          siret: SIRET_SIEGE,
+          adresse: "46 RUE DES FUSILLES 59493 VILLENEUVE-D'ASCQ",
+          actif: true,
+          dateCreation: "2024-02-16",
+        },
+      ],
+      enrichmentStatus: "partial",
+      enrichmentWarning: "multi-sites tronqué",
+      siren_source: "dinum",
+    });
+
+    // Fallback INSEE : retourne le SIRET fermé à l'adresse BD BIZET
+    vi.spyOn(inseeSirene, "lookupSiretsBySirenViaInsee").mockResolvedValue(
+      fakeInseeSearchFound([
+        {
+          siret: SIRET_SIEGE,
+          siren: SIREN_BIOGROUP,
+          raisonSocialeUniteLegale: "BIOGROUP NORD",
+          enseigne: null,
+          denominationUsuelle: null,
+          naf: "86.90B",
+          actif: true,
+          dateCreation: "2024-02-16",
+          dateFermeture: null,
+          estSiege: true,
+          trancheEffectif: null,
+          adresse: {
+            libelle: "46 RUE DES FUSILLES 59493 VILLENEUVE-D'ASCQ",
+            numeroVoie: "46",
+            typeVoie: "RUE",
+            libelleVoie: "DES FUSILLES",
+            codePostal: "59493",
+            libelleCommune: "VILLENEUVE-D'ASCQ",
+            codeCommune: "59009",
+          },
+        },
+        {
+          siret: SIRET_FERME,
+          siren: SIREN_BIOGROUP,
+          raisonSocialeUniteLegale: "BIOGROUP NORD",
+          enseigne: null,
+          denominationUsuelle: null,
+          naf: "86.90B",
+          actif: false,
+          dateCreation: "2018-07-31",
+          dateFermeture: "2024-02-16",
+          estSiege: false,
+          trancheEffectif: null,
+          adresse: {
+            libelle: "27 BD BIZET 59491 VILLENEUVE-D'ASCQ",
+            numeroVoie: "27",
+            typeVoie: "BD",
+            libelleVoie: "BIZET",
+            codePostal: "59491",
+            libelleCommune: "VILLENEUVE-D'ASCQ",
+            codeCommune: "59009",
+          },
+        },
+      ]),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.verdict_site).toBe("ferme");
+      expect(result.best_match?.siret).toBe(SIRET_FERME);
+      // Le candidat fermé doit avoir la source dinum_address_match (via fallback INSEE)
+      expect(result.best_match?.sources).toContain("dinum_address_match");
+    }
+  });
+
+  it("pas de fallback INSEE quand DINUM enrichmentStatus='success' (fallback non déclenché)", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+
+    // DINUM success : pas de fallback attendu
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_A.slice(0, 9),
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_A,
+            adresse: "27 BD BIZET 59290 WASQUEHAL",
+            actif: true,
+            dateCreation: "2020-01-01",
+          },
+        ],
+      }),
+    );
+
+    const inseeSearchSpy = vi.spyOn(inseeSirene, "lookupSiretsBySirenViaInsee");
+
+    await verifierSiteActif(VALID_FINESS);
+
+    // enrichmentStatus non setté dans fakeEntrepriseDinum = undefined ≠ "partial"
+    // → le fallback ne doit PAS être déclenché
+    expect(inseeSearchSpy).not.toHaveBeenCalled();
+  });
+
+  it("H5 régression — pas de fallback INSEE quand DINUM enrichmentStatus='failed' (panne transitoire, pas une troncature)", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      siren: SIRET_A.slice(0, 9),
+      nomComplet: "LABO BETA",
+      finances: [],
+      dirigeants: [],
+      actif: true,
+      etablissements: [{ siret: SIRET_A, adresse: "27 BD BIZET 59290 WASQUEHAL", actif: true }],
+      enrichmentStatus: "failed", // panne second appel DINUM — pas une troncature multi-sites
+      siren_source: "dinum" as const,
+    });
+
+    const inseeSearchSpy = vi.spyOn(inseeSirene, "lookupSiretsBySirenViaInsee");
+
+    const result = await verifierSiteActif(VALID_FINESS);
+
+    // "failed" ne doit PAS déclencher le fallback INSEE (H5)
+    expect(inseeSearchSpy).not.toHaveBeenCalled();
+    // Pass 2 — discipline observabilité : DINUM enrichment_failed doit être
+    // signalé au caller via dinum_errors (sinon panne second-appel silencieuse).
+    expect(result.found).toBe(true);
+    if (result.found) {
+      const enrichmentEntry = result.dinum_errors.find((e) => e.status === "enrichment_failed");
+      expect(enrichmentEntry).toBeDefined();
+      expect(enrichmentEntry?.siren).toBe(SIRET_A.slice(0, 9));
+      // L'explication doit mentionner le diagnostic DINUM (préfixe "DINUM erreurs")
+      expect(result.explication).toMatch(/DINUM erreurs/);
+    }
+  });
+
+  it("pas de clé INSEE → fallback skipped gracieusement, dinum_errors contient l'entrée explicative, pas de crash", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_SIEGE }], error: null });
+
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      siren: SIREN_BIOGROUP,
+      nomComplet: "BIOGROUP NORD",
+      finances: [],
+      dirigeants: [],
+      actif: true,
+      etablissements: [
+        { siret: SIRET_SIEGE, adresse: "46 RUE DES FUSILLES 59493 VILLENEUVE-D'ASCQ", actif: true },
+      ],
+      enrichmentStatus: "partial",
+      siren_source: "dinum",
+    });
+
+    // Pas de clé INSEE → lookupSiretsBySirenViaInsee retourne not_found
+    vi.spyOn(inseeSirene, "lookupSiretsBySirenViaInsee").mockResolvedValue({
+      found: false,
+      key: SIREN_BIOGROUP,
+      lookupStatus: "not_found",
+      message: "INSEE_SIRENE_API_KEY non configurée — fallback INSEE désactivé.",
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    // Pas de crash
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // dinum_errors doit signaler le fallback skipped avec status config_missing
+      // (distingué de not_found réel = SIREN absent SIRENE — H4 régression)
+      const inseeEntry = result.dinum_errors.find((e) => e.message.includes("insee_fallback"));
+      expect(inseeEntry).toBeDefined();
+      expect(inseeEntry?.status).toBe("config_missing");
+    }
+    warnSpy.mockRestore();
+  });
+
+  it("INSEE 5xx pendant fallback → dinum_errors avec status=rejected, pas de propagation d'exception", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_SIEGE }], error: null });
+
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      siren: SIREN_BIOGROUP,
+      nomComplet: "BIOGROUP NORD",
+      finances: [],
+      dirigeants: [],
+      actif: true,
+      etablissements: [
+        { siret: SIRET_SIEGE, adresse: "46 RUE DES FUSILLES 59493 VILLENEUVE-D'ASCQ", actif: true },
+      ],
+      enrichmentStatus: "partial",
+      siren_source: "dinum",
+    });
+
+    // INSEE 5xx → throw propagé jusqu'au Promise.allSettled du fallback
+    vi.spyOn(inseeSirene, "lookupSiretsBySirenViaInsee").mockRejectedValue(new Error("HTTP 503"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // Ne doit PAS throw — graceful degradation
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      const rejectedEntry = result.dinum_errors.find((e) => e.status === "rejected");
+      expect(rejectedEntry).toBeDefined();
+    }
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+});
+
+// ============================================================================
+// Fix P2.3 — reconcilierFinessSirene : optimisation INSEE via raison_sociale_ul
+// ============================================================================
+
+describe("reconcilierFinessSirene (P2.3 — optimisation INSEE via DINUM-enriched)", () => {
+  it("cas 1 (all DINUM-enriched) : 0 appel INSEE quand tous les candidats ont raison_sociale_ul + adresse_libelle", async () => {
+    // Les candidats DINUM-enriched ont raison_sociale_ul et adresse_libelle
+    // populés par le resolver → pas besoin d'appeler INSEE.
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "BIOGROUP NORD" }),
+    );
+    // RPPS liste le siège
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_SIEGE }], error: null });
+
+    // DINUM retourne l'établissement avec nomComplet → raison_sociale_ul sera populée
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      siren: SIREN_BIOGROUP,
+      nomComplet: "BIOGROUP NORD",
+      finances: [],
+      dirigeants: [],
+      actif: true,
+      etablissements: [
+        {
+          siret: SIRET_SIEGE,
+          adresse: "27 BD BIZET 59290 WASQUEHAL",
+          actif: true,
+          dateCreation: "2020-01-01",
+        },
+      ],
+      enrichmentStatus: "success",
+      siren_source: "dinum",
+    });
+
+    const inseeSpySiret = vi.spyOn(inseeSirene, "lookupSiretViaInsee");
+
+    const result = await reconcilierFinessSirene(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.candidates).toHaveLength(1);
+      // Score nom BIOGROUP NORD vs BIOGROUP NORD = 1 → verdict match
+      expect(result.candidates[0]?.verdict).toBe("match");
+      expect(result.candidates[0]?.scores.nom).toBe(1);
+    }
+    // Aucun appel INSEE — les données DINUM suffisent
+    expect(inseeSpySiret).not.toHaveBeenCalled();
+  });
+
+  it("cas 2 (mixed) : 1 appel INSEE sur le candidat RPPS-only, 0 sur le DINUM-enriched", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "BIOGROUP NORD" }),
+    );
+    const SIRET_B = "12345678901234";
+    // RPPS liste 2 SIRETs : SIRET_SIEGE (SIREN Biogroup) + SIRET_B (autre SIREN)
+    mockNot.mockResolvedValue({
+      data: [{ siret: SIRET_SIEGE }, { siret: SIRET_B }],
+      error: null,
+    });
+
+    // DINUM pour SIREN Biogroup → success, enrichit SIRET_SIEGE avec nomComplet
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => {
+      if (siren === SIREN_BIOGROUP) {
+        return {
+          found: true,
+          lookupStatus: "found",
+          siren: SIREN_BIOGROUP,
+          nomComplet: "BIOGROUP NORD",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            { siret: SIRET_SIEGE, adresse: "27 BD BIZET 59290 WASQUEHAL", actif: true },
+          ],
+          enrichmentStatus: "success" as const,
+          siren_source: "dinum" as const,
+        };
+      }
+      // SIREN du SIRET_B : DINUM not_found → candidat reste RPPS-only
+      return { found: false, key: siren, lookupStatus: "not_found" as const, message: "absent" };
+    });
+
+    const inseeSpySiret = vi.spyOn(inseeSirene, "lookupSiretViaInsee").mockResolvedValue(
+      fakeInseeLookupFound({
+        siret: SIRET_B,
+        siren: SIRET_B.slice(0, 9),
+        raisonSocialeUniteLegale: "AUTRE LABO",
+      }),
+    );
+
+    const result = await reconcilierFinessSirene(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // 2 candidats : 1 DINUM-enriched + 1 RPPS-only via INSEE
+      expect(result.candidates).toHaveLength(2);
+    }
+    // INSEE appelé 1 seule fois — uniquement pour SIRET_B (RPPS-only)
+    expect(inseeSpySiret).toHaveBeenCalledTimes(1);
+    expect(inseeSpySiret).toHaveBeenCalledWith(SIRET_B);
+  });
+
+  it("cas 3 (all RPPS-only) : comportement V0.7.0 préservé — appel INSEE pour chaque candidat", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "BIOGROUP NORD" }),
+    );
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+
+    // DINUM not_found → candidat reste RPPS-only (raison_sociale_ul = null)
+    // (mock default beforeEach déjà configuré en not_found)
+
+    const inseeSpySiret = vi
+      .spyOn(inseeSirene, "lookupSiretViaInsee")
+      .mockResolvedValue(fakeInseeLookupFound({ raisonSocialeUniteLegale: "BIOGROUP NORD" }));
+
+    const result = await reconcilierFinessSirene(VALID_FINESS);
+    expect(result.found).toBe(true);
+    // INSEE appelé : le candidat RPPS-only doit passer par la branche inseeRequired
+    expect(inseeSpySiret).toHaveBeenCalledTimes(1);
+    expect(inseeSpySiret).toHaveBeenCalledWith(SIRET_A);
   });
 });

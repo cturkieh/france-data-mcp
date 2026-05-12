@@ -106,9 +106,7 @@ export async function getDataFreshness(): Promise<IngestFreshnessRow[]> {
     const lastSuccess = sourceRows.find((r) => r.status === "success") ?? null;
     // `finished_at` reflète la fin réelle ; `started_at` est le fallback
     // si la migration finale n'a pas écrit `finished_at` (cas dégénéré).
-    const lastSuccessAt = lastSuccess
-      ? (lastSuccess.finished_at ?? lastSuccess.started_at)
-      : null;
+    const lastSuccessAt = lastSuccess ? (lastSuccess.finished_at ?? lastSuccess.started_at) : null;
     const stalenessDays = lastSuccessAt
       ? Math.floor((now - new Date(lastSuccessAt).getTime()) / (1000 * 60 * 60 * 24))
       : null;
