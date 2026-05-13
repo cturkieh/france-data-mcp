@@ -77,7 +77,7 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.7.5 — in production.** MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing **25 tools** with official MCP annotations and outputSchema (spec 2025-06-18, structuredContent emitted). ~95K FINESS facilities, ~462K Ameli practitioners, ~2.2M active RPPS practitioners. TypeScript strict, Biome clean, **606 tests passing**. Sentry error monitoring live (bot-noise filter active). See [CHANGELOG](CHANGELOG.md) for the full history.
+✅ **v0.7.7 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp) (`io.github.cturkieh/france-data-mcp`), mcp.so and glama.ai. MCP server live at `https://france-data-mcp.vercel.app/mcp`, exposing **25 tools** with official MCP annotations and outputSchema (spec 2025-06-18, structuredContent emitted). ~95K FINESS facilities, ~462K Ameli practitioners, ~2.2M active RPPS practitioners. TypeScript strict, Biome clean, **612 tests passing** (19 Supabase integration tests require local credentials). Sentry error monitoring live (bot-noise filter active). See [CHANGELOG](CHANGELOG.md) for the full history.
 
 ### Roadmap
 
