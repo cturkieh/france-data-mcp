@@ -103,7 +103,7 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.7.7 — en production.** Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp) (`io.github.cturkieh/france-data-mcp`), mcp.so et glama.ai. 25 tools avec annotations MCP + outputSchema (spec 2025-06-18, structuredContent émis), ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. **612 tests verts** (19 integration tests Supabase requièrent des creds locaux), TypeScript strict, Biome clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel). Sentry monitoring live (filtre bot-noise actif). Voir [CHANGELOG](CHANGELOG.md) pour l'historique.
+✅ **V0.7.8 — en production.** Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp) (`io.github.cturkieh/france-data-mcp`), mcp.so et glama.ai. 25 tools avec annotations MCP + outputSchema (spec 2025-06-18, structuredContent émis), ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. **612 tests verts** (19 integration tests Supabase requièrent des creds locaux), TypeScript strict, Biome clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel). Sentry monitoring live (filtre bot-noise actif). V0.7.8 fix `npx -y france-data-mcp` shortcut sur npm 11.7+ / Node 22+ (champ `exports` étendu pour exposer le bin). Voir [CHANGELOG](CHANGELOG.md) pour l'historique.
 
 ### Roadmap
 
