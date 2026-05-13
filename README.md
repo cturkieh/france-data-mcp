@@ -103,7 +103,7 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.7.3 — en production.** 25 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. **603 tests verts**, TypeScript strict, Biome clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel). Sentry monitoring live (filtre bot-noise actif). Voir [CHANGELOG](CHANGELOG.md) pour l'historique.
+✅ **V0.7.4 — en production.** 25 tools avec annotations MCP officielles (readOnly/idempotent/openWorld), ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. **603 tests verts**, TypeScript strict, Biome clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel). Sentry monitoring live (filtre bot-noise actif). Voir [CHANGELOG](CHANGELOG.md) pour l'historique.
 
 ### Roadmap
 

@@ -231,6 +231,10 @@ async function handleRpc(
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
+          // Spec MCP 2025-06-18 §6.2 : annotations optionnelles consommées
+          // par les clients pour décider si une confirmation utilisateur
+          // est nécessaire avant invocation. Omis si non déclaré.
+          ...(t.annotations ? { annotations: t.annotations } : {}),
         })),
       });
       emit(ctx, start, request.method, { status: 200, outcome: "success" });

@@ -4,6 +4,52 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.7.4] — 2026-05-13
+
+**Smithery quick wins : annotations MCP, descriptions params, doc Corse, icon.**
+
+Améliorations distribution/discoverability post-V0.7.3 pour pousser le quality
+score Smithery (72 → cible 88+/100, badge Verified).
+
+### Ajouté
+
+- **Annotations MCP sur les 25 tools** (spec 2025-06-18 §6.2) : `readOnlyHint: true`,
+  `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true` sur 24
+  tools. `data_freshness` reçoit la variante `idempotentHint: false` (sa réponse
+  contient `staleness_days` qui varie dans le temps). 2 constantes
+  `READ_ONLY_IDEMPOTENT_ANNOTATIONS` et `READ_ONLY_TIME_VARYING_ANNOTATIONS`
+  (la 2e spread la 1re + override) factorisent les valeurs.
+- **Type `McpToolAnnotations` strict** : 5 propriétés exactes de la spec
+  (`title`, `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+  au lieu de `Record<string, boolean>` qui aurait accepté un typo silencieusement.
+  Convention CLAUDE.md "TypeScript strict, jamais `any`" appliquée.
+- **Forward annotations dans `tools/list`** : `api/mcp.ts` map les annotations
+  via spread conditionnel `...(t.annotations ? { annotations: t.annotations } : {})`
+  (omet la clé si absente, conforme spec).
+- **3 icon variations** dans `branding/icons/` (drapeau FR + caducée, hexagone +
+  croix, lettermark FD) générées via nano-banana pro 2K. Pour upload Smithery
+  + profile GitHub.
+
+### Modifié
+
+- **14 descriptions params ajoutées** sur `professionnels_rpps_in_radius` et
+  `professionnels_rpps_par_dept` (center, radius_km, profession_codes,
+  savoir_faire_codes, mode_exercice_codes, limit, offset).
+- **Doc Corse harmonisée** sur les 4 tools qui prennent un `departement` :
+  `professionnels_par_specialite_dept`, `professionnels_rpps_par_dept`,
+  `rpps_search_by_name`, `etablissements_finess_by_categorie`. Wording uniforme
+  `"Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères
+  (Corse '2A'/'2B', pas '20'), DOM/TOM 3 caractères."` — évite que les LLM
+  clients passent `"20"` et obtiennent silencieusement 0 résultat sur la Corse.
+
+### Discipline post-fix
+
+- `/simplify` 3 agents + `/review` pass 1 3 agents → 4 findings appliqués
+  (type strict, DRY constantes, doc Corse `rpps_search_by_name`, propagation
+  doc Corse 3 autres tools).
+- `/review` pass 2 2 agents → **VERDICT GO COMMIT**.
+- 603 tests verts, tsc clean.
+
 ## [0.7.3] — 2026-05-13
 
 **Hardening error handling : RangeError → -32602, Sentry bot-noise filter,

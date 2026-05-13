@@ -118,10 +118,61 @@ export function categorieCodesFromArgs(args: Record<string, unknown>): string[] 
   });
 }
 
+/**
+ * Type strict des annotations MCP (spec 2025-06-18, §6.2). Restreint aux 5
+ * propriétés autorisées par la spec — un `Record<string, boolean>` accepterait
+ * silencieusement un typo (`readOnlyhint` au lieu de `readOnlyHint`) qui
+ * n'aurait aucun effet côté client. Convention CLAUDE.md "TypeScript strict,
+ * jamais `any`" appliquée ici.
+ */
+export type McpToolAnnotations = {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+};
+
+/**
+ * Annotations MCP consommées par les clients pour aider l'utilisateur à
+ * comprendre quels tools sont safe à invoquer sans confirmation, lesquels
+ * peuvent altérer l'état externe, etc.
+ *
+ * - `readOnlyHint: true` : le tool n'écrit rien (toutes nos sources : FINESS,
+ *   Ameli, RPPS, DINUM, INSEE, IGN, geo.api.gouv → reads only).
+ * - `destructiveHint: false` : aucun effet destructif (renforcement explicite
+ *   du readOnly).
+ * - `idempotentHint: true` : mêmes inputs → mêmes outputs (FINESS/Ameli/RPPS
+ *   stables entre 2 ingestions cron, DINUM/INSEE/IGN live mais idempotent
+ *   à l'échelle d'une session MCP).
+ * - `openWorldHint: true` : interactions avec des sources externes au serveur
+ *   (la spec MCP cible cette annotation pour distinguer "outils locaux" des
+ *   "outils qui consomment des APIs publiques").
+ */
+const READ_ONLY_IDEMPOTENT_ANNOTATIONS: McpToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+};
+
+/**
+ * Variante pour `data_freshness` : sa réponse contient des timestamps de
+ * dernière ingestion + `staleness_days` → varie dans le temps même sans
+ * input. `idempotentHint: false` signale au client qu'un cache long n'est
+ * pas safe. Spread la base pour rendre explicite que seul `idempotentHint`
+ * diverge — si la spec MCP évolue, un seul endroit à modifier.
+ */
+const READ_ONLY_TIME_VARYING_ANNOTATIONS: McpToolAnnotations = {
+  ...READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+  idempotentHint: false,
+};
+
 export type McpTool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 };
 
@@ -565,6 +616,7 @@ export const TOOLS: McpTool[] = [
         },
       },
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const opts: Parameters<typeof searchCommunes>[0] = {
         boostPopulation: args.boostPopulation !== false,
@@ -591,6 +643,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["code"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       if (typeof args.code !== "string") throw new RangeError("code (string) requis");
       return getCommuneByCode(args.code);
@@ -615,6 +668,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["adresse"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const adresse = asString(args.adresse);
       if (!adresse) throw new RangeError("adresse (string) requise");
@@ -638,6 +692,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["lon", "lat"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const lon = Number(args.lon);
       const lat = Number(args.lat);
@@ -676,6 +731,7 @@ export const TOOLS: McpTool[] = [
         page: { type: "number", description: "Page (1-indexed).", default: 1 },
       },
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const naf = asString(args.naf);
       const q = asString(args.q);
@@ -732,6 +788,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["siren"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       if (typeof args.siren !== "string") throw new RangeError("siren (string) requis");
       return getEntrepriseBySiren(args.siren);
@@ -745,6 +802,7 @@ export const TOOLS: McpTool[] = [
       type: "object",
       properties: {},
     },
+    annotations: READ_ONLY_TIME_VARYING_ANNOTATIONS,
     handler: async () => {
       const rows = await getDataFreshness();
       return { sources: rows };
@@ -761,6 +819,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
@@ -778,6 +837,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
@@ -795,6 +855,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
@@ -812,6 +873,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
@@ -829,6 +891,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["siret"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const siret = asString(args.siret);
       if (!siret) throw new RangeError("siret (string, 14 chiffres) requis");
@@ -873,6 +936,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["lon", "lat"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const { lon, lat } = requireLonLatStrict(args);
       const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
@@ -903,7 +967,7 @@ export const TOOLS: McpTool[] = [
         departement: {
           type: "string",
           description:
-            "Code département (2 caractères métropole/Corse, 3 pour DOM/TOM). Optionnel.",
+            "Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères (Corse '2A'/'2B', pas '20'), DOM/TOM 3 caractères. Optionnel.",
         },
         code_insee: {
           type: "string",
@@ -920,6 +984,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["categorie"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const famille = asFinessFamille(args.categorie);
       if (!famille) {
@@ -950,6 +1015,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
@@ -1005,6 +1071,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["lon", "lat"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const { lon, lat } = requireLonLatStrict(args);
       const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
@@ -1071,6 +1138,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["departement"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const departement = asString(args.departement);
       if (!departement) throw new RangeError("departement (string) requis");
@@ -1099,6 +1167,7 @@ export const TOOLS: McpTool[] = [
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const specialites = await listAmeliSpecialites();
       return withFreshness(
@@ -1117,6 +1186,7 @@ export const TOOLS: McpTool[] = [
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const typesPs = await listAmeliTypesPs();
       return withFreshness({ count: typesPs.length, results: typesPs }, args.include_freshness, [
@@ -1133,22 +1203,46 @@ export const TOOLS: McpTool[] = [
       properties: {
         center: {
           type: "object",
+          description: "Centre du cercle de recherche (coordonnées WGS84).",
           properties: {
-            lat: { type: "number" },
-            lon: { type: "number" },
+            lat: { type: "number", description: "Latitude (WGS84)." },
+            lon: { type: "number", description: "Longitude (WGS84)." },
           },
           required: ["lat", "lon"],
         },
-        radius_km: { type: "number", minimum: RADIUS_MIN_KM, maximum: RADIUS_MAX_KM },
-        profession_codes: { type: "array", items: { type: "string" } },
-        savoir_faire_codes: { type: "array", items: { type: "string" } },
-        mode_exercice_codes: { type: "array", items: { type: "string" } },
+        radius_km: {
+          type: "number",
+          description: "Rayon en km (0.1-50).",
+          minimum: RADIUS_MIN_KM,
+          maximum: RADIUS_MAX_KM,
+        },
+        profession_codes: {
+          type: "array",
+          description:
+            "Codes profession ANS (ex: ['10'] Médecin, ['60'] Infirmier). Si omis, toutes professions.",
+          items: { type: "string" },
+        },
+        savoir_faire_codes: {
+          type: "array",
+          description:
+            "Codes savoir-faire ANS (spécialités fines DES/DESC). Si omis, tous savoir-faire.",
+          items: { type: "string" },
+        },
+        mode_exercice_codes: {
+          type: "array",
+          description: "Codes mode d'exercice ANS (libéral / salarié / mixte). Si omis, tous modes.",
+          items: { type: "string" },
+        },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
-        limit: { type: "number" },
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats retournés (défaut serveur 100).",
+        },
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["center", "radius_km"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const center = args.center as { lat: number; lon: number } | undefined;
       if (!center) throw new RangeError("center {lat, lon} requis");
@@ -1173,17 +1267,37 @@ export const TOOLS: McpTool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        departement: { type: "string" },
-        profession_code: { type: "string" },
-        savoir_faire_code: { type: "string" },
-        mode_exercice_code: { type: "string" },
+        departement: {
+          type: "string",
+          description:
+            "Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères (Corse '2A'/'2B', pas '20'), DOM/TOM 3 caractères.",
+        },
+        profession_code: {
+          type: "string",
+          description: "Code profession ANS (ex: '10' Médecin, '60' Infirmier). Optionnel.",
+        },
+        savoir_faire_code: {
+          type: "string",
+          description: "Code savoir-faire ANS (spécialité fine DES/DESC). Optionnel.",
+        },
+        mode_exercice_code: {
+          type: "string",
+          description: "Code mode d'exercice ANS (libéral / salarié / mixte). Optionnel.",
+        },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
-        limit: { type: "number" },
-        offset: { type: "number" },
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats par page (défaut serveur 100).",
+        },
+        offset: {
+          type: "number",
+          description: "Offset pour pagination (défaut 0). Re-paginer tant que `truncated=true`.",
+        },
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["departement"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const departement = asString(args.departement);
       if (!departement) throw new RangeError("departement (string) requis");
@@ -1215,6 +1329,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
       if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
@@ -1238,7 +1353,8 @@ export const TOOLS: McpTool[] = [
         },
         departement: {
           type: "string",
-          description: "Code département (2 chiffres métropole/Corse, 3 pour DOM/COM). Optionnel.",
+          description:
+            "Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères (Corse '2A'/'2B', pas '20'), DOM/COM 3 caractères. Optionnel.",
         },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: {
@@ -1252,6 +1368,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["nom"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const nom = asString(args.nom)?.trim();
       if (!nom) throw new RangeError("nom (string non vide) requis");
@@ -1277,6 +1394,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["rpps_id"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const rppsId = asString(args.rpps_id)?.trim();
       if (!rppsId) throw new RangeError("rpps_id (string) requis");
@@ -1364,6 +1482,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["lon", "lat", "naf"],
     },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const lon = coerceNumber(args.lon, "lon");
       const lat = coerceNumber(args.lat, "lat");
