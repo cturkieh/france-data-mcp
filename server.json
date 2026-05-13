@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.cturkieh/france-data-mcp",
+  "description": "French territorial intelligence MCP: cross-reference health, business & geo public registries.",
+  "repository": {
+    "url": "https://github.com/cturkieh/france-data-mcp",
+    "source": "github"
+  },
+  "version": "0.7.7",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "france-data-mcp",
+      "version": "0.7.7",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://france-data-mcp.vercel.app/mcp"
+    }
+  ]
+}
