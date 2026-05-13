@@ -1,5 +1,16 @@
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ENDPOINT, USER_AGENT, forwardLine, parseId, safeEndpointForLog } from "./cli.js";
+import {
+  ENDPOINT,
+  USER_AGENT,
+  forwardLine,
+  isMainModule,
+  parseId,
+  safeEndpointForLog,
+} from "./cli.js";
 
 function makeOkResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -238,5 +249,74 @@ describe("forwardLine", () => {
     await forwardLine('{"jsonrpc":"2.0","id":1,"method":"ping"}', fetchMock, writeOut);
     expect(writes).toHaveLength(1);
     expect(writes[0]?.match(/\n+$/u)?.[0]).toBe("\n");
+  });
+});
+
+/**
+ * Régression V0.7.6 — symlink resolution dans la garde isMain.
+ *
+ * Bug original (V0.7.2 → V0.7.5) : la garde comparait
+ * `pathToFileURL(process.argv[1]).href === import.meta.url`. Quand npm/npx
+ * lance le bin via le symlink `node_modules/.bin/france-data-mcp`,
+ * `process.argv[1]` reste le path du symlink mais Node ESM résout
+ * `import.meta.url` vers la cible réelle. Les deux divergent → main()
+ * jamais appelé → process exit silencieux.
+ *
+ * Ces tests créent un VRAI symlink dans tmpdir() et valident que
+ * isMainModule() retourne true des deux côtés (cible directe ET via
+ * symlink). Sans ces tests, la régression peut revenir lors d'un futur
+ * refacto de la garde.
+ */
+describe("isMainModule (V0.7.6 régression — résolution symlink)", () => {
+  let tmpDir: string;
+  let realPath: string;
+  let linkPath: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "fdm-cli-ismain-"));
+    realPath = join(tmpDir, "real-module.mjs");
+    linkPath = join(tmpDir, "symlink-to-real.mjs");
+    writeFileSync(realPath, "// fake module pour test isMainModule");
+    symlinkSync(realPath, linkPath);
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("retourne true en exécution directe (pas de symlink)", () => {
+    const url = pathToFileURL(realPath).href;
+    expect(isMainModule(url, realPath)).toBe(true);
+  });
+
+  it("retourne true quand argv[1] est un symlink vers le module (CRITICAL — repro bug V0.7.2-V0.7.5)", () => {
+    // Reproduit exactement le scénario npm/npx :
+    //   - import.meta.url pointe vers la cible réelle (Node résout les symlinks ESM)
+    //   - process.argv[1] est le symlink (Node ne le résout PAS pour argv)
+    // L'ancienne garde retournait false ici → main() jamais appelé → silence.
+    const urlOfRealTarget = pathToFileURL(realPath).href;
+    expect(isMainModule(urlOfRealTarget, linkPath)).toBe(true);
+  });
+
+  it("retourne false quand argv[1] pointe vers un autre fichier (importé en sous-module)", () => {
+    const otherPath = join(tmpDir, "other-module.mjs");
+    writeFileSync(otherPath, "// autre module");
+    const url = pathToFileURL(realPath).href;
+    expect(isMainModule(url, otherPath)).toBe(false);
+  });
+
+  it("retourne false quand argv[1] est undefined (cas import depuis un test)", () => {
+    const url = pathToFileURL(realPath).href;
+    expect(isMainModule(url, undefined)).toBe(false);
+  });
+
+  it("retourne false sans throw si realpath échoue (fichier inexistant)", () => {
+    const ghostPath = join(tmpDir, "does-not-exist.mjs");
+    const url = pathToFileURL(ghostPath).href;
+    expect(isMainModule(url, ghostPath)).toBe(false);
+  });
+
+  it("retourne false sans throw si import.meta.url est malformé", () => {
+    expect(isMainModule("not-a-url", realPath)).toBe(false);
   });
 });

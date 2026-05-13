@@ -21,9 +21,10 @@
  * JSON-RPC). Pas d'état stateful : le serveur HTTP est stateless lui aussi.
  */
 
+import { realpathSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { VERSION } from "../src/core/version.js";
 
@@ -208,11 +209,35 @@ async function main(): Promise<void> {
   }
 }
 
-// `import.meta.url === pathToFileURL(process.argv[1])` détecte qu'on est lancé
-// directement (vs importé par un test). Évite de boucler stdin pendant les tests.
-const isMain =
-  typeof process.argv[1] === "string" && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
+/**
+ * Détecte si le module est exécuté directement (vs importé par un test).
+ * Évite de démarrer la boucle stdin pendant les tests.
+ *
+ * V0.7.6 fix : la garde précédente comparait `pathToFileURL(argv1).href` à
+ * `import.meta.url`. Quand npm/npx exécutent le bin via un symlink dans
+ * `node_modules/.bin/`, `process.argv[1]` reste le chemin du symlink mais
+ * Node ESM résout `import.meta.url` vers la cible réelle. Les deux divergent
+ * → `main()` jamais appelé → process exit silencieux. Régression silencieuse
+ * en prod depuis V0.7.2 (1er wrapper npm). Fix : comparer les `realpath` des
+ * deux côtés pour matcher quel que soit le routage symlink.
+ */
+export function isMainModule(importMetaUrl: string, argv1: string | undefined): boolean {
+  if (typeof argv1 !== "string") return false;
+  try {
+    return realpathSync(fileURLToPath(importMetaUrl)) === realpathSync(argv1);
+  } catch {
+    // Catch volontairement silencieux (PAS un silent failure métier) :
+    // c'est une décision booléenne sans effet utilisateur — on ne hand off
+    // aucune donnée, on ne masque aucune erreur API. Si realpath ou
+    // fileURLToPath throw (URL malformée, fichier inexistant — typique en
+    // contexte test/import abstrait), la bonne réponse est "ne PAS démarrer
+    // main()", pas "logger une erreur" qui polluerait stderr de tous les
+    // tests qui importent le module.
+    return false;
+  }
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((err: unknown) => {
     const reason = err instanceof Error ? err.message : String(err);
     console.error(`[france-data-mcp-npm] fatal: ${reason}`);
