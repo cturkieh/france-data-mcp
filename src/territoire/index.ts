@@ -4,7 +4,7 @@
  * Sources :
  *  - geo.api.gouv.fr (DINUM/Etalab) → recherche de communes
  *  - data.geopf.fr (IGN Géoplateforme) → géocodage d'adresse
- *  - INSEE → population IRIS infra-communale (à venir)
+ *  - INSEE Melodi → population municipale par commune et département
  */
 
 export {
@@ -21,5 +21,12 @@ export {
   type GeocodeResult,
   type GeocodeOptions,
 } from "./geocode.js";
+
+export {
+  getPopulationByCommune,
+  getPopulationByDept,
+  type PopulationData,
+  type GeoLevel,
+} from "./insee-melodi.js";
 
 export const TERRITOIRE_VERSION = "0.1.0";

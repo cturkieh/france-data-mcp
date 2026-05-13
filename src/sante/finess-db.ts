@@ -5,7 +5,8 @@ import {
   finessByCategorieMetadata,
   finessRadiusMetadata,
 } from "../core/query-metadata.js";
-import { getAnonClient } from "../storage/supabase.js";
+import { getAnonClient, getUntypedAnonClient } from "../storage/supabase.js";
+import { assertValidDept } from "../territoire/dept-codes.js";
 import {
   assertValidNumFiness,
   clampLimit,
@@ -74,6 +75,47 @@ export interface FinessQueryResult {
 function familiesToCodes(familles: FinessFamilleQuery[] | undefined): string[] {
   if (!familles || familles.length === 0) return [];
   return familles.flatMap((f) => [...FINESS_FAMILY_CODES[f]]);
+}
+
+export interface CountFinessInput {
+  /** Famille FINESS (mappe vers les codes catégorie via FINESS_FAMILY_CODES). */
+  famille: FinessFamilleQuery;
+  /** Code département (2-3 chars). Omis ou null → comptage France entière. */
+  departement?: string | null;
+}
+
+/**
+ * Compte les établissements FINESS d'une famille (RPC `count_finess` V0.8).
+ * Sert de brique pour `densiteEtablissementsSante`.
+ *
+ * `departement` omis ou null → comptage France entière. La famille est
+ * obligatoire (la RPC throw si codes vides — compter "tous établissements"
+ * mélangerait labos, hôpitaux, EHPAD et n'aurait pas de sens).
+ */
+export async function countFiness(input: CountFinessInput): Promise<number> {
+  // Validation TS avant network roundtrip — sinon dept malformé part en
+  // parallèle (Promise.all densite.ts) et la RPC répond ERRCODE 22023 wrappé
+  // en -32603 internal_error côté MCP au lieu d'un -32602 invalid_params propre.
+  // Mirror exact du contrat de countRpps.
+  if (input.departement !== undefined && input.departement !== null) {
+    assertValidDept(input.departement);
+  }
+  const codes = [...FINESS_FAMILY_CODES[input.famille]];
+  // Untyped client : la RPC count_finess (V0.8) n'est pas encore dans les
+  // types Supabase générés (regen via `pnpm db:types` après apply prod).
+  // Pattern aligné sur countRpps qui utilise aussi getUntypedAnonClient.
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("count_finess", {
+    p_dept: input.departement ?? null,
+    p_categorie_codes: codes,
+  });
+  if (error) throw new Error(formatRpcError("count_finess", error));
+  if (typeof data !== "number") {
+    throw new Error(
+      `count_finess returned unexpected type ${typeof data} (famille=${input.famille}, dept=${input.departement ?? "FRANCE"}, expected number, got: ${JSON.stringify(data)})`,
+    );
+  }
+  return data;
 }
 
 /**

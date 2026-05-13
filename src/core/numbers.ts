@@ -23,3 +23,11 @@ export function metersToKm(meters: number | null | undefined): number | null {
   if (typeof meters !== "number" || !Number.isFinite(meters)) return null;
   return Math.round((meters / 1000) * 100) / 100;
 }
+
+/**
+ * Arrondit `value` à 2 décimales. Utilisé pour les ratios et pourcentages
+ * exposés au caller MCP (densités pour 100k hab., écarts vs national en %).
+ */
+export function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}

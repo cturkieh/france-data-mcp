@@ -38,6 +38,12 @@ import {
   getEntrepriseBySiren,
   searchEntreprises,
 } from "../src/sante/index.js";
+import {
+  MODE_EXERCICE_ACTIVITE_REGULIERE,
+  PROFESSION_CODE_MEDECIN,
+  densiteEtablissementsSante,
+  densiteProfessionnelsSante,
+} from "../src/sante/densite.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import {
   buildCategorieCodes,
@@ -46,6 +52,7 @@ import {
   getRppsDansEtablissement,
   getRppsInRadius,
   getRppsParSpecialiteDept,
+  listSavoirFaireRpps,
 } from "../src/sante/rpps-db.js";
 import { RPPS_CGU_NOTICE, RPPS_MODE_EXERCICE, TRE_R09_URL } from "../src/sante/rpps-types.js";
 import { getDataFreshness } from "../src/storage/ingest-log.js";
@@ -53,6 +60,8 @@ import { deptFromCodeInsee } from "../src/territoire/dept-codes.js";
 import {
   geocode,
   getCommuneByCode,
+  getPopulationByCommune,
+  getPopulationByDept,
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
@@ -896,6 +905,50 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
+    name: "population_par_commune",
+    description:
+      "Population municipale (PMUN), population comptée à part (PCAP) et population totale (PTOT) d'une commune française par son code INSEE (5 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN est la base légale officielle utilisée pour les indicateurs DREES (densité médicale, etc.). Retourne un `LookupResult` discriminé par `found`. Si la commune a fusionné ou changé de code, `found: false` avec orientation vers `autocomplete_commune`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description:
+            "Code INSEE de la commune (5 caractères, ex: '75056' Paris, '13201' Marseille 1er, '2A004' Ajaccio).",
+        },
+      },
+      required: ["code"],
+    },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      if (typeof args.code !== "string") throw new RangeError("code (string) requis");
+      return getPopulationByCommune(args.code);
+    },
+  },
+  {
+    name: "population_par_departement",
+    description:
+      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'un département français par son code INSEE (2-3 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN recommandée pour calculs de densité (méthodo DREES). Supporte la Corse (2A, 2B) et les DOM (971-976).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description:
+            "Code INSEE du département (2-3 caractères, ex: '75' Paris, '13' Bouches-du-Rhône, '2A' Corse-du-Sud, '971' Guadeloupe).",
+        },
+      },
+      required: ["code"],
+    },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      if (typeof args.code !== "string") throw new RangeError("code (string) requis");
+      return getPopulationByDept(args.code);
+    },
+  },
+  {
     name: "entreprises_in_radius",
     description:
       "Recherche d'entreprises françaises avec filtres NAF, code postal, département ou rayon géographique. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.\n\nLimitation API DINUM : la combinaison `naf + lat/lon/radiusKm` n'est pas supportée nativement (lat/lon nécessitent un `q` textuel). Le serveur applique alors un fallback : reverseGeocode du point → recherche par département → filtrage Haversine côté serveur. Les résultats sont limités aux 25 premières entreprises du NAF dans le département (limite API).",
@@ -1549,6 +1602,151 @@ export const TOOLS: McpTool[] = [
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       return withFreshness(await getRppsDansEtablissement(input), args.include_freshness, ["rpps"]);
+    },
+  },
+  {
+    name: "densite_professionnels_sante",
+    description: `Densité de professionnels de santé pour 100 000 habitants dans un département. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex SM02 cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['1']\`.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        code_dept: {
+          type: "string",
+          description:
+            "Code INSEE du département (2-3 caractères, ex: '75', '13', '2A', '971').",
+        },
+        profession_code: {
+          type: "string",
+          description: `Code profession ANS (TRE_R94). Default '${PROFESSION_CODE_MEDECIN}' (Médecin). Ex : '60' Infirmier, '21' Pharmacien, '50' Sage-femme, '40' Chirurgien-dentiste, '70' Masseur-kinésithérapeute.`,
+        },
+        savoir_faire_code: {
+          type: "string",
+          description:
+            "Code spécialité (savoir_faire). Pertinent surtout pour profession_code=10 (médecin). Ex : 'SM02' Cardiologie, 'SM26' Dermato-vénérologie. Voir lister_specialites_medicales (V0.8 Phase 4).",
+        },
+        mode_exercice_codes: {
+          type: "array",
+          items: { type: "string" },
+          description: `Codes mode_exercice ANS à inclure. Default ['1','2','3'] (libéral + salarié + mixte = activité régulière DREES). Passer ['1'] pour libéraux seuls. ${RPPS_MODE_EXERCICE_HINT}`,
+        },
+        compare_national: {
+          type: "boolean",
+          description:
+            "Ajoute le calcul France entière + écart relatif en % (recommandé pour qualifier 'sous-doté'/'sur-doté').",
+          default: false,
+        },
+        ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
+      },
+      required: ["code_dept"],
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      const codeDept = asString(args.code_dept);
+      if (!codeDept) throw new RangeError("code_dept (string, 2-3 caractères) requis");
+      const input: Parameters<typeof densiteProfessionnelsSante>[0] = {
+        departement: codeDept,
+        categorieCodes: categorieCodesFromArgs(args),
+      };
+      const professionCode = asString(args.profession_code);
+      if (professionCode) input.professionCode = professionCode;
+      const savoirFaireCode = asString(args.savoir_faire_code);
+      if (savoirFaireCode) input.savoirFaireCode = savoirFaireCode;
+      if (Array.isArray(args.mode_exercice_codes)) {
+        const filtered = args.mode_exercice_codes.filter(
+          (v): v is string => typeof v === "string",
+        );
+        // `[]` reçu du caller MCP : sémantique différente du défaut DREES.
+        // Si l'array est vide après filtrage (caller a passé [] OU [42, true] —
+        // tout filtré), on le signale comme désactivation explicite du filtre
+        // (= comptage tous statuts confondus, pas la méthodo DREES). Log warn
+        // pour traçabilité car risque de mécompréhension côté LLM.
+        if (filtered.length === 0) {
+          console.warn(
+            `[france-data-mcp] densite_professionnels_sante: mode_exercice_codes vide reçu — interprété comme 'pas de filtre' (tous statuts), pas la méthodo DREES par défaut`,
+          );
+          input.modeExerciceCodes = null;
+        } else {
+          input.modeExerciceCodes = filtered;
+        }
+      }
+      const compareNational = coerceBoolean(args.compare_national, "compare_national");
+      if (compareNational === true) input.compareNational = true;
+      return densiteProfessionnelsSante(input);
+    },
+  },
+  {
+    name: "densite_etablissements_sante",
+    description:
+      "Densité d'établissements de santé pour 100 000 habitants dans un département, par famille FINESS. Croise FINESS DREES (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nFamilles disponibles : `labo` (laboratoires de biologie médicale), `pharmacie`, `ehpad`, `mco` (court séjour médecine/chirurgie/obstétrique), `ssr` (soins de suite), `psychiatrie`, `dialyse`, `imagerie`, `had` (hospitalisation à domicile), `msp_cpts` (maisons de santé + CPTS), `handicap_enfants`, `handicap_adultes`, `addictologie`, `pmi`, `prevention_sante`, etc. Famille obligatoire — sans filtre, le ratio mélangerait labos / hôpitaux / EHPAD et n'aurait pas de sens.\n\n`compare_national: true` ajoute la densité France entière (DOM inclus) + écart en %. Coût : 1 RPC count_finess + 1 appel Melodi (cacheable).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        code_dept: {
+          type: "string",
+          description:
+            "Code INSEE du département (2-3 caractères, ex: '75', '13', '2A', '971').",
+        },
+        famille: {
+          type: "string",
+          description:
+            "Famille FINESS à compter (labo, pharmacie, ehpad, mco, ssr, psychiatrie, dialyse, imagerie, had, msp_cpts, handicap_enfants, handicap_adultes, addictologie, pmi, prevention_sante, etc.).",
+        },
+        compare_national: {
+          type: "boolean",
+          description:
+            "Ajoute le calcul France entière + écart relatif en % (recommandé pour 'sous-doté'/'sur-doté').",
+          default: false,
+        },
+      },
+      required: ["code_dept", "famille"],
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      const codeDept = asString(args.code_dept);
+      if (!codeDept) throw new RangeError("code_dept (string, 2-3 caractères) requis");
+      const famille = asFinessFamille(args.famille);
+      if (!famille) {
+        throw new RangeError(
+          `famille requise et valide — valeurs : ${FAMILLES_LIST}`,
+        );
+      }
+      const input: Parameters<typeof densiteEtablissementsSante>[0] = {
+        departement: codeDept,
+        famille,
+      };
+      const compareNational = coerceBoolean(args.compare_national, "compare_national");
+      if (compareNational === true) input.compareNational = true;
+      return densiteEtablissementsSante(input);
+    },
+  },
+  {
+    name: "lister_specialites_medicales",
+    description: `Liste les spécialités médicales (savoir_faire RPPS) avec leur libellé et le nombre de PS qui les portent. Tool d'aide à la découverte pour le LLM : avant d'appeler densite_professionnels_sante ou professionnels_rpps_par_dept avec un \`savoir_faire_code\` précis (ex 'SM02' Cardiologie), utiliser ce tool pour obtenir la liste exhaustive.\n\nFiltre par défaut : profession_code='${PROFESSION_CODE_MEDECIN}' (Médecin) — retourne donc les spécialités médicales (cardiologie, dermato, gynéco, etc.). Passer \`profession_code\` pour énumérer les spécialités d'une autre profession (ex '60' Infirmier → spécialités IDE), ou \`null\` pour tous savoir_faire confondus.\n\nRésultats triés par count_ps DESC (spécialités les plus représentées en premier). Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        profession_code: {
+          type: "string",
+          description: `Code profession ANS (TRE_R94). Default '${PROFESSION_CODE_MEDECIN}' (Médecin). Passer une string vide ou 'null' pour énumérer tous savoir_faire toutes professions confondues.`,
+        },
+      },
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      // Sentinel "null" (string) pour désactiver le filtre — JSON-RPC ne peut
+      // pas véhiculer un null dans un champ schema "string". asString rejette
+      // les types invalides (number/boolean/null/undefined → undefined).
+      const raw = asString(args.profession_code);
+      let professionCode: string | null;
+      if (raw === "null") {
+        professionCode = null;
+      } else if (raw && raw.length > 0) {
+        professionCode = raw;
+      } else {
+        professionCode = PROFESSION_CODE_MEDECIN;
+      }
+      const results = await listSavoirFaireRpps(professionCode);
+      return { count: results.length, profession_code: professionCode, results };
     },
   },
   {

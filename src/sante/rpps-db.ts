@@ -192,7 +192,113 @@ export interface RppsQueryResult {
   query_metadata?: QueryMetadata;
 }
 
+export interface CountRppsInput {
+  /** Code département (2-3 chars). Omis ou null → comptage France entière. */
+  departement?: string | null;
+  /** Code profession ANS (ex "10" Médecin, "60" Infirmier, "21" Pharmacien). */
+  professionCode?: string | null;
+  /** Code savoir_faire (spécialité, ex "SM02" Cardiologie). */
+  savoirFaireCode?: string | null;
+  /**
+   * Codes mode_exercice ANS à inclure. Pour la méthodo DREES "activité régulière",
+   * passer ['1','2','3'] (libéral, salarié, mixte). Vide ou omis → pas de filtre.
+   */
+  modeExerciceCodes?: string[];
+  /** Codes catégorie ANS (TRE_R09). Vide ou omis → default ['C','M']. */
+  categorieCodes?: string[];
+}
+
 // --- Public query functions ------------------------------------------------
+
+export interface SavoirFaireEntry {
+  /** Code savoir_faire ANS (ex 'SM02' Cardiologie). */
+  code: string;
+  /** Libellé clair (le plus fréquent quand des doublons existent). */
+  libelle: string;
+  /** Nombre de PS portant ce savoir_faire dans le périmètre filtré. */
+  count_ps: number;
+}
+
+/**
+ * Liste les savoir_faire (spécialités) présents en base RPPS, optionnellement
+ * filtrés par profession. Tool d'aide LLM (V0.8) : permet de découvrir les
+ * codes spécialité (ex 'SM02' Cardiologie) avant de les passer à
+ * `densiteProfessionnelsSante` ou aux autres tools de query.
+ *
+ * Triés par count_ps DESC (spécialités les plus représentées en premier).
+ */
+export async function listSavoirFaireRpps(
+  professionCode?: string | null,
+): Promise<SavoirFaireEntry[]> {
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("lister_savoir_faire_rpps", {
+    p_profession_code: professionCode ?? null,
+  });
+  if (error) throw new Error(formatRpcError("lister_savoir_faire_rpps", error));
+  const rows = expectRpcRows<{
+    code: string | null;
+    libelle: string | null;
+    count_ps: number | string | null;
+  }>("lister_savoir_faire_rpps", data);
+  const out: SavoirFaireEntry[] = [];
+  for (const row of rows) {
+    if (!row.code) {
+      // Invariant SQL violé : la migration filtre déjà `WHERE savoir_faire_code
+      // IS NOT NULL`. Un row sans code = drift schéma upstream / RPC remplacée
+      // par un mock. NE PAS swallow silencieusement — log pour visibilité.
+      console.warn(
+        `[france-data-mcp] lister_savoir_faire_rpps: row sans code reçu malgré WHERE IS NOT NULL côté SQL — invariant violé (libelle=${row.libelle ?? "<null>"})`,
+      );
+      continue;
+    }
+    // PostgREST sérialise BIGINT parfois en string si > Number.MAX_SAFE_INTEGER.
+    // Sur 2.23M PS, les counts par savoir_faire sont au max ~100K → toujours
+    // safe en number. Conversion défensive quand même.
+    const count =
+      typeof row.count_ps === "number" ? row.count_ps : Number(row.count_ps ?? 0);
+    if (!Number.isFinite(count)) {
+      console.warn(
+        `[france-data-mcp] lister_savoir_faire_rpps: count_ps non parsable pour code=${row.code} (raw=${JSON.stringify(row.count_ps)}) — fallback 0`,
+      );
+    }
+    out.push({
+      code: row.code,
+      libelle: row.libelle ?? "",
+      count_ps: Number.isFinite(count) ? count : 0,
+    });
+  }
+  return out;
+}
+
+/**
+ * Compte les PS RPPS matching les filtres (RPC `count_rpps` V0.8). Sert de
+ * brique pour `densiteProfessionnelsSante` (cross-source RPPS+Melodi).
+ *
+ * `departement` omis ou null → comptage France entière. La RPC valide le
+ * format dept côté Postgres (regex identique aux autres RPCs RPPS).
+ */
+export async function countRpps(input: CountRppsInput = {}): Promise<number> {
+  if (input.departement !== undefined && input.departement !== null) {
+    assertValidDept(input.departement);
+  }
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("count_rpps", {
+    p_dept: input.departement ?? null,
+    p_profession_code: input.professionCode ?? null,
+    p_savoir_faire_code: input.savoirFaireCode ?? null,
+    p_mode_exercice_codes: input.modeExerciceCodes ?? [],
+    p_categorie_codes: input.categorieCodes ?? [],
+  });
+  if (error) throw new Error(formatRpcError("count_rpps", error));
+  // PostgREST sérialise un BIGINT en number JS (safe jusqu'à 2^53). La base
+  // RPPS ~2.23M lignes — aucun risque de dépassement.
+  if (typeof data !== "number") {
+    throw new Error(
+      `count_rpps returned unexpected type ${typeof data} (dept=${input.departement ?? "FRANCE"}, profession=${input.professionCode ?? "*"}, expected number, got: ${JSON.stringify(data)})`,
+    );
+  }
+  return data;
+}
 
 export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQueryResult> {
   const limit = clampLimit(input.limit);

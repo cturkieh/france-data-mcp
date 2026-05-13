@@ -103,12 +103,16 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.7.8 — en production.** Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp) (`io.github.cturkieh/france-data-mcp`), mcp.so et glama.ai. 25 tools avec annotations MCP + outputSchema (spec 2025-06-18, structuredContent émis), ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. **612 tests verts** (19 integration tests Supabase requièrent des creds locaux), TypeScript strict, Biome clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel). Sentry monitoring live (filtre bot-noise actif). V0.7.8 fix `npx -y france-data-mcp` shortcut sur npm 11.7+ / Node 22+ (champ `exports` étendu pour exposer le bin). Voir [CHANGELOG](CHANGELOG.md) pour l'historique.
+✅ **V0.8.0 — en production.** Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp) (`io.github.cturkieh/france-data-mcp`), mcp.so et glama.ai. **30 tools** avec annotations MCP + outputSchema (spec 2025-06-18, structuredContent émis), ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. **642 tests verts** (19 integration tests Supabase requièrent des creds locaux), TypeScript strict, Biome clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel). Sentry monitoring live (filtre bot-noise actif).
+
+V0.8 ajoute 5 tools croisant **INSEE Melodi** (population de référence) avec RPPS et FINESS : `population_par_commune`, `population_par_departement`, `densite_professionnels_sante` (méthodo DREES, ratio médecins/100k hab. + comparaison nationale), `densite_etablissements_sante` (labos / pharmacies / EHPAD / hôpitaux par famille FINESS), `lister_specialites_medicales` (découverte des codes savoir_faire RPPS pour le LLM).
+
+Voir [CHANGELOG](CHANGELOG.md) pour l'historique.
 
 ### Roadmap
 
-- [ ] **V0.8** — Tools composites santé (`panorama_sante_territoire`, densités), INSEE Melodi (séries macro communales)
-- [ ] **V0.9+** — Support DOM-COM, INSEE IRIS (démographie infra-communale)
+- [ ] **V0.8.1** — Densité commune (RPC `count_rpps_by_commune` via code postal), `panorama_sante_territoire` agrégateur, polish docs/installation-claude.md (drift count tools)
+- [ ] **V0.9+** — Support DOM-COM widening (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 
 ---
 
