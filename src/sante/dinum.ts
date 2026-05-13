@@ -269,13 +269,13 @@ export async function searchEntreprises(
   } = options;
 
   if (!q && !naf && !codePostal && !departement && !codeCommune && !center) {
-    throw new Error(
+    throw new RangeError(
       "searchEntreprises: au moins un critère est requis (q, naf, codePostal, departement, codeCommune ou center+radiusKm)",
     );
   }
 
   if (center && (radiusKm === undefined || radiusKm <= 0)) {
-    throw new Error("searchEntreprises: radiusKm > 0 requis quand center est fourni");
+    throw new RangeError("searchEntreprises: radiusKm > 0 requis quand center est fourni");
   }
 
   // L'API DINUM exige que `lat/long/radius` soient accompagnés d'un `q` (recherche
@@ -284,14 +284,14 @@ export async function searchEntreprises(
   // par défaut via le NAF si présent, sinon on signale l'incompatibilité.
   if (center && !q) {
     if (naf) {
-      throw new Error(
+      throw new RangeError(
         "searchEntreprises: l'API DINUM n'accepte pas `naf` + `center+radiusKm` directement. " +
           "Options : (1) `q='<terme>'` + center+radiusKm (recherche textuelle géolocalisée), " +
           "(2) `naf` + `codePostal`/`departement`/`codeCommune` (filtrage administratif), " +
           "(3) faire un reverseGeocode du center pour obtenir codeCommune puis filtrer.",
       );
     }
-    throw new Error(
+    throw new RangeError(
       "searchEntreprises: `center+radiusKm` requiert un paramètre `q` (recherche textuelle). " +
         "L'API DINUM ne supporte pas la recherche géographique pure.",
     );
@@ -356,7 +356,7 @@ export async function getEntrepriseBySiren(
   signal?: AbortSignal,
 ): Promise<LookupResult<Entreprise>> {
   if (!/^\d{9}$/.test(siren)) {
-    throw new Error(`getEntrepriseBySiren: SIREN invalide "${siren}" (attendu 9 chiffres)`);
+    throw new RangeError(`getEntrepriseBySiren: SIREN invalide "${siren}" (attendu 9 chiffres)`);
   }
   const result = await searchEntreprises({ q: siren, perPage: 5, onlyActive: false, signal });
   const match = result.entreprises.find((e) => e.siren === siren);

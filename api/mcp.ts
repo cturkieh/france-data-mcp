@@ -196,8 +196,17 @@ async function handleRpc(
       const response = success(id, {
         protocolVersion: PROTOCOL_VERSION,
         serverInfo: SERVER_INFO,
+        // `resources` et `prompts` annoncés (listes vides actuellement) pour
+        // (1) supprimer les warnings Smithery ranking et (2) éviter les
+        // -32601 Method not found côté clients qui sondent ces capacités
+        // par convenance après initialize. Sémantique : "le serveur supporte
+        // la primitive mais n'en publie aucune entrée". Si on ajoute un jour
+        // une vraie ressource/prompt, basculer `listChanged: true` (la spec
+        // MCP attend alors une notification de changement).
         capabilities: {
           tools: { listChanged: false },
+          resources: { listChanged: false },
+          prompts: { listChanged: false },
         },
         instructions:
           "Données publiques françaises pour analyse territoriale (santé, démographie, entreprises, géocodage). Mentionne toujours la source officielle (FINESS/ANS, INSEE, IGN, DINUM, etc.) quand tu cites des chiffres.",
@@ -226,6 +235,19 @@ async function handleRpc(
       });
       emit(ctx, start, request.method, { status: 200, outcome: "success" });
       return response;
+    }
+
+    // Stubs MCP : annoncés dans `initialize.capabilities` mais aucune entrée
+    // exposée actuellement. Préférable à un -32601 qui ferait paniquer Smithery
+    // ranker et certains clients MCP qui sondent ces capacités par convenance.
+    if (request.method === "resources/list") {
+      emit(ctx, start, request.method, { status: 200, outcome: "success" });
+      return success(id, { resources: [] });
+    }
+
+    if (request.method === "prompts/list") {
+      emit(ctx, start, request.method, { status: 200, outcome: "success" });
+      return success(id, { prompts: [] });
     }
 
     if (request.method === "tools/call") {

@@ -131,7 +131,7 @@ export function searchEtablissementsFiness(
   const { categories, codePostal, departement, codeCommune, center, radiusKm, limit } = options;
 
   if (center && (radiusKm === undefined || radiusKm <= 0)) {
-    throw new Error("searchEtablissementsFiness: radiusKm > 0 requis quand center est fourni");
+    throw new RangeError("searchEtablissementsFiness: radiusKm > 0 requis quand center est fourni");
   }
 
   const radiusMeters = center && radiusKm !== undefined ? radiusKm * 1000 : null;

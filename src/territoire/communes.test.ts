@@ -69,6 +69,13 @@ describe("searchCommunes", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  // Régression FRANCE-DATA-MCP-2 : avant V0.7.3 le throw était `Error` standard,
+  // qui tombait en JSON-RPC -32603 internal_error + capture Sentry parasite.
+  // RangeError → mapping -32602 bad_request via api/mcp.ts.
+  it("throw RangeError (pas Error standard) quand aucun critère (FRANCE-DATA-MCP-2)", async () => {
+    await expect(searchCommunes({})).rejects.toThrow(RangeError);
+  });
+
   it("renvoie tableau vide si aucune commune trouvée", async () => {
     fetchMock.mockResolvedValue(jsonResponse([]));
     const villes = await searchCommunes({ nom: "ZZZTOPONYMEINEXISTANT" });

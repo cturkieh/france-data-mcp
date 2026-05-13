@@ -166,6 +166,15 @@ describe("searchEntreprises", () => {
     await expect(searchEntreprises({})).rejects.toThrow(/au moins un critère/);
   });
 
+  // Régression FRANCE-DATA-MCP-2 : validators DINUM throw RangeError, pas Error
+  // standard (sinon mapping JSON-RPC -32603 + Sentry parasite cf. api/mcp.ts).
+  it("throw RangeError sur les inputs invalides (FRANCE-DATA-MCP-2)", async () => {
+    await expect(searchEntreprises({})).rejects.toThrow(RangeError);
+    await expect(searchEntreprises({ center: { lon: 4.7, lat: 49.7 } })).rejects.toThrow(
+      RangeError,
+    );
+  });
+
   it("rejette si center sans radiusKm", async () => {
     await expect(searchEntreprises({ center: { lon: 4.7, lat: 49.7 } })).rejects.toThrow(
       /radiusKm/,
@@ -553,6 +562,7 @@ describe("getEntrepriseBySiren", () => {
 
   it("rejette les SIREN invalides sans appeler l'API", async () => {
     await expect(getEntrepriseBySiren("123")).rejects.toThrow(/SIREN invalide/);
+    await expect(getEntrepriseBySiren("123")).rejects.toThrow(RangeError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __ensureInitForTesting,
   __resetSentryForTesting,
+  beforeSendEvent,
   captureMcpError,
   flushSentry,
+  isBotNoiseEvent,
   isSentryEnabled,
 } from "./sentry.js";
 
@@ -225,6 +227,218 @@ describe("Sentry integration", () => {
       vi.stubEnv("SENTRY_ENVIRONMENT", "staging");
       __ensureInitForTesting();
       expect(Sentry.init).toHaveBeenCalledWith(expect.objectContaining({ environment: "staging" }));
+    });
+  });
+});
+
+describe("beforeSendEvent (FRANCE-DATA-MCP-1 bot noise filter)", () => {
+  function makeEvent(opts: {
+    method?: string;
+    exMessage?: string;
+    headers?: Record<string, string>;
+  }): Sentry.ErrorEvent {
+    const tags: Record<string, string> = {};
+    if (opts.method) tags["mcp.method"] = opts.method;
+    // `type: undefined` est la signature `ErrorEvent` (vs `TransactionEvent`).
+    const event: Sentry.ErrorEvent = { tags, type: undefined };
+    if (opts.exMessage !== undefined) {
+      event.exception = { values: [{ type: "TypeError", value: opts.exMessage }] };
+    }
+    if (opts.headers) {
+      event.request = { headers: opts.headers };
+    }
+    return event;
+  }
+
+  describe("isBotNoiseEvent", () => {
+    it("drop si handler_root + 'Cannot read prop'", () => {
+      expect(
+        isBotNoiseEvent(
+          makeEvent({
+            method: "handler_root",
+            exMessage: "Cannot read properties of undefined (reading 'method')",
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it("drop si handler_root + 'is not iterable'", () => {
+      expect(
+        isBotNoiseEvent(makeEvent({ method: "handler_root", exMessage: "x is not iterable" })),
+      ).toBe(true);
+    });
+
+    it("drop si handler_root + 'Unexpected token'", () => {
+      expect(
+        isBotNoiseEvent(
+          makeEvent({ method: "handler_root", exMessage: "Unexpected token { in JSON" }),
+        ),
+      ).toBe(true);
+    });
+
+    it("drop si handler_root + 'Cannot destructure'", () => {
+      expect(
+        isBotNoiseEvent(
+          makeEvent({
+            method: "handler_root",
+            exMessage: "Cannot destructure property 'method' of 'request' as it is undefined",
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it("drop si handler_root + 'Cannot convert undefined or null'", () => {
+      expect(
+        isBotNoiseEvent(
+          makeEvent({
+            method: "handler_root",
+            exMessage: "Cannot convert undefined or null to object",
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it("drop si handler_root + 'is not a function'", () => {
+      expect(
+        isBotNoiseEvent(
+          makeEvent({
+            method: "handler_root",
+            exMessage: "body.method.toLowerCase is not a function",
+          }),
+        ),
+      ).toBe(true);
+    });
+
+    it("garde si handler_root mais message non-noise (genuine bug invariant V0.7.2)", () => {
+      expect(
+        isBotNoiseEvent(
+          makeEvent({
+            method: "handler_root",
+            exMessage: "extractIp: unexpected header shape",
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it("garde si pattern noise mais mcp.method ≠ handler_root", () => {
+      expect(
+        isBotNoiseEvent(
+          makeEvent({
+            method: "tools/call",
+            exMessage: "Cannot read properties of undefined",
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it("garde si event sans exception (rien à matcher)", () => {
+      expect(isBotNoiseEvent(makeEvent({ method: "handler_root" }))).toBe(false);
+    });
+  });
+
+  describe("beforeSendEvent pipeline", () => {
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    it("retourne null sur bot noise (drop)", () => {
+      const event = makeEvent({
+        method: "handler_root",
+        exMessage: "Cannot read properties of null",
+      });
+      expect(beforeSendEvent(event)).toBeNull();
+    });
+
+    it("logge un console.warn distinctif lors du drop (observabilité Vercel)", () => {
+      const event = makeEvent({
+        method: "handler_root",
+        exMessage: "Cannot read properties of undefined",
+      });
+      beforeSendEvent(event);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("dropping bot-noise event"),
+      );
+    });
+
+    it("retourne l'event sanitizé sur genuine error", () => {
+      const event = makeEvent({
+        method: "tools/call",
+        exMessage: "tool exploded",
+        headers: { authorization: "Bearer x", "x-api-key": "secret", "user-agent": "Claude/1.0" },
+      });
+      const out = beforeSendEvent(event);
+      expect(out).not.toBeNull();
+      const headers = (out as Sentry.ErrorEvent).request?.headers as
+        | Record<string, string>
+        | undefined;
+      expect(headers?.authorization).toBeUndefined();
+      expect(headers?.["x-api-key"]).toBeUndefined();
+      expect(headers?.["user-agent"]).toBe("Claude/1.0");
+    });
+
+    it("drop tous les headers sensibles connus (proxy/csrf/cloud auth)", () => {
+      // Couverture OWASP secret-headers + infra fréquentes (Vercel, AWS).
+      const event = makeEvent({
+        method: "tools/call",
+        exMessage: "tool exploded",
+        headers: {
+          authorization: "Bearer x",
+          "proxy-authorization": "Basic y",
+          cookie: "sid=z",
+          "set-cookie": "sid=z; HttpOnly",
+          "x-api-key": "secret",
+          "x-csrf-token": "csrf",
+          "x-xsrf-token": "xsrf",
+          "x-amz-security-token": "AQoDY...",
+          "x-vercel-protection-bypass": "preview-token",
+          "user-agent": "Claude/1.0",
+          // Casing-insensitive : drop quand même.
+          "X-API-KEY": "second",
+        },
+      });
+      const out = beforeSendEvent(event);
+      const headers = (out as Sentry.ErrorEvent).request?.headers as
+        | Record<string, string>
+        | undefined;
+      for (const sensitive of [
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-csrf-token",
+        "x-xsrf-token",
+        "x-amz-security-token",
+        "x-vercel-protection-bypass",
+        "X-API-KEY",
+      ]) {
+        expect(headers?.[sensitive]).toBeUndefined();
+      }
+      expect(headers?.["user-agent"]).toBe("Claude/1.0");
+    });
+
+    it("ne mute pas l'event d'entrée (immutabilité, clone)", () => {
+      const event = makeEvent({
+        method: "tools/call",
+        exMessage: "tool exploded",
+        headers: { authorization: "Bearer secret", "user-agent": "Claude/1.0" },
+      });
+      beforeSendEvent(event);
+      // L'event d'origine doit toujours avoir authorization (pas muté).
+      expect(
+        (event.request?.headers as Record<string, string> | undefined)?.authorization,
+      ).toBe("Bearer secret");
+    });
+
+    it("ne crash pas si event sans request", () => {
+      const event = makeEvent({ method: "tools/call", exMessage: "boom" });
+      expect(() => beforeSendEvent(event)).not.toThrow();
     });
   });
 });

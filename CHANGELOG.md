@@ -4,6 +4,104 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.7.3] — 2026-05-13
+
+**Hardening error handling : RangeError → -32602, Sentry bot-noise filter,
+stubs MCP `resources/list` + `prompts/list`.**
+
+Réagit à 2 events Sentry observés en prod post-V0.7.2 :
+
+- **FRANCE-DATA-MCP-2** : `searchCommunes` (et ~24 autres validators caller-fault)
+  throwaient `Error` standard, mappés en JSON-RPC `-32603 internal_error` avec
+  capture Sentry parasite, alors que l'input invalide est une faute caller
+  (`-32602 bad_request`).
+- **FRANCE-DATA-MCP-1** : bot scanner JSON-RPC malformé tombe dans le catch
+  root → Sentry-flood récurrent dès qu'un scanner balaye l'endpoint.
+
+### Ajouté
+
+- **`requireLonLatStrict(args)`** (`api/tools.ts`) : nouveau helper qui factorise
+  l'extraction `lon`/`lat` via `coerceNumber` (rejet strict des inputs non-numériques)
+  + throw `RangeError` si absent. Appliqué aux 2 handlers `etablissements_finess_in_radius`
+  et `professionnels_in_radius`. `reverse_geocode` garde sa sémantique laxiste
+  `Number() + Number.isFinite()` (documenté dans la JSDoc).
+- **`isBotNoiseEvent(event)`** + **`beforeSendEvent(event)`** + **`sanitizeEventHeaders(event)`**
+  exportés dans `api/_lib/sentry.ts`. Pipeline `beforeSend` :
+  1. Drop si `tags['mcp.method'] === 'handler_root'` ET message matche
+     `BOT_NOISE_PATTERNS` (6 entrées : `Cannot read prop`, `Cannot destructure prop`,
+     `Cannot convert undefined or null`, `is not iterable`, `is not a function`,
+     `Unexpected token`).
+  2. `console.warn` distinctif au drop (observabilité Vercel JSON logs, anomaly
+     detection possible via grep `bot-noise event`).
+  3. Sinon, sanitize headers via clone immutable (pas de mutation in-place).
+- **`SENSITIVE_HEADER_NAMES`** : 9 headers droppés (OWASP + infra Vercel/AWS) :
+  `authorization`, `proxy-authorization`, `cookie`, `set-cookie`, `x-api-key`,
+  `x-csrf-token`, `x-xsrf-token`, `x-amz-security-token`, `x-vercel-protection-bypass`.
+  Match case-insensitive.
+- **Stubs MCP `resources/list`** → `{ resources: [] }` et **`prompts/list`** →
+  `{ prompts: [] }`. Déclarés dans `initialize.capabilities` aux côtés de `tools`
+  (`listChanged: false`). Supprime les warnings Smithery ranker + les `-32601`
+  côté clients qui sondent ces capacités après initialize.
+
+### Modifié
+
+- **24 validators caller-fault** : `throw new Error` → `throw new RangeError`.
+  Sites : `src/territoire/communes.ts:95` (FRANCE-DATA-MCP-2 root cause),
+  `src/sante/dinum.ts` (5 sites `searchEntreprises` + `getEntrepriseBySiren`),
+  `src/sante/finess.ts:134` (`searchEtablissementsFiness`), `src/sante/finess-db.ts:142`
+  (`getFinessByNumFiness` via `assertValidNumFiness` réutilisé), `api/tools.ts`
+  (~16 sites : `parseFamilles` 2×, `parseStringArray` 3×, handlers 11×).
+- **`getFinessByNumFiness`** utilise désormais `assertValidNumFiness` (helper
+  shared dans `db-helpers.ts`, déjà adopté par `cross-source.ts`). Élimine la
+  régex dupliquée + bonus `.trim()` sur l'input. Message d'erreur uniforme.
+- **`sanitizeEventHeaders`** retourne maintenant un clone (spread `{ ...event, request: {...} }`)
+  au lieu de muter l'event d'entrée. Idempotent si appelé plusieurs fois par Sentry SDK.
+- **`initialize.capabilities`** : ajout de `resources: { listChanged: false }`
+  et `prompts: { listChanged: false }`. Si une vraie ressource/prompt est
+  ajoutée plus tard, basculer `listChanged: true` (spec MCP).
+
+### Tests
+
+- 603 tests verts (598 → 603, +5 nets). Nouveaux :
+  - `sentry.test.ts` : tests `isBotNoiseEvent` (6 patterns + edge cases),
+    `beforeSendEvent` pipeline (drop, log warn, immutability, sanitize),
+    `SENSITIVE_HEADER_NAMES` coverage (proxy/csrf/cloud auth + case-insensitive).
+  - Régressions RangeError sur `searchCommunes`, `searchEntreprises`,
+    `getEntrepriseBySiren`, `getFinessByNumFiness`.
+- `tsc` clean sur `tsconfig.json` + `tsconfig.api.json`.
+
+### Discipline post-fix appliquée
+
+- **`/simplify`** (3 agents reuse/quality/efficiency) → 7 findings appliqués :
+  `assertValidNumFiness` réutilisé, `requireLonLatStrict` factorisé, patterns
+  étendus (3 ajoutés), immutability clone, log warn drop, em-dashes corrigés
+  (5 sites), JSDoc trompeur retiré.
+- **`/review` pass 1** (3 agents) → 4 findings appliqués : JSDoc orpheline
+  (`categorieCodesFromArgs` qui flottait au-dessus de `requireLonLatStrict`),
+  `SENSITIVE_HEADER_NAMES` élargi de 3 → 9 entrées (OWASP + Vercel + AWS),
+  commentaire `beforeSend` redondant retiré, test redondant `sans tags` supprimé.
+- **`/review` pass 2** (2 agents) → **VERDICT GO COMMIT**. 6 nits LOW
+  backloguées V0.7.4 (log warn truncate, chained exceptions, `nextCursor` stubs,
+  pattern `Unexpected end of JSON input`, audit `coerceNumber` RangeError).
+
+## [0.7.2] — 2026-05-12
+
+**Sentry error monitoring + wrapper npm `france-data-mcp` + sanitization
+credentials.**
+
+- Sentry `@sentry/node` 10.x sur l'endpoint MCP public. Capture des 500
+  internes uniquement (pas de tracing). No-op transparent si `SENTRY_DSN`
+  absent. Helper `reportInternalError` centralise console.error + emit +
+  capture sur 4 callsites. Try/finally global pour `flushSentry`, catch root
+  pour exceptions hors-boucle (invariant "100% des 500 capturés").
+- Wrapper npm `bin/cli.ts` forwarde stdio NDJSON → endpoint HTTPS Vercel
+  pour les clients MCP qui ne supportent pas HTTP distant (Claude Desktop).
+  `npx france-data-mcp`. Override `FRANCE_DATA_MCP_URL` pour miroir privé.
+- Source de vérité unique pour la version : `src/core/version.ts`.
+- `sanitizeReason(reason)` : redact des credentials dans les messages d'erreur
+  fetch (Node 22 TypeError contient l'URL userinfo complète).
+- 586 tests verts (525 → 586, +61).
+
 ## [0.7.1] — 2026-05-12
 
 **Fallback INSEE multi-sites + optimisation rate limit reconcilier**

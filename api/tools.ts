@@ -77,6 +77,24 @@ const RPPS_INCLUDE_CATEGORIES_SCHEMA = {
 } as const;
 
 /**
+ * Extrait et valide les coordonnées `lon`/`lat` des arguments d'un tool, en
+ * passant par `coerceNumber` (rejette string non-numérique, boolean, etc.).
+ * Throw RangeError → -32602 bad_request si l'un des deux est absent ou invalide.
+ *
+ * Note : N'utilise PAS la sémantique laxiste `Number()` + `Number.isFinite()`
+ * de `reverse_geocode` (qui accepte des inputs ouverts) : applicable aux tools
+ * où le contrat MCP est strict (in_radius patterns).
+ */
+function requireLonLatStrict(args: Record<string, unknown>): { lon: number; lat: number } {
+  const lon = coerceNumber(args.lon, "lon");
+  const lat = coerceNumber(args.lat, "lat");
+  if (lon === undefined || lat === undefined) {
+    throw new RangeError("lon et lat (number) requis");
+  }
+  return { lon, lat };
+}
+
+/**
  * Traduit les flags MCP `include_etudiants` / `include_agents_publics` en
  * array `categorieCodes` consommable par les 3 RPCs RPPS. Source unique
  * pour garantir la même sémantique sur les 3 handlers.
@@ -203,7 +221,10 @@ function asFinessFamille(v: unknown): FinessFamilleQuery | undefined {
 function parseFamilles(v: unknown): FinessFamilleQuery[] | undefined {
   if (v === undefined || v === null) return undefined;
   if (!Array.isArray(v)) {
-    throw new Error(
+    // RangeError partout dans les validators de tools → JSON-RPC -32602
+    // (faute caller). Sans cette typage, ces inputs invalides tombaient en
+    // -32603 internal_error + capture Sentry parasite (cf. FRANCE-DATA-MCP-2).
+    throw new RangeError(
       `familles doit être un tableau (reçu ${typeof v}). Valeurs autorisées : ${FINESS_FAMILLE_INPUTS.join(", ")}.`,
     );
   }
@@ -211,7 +232,7 @@ function parseFamilles(v: unknown): FinessFamilleQuery[] | undefined {
   for (const item of v) {
     const f = asFinessFamille(item);
     if (!f) {
-      throw new Error(
+      throw new RangeError(
         `famille FINESS invalide : "${String(item)}". Valeurs autorisées : ${FINESS_FAMILLE_INPUTS.join(", ")}.`,
       );
     }
@@ -232,17 +253,17 @@ function parseFamilles(v: unknown): FinessFamilleQuery[] | undefined {
 function parseStringArray(v: unknown, paramName: string): string[] | undefined {
   if (v === undefined || v === null) return undefined;
   if (!Array.isArray(v)) {
-    throw new Error(`${paramName} doit être un tableau de strings (reçu ${typeof v}).`);
+    throw new RangeError(`${paramName} doit être un tableau de strings (reçu ${typeof v}).`);
   }
   if (v.length === 0) return undefined;
   for (const item of v) {
     if (typeof item !== "string") {
-      throw new Error(
+      throw new RangeError(
         `${paramName}: chaque élément doit être une string (reçu ${typeof item} dans le tableau).`,
       );
     }
     if (item === "") {
-      throw new Error(
+      throw new RangeError(
         `${paramName}: la chaîne vide n'est pas autorisée — passer le tableau sans cet élément ou omettre le paramètre pour ne pas filtrer.`,
       );
     }
@@ -471,7 +492,10 @@ async function searchByNafInRadius(params: {
 
   const fallbackDept = deptFromCommune(reverse?.codeCommune);
   if (!fallbackDept) {
-    throw new Error(
+    // RangeError → caller a fourni un point hors zone administrative française
+    // (typique : coords océan, étranger, ou code postal sans rattachement INSEE).
+    // Faute caller → -32602, pas internal_error.
+    throw new RangeError(
       `entreprises_in_radius: impossible de déduire le département du point lon=${center.lon} lat=${center.lat} via reverseGeocode (codeCommune="${reverse?.codeCommune ?? "absent"}"). Fournir 'departement' ou 'codePostal' explicitement.`,
     );
   }
@@ -568,7 +592,7 @@ export const TOOLS: McpTool[] = [
       required: ["code"],
     },
     handler: async (args) => {
-      if (typeof args.code !== "string") throw new Error("code (string) requis");
+      if (typeof args.code !== "string") throw new RangeError("code (string) requis");
       return getCommuneByCode(args.code);
     },
   },
@@ -593,7 +617,7 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args) => {
       const adresse = asString(args.adresse);
-      if (!adresse) throw new Error("adresse (string) requise");
+      if (!adresse) throw new RangeError("adresse (string) requise");
       const opts: Parameters<typeof geocode>[1] = {};
       const codePostal = asString(args.codePostal);
       const codeCommune = asString(args.codeCommune);
@@ -618,7 +642,7 @@ export const TOOLS: McpTool[] = [
       const lon = Number(args.lon);
       const lat = Number(args.lat);
       if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
-        throw new Error("lon et lat (number) requis");
+        throw new RangeError("lon et lat (number) requis");
       }
       return reverseGeocode({ lon, lat });
     },
@@ -709,7 +733,7 @@ export const TOOLS: McpTool[] = [
       required: ["siren"],
     },
     handler: async (args) => {
-      if (typeof args.siren !== "string") throw new Error("siren (string) requis");
+      if (typeof args.siren !== "string") throw new RangeError("siren (string) requis");
       return getEntrepriseBySiren(args.siren);
     },
   },
@@ -850,11 +874,7 @@ export const TOOLS: McpTool[] = [
       required: ["lon", "lat"],
     },
     handler: async (args) => {
-      const lon = coerceNumber(args.lon, "lon");
-      const lat = coerceNumber(args.lat, "lat");
-      if (lon === undefined || lat === undefined) {
-        throw new Error("lon et lat (number) requis");
-      }
+      const { lon, lat } = requireLonLatStrict(args);
       const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
       // Bornes radius validées au DB layer (validateRadiusKm dans
       // finess-db.ts/ameli-db.ts via db-helpers) — source unique.
@@ -903,7 +923,7 @@ export const TOOLS: McpTool[] = [
     handler: async (args) => {
       const famille = asFinessFamille(args.categorie);
       if (!famille) {
-        throw new Error(`categorie (string) requis : ${FINESS_FAMILLE_INPUTS.join(", ")}.`);
+        throw new RangeError(`categorie (string) requis : ${FINESS_FAMILLE_INPUTS.join(", ")}.`);
       }
       const departement = asString(args.departement);
       const codeInsee = asString(args.code_insee);
@@ -986,11 +1006,7 @@ export const TOOLS: McpTool[] = [
       required: ["lon", "lat"],
     },
     handler: async (args) => {
-      const lon = coerceNumber(args.lon, "lon");
-      const lat = coerceNumber(args.lat, "lat");
-      if (lon === undefined || lat === undefined) {
-        throw new Error("lon et lat (number) requis");
-      }
+      const { lon, lat } = requireLonLatStrict(args);
       const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
       // Bornes radius validées au DB layer (cf. ameli-db.ts) — source unique.
       const specialiteCodes = parseStringArray(args.specialite_codes, "specialite_codes");
@@ -1057,7 +1073,7 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args) => {
       const departement = asString(args.departement);
-      if (!departement) throw new Error("departement (string) requis");
+      if (!departement) throw new RangeError("departement (string) requis");
       const specialiteCode = asString(args.specialite_code);
       const typePsCode = asString(args.type_ps_code);
       const limit = coerceNumber(args.limit, "limit");
@@ -1135,9 +1151,9 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args) => {
       const center = args.center as { lat: number; lon: number } | undefined;
-      if (!center) throw new Error("center {lat, lon} requis");
+      if (!center) throw new RangeError("center {lat, lon} requis");
       const radiusKm = coerceNumber(args.radius_km, "radius_km");
-      if (radiusKm === undefined) throw new Error("radius_km (number) requis");
+      if (radiusKm === undefined) throw new RangeError("radius_km (number) requis");
       const limit = coerceNumber(args.limit, "limit");
       const professionCodes = parseStringArray(args.profession_codes, "profession_codes");
       const savoirFaireCodes = parseStringArray(args.savoir_faire_codes, "savoir_faire_codes");
@@ -1170,7 +1186,7 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args) => {
       const departement = asString(args.departement);
-      if (!departement) throw new Error("departement (string) requis");
+      if (!departement) throw new RangeError("departement (string) requis");
       const professionCode = asString(args.profession_code);
       const savoirFaireCode = asString(args.savoir_faire_code);
       const modeExerciceCode = asString(args.mode_exercice_code);

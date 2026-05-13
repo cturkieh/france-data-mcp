@@ -7,6 +7,7 @@ import {
 } from "../core/query-metadata.js";
 import { getAnonClient } from "../storage/supabase.js";
 import {
+  assertValidNumFiness,
   clampLimit,
   expectRpcRows,
   formatRpcError,
@@ -139,12 +140,10 @@ export async function getFinessByCategorie(input: ByCategorieInput): Promise<Fin
  * (cf. `src/core/lookup-result.ts`).
  */
 export async function getFinessByNumFiness(numFiness: string): Promise<LookupResult<FinessResult>> {
-  if (!/^\d{9}$/.test(numFiness)) {
-    throw new Error(`[france-data-mcp] num_finess must be 9 digits, got "${numFiness}"`);
-  }
+  const trimmed = assertValidNumFiness(numFiness);
   const supabase = getAnonClient();
   const { data, error } = await supabase.rpc("finess_by_num_finess", {
-    p_num_finess: numFiness,
+    p_num_finess: trimmed,
   });
   if (error) {
     throw new Error(formatRpcError("finess_by_num_finess", error));

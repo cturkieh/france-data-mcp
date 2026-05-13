@@ -191,7 +191,9 @@ describe("getFinessByNumFiness LookupResult (V0.4.3 migration)", () => {
   });
 
   it("rejette un num_finess mal formé sans appeler le RPC", async () => {
-    await expect(getFinessByNumFiness("123")).rejects.toThrow(/num_finess must be 9 digits/);
+    // V0.7.3 : utilise `assertValidNumFiness` shared helper, message "invalide ... attendu 9 chiffres".
+    await expect(getFinessByNumFiness("123")).rejects.toThrow(/num_finess invalide/);
+    await expect(getFinessByNumFiness("123")).rejects.toThrow(RangeError);
     expect(mockRpc).not.toHaveBeenCalled();
   });
 });
