@@ -27,16 +27,26 @@ import {
 import { type CountFinessInput, countFiness } from "./finess-db.js";
 import type { FinessFamilleQuery } from "./finess-categories.js";
 import { type CountRppsInput, countRpps } from "./rpps-db.js";
+import { RPPS_MODE_EXERCICE } from "./rpps-types.js";
 
 /** Code profession ANS pour Médecin (TRE_R94). */
 export const PROFESSION_CODE_MEDECIN = "10";
 
 /**
  * Modes d'exercice composant l'« activité régulière » au sens DREES :
- * libéral (1), salarié (2), mixte (3). Exclut remplaçants (4), bénévoles
- * (5), autres (6) — qui ne participent pas aux indicateurs de couverture.
+ * libéral (L), salarié (S), mixte (M). Exclut remplaçants (R), bénévoles (B),
+ * autres (A) — qui ne participent pas aux indicateurs de couverture.
+ *
+ * IMPORTANT : les codes ANS sont ALPHABÉTIQUES en base RPPS, pas numériques
+ * (cf. rpps-types.ts RPPS_MODE_EXERCICE). V0.8.0 utilisait à tort `["1","2","3"]`
+ * → 0 match → densité=0 silencieux. Régression chopped en smoke test prod
+ * post-publish, fix V0.8.1.
  */
-export const MODE_EXERCICE_ACTIVITE_REGULIERE = ["1", "2", "3"] as const;
+export const MODE_EXERCICE_ACTIVITE_REGULIERE = [
+  RPPS_MODE_EXERCICE.LIBERAL,
+  RPPS_MODE_EXERCICE.SALARIE,
+  RPPS_MODE_EXERCICE.MIXTE,
+] as const;
 
 const PER_100K_FACTOR = 100_000;
 

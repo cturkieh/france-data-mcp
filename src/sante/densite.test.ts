@@ -60,7 +60,7 @@ describe("densiteProfessionnelsSante", () => {
       departement: "75",
       professionCode: "10",
       savoirFaireCode: null,
-      modeExerciceCodes: ["1", "2", "3"],
+      modeExerciceCodes: ["L", "S", "M"],
       categorieCodes: [],
     });
     expect(result.zone.zone).toBe("75");
@@ -69,7 +69,7 @@ describe("densiteProfessionnelsSante", () => {
     expect(result.zone.populationAnnee).toBe(2023);
     expect(result.zone.densitePour100k).toBe(round2((7900 / 2103778) * 100_000));
     expect(result.parametres.professionCode).toBe("10");
-    expect(result.parametres.modeExerciceCodes).toEqual(["1", "2", "3"]);
+    expect(result.parametres.modeExerciceCodes).toEqual(["L", "S", "M"]);
     expect(result.parametres.methodologie).toContain("DREES");
     expect(result.comparaisonNationale).toBeUndefined();
   });

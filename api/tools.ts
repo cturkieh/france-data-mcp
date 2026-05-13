@@ -1627,7 +1627,7 @@ export const TOOLS: McpTool[] = [
         mode_exercice_codes: {
           type: "array",
           items: { type: "string" },
-          description: `Codes mode_exercice ANS à inclure. Default ['1','2','3'] (libéral + salarié + mixte = activité régulière DREES). Passer ['1'] pour libéraux seuls. ${RPPS_MODE_EXERCICE_HINT}`,
+          description: `Codes mode_exercice ANS à inclure. Default ['L','S','M'] (libéral + salarié + mixte = activité régulière DREES). Passer ['L'] pour libéraux seuls. ${RPPS_MODE_EXERCICE_HINT}`,
         },
         compare_national: {
           type: "boolean",
