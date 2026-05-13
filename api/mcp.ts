@@ -235,6 +235,9 @@ async function handleRpc(
           // par les clients pour décider si une confirmation utilisateur
           // est nécessaire avant invocation. Omis si non déclaré.
           ...(t.annotations ? { annotations: t.annotations } : {}),
+          // Spec MCP 2025-06-18 §6.3 : outputSchema permet aux clients de
+          // type-check les réponses et de mieux grounder un LLM consommateur.
+          ...(t.outputSchema ? { outputSchema: t.outputSchema } : {}),
         })),
       });
       emit(ctx, start, request.method, { status: 200, outcome: "success" });
@@ -339,8 +342,20 @@ async function handleRpc(
         outcome: "success",
         extra: { rl_backend: rl.backend, rl_remaining: rl.remaining },
       });
+      // Spec MCP 2025-06-18 §6.3 : si le tool a un `outputSchema`, on émet aussi
+      // `structuredContent` pour que les clients MCP modernes (Inspector,
+      // Claude Desktop récent) puissent valider la réponse contre le schema
+      // déclaré dans `tools/list`. Le `content` text reste pour rétrocompat.
+      // `structuredContent` doit être un object (le SDK officiel typé
+      // `{ [key: string]: unknown }`). On exclut donc null, arrays et primitives.
+      const wantsStructured =
+        tool.outputSchema !== undefined &&
+        result !== null &&
+        typeof result === "object" &&
+        !Array.isArray(result);
       return success(id, {
         content: [{ type: "text", text: resultText }],
+        ...(wantsStructured ? { structuredContent: result } : {}),
       });
     }
 

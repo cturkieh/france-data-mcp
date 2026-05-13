@@ -4,6 +4,74 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.7.5] — 2026-05-13
+
+**Smithery quick win #2 : outputSchema sur 22 tools + structuredContent.**
+
+Spec MCP 2025-06-18 §6.3 : `outputSchema` permet aux clients de type-check
+les réponses et de mieux grounder un LLM consommateur. Score Smithery
+attendu : +10.37pt (80 → 90+/100).
+
+### Ajouté
+
+- **6 patterns JSON Schema réutilisables** déclarés en tête `api/tools.ts` :
+  - `LOOKUP_RESULT_OUTPUT_SCHEMA` : discriminé par `found`. `required: ["found", "lookupStatus"]`
+    (validé contre `src/core/lookup-result.ts` qui garantit l'invariant).
+  - `QUERY_RESULT_OUTPUT_SCHEMA` : `{count, results, truncated?, query_metadata?, freshness?}`.
+    `truncated` optional (les tools de listing exhaustif `lister_*_ameli` ne le mettent pas).
+  - `DINUM_QUERY_OUTPUT_SCHEMA` : shape native DINUM `{total, page, perPage, totalPages, entreprises, fallback?}`.
+    Schema dédié car le handler `entreprises_in_radius` expose la pagination DINUM telle quelle (pas de normalisation `count/results`).
+  - `COVERAGE_OUTPUT_SCHEMA` : audit de couverture FINESS vs SIRENE avec
+    `coverage_ratio` nullable (zone rurale + NAF rare → `sirene_sirets === 0` → ratio non calculable).
+  - `DATA_FRESHNESS_OUTPUT_SCHEMA` : tous les fields runtime-nullable typés `["string" | "number", "null"]`
+    (1er déploiement → aucun succès enregistré, signal alarmant à propager au caller).
+- **22 outputSchema assignments** sur les 25 tools : 9 LOOKUP, 11 QUERY (dont 2 lister_*),
+  1 DINUM_QUERY, 1 COVERAGE, 1 DATA_FRESHNESS. Les 3 tools spec-violating
+  (`autocomplete_commune` array-root, `geocode_adresse` / `reverse_geocode` nullable)
+  n'ont volontairement pas d'outputSchema : spec MCP exige `type: "object"` littéral au root
+  et un schema invalide ferait planter les clients stricts (Inspector v0.10+).
+- **`structuredContent` dans `tools/call` response** (`api/mcp.ts`) : émis quand
+  `tool.outputSchema` est défini ET result est un object non-array non-null. Permet
+  aux clients MCP modernes (Inspector, Claude Desktop récent) de valider la réponse
+  contre le schema déclaré.
+- **Type `McpTool.outputSchema?: Record<string, unknown>`** : optional, non-breaking
+  pour les tools sans schema.
+- **`lookupStatus`** ajouté manuellement aux 3 branches de `professionnel_by_rpps`
+  (le tool a des champs custom `source`/`fhir`/`ans_fhir_status` incompatibles avec
+  les helpers `lookupFound`/`lookupNotFound` generic). Conforme au `LOOKUP_RESULT_OUTPUT_SCHEMA`
+  qui requiert `lookupStatus`.
+
+### Tests
+
+- **606 tests verts** (603 → 606, +3 régressions outputSchema declarations).
+- 3 nouveaux tests dans `api/tools.test.ts` : (1) 22 tools ont outputSchema,
+  (2) 3 tools spec-violating n'ont volontairement pas d'outputSchema,
+  (3) chaque outputSchema déclaré a `type: "object"`.
+
+### Discipline post-fix
+
+- `/review` pass 1 (3 agents code-simplifier + code-reviewer + silent-failure-hunter) →
+  **NO-GO COMMIT** initial avec 8 findings :
+  - 2 CRITICAL (ARRAY_RESULT viole spec, mapping QUERY_RESULT faux sur 4 tools)
+  - 4 HIGH (DATA_FRESHNESS non-nullable, OBJECT_RESULT ne couvre pas null,
+    DINUM/COVERAGE shape mismatch, structuredContent absent)
+  - 2 MEDIUM (LOOKUP.lookupStatus required, JSDoc trompeurs)
+- 8 fixes appliqués + 6 nouveaux schemas/refactors créés.
+- `/review` pass 2 (2 agents) → **VERDICT GO COMMIT** après 5 fixes additionnels
+  (professionnel_by_rpps lookupStatus, COVERAGE.coverage_ratio nullable,
+  retrait OBJECT_OR_NULL_OUTPUT_SCHEMA dead code, retrait outputSchema sur 2 tools
+  nullable, garde structuredContent stricte).
+
+### Backlog V0.7.6+
+
+- **Wrapper `professionnel_by_rpps` via `lookupFound`/`lookupNotFound`** (au lieu
+  d'ajouter `lookupStatus` manuellement). Demande d'étendre `lookupNotFound` pour
+  accepter des champs custom (`source`, `ans_fhir_status`). Cohérence avec les
+  12 autres LOOKUP tools.
+- **Tests E2E `structuredContent`** : ajouter dans `api/mcp.test.ts` (à créer)
+  un test qui vérifie que `tools/call` émet `structuredContent` quand
+  `outputSchema` déclaré, et ne l'émet pas pour `autocomplete_commune`.
+
 ## [0.7.4] — 2026-05-13
 
 **Smithery quick wins : annotations MCP, descriptions params, doc Corse, icon.**

@@ -168,11 +168,203 @@ const READ_ONLY_TIME_VARYING_ANNOTATIONS: McpToolAnnotations = {
   idempotentHint: false,
 };
 
+/**
+ * Patterns `outputSchema` réutilisables (spec MCP 2025-06-18 §6.3) déclarés
+ * une fois et référencés par les 25 tools. Format JSON Schema standard.
+ *
+ * Bénéfices : (1) Smithery quality score (+10pt), (2) LLM clients peuvent
+ * type-check les réponses sans deviner la shape, (3) auto-documentation
+ * pour les humains qui inspectent la spec via `tools/list`.
+ *
+ * Volontairement loose : on déclare la shape racine + les top-level fields
+ * communs, mais on évite un schema strict avec `additionalProperties: false`
+ * qui casserait dès qu'on ajoute un champ optionnel (semver freeze
+ * silencieux). `LookupResult` reste explicitement open au payload pour rester
+ * stable face à l'évolution des types métier.
+ */
+const LOOKUP_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  description:
+    "LookupResult discriminé par `found`. true → payload métier à plat (siren, nomComplet, etc.). false → `lookupStatus`/`key`/`message` actionnables. `lookupStatus` est toujours présent runtime (validé par tests).",
+  properties: {
+    found: { type: "boolean" },
+    lookupStatus: {
+      type: "string",
+      enum: ["found", "not_found", "ambiguous"],
+    },
+    key: { type: "string", description: "Clé recherchée (SIREN, num_finess, code INSEE, …)." },
+    message: {
+      type: "string",
+      description: "Explication actionnable quand `found=false` (cause probable + remédiation).",
+    },
+  },
+  required: ["found", "lookupStatus"],
+};
+
+const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  description:
+    "Résultat de query avec metadata. `results` est tronqué à `limit` côté serveur (cf. `truncated` quand applicable).",
+  properties: {
+    count: {
+      type: "number",
+      description: "Nombre d'entrées retournées dans `results` (post-troncature).",
+    },
+    truncated: {
+      type: "boolean",
+      description:
+        "true si le total réel dépasse `limit` (re-paginer via `offset` si supporté). Optional sur les tools de listing exhaustif (lister_*).",
+    },
+    results: {
+      type: "array",
+      items: { type: "object" },
+      description: "Entrées métier (shape spécifique au tool, cf. description du tool).",
+    },
+    query_metadata: {
+      type: "object",
+      description: "Metadata de la query (radius_km, departement, filtres appliqués, …).",
+    },
+    freshness: {
+      type: "object",
+      description: "Fraîcheur des sources (présent si `include_freshness: true`).",
+    },
+  },
+  required: ["count", "results"],
+};
+
+/**
+ * Schema dédié pour `entreprises_in_radius`. L'API DINUM retourne sa shape native
+ * `{total, page, perPage, totalPages, entreprises}` (sans normalisation vers le
+ * pattern count/results) pour exposer la pagination DINUM telle quelle. Schema
+ * dédié plutôt que QUERY_RESULT_OUTPUT_SCHEMA qui ne matche pas.
+ */
+const DINUM_QUERY_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  description:
+    "Résultat de recherche DINUM avec pagination native (total, page, perPage, totalPages, entreprises). `fallback` présent si le serveur a fait un reverseGeocode + filtrage Haversine quand l'API DINUM ne supporte pas la combinaison `naf + lat/lon`.",
+  properties: {
+    total: { type: "number", description: "Total d'entreprises matchant la query côté DINUM." },
+    page: { type: "number" },
+    perPage: { type: "number" },
+    totalPages: { type: "number" },
+    entreprises: {
+      type: "array",
+      items: { type: "object" },
+      description: "Entreprises retournées (SIREN, nomComplet, NAF, finances, etablissements).",
+    },
+    fallback: {
+      type: "object",
+      description:
+        "Présent uniquement si le serveur a appliqué le fallback reverseGeocode + Haversine.",
+    },
+    truncated_by_per_page: {
+      type: "boolean",
+      description: "true si le post-filtre Haversine a tronqué pour respecter `perPage`.",
+    },
+  },
+  required: ["total", "page", "perPage", "totalPages", "entreprises"],
+};
+
+/**
+ * Schema dédié pour `finess_sirene_coverage_in_radius`. Le tool retourne un
+ * audit méthodologique (taux de couverture FINESS vs SIRENE) qui ne rentre
+ * dans aucun autre pattern.
+ */
+const COVERAGE_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  description:
+    "Audit de couverture FINESS vs SIRENE dans un rayon. coverage_ratio = matched / total_finess. Caveats explicites pour cadrer la méthode (FINESS = sites physiques agréés, SIRENE = SIRET actifs au NAF cible).",
+  properties: {
+    finess_sites: {
+      type: "number",
+      description: "Nombre de sites FINESS dans le rayon (référentiel DREES).",
+    },
+    sirene_sirets: {
+      type: "number",
+      description: "Nombre de SIRET physiques actifs au NAF cible dans le rayon (DINUM/SIRENE).",
+    },
+    matched_count: { type: "number", description: "Nombre de matchs greedy Dice ≥ 0.7." },
+    coverage_ratio: {
+      type: ["number", "null"],
+      description:
+        "matched / finess_sites ∈ [0, 1]. null si `sirene_sirets === 0` (zone rurale + NAF rare → ratio non calculable).",
+    },
+    finess_only_count: { type: "number" },
+    sirene_only_count: { type: "number" },
+    matched_samples: { type: "array", items: { type: "object" } },
+    finess_only_samples: { type: "array", items: { type: "object" } },
+    sirene_only_samples: { type: "array", items: { type: "object" } },
+    methodology: {
+      type: "string",
+      description: "Description LLM-friendly de l'algorithme appliqué.",
+    },
+    caveats: {
+      type: "array",
+      items: { type: "string" },
+      description: "Limitations méthodologiques explicites (discipline zéro overclaim).",
+    },
+    truncated_unites_legales: {
+      type: "boolean",
+      description: "true si le cap `maxUnitesLegales` a été atteint avant énumération complète.",
+    },
+  },
+  required: ["finess_sites", "sirene_sirets", "coverage_ratio", "methodology"],
+};
+
+/**
+ * Spec MCP 2025-06-18 §6.3 : « The schema MUST be of type 'object' ». Un schema
+ * au root `type: "array"` ou `type: ["object", "null"]` viole la spec littérale.
+ * Les tools qui retournent `T | null` ou `T[]` n'ont donc volontairement PAS
+ * d'outputSchema déclaré :
+ *  - `autocomplete_commune` (root array)
+ *  - `geocode_adresse` / `reverse_geocode` (peut retourner null)
+ * Le forward conditionnel dans `api/mcp.ts` omet la clé absente, conforme.
+ */
+
+/**
+ * `data_freshness` retourne pour chaque source des champs nullable : si la
+ * source n'a jamais été ingérée (1er déploiement), `last_success_at` /
+ * `staleness_days` / etc. sont `null`. Le schema déclare `["string", "null"]`
+ * / `["number", "null"]` pour matcher fidèlement le runtime (cf.
+ * `IngestFreshnessRow` dans `src/storage/ingest-log.ts`).
+ */
+const DATA_FRESHNESS_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    sources: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Identifiant source (finess, ameli_ps, rpps)." },
+          last_success_at: {
+            type: ["string", "null"],
+            description:
+              "ISO timestamp dernière ingestion OK. null si aucun succès enregistré (1er déploiement).",
+          },
+          last_success_row_count: { type: ["number", "null"] },
+          last_attempt_at: { type: ["string", "null"] },
+          last_attempt_status: { type: ["string", "null"] },
+          staleness_days: {
+            type: ["number", "null"],
+            description: "null si la source n'a jamais été synchronisée (signal alarmant à propager au caller).",
+          },
+          cadence_hint: { type: "string" },
+        },
+        required: ["source"],
+      },
+    },
+  },
+  required: ["sources"],
+};
+
 export type McpTool = {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: McpToolAnnotations;
+  /** Spec MCP 2025-06-18 §6.3 — JSON Schema décrivant la shape du retour. */
+  outputSchema?: Record<string, unknown>;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
 };
 
@@ -643,6 +835,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["code"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       if (typeof args.code !== "string") throw new RangeError("code (string) requis");
@@ -731,6 +924,7 @@ export const TOOLS: McpTool[] = [
         page: { type: "number", description: "Page (1-indexed).", default: 1 },
       },
     },
+    outputSchema: DINUM_QUERY_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const naf = asString(args.naf);
@@ -788,6 +982,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["siren"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       if (typeof args.siren !== "string") throw new RangeError("siren (string) requis");
@@ -802,6 +997,7 @@ export const TOOLS: McpTool[] = [
       type: "object",
       properties: {},
     },
+    outputSchema: DATA_FRESHNESS_OUTPUT_SCHEMA,
     annotations: READ_ONLY_TIME_VARYING_ANNOTATIONS,
     handler: async () => {
       const rows = await getDataFreshness();
@@ -819,6 +1015,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
@@ -837,6 +1034,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
@@ -855,6 +1053,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
@@ -873,6 +1072,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
@@ -891,6 +1091,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["siret"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const siret = asString(args.siret);
@@ -936,6 +1137,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["lon", "lat"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const { lon, lat } = requireLonLatStrict(args);
@@ -984,6 +1186,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["categorie"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const famille = asFinessFamille(args.categorie);
@@ -1015,6 +1218,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
@@ -1071,6 +1275,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["lon", "lat"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const { lon, lat } = requireLonLatStrict(args);
@@ -1138,6 +1343,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["departement"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const departement = asString(args.departement);
@@ -1167,6 +1373,7 @@ export const TOOLS: McpTool[] = [
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const specialites = await listAmeliSpecialites();
@@ -1186,6 +1393,7 @@ export const TOOLS: McpTool[] = [
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const typesPs = await listAmeliTypesPs();
@@ -1242,6 +1450,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["center", "radius_km"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const center = args.center as { lat: number; lon: number } | undefined;
@@ -1297,6 +1506,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["departement"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const departement = asString(args.departement);
@@ -1329,6 +1539,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["num_finess"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const numFiness = asString(args.num_finess);
@@ -1368,6 +1579,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["nom"],
     },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const nom = asString(args.nom)?.trim();
@@ -1394,14 +1606,26 @@ export const TOOLS: McpTool[] = [
       },
       required: ["rpps_id"],
     },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const rppsId = asString(args.rpps_id)?.trim();
       if (!rppsId) throw new RangeError("rpps_id (string) requis");
       const sites = await getRppsById(rppsId);
       if (sites.length > 0) {
+        // V0.7.5 : `lookupStatus` ajouté manuellement (le tool a des champs
+        // custom `source`/`fhir`/`ans_fhir_status` incompatibles avec `lookupFound`
+        // generic helper). Respecte `LOOKUP_RESULT_OUTPUT_SCHEMA` requis pour
+        // que les clients MCP stricts valident la réponse.
         return withFreshness(
-          { found: true, source: "db", rpps_id: rppsId, count: sites.length, sites },
+          {
+            found: true,
+            lookupStatus: "found" as const,
+            source: "db",
+            rpps_id: rppsId,
+            count: sites.length,
+            sites,
+          },
           args.include_freshness,
           ["rpps"],
         );
@@ -1414,6 +1638,7 @@ export const TOOLS: McpTool[] = [
       if (fhir.found) {
         return {
           found: true,
+          lookupStatus: "found" as const,
           source: "ans_fhir",
           rpps_id: rppsId,
           fhir: fhir.practitioner,
@@ -1426,6 +1651,8 @@ export const TOOLS: McpTool[] = [
       // panne ANS (`api_error` → retry justifié) de config manquante (`no_key`).
       return {
         found: false,
+        lookupStatus: "not_found" as const,
+        key: rppsId,
         rpps_id: rppsId,
         source: "ans_fhir_lookup",
         ans_fhir_status: fhir.status,
@@ -1482,6 +1709,7 @@ export const TOOLS: McpTool[] = [
       },
       required: ["lon", "lat", "naf"],
     },
+    outputSchema: COVERAGE_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const lon = coerceNumber(args.lon, "lon");

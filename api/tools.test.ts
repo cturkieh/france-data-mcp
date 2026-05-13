@@ -7,7 +7,7 @@ import * as inseeSirene from "../src/sante/insee-sirene.js";
 import * as rppsDb from "../src/sante/rpps-db.js";
 import * as ingestLog from "../src/storage/ingest-log.js";
 import * as geocode from "../src/territoire/geocode.js";
-import { categorieCodesFromArgs, deptFromCommune, findTool } from "./tools.js";
+import { TOOLS, categorieCodesFromArgs, deptFromCommune, findTool } from "./tools.js";
 
 describe("deptFromCommune", () => {
   it("extrait le département pour la métropole standard", () => {
@@ -1078,5 +1078,31 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
     const tool = findTool("reconcilier_finess_sirene");
     await tool?.handler({ num_finess: "590048997" });
     expect(spy).toHaveBeenCalledWith("590048997");
+  });
+});
+
+describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
+  it("expose un outputSchema sur les tools object-root (22 tools attendus)", () => {
+    const withOutput = TOOLS.filter((t) => t.outputSchema !== undefined);
+    // 25 tools - 3 spec-violating (autocomplete_commune array-root,
+    // geocode_adresse / reverse_geocode nullable) = 22.
+    expect(withOutput).toHaveLength(22);
+  });
+
+  it("omet volontairement l'outputSchema pour les tools array-root ou nullable", () => {
+    // Spec MCP exige `type: "object"` littéral au root → ces 3 tools ne peuvent
+    // pas déclarer un schema conforme et restent sans outputSchema (préférable
+    // à un schema invalide qui ferait planter les clients stricts).
+    for (const name of ["autocomplete_commune", "geocode_adresse", "reverse_geocode"]) {
+      const tool = findTool(name);
+      expect(tool?.outputSchema).toBeUndefined();
+    }
+  });
+
+  it("chaque outputSchema déclaré a `type: object` (spec MCP 2025-06-18 §6.3)", () => {
+    for (const tool of TOOLS) {
+      if (tool.outputSchema === undefined) continue;
+      expect(tool.outputSchema.type).toBe("object");
+    }
   });
 });
