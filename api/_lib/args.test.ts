@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { normalizeAliases, requireOneOf, requireString, suggestParamError } from "./args.js";
+import {
+  normalizeAliases,
+  requireFinessId,
+  requireOneOf,
+  requireString,
+  suggestParamError,
+} from "./args.js";
 
 describe("normalizeAliases", () => {
   it("remappe les clés alternatives vers le nom canonique", () => {
@@ -142,5 +148,59 @@ describe("requireString", () => {
     expect(() =>
       requireString({ code: null } as Record<string, unknown>, "code", { code: "75056" }),
     ).toThrow(/type=object, valeur=null/);
+  });
+});
+
+describe("requireFinessId", () => {
+  it("retourne la valeur trimée si 9 chiffres exacts", () => {
+    expect(requireFinessId({ num_finess: "690780150" })).toBe("690780150");
+    expect(requireFinessId({ num_finess: "  690780150  " })).toBe("690780150");
+  });
+
+  it("supporte une clé custom (alias possible)", () => {
+    expect(requireFinessId({ finess: "690780150" }, "finess")).toBe("690780150");
+  });
+
+  it("clé absente → 'Paramètre manquant' avec exemple (cohérence avec requireString)", () => {
+    // Distinct du cas "clé présente mais bad type" — sinon le LLM qui a OUBLIÉ
+    // le param voit "type=undefined" alors que le param n'est pas dans args.
+    expect(() => requireFinessId({})).toThrow(/Paramètre manquant/);
+    expect(() => requireFinessId({})).toThrow(/Exemple: \{"num_finess":"690780150"\}/);
+  });
+
+  it("clé présente mais type non-string (number, null) → message dédié type+valeur", () => {
+    expect(() => requireFinessId({ num_finess: 690780150 } as Record<string, unknown>)).toThrow(
+      /doit être une string.*type=number/,
+    );
+    expect(() => requireFinessId({ num_finess: null } as Record<string, unknown>)).toThrow(
+      /doit être une string.*type=object.*valeur=null/,
+    );
+  });
+
+  it("throw RangeError si moins de 9 chiffres (oubli zéro de tête typique)", () => {
+    expect(() => requireFinessId({ num_finess: "69078015" })).toThrow(
+      /attendu exactement 9 chiffres/,
+    );
+  });
+
+  it("throw RangeError si plus de 9 chiffres (SIRET 14 confondu avec FINESS)", () => {
+    expect(() => requireFinessId({ num_finess: "39503084400124" })).toThrow(
+      /attendu exactement 9 chiffres/,
+    );
+  });
+
+  it("throw RangeError si caractères non-numériques", () => {
+    expect(() => requireFinessId({ num_finess: "690-780-150" })).toThrow();
+    expect(() => requireFinessId({ num_finess: "abcdefghi" })).toThrow();
+    expect(() => requireFinessId({ num_finess: "690780150X" })).toThrow();
+  });
+
+  it("message d'erreur inclut le nom du paramètre et un exemple JSON", () => {
+    expect(() => requireFinessId({ num_finess: "bad" })).toThrow(
+      /num_finess.*Exemple: \{"num_finess":"690780150"\}/,
+    );
+    expect(() => requireFinessId({ finess_id: "bad" }, "finess_id")).toThrow(
+      /finess_id.*Exemple: \{"finess_id":"690780150"\}/,
+    );
   });
 });

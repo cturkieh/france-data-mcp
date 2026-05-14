@@ -18,6 +18,7 @@
  */
 
 import type { VercelRequest } from "@vercel/node";
+import { captureMcpConfigWarning } from "./sentry.js";
 
 export type LogLevel = "info" | "warn" | "error";
 
@@ -149,6 +150,15 @@ const AXIOM_BUFFER_MAX = 500;
 const AXIOM_INGEST_TIMEOUT_MS = 1500;
 const AXIOM_DEFAULT_HOST = "api.axiom.co";
 
+/**
+ * Retourne le host Axiom effectif : valeur de `AXIOM_HOST` (trimée) si set
+ * non-vide, sinon `api.axiom.co` (région US par défaut). Exporté pour que
+ * `healthz` puisse exposer la même valeur que celle utilisée à l'ingest réel.
+ */
+export function getAxiomHost(): string {
+  return process.env.AXIOM_HOST?.trim() || AXIOM_DEFAULT_HOST;
+}
+
 let bufferOverflowWarned = false;
 
 function enqueueAxiomEvent(payload: Record<string, unknown>): void {
@@ -196,7 +206,7 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
     warnMissingAxiomOnce();
     return;
   }
-  const host = process.env.AXIOM_HOST?.trim() || AXIOM_DEFAULT_HOST;
+  const host = getAxiomHost();
   const batch = axiomBuffer.splice(0);
   try {
     const res = await fetch(`https://${host}/v1/datasets/${encodeURIComponent(dataset)}/ingest`, {
@@ -230,14 +240,22 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
  * d'env var Axiom = dégrade silencieusement la rétention 30j promise par PRIVACY.md.
  */
 let axiomWarningEmitted = false;
+const MISSING_AXIOM_MESSAGE =
+  "AXIOM_TOKEN ou AXIOM_DATASET absent — logs détaillés non persistés au-delà de la fenêtre Vercel Runtime Logs. PRIVACY.md rétention 30j non tenue.";
+/**
+ * Émet le warn pour les env Vercel servant du trafic réel (production +
+ * preview). Aligné avec `warnMissingSaltOnce` (rate-limit.ts) — preview
+ * deployments servent smoke tests / demos pre-prod qui doivent respecter
+ * la même promesse RGPD. `test` et `development` (CI, dev local) restent
+ * silencieux pour ne pas polluer.
+ */
 function warnMissingAxiomOnce(): void {
   if (axiomWarningEmitted) return;
   const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "";
-  if (env !== "production") return;
+  if (env !== "production" && env !== "preview") return;
   axiomWarningEmitted = true;
-  console.error(
-    "[france-data-mcp] AXIOM_TOKEN ou AXIOM_DATASET absent en production — logs détaillés non persistés au-delà de la fenêtre Vercel Runtime Logs. PRIVACY.md rétention 30j non tenue.",
-  );
+  console.error(`[france-data-mcp] ${MISSING_AXIOM_MESSAGE}`);
+  captureMcpConfigWarning("missing_axiom_config", MISSING_AXIOM_MESSAGE);
 }
 
 /**

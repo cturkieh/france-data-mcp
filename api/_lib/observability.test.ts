@@ -7,6 +7,12 @@ import {
   flushMcpEventsToAxiom,
   logMcpEvent,
 } from "./observability.js";
+import { captureMcpConfigWarning } from "./sentry.js";
+
+vi.mock("./sentry.js", async () => {
+  const actual = await vi.importActual<typeof import("./sentry.js")>("./sentry.js");
+  return { ...actual, captureMcpConfigWarning: vi.fn() };
+});
 
 function fakeReq(headers: Record<string, string | undefined>) {
   return { headers } as unknown as VercelRequest;
@@ -209,6 +215,7 @@ describe("flushMcpEventsToAxiom", () => {
     for (const k of ENV_KEYS) SAVED_ENV[k] = process.env[k];
     for (const k of ENV_KEYS) delete process.env[k];
     __resetAxiomStateForTesting();
+    vi.mocked(captureMcpConfigWarning).mockClear();
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -395,8 +402,16 @@ describe("flushMcpEventsToAxiom", () => {
     expect(errSpy.mock.calls.some((c) => String(c[0]).includes("AXIOM_TOKEN"))).toBe(true);
   });
 
-  it("ne warn pas en preview", async () => {
+  it("warn aussi en preview (V0.9.2 — staging Vercel sert du trafic réel, même promesse PRIVACY.md)", async () => {
     process.env.VERCEL_ENV = "preview";
+    logSuccessEvent();
+    await flushMcpEventsToAxiom();
+    const errSpy = vi.mocked(console.error);
+    expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("AXIOM_TOKEN"))).toHaveLength(1);
+  });
+
+  it("ne warn pas en development/test (CI, local) — silencieux par design", async () => {
+    process.env.VERCEL_ENV = "development";
     logSuccessEvent();
     await flushMcpEventsToAxiom();
     const errSpy = vi.mocked(console.error);
@@ -413,5 +428,37 @@ describe("flushMcpEventsToAxiom", () => {
     await flushMcpEventsToAxiom();
     const errSpy = vi.mocked(console.error);
     expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("AXIOM_TOKEN"))).toHaveLength(1);
+  });
+
+  it("en prod sans AXIOM_TOKEN, émet aussi un Sentry config_warning (code 'missing_axiom_config')", async () => {
+    process.env.VERCEL_ENV = "production";
+    logSuccessEvent();
+    await flushMcpEventsToAxiom();
+    logSuccessEvent();
+    await flushMcpEventsToAxiom();
+    // Une seule capture Sentry malgré N flush — cohérent avec le warn one-shot
+    expect(captureMcpConfigWarning).toHaveBeenCalledTimes(1);
+    expect(captureMcpConfigWarning).toHaveBeenCalledWith(
+      "missing_axiom_config",
+      expect.stringContaining("AXIOM_TOKEN"),
+    );
+  });
+
+  it("en preview, Sentry config_warning émis aussi (V0.9.2 — staging Vercel sert trafic réel)", async () => {
+    process.env.VERCEL_ENV = "preview";
+    logSuccessEvent();
+    await flushMcpEventsToAxiom();
+    expect(captureMcpConfigWarning).toHaveBeenCalledTimes(1);
+    expect(captureMcpConfigWarning).toHaveBeenCalledWith(
+      "missing_axiom_config",
+      expect.stringContaining("AXIOM_TOKEN"),
+    );
+  });
+
+  it("hors prod/preview (dev/test), pas de Sentry config_warning", async () => {
+    process.env.VERCEL_ENV = "development";
+    logSuccessEvent();
+    await flushMcpEventsToAxiom();
+    expect(captureMcpConfigWarning).not.toHaveBeenCalled();
   });
 });

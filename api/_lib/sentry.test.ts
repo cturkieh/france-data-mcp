@@ -4,6 +4,7 @@ import {
   __ensureInitForTesting,
   __resetSentryForTesting,
   beforeSendEvent,
+  captureMcpConfigWarning,
   captureMcpError,
   flushSentry,
   isBotNoiseEvent,
@@ -14,10 +15,13 @@ vi.mock("@sentry/node", () => {
   const scope = {
     setTag: vi.fn(),
     setContext: vi.fn(),
+    setLevel: vi.fn(),
+    setFingerprint: vi.fn(),
   };
   return {
     init: vi.fn(),
     captureException: vi.fn(),
+    captureMessage: vi.fn(),
     flush: vi.fn().mockResolvedValue(true),
     withScope: vi.fn((cb: (s: typeof scope) => void) => cb(scope)),
     __scope: scope,
@@ -35,7 +39,12 @@ const ctx = {
 function mockedScope() {
   return (
     Sentry as unknown as {
-      __scope: { setTag: ReturnType<typeof vi.fn>; setContext: ReturnType<typeof vi.fn> };
+      __scope: {
+        setTag: ReturnType<typeof vi.fn>;
+        setContext: ReturnType<typeof vi.fn>;
+        setLevel: ReturnType<typeof vi.fn>;
+        setFingerprint: ReturnType<typeof vi.fn>;
+      };
     }
   ).__scope;
 }
@@ -50,10 +59,13 @@ describe("Sentry integration", () => {
     __resetSentryForTesting();
     vi.mocked(Sentry.init).mockClear();
     vi.mocked(Sentry.captureException).mockClear();
+    vi.mocked(Sentry.captureMessage).mockClear();
     vi.mocked(Sentry.flush).mockClear();
     vi.mocked(Sentry.withScope).mockClear();
     mockedScope().setTag.mockClear();
     mockedScope().setContext.mockClear();
+    mockedScope().setLevel.mockClear();
+    mockedScope().setFingerprint.mockClear();
     // vi.stubEnv auto-restore via afterEach() unstubAllEnvs — pas de pollution
     // entre tests / suites parallèles.
     vi.stubEnv("SENTRY_DSN", "");
@@ -160,6 +172,51 @@ describe("Sentry integration", () => {
       expect(toolCalls).toHaveLength(0);
     });
 
+    it("Postgres timeout 57014 : tags + level warning + fingerprint stable pour grouper", () => {
+      const err = new Error(
+        "[france-data-mcp] ameli_by_specialite_dept (57014): canceling statement due to statement timeout",
+      );
+      captureMcpError(err, { ...ctx, tool: "professionnels_par_specialite_dept" });
+      const scope = mockedScope();
+      expect(scope.setTag).toHaveBeenCalledWith("mcp.postgres_code", "57014");
+      expect(scope.setLevel).toHaveBeenCalledWith("warning");
+      expect(scope.setFingerprint).toHaveBeenCalledWith([
+        "mcp_postgres_timeout",
+        "tools/call",
+        "professionnels_par_specialite_dept",
+      ]);
+      expect(Sentry.captureException).toHaveBeenCalledWith(err);
+    });
+
+    it("Postgres timeout 57014 sans tool : fingerprint utilise 'unknown'", () => {
+      const err = new Error("rpc_xxx (57014): canceling statement");
+      captureMcpError(err, { ...ctx, tool: undefined });
+      const scope = mockedScope();
+      expect(scope.setFingerprint).toHaveBeenCalledWith([
+        "mcp_postgres_timeout",
+        "tools/call",
+        "unknown",
+      ]);
+    });
+
+    it("erreur classique non-timeout : pas de tag postgres_code, pas de fingerprint", () => {
+      captureMcpError(new Error("TypeError: Cannot read property 'x' of null"), ctx);
+      const scope = mockedScope();
+      const pgCalls = scope.setTag.mock.calls.filter(
+        (c: unknown[]) => c[0] === "mcp.postgres_code",
+      );
+      expect(pgCalls).toHaveLength(0);
+      expect(scope.setFingerprint).not.toHaveBeenCalled();
+      expect(scope.setLevel).not.toHaveBeenCalled();
+    });
+
+    it("err null/undefined ne crash pas et ne match pas le pattern timeout", () => {
+      expect(() => captureMcpError(null, ctx)).not.toThrow();
+      expect(() => captureMcpError(undefined, ctx)).not.toThrow();
+      const scope = mockedScope();
+      expect(scope.setFingerprint).not.toHaveBeenCalled();
+    });
+
     it("captureMcpError merge le extra dans le context MCP", () => {
       captureMcpError(new Error("layered"), { ...ctx, extra: { layer: "json_stringify" } });
       const scope = mockedScope();
@@ -228,6 +285,69 @@ describe("Sentry integration", () => {
       __ensureInitForTesting();
       expect(Sentry.init).toHaveBeenCalledWith(expect.objectContaining({ environment: "staging" }));
     });
+  });
+});
+
+describe("captureMcpConfigWarning", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    __resetSentryForTesting();
+    vi.mocked(Sentry.captureMessage).mockClear();
+    vi.mocked(Sentry.withScope).mockClear();
+    mockedScope().setTag.mockClear();
+    mockedScope().setLevel.mockClear();
+    mockedScope().setFingerprint.mockClear();
+    vi.stubEnv("SENTRY_DSN", "");
+    vi.stubEnv("VERCEL_ENV", "");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("sans DSN : no-op, n'appelle pas Sentry.captureMessage", () => {
+    captureMcpConfigWarning("missing_ip_salt", "salt absent");
+    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+    void errorSpy;
+  });
+
+  it("avec DSN : tag mcp.config_warning + fingerprint stable + captureMessage warning", () => {
+    vi.stubEnv("SENTRY_DSN", "https://k@sentry.io/1");
+    captureMcpConfigWarning("missing_ip_salt", "salt absent en prod");
+
+    const scope = mockedScope();
+    expect(scope.setTag).toHaveBeenCalledWith("mcp.config_warning", "missing_ip_salt");
+    expect(scope.setFingerprint).toHaveBeenCalledWith(["mcp_config_warning", "missing_ip_salt"]);
+    // Level passé via le 2e arg captureMessage (pas via scope.setLevel — doublon évité)
+    expect(Sentry.captureMessage).toHaveBeenCalledWith("salt absent en prod", "warning");
+  });
+
+  it("Sentry.captureMessage qui throw → catch + console.error, ne propage pas", () => {
+    vi.stubEnv("SENTRY_DSN", "https://k@sentry.io/1");
+    vi.mocked(Sentry.captureMessage).mockImplementationOnce(() => {
+      throw new Error("network down");
+    });
+
+    expect(() => captureMcpConfigWarning("missing_axiom_config", "axiom absent")).not.toThrow();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Sentry captureMessage failed"),
+    );
+    void warnSpy;
+  });
+
+  it("init failed (DSN malformé) : pas de captureMessage", () => {
+    vi.stubEnv("SENTRY_DSN", "https://k@sentry.io/1");
+    vi.mocked(Sentry.init).mockImplementationOnce(() => {
+      throw new Error("dsn malformé");
+    });
+
+    captureMcpConfigWarning("missing_ip_salt", "x");
+    expect(Sentry.captureMessage).not.toHaveBeenCalled();
   });
 });
 

@@ -5,6 +5,9 @@
   "functions": {
     "api/mcp.ts": {
       "maxDuration": 60
+    },
+    "api/healthz.ts": {
+      "maxDuration": 5
     }
   },
   "headers": [
@@ -15,7 +18,18 @@
         { "key": "Access-Control-Allow-Methods", "value": "GET, POST, OPTIONS" },
         { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Mcp-Session-Id" }
       ]
+    },
+    {
+      "source": "/healthz",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, HEAD" },
+        { "key": "Cache-Control", "value": "no-store" }
+      ]
     }
   ],
-  "rewrites": [{ "source": "/mcp", "destination": "/api/mcp" }]
+  "rewrites": [
+    { "source": "/mcp", "destination": "/api/mcp" },
+    { "source": "/healthz", "destination": "/api/healthz" }
+  ]
 }

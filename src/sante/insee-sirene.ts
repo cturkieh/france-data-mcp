@@ -23,6 +23,7 @@
  * sans clé INSEE.
  */
 
+import { readApiKeyEnv } from "../core/env.js";
 import { HttpError, fetchJson } from "../core/http.js";
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import type { Entreprise } from "./dinum.js";
@@ -41,15 +42,12 @@ const FETCH_TIMEOUT_MS = 60_000;
  * Lit `INSEE_SIRENE_API_KEY` depuis l'env. Retourne `null` si absente ou vide
  * (no-op gracieux : la lib reste utilisable sans clé INSEE).
  *
- * Strippe aussi les guillemets entourants — certains parsers `.env` (ou un
- * copier-coller Vercel UI) les conservent, et l'API INSEE rejette alors
- * silencieusement la clé en 401, ce qui ressemble à une clé révoquée.
+ * Délégué à `readApiKeyEnv` (`src/core/env.ts`) qui gère le trim + strip quotes
+ * entourants — copier-coller Vercel UI conserve parfois les `"<UUID>"`, ce qui
+ * cause un 401 silencieux indiscernable d'une clé révoquée.
  */
 export function getInseeApiKey(): string | null {
-  const raw = process.env.INSEE_SIRENE_API_KEY;
-  if (!raw) return null;
-  const cleaned = raw.trim().replace(/^["']|["']$/g, "");
-  return cleaned === "" ? null : cleaned;
+  return readApiKeyEnv("INSEE_SIRENE_API_KEY");
 }
 
 /**

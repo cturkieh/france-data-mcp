@@ -21,6 +21,8 @@
  *   - Coût négligeable (un objet spread + lookup par clé).
  */
 
+import { NUM_FINESS_PATTERN } from "../../src/sante/db-helpers.js";
+
 /** RangeError mapping JSON-RPC -32602 côté boundary MCP (Invalid params). */
 function paramError(message: string): RangeError {
   return new RangeError(message);
@@ -142,4 +144,46 @@ export function requireString(
     );
   }
   throw suggestParamError(args, [key], exampleArg);
+}
+
+/**
+ * Valide un numéro FINESS (9 chiffres exactement, colonne SQL `CHAR(9)`).
+ * Retourne la valeur trimée. Message d'erreur explicite quand un LLM passe
+ * 8 chiffres (oubli zéro de tête) ou un SIRET 14 chiffres confondu avec FINESS.
+ *
+ * Trois branches d'erreur distinctes (cohérence avec `requireString`) :
+ *  1. Clé absente → `suggestParamError` (Paramètre manquant + exemple)
+ *  2. Clé présente mais type ≠ string → message explicite type + valeur reçue
+ *  3. Clé string mais format invalide → message regex 9 chiffres + exemple
+ *
+ * Pourquoi le tool layer plutôt que le wrapper DB :
+ *  - Le LLM appelle le tool, pas la lib — l'erreur doit revenir avec un
+ *    message qui parle des paramètres MCP, pas du contrat SQL.
+ *  - Defense-in-depth : la RPC Postgres throw aussi sur `CHAR(9)` overflow,
+ *    mais le message renvoyé est moins lisible (`value too long for type`).
+ *  - Centralisé pour qu'un caller (`compare_…`, `verifier_site_actif`,
+ *    `historique_etablissement`, `reconcilier_finess_sirene`, `etablissement_by_finess`,
+ *    `rpps_dans_etablissement`) ne réinvente pas la regex chacun de son côté.
+ *
+ * Source de vérité regex : `NUM_FINESS_PATTERN` (`src/sante/db-helpers.ts`),
+ * partagée avec `assertValidNumFiness` (defense-in-depth lib + tool boundary).
+ */
+export function requireFinessId(args: Record<string, unknown>, key = "num_finess"): string {
+  const example = { [key]: "690780150" };
+  if (!(key in args)) {
+    throw suggestParamError(args, [key], example);
+  }
+  const raw = args[key];
+  if (typeof raw !== "string") {
+    throw paramError(
+      `Paramètre "${key}" doit être une string de 9 chiffres. Reçu: type=${typeof raw}, valeur=${JSON.stringify(raw)}. Exemple: ${JSON.stringify(example)}`,
+    );
+  }
+  const trimmed = raw.trim();
+  if (!NUM_FINESS_PATTERN.test(trimmed)) {
+    throw paramError(
+      `Paramètre "${key}" invalide : attendu exactement 9 chiffres (FINESS DREES). Reçu: ${JSON.stringify(raw)}. Exemple: ${JSON.stringify(example)}`,
+    );
+  }
+  return trimmed;
 }

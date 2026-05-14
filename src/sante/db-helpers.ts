@@ -118,6 +118,15 @@ export function trimOrNull(s: string | null | undefined): string | null {
 }
 
 /**
+ * Pattern numéro FINESS site (9 chiffres, contrainte SQL `CHAR(9)`).
+ * Exporté pour partager la source de vérité entre `assertValidNumFiness` (lib)
+ * et `requireFinessId` (`api/_lib/args.ts` — tool boundary). Un futur changement
+ * de format (ex: Mayotte ou DOM-COM widening) ne se modifiera qu'à un seul
+ * endroit.
+ */
+export const NUM_FINESS_PATTERN = /^\d{9}$/;
+
+/**
  * Valide un numéro FINESS site (9 chiffres) côté boundary public. Renvoie le
  * `numFiness` trimmed pour que le caller forward la version normalisée à la
  * RPC. Throw `RangeError` (mappé JSON-RPC -32602 par `api/mcp.ts`) sur format
@@ -125,7 +134,7 @@ export function trimOrNull(s: string | null | undefined): string | null {
  */
 export function assertValidNumFiness(numFiness: string): string {
   const trimmed = numFiness.trim();
-  if (!/^\d{9}$/.test(trimmed)) {
+  if (!NUM_FINESS_PATTERN.test(trimmed)) {
     throw new RangeError(
       `[france-data-mcp] num_finess invalide "${numFiness}" — attendu 9 chiffres (FINESS site).`,
     );

@@ -247,9 +247,12 @@ interface RawFinessRow {
 }
 
 function toFinessResult(row: RawFinessRow): FinessResult {
-  const coords = row.geom
-    ? { lat: row.geom.coordinates[1] ?? 0, lon: row.geom.coordinates[0] ?? 0 }
-    : null;
+  // Aligné sur `rpps-db.ts:toResult` : si `geom` est présent mais `coordinates`
+  // malformé (entry undefined ou non-number), on retombe explicitement sur null
+  // plutôt qu'un (0,0) Golfe-de-Guinée silencieux qui masquerait un drift schéma.
+  const lat = row.geom?.coordinates[1];
+  const lon = row.geom?.coordinates[0];
+  const coords = typeof lat === "number" && typeof lon === "number" ? { lat, lon } : null;
   return {
     num_finess: row.num_finess,
     raison_sociale: row.raison_sociale,

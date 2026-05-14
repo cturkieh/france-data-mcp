@@ -272,9 +272,13 @@ interface RawAmeliRow {
 }
 
 function toAmeliResult(row: RawAmeliRow): AmeliResult {
-  const coords = row.geom
-    ? { lat: row.geom.coordinates[1] ?? 0, lon: row.geom.coordinates[0] ?? 0 }
-    : null;
+  // Aligné sur `rpps-db.ts:toResult` et `finess-db.ts:toFinessResult` (V0.9.2) :
+  // si `geom` est présent mais `coordinates` malformé (entry undefined ou
+  // non-number), on retombe explicitement sur null plutôt qu'un (0,0)
+  // Golfe-de-Guinée silencieux qui masquerait un drift schéma.
+  const lat = row.geom?.coordinates[1];
+  const lon = row.geom?.coordinates[0];
+  const coords = typeof lat === "number" && typeof lon === "number" ? { lat, lon } : null;
   const distance = metersToKm(row.distance_meters);
   return {
     id: row.id,

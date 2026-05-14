@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import type { VercelRequest } from "@vercel/node";
+import { captureMcpConfigWarning } from "./sentry.js";
 
 const WINDOW = "1 m" as const;
 const DEFAULT_LIMIT = 60;
@@ -146,14 +147,21 @@ export function hashIp(ip: string): string {
  * promet un hash salé mais on tombe en pratique sur un hash rainbow-tableable).
  */
 let saltWarningEmitted = false;
+const MISSING_SALT_MESSAGE =
+  "FRANCE_DATA_IP_SALT absent ou vide — hash IP rainbow-tableable, promesse PRIVACY.md non tenue. Configurer la var d'env via `openssl rand -hex 32`.";
+/**
+ * Émet le warn pour les env Vercel servant du trafic réel (production +
+ * preview). Les preview deployments servent souvent des smoke tests / demos
+ * pre-prod qui doivent respecter la même promesse RGPD que la prod. `test` et
+ * `development` (CI, dev local) restent silencieux pour ne pas polluer.
+ */
 function warnMissingSaltOnce(): void {
   if (saltWarningEmitted) return;
   const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "";
-  if (env !== "production") return;
+  if (env !== "production" && env !== "preview") return;
   saltWarningEmitted = true;
-  console.error(
-    "[france-data-mcp] FRANCE_DATA_IP_SALT absent ou vide en production — hash IP rainbow-tableable, promesse PRIVACY.md non tenue. Configurer la var d'env via `openssl rand -hex 32`.",
-  );
+  console.error(`[france-data-mcp] ${MISSING_SALT_MESSAGE}`);
+  captureMcpConfigWarning("missing_ip_salt", MISSING_SALT_MESSAGE);
 }
 
 /** Test-only hook : reset le flag pour re-tester le path warn en isolation. */

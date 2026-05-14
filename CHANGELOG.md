@@ -4,6 +4,79 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.9.2] — 2026-05-14
+
+**Patch — observabilité production + nettoyage dette legacy.**
+
+Mini-sprint quick wins post-V0.9.1 : un endpoint `/healthz` pour les monitors
+externes, escalade Sentry sur les warns one-shot RGPD/observabilité, capture
+groupée des timeouts Postgres 57014, et factorisation de deux duplications
+(API key reader + FINESS ID validator) repérées dans le backlog `P2 — Polish`.
+
+### Ajouté
+
+- **`/healthz` endpoint** (`api/healthz.ts`) — GET/HEAD retournent 200 + JSON
+  `{ status, version, timestamp, config }` où `config` expose des booléens
+  par dépendance (Axiom, IP salt, Sentry, Supabase, INSEE SIRENE, ANS FHIR,
+  Upstash). Aucune valeur d'env var leakée. Path rewrite `/healthz` →
+  `/api/healthz`, CORS `*`, `Cache-Control: no-store`, `maxDuration: 5s`.
+  Consommable par Uptime Kuma, Better Stack, Smithery, etc.
+- **`captureMcpConfigWarning(code, message)`** (`api/_lib/sentry.ts`) — capture
+  d'un `Sentry.captureMessage` avec `level: warning`, tag `mcp.config_warning`
+  et fingerprint stable basé sur le `code` pour grouper toutes les instances
+  d'un même warn one-shot dans UNE issue Sentry. Appelé depuis
+  `warnMissingSaltOnce` (code `missing_ip_salt`) et `warnMissingAxiomOnce`
+  (code `missing_axiom_config`). Sans ce signal, un oubli d'env var en prod
+  dégrade silencieusement une promesse PRIVACY.md.
+- **Détection Postgres timeout 57014 dans `captureMcpError`** — quand le
+  message d'erreur matche `(57014)` (code SQLSTATE injecté par
+  `formatRpcError`), ajout d'un tag `mcp.postgres_code=57014`, escalade en
+  `level: warning` et fingerprint stable `[mcp_postgres_timeout, method, tool]`.
+  Toutes les timeouts d'un même tool sont groupées dans une seule issue Sentry —
+  un volume anormal sur ce groupe = signal d'index manquant à investiguer,
+  pas une panne à pager. Lib OSS reste sans dépendance Sentry (détection regex
+  côté `api/` uniquement).
+- **`readApiKeyEnv(name)`** (`src/core/env.ts`) — helper centralisé pour les
+  secrets API : lit `process.env[name]`, trim + strip quotes entourantes,
+  retourne `null` si absente/vide après nettoyage. Élimine la duplication
+  entre `getInseeApiKey` et `getAnsFhirApiKey` (Vercel UI conserve parfois
+  les `"<UUID>"` → 401 silencieux indiscernable d'une clé révoquée).
+- **`requireFinessId(args, key?)`** (`api/_lib/args.ts`) — valide qu'un argument
+  tool MCP est un FINESS (9 chiffres exactement après trim). Throw `RangeError`
+  avec message explicite incluant le paramètre attendu + un exemple. Remplace
+  6 callers répétés dans `api/tools.ts` qui faisaient `asString + check vide`
+  sans valider la longueur ni le format chiffres. Defense-in-depth au tool
+  layer (message LLM-friendly) + RPC Postgres (CHAR(9) reject).
+- **Tests** — 30 nouveaux tests : 6 healthz (GET/HEAD/405, booléens, secrets
+  non leakés, axiom host EU/US), 4 captureMcpConfigWarning (sans/avec DSN,
+  Sentry throw, init failed), 2 warns one-shot relayés (rate-limit + axiom),
+  4 timeout 57014 (tags + fingerprint avec tool / sans tool / non-timeout /
+  err null), 7 requireFinessId (trim, custom key, type non-string, < 9 chars,
+  > 9 chars, non-numérique, message d'erreur), 7 readApiKeyEnv (absente, vide,
+  whitespace, trim, quotes ", quotes ', quotes internes préservées).
+
+### Modifié
+
+- **`getInseeApiKey` / `getAnsFhirApiKey`** délèguent à `readApiKeyEnv`. Aucun
+  changement de comportement, juste élimination d'une duplication.
+- **JSDoc `SavoirFaireEntry.libelle`** (`rpps-db.ts`) — corrigée pour refléter
+  le comportement réel de la matview `rpps_savoir_faire_stats` :
+  `MAX(savoir_faire_libelle)` retient le **dernier alphabétiquement**, PAS
+  le plus fréquent. Stable et déterministe, suffisant pour disambiguation
+  côté LLM (le `code` reste l'identifiant). Backlog `P2 — Polish` reporté
+  V0.9.1.
+- **`toFinessResult`** (`finess-db.ts:249`) — aligné sur `rpps-db.ts:toResult`
+  pour éviter un `(0,0)` Golfe-de-Guinée silencieux quand `geom.coordinates`
+  est malformé : check `typeof === "number"` + fallback `coords: null`.
+  Backlog `P2 — Refactor legacy`.
+- **`vercel.json`** — ajout de la fonction `api/healthz.ts` (maxDuration 5s),
+  rewrite `/healthz` → `/api/healthz`, headers CORS dédiés.
+
+### Fix
+
+- **Version mismatch** — `src/core/version.ts`, `package.json` et `server.json`
+  passés à `0.9.2` en synchrone (lesson V0.9.1).
+
 ## [0.9.1] — 2026-05-14
 
 **Patch — log drain Axiom + privacy hardening + fix format CI.**

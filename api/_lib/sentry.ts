@@ -7,11 +7,13 @@
  * besoin un jour d'instrumentation perf, passer par OTLP côté Vercel.
  *
  * Comportement :
- *  - Init idempotente déclenchée au 1er `captureMcpError` (lazy : un cold
- *    start `tools/list` qui ne lève aucune erreur ne paye pas l'init).
+ *  - Init idempotente déclenchée au 1er appel à `captureMcpError` OU
+ *    `captureMcpConfigWarning` (lazy : un cold start `tools/list` qui ne
+ *    lève aucune erreur ne paye pas l'init).
  *  - No-op transparent si `SENTRY_DSN` absent ou vide → le code appelant
  *    n'a aucune condition à vérifier, et les tests / dev local marchent
- *    sans config Sentry.
+ *    sans config Sentry. Les warns one-shot restent visibles côté Vercel
+ *    Runtime Logs même si Sentry est désactivé.
  *  - `flushSentry()` à appeler en fin de requête : Vercel coupe le process
  *    juste après la réponse HTTP, ce qui peut perdre des events en attente.
  */
@@ -173,13 +175,36 @@ export type SentryContext = McpRequestContext & {
 };
 
 /**
+ * Pattern de détection des Postgres `statement_timeout` (SQLSTATE 57014).
+ * `formatRpcError` (src/sante/db-helpers.ts) embarque toujours le code Postgres
+ * entre parenthèses dans le message, donc un grep `(57014)` est fiable et
+ * découplé du wording exact ("canceling statement due to statement timeout"
+ * vs autre traduction côté pg locale). Garde la lib OSS sans dépendance Sentry.
+ */
+const POSTGRES_TIMEOUT_PATTERN = /\(57014\)/;
+
+/**
  * Capture une exception côté Sentry avec les tags MCP standard. No-op si
  * Sentry n'est pas configuré. Ne throw jamais — un échec d'envoi à Sentry
  * ne doit pas faire échouer la réponse MCP au client.
+ *
+ * **Détection Postgres timeout 57014** : quand le message d'erreur révèle un
+ * `statement_timeout` (code SQLSTATE 57014), on regroupe ces events sous un
+ * fingerprint stable `[mcp_postgres_timeout, method, tool]` et on les passe
+ * en `warning` plutôt que `error`. C'est une dégradation transitoire (plan
+ * Postgres generic + dept dense, cf. lessons learned V0.5.2-V0.5.4), pas un
+ * bug serveur — un volume anormal sur ce groupe = signal d'index manquant à
+ * investiguer, pas une panne à pager.
  */
 export function captureMcpError(err: unknown, ctx: SentryContext): void {
   ensureInit();
   if (!enabled) return;
+
+  // String(err) après l'early return : si Sentry est désactivé on évite le coût
+  // (et un éventuel throw sur un proxy avec getter circulaire qui crash en
+  // sérialisation toString — improbable mais cf. principe defense-in-depth).
+  const message = err instanceof Error ? err.message : String(err);
+  const isPostgresTimeout = POSTGRES_TIMEOUT_PATTERN.test(message);
 
   try {
     Sentry.withScope((scope) => {
@@ -191,6 +216,15 @@ export function captureMcpError(err: unknown, ctx: SentryContext): void {
         scope.setTag("mcp.tool", ctx.tool);
       }
       scope.setTag("mcp.outcome", ctx.outcome);
+      if (isPostgresTimeout) {
+        scope.setTag("mcp.postgres_code", "57014");
+        scope.setLevel("warning");
+        scope.setFingerprint([
+          "mcp_postgres_timeout",
+          ctx.method,
+          typeof ctx.tool === "string" && ctx.tool.length > 0 ? ctx.tool : "unknown",
+        ]);
+      }
       scope.setContext("mcp_request", {
         ip_hash: ctx.ipHash,
         user_agent: ctx.userAgent,
@@ -201,6 +235,44 @@ export function captureMcpError(err: unknown, ctx: SentryContext): void {
   } catch (sentryErr) {
     const reason = sentryErr instanceof Error ? sentryErr.message : String(sentryErr);
     console.error(`[france-data-mcp] Sentry captureException failed: ${reason}`);
+  }
+}
+
+/**
+ * Capture un warning de configuration côté Sentry (env var manquante en
+ * production, etc.). Émis depuis les helpers `warnMissing*Once` qui détectent
+ * une promesse documentée (PRIVACY.md rétention 30j, hash IP salé) non tenue
+ * à cause d'un oubli d'env.
+ *
+ * Différences avec `captureMcpError` :
+ *  - pas de contexte HTTP : ce sont des warns module-level émis au 1er accès
+ *    après cold start, hors d'une requête utilisateur précise
+ *  - niveau `warning` (pas `error`) — c'est une dérive ops, pas un bug
+ *  - tag `mcp.config_warning` + fingerprint stable basé sur le `code` pour
+ *    grouper toutes les instances du même warn dans UNE seule issue Sentry,
+ *    indépendamment du release ou de l'environnement
+ *
+ * No-op si Sentry désactivé (SENTRY_DSN absent ou init failed) — les warns
+ * restent alors visibles UNIQUEMENT dans Vercel Runtime Logs via le
+ * `console.error` qui précède chaque appel à cette fonction. Ne throw jamais
+ * (un échec d'envoi à Sentry ne doit pas casser le flux de requêtes).
+ */
+export function captureMcpConfigWarning(code: string, message: string): void {
+  ensureInit();
+  if (!enabled) return;
+
+  try {
+    // Le level "warning" passe via le 2e arg `captureMessage`. On évite
+    // `scope.setLevel("warning")` qui ferait doublon (les 2 mécanismes pointent
+    // sur le même champ event.level — confusion sur lequel "gagne").
+    Sentry.withScope((scope) => {
+      scope.setTag("mcp.config_warning", code);
+      scope.setFingerprint(["mcp_config_warning", code]);
+      Sentry.captureMessage(message, "warning");
+    });
+  } catch (sentryErr) {
+    const reason = sentryErr instanceof Error ? sentryErr.message : String(sentryErr);
+    console.error(`[france-data-mcp] Sentry captureMessage failed: ${reason}`);
   }
 }
 
@@ -224,7 +296,8 @@ export async function flushSentry(timeoutMs = 2000): Promise<void> {
  * Indique si Sentry est activé. Volontairement passif : NE déclenche PAS
  * l'init — sinon un caller innocent (middleware, healthcheck) paierait le
  * coût Sentry sur le cold start. La lazyness est garantie par le fait que
- * seul `captureMcpError` peut déclencher `ensureInit`.
+ * seuls `captureMcpError` et `captureMcpConfigWarning` peuvent déclencher
+ * `ensureInit`.
  *
  * Helper exposé pour les tests, mais safe à appeler ailleurs.
  */

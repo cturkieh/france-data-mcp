@@ -8,6 +8,12 @@ import {
   getRateLimitPerMinute,
   hashIp,
 } from "./rate-limit.js";
+import { captureMcpConfigWarning } from "./sentry.js";
+
+vi.mock("./sentry.js", async () => {
+  const actual = await vi.importActual<typeof import("./sentry.js")>("./sentry.js");
+  return { ...actual, captureMcpConfigWarning: vi.fn() };
+});
 
 /** Build a minimal VercelRequest-compatible object for header tests. */
 function fakeReq(headers: Record<string, string | string[] | undefined>, remoteAddress?: string) {
@@ -33,6 +39,7 @@ beforeEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
   __resetForTesting();
   __resetSaltWarningForTesting();
+  vi.mocked(captureMcpConfigWarning).mockClear();
 });
 
 afterEach(() => {
@@ -141,9 +148,18 @@ describe("hashIp — silent-failure warn", () => {
     errSpy.mockRestore();
   });
 
-  it("ne warn pas en preview (silence sur staging)", () => {
+  it("warn aussi en preview (V0.9.2 — staging Vercel sert du trafic réel, même promesse RGPD)", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     process.env.VERCEL_ENV = "preview";
+    hashIp("1.2.3.4");
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0]?.[0]).toContain("FRANCE_DATA_IP_SALT");
+    errSpy.mockRestore();
+  });
+
+  it("ne warn pas en dev/test (CI, local) — silencieux par design", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.VERCEL_ENV = "development";
     hashIp("1.2.3.4");
     expect(errSpy).not.toHaveBeenCalled();
     errSpy.mockRestore();
@@ -172,6 +188,34 @@ describe("hashIp — silent-failure warn", () => {
     hashIp("1.2.3.4");
     expect(errSpy).toHaveBeenCalledTimes(1);
     errSpy.mockRestore();
+  });
+
+  it("en production sans salt, émet aussi un Sentry config_warning (code 'missing_ip_salt')", () => {
+    process.env.VERCEL_ENV = "production";
+    hashIp("1.2.3.4");
+    hashIp("5.6.7.8");
+    // captureMcpConfigWarning suit la one-shot du warn console — pas de spam Sentry
+    expect(captureMcpConfigWarning).toHaveBeenCalledTimes(1);
+    expect(captureMcpConfigWarning).toHaveBeenCalledWith(
+      "missing_ip_salt",
+      expect.stringContaining("FRANCE_DATA_IP_SALT"),
+    );
+  });
+
+  it("en preview aussi, Sentry config_warning émis (V0.9.2 — staging Vercel sert trafic réel)", () => {
+    process.env.VERCEL_ENV = "preview";
+    hashIp("1.2.3.4");
+    expect(captureMcpConfigWarning).toHaveBeenCalledTimes(1);
+    expect(captureMcpConfigWarning).toHaveBeenCalledWith(
+      "missing_ip_salt",
+      expect.stringContaining("FRANCE_DATA_IP_SALT"),
+    );
+  });
+
+  it("hors prod/preview (dev/test), pas de Sentry config_warning", () => {
+    process.env.VERCEL_ENV = "development";
+    hashIp("1.2.3.4");
+    expect(captureMcpConfigWarning).not.toHaveBeenCalled();
   });
 });
 

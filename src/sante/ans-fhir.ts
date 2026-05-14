@@ -24,6 +24,7 @@
  * sans clé ANS (la couverture DB suffit à la majorité des cas).
  */
 
+import { readApiKeyEnv } from "../core/env.js";
 import { HttpError, fetchJson } from "../core/http.js";
 
 const ANS_FHIR_DEFAULT_BASE = "https://gateway.api.esante.gouv.fr/fhir/v2";
@@ -37,12 +38,9 @@ const IDNPS_SYSTEM = "urn:oid:1.2.250.1.71.4.2.1";
 const FETCH_TIMEOUT_MS = 60_000;
 
 export function getAnsFhirApiKey(): string | null {
-  const raw = process.env.ANS_FHIR_API_KEY;
-  if (!raw) return null;
-  // Strippe quotes entourants (parsers .env qui les conservent → 401 silencieux),
-  // pattern identique à `getInseeApiKey` (cf. insee-sirene.ts V0.4.5).
-  const cleaned = raw.trim().replace(/^["']|["']$/g, "");
-  return cleaned === "" ? null : cleaned;
+  // Centralisé via `readApiKeyEnv` (`src/core/env.ts`) : pattern identique à
+  // `getInseeApiKey`, gère trim + strip quotes entourants (Vercel UI / parsers .env).
+  return readApiKeyEnv("ANS_FHIR_API_KEY");
 }
 
 /** Override optionnel (env de staging, mock test). Sinon endpoint officiel. */

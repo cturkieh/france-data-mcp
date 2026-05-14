@@ -31,6 +31,7 @@ import {
 import { getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.js";
 import {
+  assertValidNumFiness,
   clampLimit,
   clampOffset,
   expectRpcRows,
@@ -231,7 +232,13 @@ export interface CountRppsByCommuneInput {
 export interface SavoirFaireEntry {
   /** Code savoir_faire ANS (ex 'SM04' Cardiologie ; 'SM02' = Anesthésie-réanimation). */
   code: string;
-  /** Libellé clair (le plus fréquent quand des doublons existent). */
+  /**
+   * Libellé clair du savoir_faire. Quand un même `code` a plusieurs libellés
+   * upstream (drift référentiel ANS au fil des sync), la matview
+   * `rpps_savoir_faire_stats` retient `MAX(savoir_faire_libelle)` —
+   * dernier alphabétiquement, PAS le plus fréquent. Stable et déterministe,
+   * suffisant pour disambiguation côté LLM (le `code` reste l'identifiant).
+   */
   libelle: string;
   /** Nombre de PS portant ce savoir_faire dans le périmètre filtré. */
   count_ps: number;
@@ -403,12 +410,9 @@ export async function getRppsDansEtablissement(
   input: RppsDansEtablissementInput,
 ): Promise<RppsQueryResult> {
   const limit = clampLimit(input.limit);
-  const numFiness = input.numFiness.trim();
-  if (!/^\d{9}$/.test(numFiness)) {
-    throw new RangeError(
-      `[france-data-mcp] num_finess invalide "${input.numFiness}" — attendu 9 chiffres (FINESS site).`,
-    );
-  }
+  // Defense-in-depth lib : aligné avec `finess-db.ts:getFinessByNumFiness`,
+  // utilise la source de vérité partagée `NUM_FINESS_PATTERN` via `assertValidNumFiness`.
+  const numFiness = assertValidNumFiness(input.numFiness);
 
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("rpps_dans_etablissement", {

@@ -66,7 +66,7 @@ import {
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
-import { normalizeAliases, requireOneOf, requireString } from "./_lib/args.js";
+import { normalizeAliases, requireFinessId, requireOneOf, requireString } from "./_lib/args.js";
 
 /** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
 const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
@@ -1107,8 +1107,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      const numFiness = requireFinessId(args);
       return compareRaisonSocialeFinessVsRpps(numFiness);
     },
   },
@@ -1126,8 +1125,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      const numFiness = requireFinessId(args);
       return historiqueEtablissement(numFiness);
     },
   },
@@ -1145,8 +1143,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      const numFiness = requireFinessId(args);
       return reconcilierFinessSirene(numFiness);
     },
   },
@@ -1164,8 +1161,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      const numFiness = requireFinessId(args);
       return verifierSiteActif(numFiness);
     },
   },
@@ -1310,8 +1306,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      const numFiness = requireFinessId(args);
       const result = await getFinessByNumFiness(numFiness);
       // LookupResult discriminé par `found`. On n'injecte la freshness que sur
       // les payloads `found: true` (le not_found est par construction sans
@@ -1632,8 +1627,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const numFiness = asString(args.num_finess);
-      if (!numFiness) throw new RangeError("num_finess (string, 9 chiffres) requis");
+      const numFiness = requireFinessId(args);
       const limit = coerceNumber(args.limit, "limit");
       const input: Parameters<typeof getRppsDansEtablissement>[0] = { numFiness };
       input.categorieCodes = categorieCodesFromArgs(args);
