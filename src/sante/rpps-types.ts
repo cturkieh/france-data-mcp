@@ -34,6 +34,33 @@ export const RPPS_MODE_EXERCICE = {
 } as const;
 
 /**
+ * Codes profession ANS (TRE_R94). Source unique pour éviter le drift entre
+ * `densite.ts`, `panorama.ts` et descriptions tools. Étendre cette liste à
+ * chaque profession activement consommée par un module — éviter de hardcoder
+ * un code inline.
+ */
+export const RPPS_PROFESSION = {
+  MEDECIN: "10",
+  PHARMACIEN: "21",
+  INFIRMIER: "60",
+} as const;
+
+/**
+ * Codes savoir_faire (spécialités) ANS canoniques — pour éviter les drift
+ * SM02/SM04 chopés en V0.8/V0.9. ATTENTION historique :
+ *   - SM02 = Anesthésie-réanimation (PAS Cardiologie)
+ *   - SM04 = Cardiologie et maladies vasculaires
+ *
+ * Source : extraction RPPS / Annuaire Santé ANS (V0.9 smoke test prod).
+ * Étendre uniquement avec des codes vérifiés sur dump prod.
+ */
+export const RPPS_SAVOIR_FAIRE = {
+  ANESTHESIE_REANIMATION: "SM02",
+  CARDIOLOGIE: "SM04",
+  DERMATO_VENEREOLOGIE: "SM26",
+} as const;
+
+/**
  * URL de référence ANS pour les nomenclatures publiques. Mention obligatoire
  * en CGU des datasets data.gouv : « Source : Annuaire Santé, ANS — Licence
  * Ouverte v2.0 ».

@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildCommuneIndex } from "../../src/territoire/commune-index.js";
 import type { Commune } from "../../src/territoire/communes.js";
 import { __TESTING__ } from "./rpps.js";
+import type { IngestLogEntry } from "./shared.js";
 
-const { parseRppsRecord, COL } = __TESTING__;
+const { parseRppsRecord, COL, refreshRppsMatviews } = __TESTING__;
 
 const fixtures: Commune[] = [
   {
@@ -220,5 +221,88 @@ describe("parseRppsRecord", () => {
     const result = parseRppsRecord(row(), idx);
     if (!result.row) throw new Error("expected row");
     expect(result.row.raw).toEqual({});
+  });
+});
+
+// --- refreshRppsMatviews (V0.9) -----------------------------------------------
+
+function makeLog(): IngestLogEntry {
+  return {
+    source: "rpps",
+    started_at: "2026-05-14T10:00:00Z",
+    status: "success",
+  };
+}
+
+function makeSupabaseStub(rpcImpl: (name: string, args: unknown) => { error: unknown }) {
+  return { rpc: vi.fn(rpcImpl) } as unknown as Parameters<typeof refreshRppsMatviews>[0];
+}
+
+describe("refreshRppsMatviews", () => {
+  it("appelle ingest_refresh_matview pour chaque matview connue", async () => {
+    const calls: string[] = [];
+    const supabase = makeSupabaseStub((name, args) => {
+      expect(name).toBe("ingest_refresh_matview");
+      const params = args as { p_matview: string };
+      calls.push(params.p_matview);
+      return { error: null };
+    });
+    const log = makeLog();
+
+    await refreshRppsMatviews(supabase, log);
+
+    expect(calls).toEqual(["rpps_savoir_faire_stats", "rpps_count_stats"]);
+    expect(log.status).toBe("success");
+    expect(log.error_message).toBeUndefined();
+  });
+
+  it("marque status=partial et concatène l'erreur si une matview échoue", async () => {
+    const supabase = makeSupabaseStub((_name, args) => {
+      const params = args as { p_matview: string };
+      if (params.p_matview === "rpps_count_stats") {
+        return { error: { code: "57014", message: "canceling statement due to timeout" } };
+      }
+      return { error: null };
+    });
+    const log = makeLog();
+
+    await refreshRppsMatviews(supabase, log);
+
+    expect(log.status).toBe("partial");
+    expect(log.error_message).toContain("rpps_count_stats");
+    expect(log.error_message).toContain("57014");
+  });
+
+  it("préserve un error_message préexistant et concatène", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "42P01", message: "relation does not exist" },
+    }));
+    const log = makeLog();
+    log.error_message = "earlier non-fatal warning";
+
+    await refreshRppsMatviews(supabase, log);
+
+    expect(log.status).toBe("partial");
+    expect(log.error_message?.startsWith("earlier non-fatal warning;")).toBe(true);
+  });
+
+  it("continue les autres matviews même si la première échoue", async () => {
+    const visited: string[] = [];
+    const supabase = makeSupabaseStub((_name, args) => {
+      const params = args as { p_matview: string };
+      visited.push(params.p_matview);
+      if (params.p_matview === "rpps_savoir_faire_stats") {
+        return { error: { code: "53300", message: "too many connections" } };
+      }
+      return { error: null };
+    });
+    const log = makeLog();
+
+    await refreshRppsMatviews(supabase, log);
+
+    expect(visited).toEqual(["rpps_savoir_faire_stats", "rpps_count_stats"]);
+    expect(log.status).toBe("partial");
+    expect(log.error_message).toContain("rpps_savoir_faire_stats");
+    expect(log.error_message).not.toContain("rpps_count_stats (");
   });
 });

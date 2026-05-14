@@ -20,17 +20,25 @@
 
 import { round2 } from "../core/numbers.js";
 import {
+  getPopulationByCommune,
   getPopulationByDept,
   getPopulationFrance,
   type PopulationData,
 } from "../territoire/insee-melodi.js";
 import { type CountFinessInput, countFiness } from "./finess-db.js";
 import type { FinessFamilleQuery } from "./finess-categories.js";
-import { type CountRppsInput, countRpps } from "./rpps-db.js";
-import { RPPS_MODE_EXERCICE } from "./rpps-types.js";
+import {
+  type CountRppsByCommuneInput,
+  type CountRppsInput,
+  countRpps,
+  countRppsByCommune,
+} from "./rpps-db.js";
+import { RPPS_MODE_EXERCICE, RPPS_PROFESSION } from "./rpps-types.js";
+import { SOURCE_LABELS } from "./sources.js";
 
-/** Code profession ANS pour Médecin (TRE_R94). */
-export const PROFESSION_CODE_MEDECIN = "10";
+/** Code profession ANS pour Médecin (TRE_R94). Reexport pour rétro-compat ;
+ * la source unique est `RPPS_PROFESSION.MEDECIN` dans rpps-types.ts. */
+export const PROFESSION_CODE_MEDECIN = RPPS_PROFESSION.MEDECIN;
 
 /**
  * Modes d'exercice composant l'« activité régulière » au sens DREES :
@@ -51,15 +59,26 @@ export const MODE_EXERCICE_ACTIVITE_REGULIERE = [
 const PER_100K_FACTOR = 100_000;
 
 export interface DensiteProfessionnelsSanteInput {
-  /** Code département (2-3 chars). Requis. */
-  departement: string;
+  /**
+   * Code département (2-3 chars). Exactement UN des deux entre `departement`
+   * et `codeInsee` est requis. Le département agrège tous les arrondissements
+   * (Paris 75, Lyon 69, Marseille 13) — c'est le bon niveau pour la densité
+   * « ville métropole » au sens DREES.
+   */
+  departement?: string;
+  /**
+   * Code INSEE commune 5 chars (V0.9). Exclusif avec `departement`. Pour
+   * Paris/Lyon/Marseille, le code INSEE correspond à un arrondissement précis
+   * (ex 75108 Paris 8e) — utiliser `departement` pour la métropole entière.
+   */
+  codeInsee?: string;
   /** Code profession ANS. Default `'10'` (Médecin). */
   professionCode?: string | null;
-  /** Code savoir_faire (spécialité, ex 'SM02' Cardiologie). */
+  /** Code savoir_faire (spécialité, ex 'SM04' Cardiologie). */
   savoirFaireCode?: string | null;
   /**
-   * Codes mode_exercice ANS. Default `['1','2','3']` (activité régulière DREES).
-   * Passer un subset (ex `['1']` libéral seul) pour spécialiser. `[]` ou `null`
+   * Codes mode_exercice ANS. Default `['L','S','M']` (activité régulière DREES).
+   * Passer un subset (ex `['L']` libéral seul) pour spécialiser. `[]` ou `null`
    * → pas de filtre (tous statuts inclus, comportement non-DREES).
    */
   modeExerciceCodes?: string[] | null;
@@ -67,15 +86,17 @@ export interface DensiteProfessionnelsSanteInput {
   categorieCodes?: string[];
   /**
    * Si true, ajoute le même calcul au niveau national + l'écart relatif.
-   * Coût : 1 appel RPC count_rpps supplémentaire (sans filtre dept) +
+   * Coût : 1 appel RPC count supplémentaire (sans filtre zone) +
    * 1 appel Melodi (FRANCE-F, cacheable). Recommandé pour "désert médical".
    */
   compareNational?: boolean;
 }
 
 export interface DensiteResult {
-  /** Code zone analysée (dept). */
+  /** Code zone analysée (dept ou code INSEE commune). */
   zone: string;
+  /** Niveau géographique analysé. Utile pour le LLM pour interpréter. */
+  niveau: "departement" | "commune";
   /** Nombre de PS matching les filtres dans la zone. */
   countPs: number;
   /** Population PMUN de la zone (méthodo DREES). */
@@ -110,8 +131,8 @@ export interface DensiteProfessionnelsSanteResult {
     methodologie: string;
   };
   source: {
-    ps: "RPPS / Annuaire Santé ANS (Supabase, mensuel)";
-    population: "INSEE Melodi (DS_POPULATIONS_REFERENCE)";
+    ps: typeof SOURCE_LABELS.rpps;
+    population: typeof SOURCE_LABELS.melodi;
   };
   /** Présent uniquement si `compareNational=true`. */
   comparaisonNationale?: DensiteComparaison;
@@ -131,43 +152,120 @@ function computeDensite(countPs: number, population: number): number {
   return round2((countPs * PER_100K_FACTOR) / population);
 }
 
-function buildCountInput(
+function resolveModeExercice(input: DensiteProfessionnelsSanteInput): string[] {
+  if (input.modeExerciceCodes === null) return [];
+  return input.modeExerciceCodes ?? [...MODE_EXERCICE_ACTIVITE_REGULIERE];
+}
+
+/**
+ * Construit la shape commune des filtres RPPS (profession + savoir_faire +
+ * mode_exercice + categorie). Extraite pour éviter la duplication entre les
+ * deux builders dept et commune — une seule source de vérité quand un nouveau
+ * filtre est ajouté.
+ */
+function buildRppsFilters(
   input: DensiteProfessionnelsSanteInput,
-  departement: string | null,
-): CountRppsInput {
-  const professionCode = input.professionCode ?? PROFESSION_CODE_MEDECIN;
-  const modeExerciceCodes =
-    input.modeExerciceCodes === null
-      ? []
-      : (input.modeExerciceCodes ?? [...MODE_EXERCICE_ACTIVITE_REGULIERE]);
-  const out: CountRppsInput = {
-    professionCode,
+  modeExerciceCodes: string[],
+): {
+  professionCode: string;
+  savoirFaireCode: string | null;
+  modeExerciceCodes: string[];
+  categorieCodes: string[];
+} {
+  return {
+    professionCode: input.professionCode ?? PROFESSION_CODE_MEDECIN,
     savoirFaireCode: input.savoirFaireCode ?? null,
     modeExerciceCodes,
     categorieCodes: input.categorieCodes ?? [],
   };
+}
+
+function buildCountInput(
+  input: DensiteProfessionnelsSanteInput,
+  departement: string | null,
+  modeExerciceCodes: string[],
+): CountRppsInput {
+  const out: CountRppsInput = buildRppsFilters(input, modeExerciceCodes);
   if (departement !== null) out.departement = departement;
   return out;
+}
+
+function buildCountByCommuneInput(
+  input: DensiteProfessionnelsSanteInput,
+  codeInsee: string,
+  modeExerciceCodes: string[],
+): CountRppsByCommuneInput {
+  return { ...buildRppsFilters(input, modeExerciceCodes), codeInsee };
+}
+
+/**
+ * Garantit qu'exactement un des deux entre `departement` et `codeInsee` est
+ * fourni. RangeError pour mapping JSON-RPC -32602 côté boundary MCP.
+ */
+function resolveZone(
+  input: DensiteProfessionnelsSanteInput,
+): { kind: "departement"; code: string } | { kind: "commune"; code: string } {
+  const hasDept = typeof input.departement === "string" && input.departement.length > 0;
+  const hasInsee = typeof input.codeInsee === "string" && input.codeInsee.length > 0;
+  if (hasDept && hasInsee) {
+    throw new RangeError(
+      "densiteProfessionnelsSante: passer SOIT departement SOIT codeInsee, pas les deux",
+    );
+  }
+  if (!hasDept && !hasInsee) {
+    throw new RangeError(
+      "densiteProfessionnelsSante: departement ou codeInsee requis",
+    );
+  }
+  return hasInsee
+    ? { kind: "commune", code: input.codeInsee as string }
+    : { kind: "departement", code: input.departement as string };
 }
 
 export async function densiteProfessionnelsSante(
   input: DensiteProfessionnelsSanteInput,
 ): Promise<DensiteProfessionnelsSanteResult> {
-  const baseCountInput = buildCountInput(input, input.departement);
-  const [countPs, populationLookup] = await Promise.all([
-    countRpps(baseCountInput),
-    getPopulationByDept(input.departement),
-  ]);
+  const zoneSpec = resolveZone(input);
+  const modeExerciceCodes = resolveModeExercice(input);
+  const filters = buildRppsFilters(input, modeExerciceCodes);
 
-  if (!populationLookup.found) {
-    throw new Error(
-      `Population introuvable pour le département ${input.departement} via INSEE Melodi : ${populationLookup.message}`,
-    );
+  let countPs: number;
+  let populationLookup: PopulationData;
+
+  if (zoneSpec.kind === "commune") {
+    const countInput = buildCountByCommuneInput(input, zoneSpec.code, modeExerciceCodes);
+    const [count, popLookup] = await Promise.all([
+      countRppsByCommune(countInput),
+      getPopulationByCommune(zoneSpec.code),
+    ]);
+    if (!popLookup.found) {
+      // RangeError pour mapping JSON-RPC -32602 (Invalid params) : commune
+      // fusionnée ou code invalide = faute caller récupérable, pas une panne.
+      throw new RangeError(
+        `Population introuvable pour la commune ${zoneSpec.code} via INSEE Melodi (commune peut-être fusionnée ou code invalide) : ${popLookup.message}`,
+      );
+    }
+    countPs = count;
+    populationLookup = popLookup;
+  } else {
+    const countInput = buildCountInput(input, zoneSpec.code, modeExerciceCodes);
+    const [count, popLookup] = await Promise.all([
+      countRpps(countInput),
+      getPopulationByDept(zoneSpec.code),
+    ]);
+    if (!popLookup.found) {
+      throw new RangeError(
+        `Population introuvable pour le département ${zoneSpec.code} via INSEE Melodi : ${popLookup.message}`,
+      );
+    }
+    countPs = count;
+    populationLookup = popLookup;
   }
 
   const population = populationLookup.populationMunicipale;
   const zone: DensiteResult = {
-    zone: input.departement,
+    zone: zoneSpec.code,
+    niveau: zoneSpec.kind,
     countPs,
     population,
     populationAnnee: populationLookup.annee,
@@ -177,29 +275,25 @@ export async function densiteProfessionnelsSante(
   const result: DensiteProfessionnelsSanteResult = {
     zone,
     parametres: {
-      professionCode: baseCountInput.professionCode ?? null,
-      savoirFaireCode: baseCountInput.savoirFaireCode ?? null,
-      // [] côté caller TS = null SQL = default DREES côté RPC. On reflète ce
-      // qui sera réellement appliqué (cf. commentaire migration count_rpps).
+      professionCode: filters.professionCode,
+      savoirFaireCode: filters.savoirFaireCode,
       modeExerciceCodes:
-        baseCountInput.modeExerciceCodes && baseCountInput.modeExerciceCodes.length > 0
-          ? baseCountInput.modeExerciceCodes
-          : [...MODE_EXERCICE_ACTIVITE_REGULIERE],
+        modeExerciceCodes.length > 0 ? modeExerciceCodes : [...MODE_EXERCICE_ACTIVITE_REGULIERE],
       categorieCodes:
-        baseCountInput.categorieCodes && baseCountInput.categorieCodes.length > 0
-          ? baseCountInput.categorieCodes
-          : ["C", "M"],
+        input.categorieCodes && input.categorieCodes.length > 0 ? input.categorieCodes : ["C", "M"],
       methodologie:
         "Densité PS = count(RPPS matching filtres) / population municipale × 100 000. Default : médecins en activité régulière (libéral + salarié + mixte) hors étudiants — méthodo DREES.",
     },
     source: {
-      ps: "RPPS / Annuaire Santé ANS (Supabase, mensuel)",
-      population: "INSEE Melodi (DS_POPULATIONS_REFERENCE)",
+      ps: SOURCE_LABELS.rpps,
+      population: SOURCE_LABELS.melodi,
     },
   };
 
   if (input.compareNational) {
-    const nationalInput = buildCountInput(input, null);
+    // Le compare_national reste basé sur countRpps (France entière) — la
+    // sémantique "vs national" est identique que la zone soit dept ou commune.
+    const nationalInput = buildCountInput(input, null, modeExerciceCodes);
     const [countNational, popFrance] = await Promise.all([
       countRpps(nationalInput),
       getPopulationFrance(),
@@ -265,8 +359,8 @@ export interface DensiteEtablissementsSanteResult {
     methodologie: string;
   };
   source: {
-    etablissements: "FINESS DREES (Supabase, bimensuel)";
-    population: "INSEE Melodi (DS_POPULATIONS_REFERENCE)";
+    etablissements: typeof SOURCE_LABELS.finess;
+    population: typeof SOURCE_LABELS.melodi;
   };
   comparaisonNationale?: DensiteEtablissementsComparaison;
 }
@@ -289,7 +383,9 @@ export async function densiteEtablissementsSante(
   ]);
 
   if (!populationLookup.found) {
-    throw new Error(
+    // RangeError pour mapping JSON-RPC -32602 (faute caller récupérable),
+    // aligné avec `densiteProfessionnelsSante` (V0.9 /review Passe 2).
+    throw new RangeError(
       `Population introuvable pour le département ${input.departement} via INSEE Melodi : ${populationLookup.message}`,
     );
   }
@@ -311,8 +407,8 @@ export async function densiteEtablissementsSante(
         "Densité établissements = count(FINESS catégories famille) / population municipale × 100 000. Famille obligatoire (cf. FINESS_FAMILY_CODES).",
     },
     source: {
-      etablissements: "FINESS DREES (Supabase, bimensuel)",
-      population: "INSEE Melodi (DS_POPULATIONS_REFERENCE)",
+      etablissements: SOURCE_LABELS.finess,
+      population: SOURCE_LABELS.melodi,
     },
   };
 

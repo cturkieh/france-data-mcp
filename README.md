@@ -61,7 +61,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 ---
 
-## Outils MCP (30 tools)
+## Outils MCP (31 tools)
 
 ### 🗺️ Territoire (4)
 `autocomplete_commune` · `get_commune_by_code` · `geocode_adresse` · `reverse_geocode`
@@ -89,6 +89,9 @@ Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DR
 
 `population_par_commune` · `population_par_departement` · `densite_professionnels_sante` (+ comparaison nationale matview <50 ms) · `densite_etablissements_sante` (labos, pharmacies, EHPAD, hôpitaux) · `lister_specialites_medicales` (découverte des codes savoir_faire RPPS)
 
+### 🧭 Agrégateur santé territoire (1) — V0.9
+`panorama_sante_territoire` — 1 call pour population + densités médecins/infirmiers/pharmaciens vs national + count FINESS par famille (labo, pharmacie, EHPAD, MCO, MSP/CPTS). Granularité explicite (`niveau: commune`, `niveauEtablissements: departement | indisponible`).
+
 ### 🔀 Croisement multi-source (6)
 Réconciliation FINESS ↔ RPPS ↔ SIRENE — faits bruts sans interprétation métier.
 
@@ -109,13 +112,13 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.8.3 — en production.** 30 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. 642 tests verts, TypeScript strict, Biome clean. Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so et glama.ai. Crons GitHub Actions (FINESS bimensuel, Ameli hebdo, RPPS mensuel) et Sentry monitoring actifs.
+✅ **V0.9.0 — en production.** 31 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. 725 tests verts, TypeScript strict, Biome clean. Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so et glama.ai. Crons GitHub Actions (FINESS bimensuel, Ameli hebdo, RPPS mensuel) et Sentry monitoring actifs.
 
 Voir [CHANGELOG](CHANGELOG.md) pour l'historique détaillé.
 
 ### Roadmap
 
-- [ ] **V0.9** — Densité commune (RPC `count_rpps_by_commune`), agrégateur `panorama_sante_territoire`
+- [ ] **V0.9.1** — RPC `count_finess_by_commune` (granularité commune côté établissements), auto-refresh matviews via cron multi-source
 - [ ] **V1.0+** — Support DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 
 ---

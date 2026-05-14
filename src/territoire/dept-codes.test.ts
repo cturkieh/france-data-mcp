@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { deptFromCodeInsee, deriveDeptFromCp, isValidDept } from "./dept-codes.js";
+import {
+  assertValidCodeInsee,
+  deptFromCodeInsee,
+  deriveDeptFromCp,
+  isValidCodeInsee,
+  isValidDept,
+} from "./dept-codes.js";
 
 describe("deptFromCodeInsee", () => {
   it("returns 2-char prefix for métropole", () => {
@@ -132,5 +138,61 @@ describe("deriveDeptFromCp", () => {
     // Cas DROM hors range : "979xx" n'a pas de dept, isValidDept('979')=false.
     expect(deriveDeptFromCp("97900")).toBeUndefined();
     expect(deriveDeptFromCp("98300")).toBeUndefined(); // 983 hors range COM
+  });
+});
+
+describe("isValidCodeInsee", () => {
+  it("accepts métropole 5-digit codes", () => {
+    expect(isValidCodeInsee("75056")).toBe(true); // Paris
+    expect(isValidCodeInsee("75108")).toBe(true); // Paris 8e arrondissement
+    expect(isValidCodeInsee("59009")).toBe(true); // Villeneuve-d'Ascq
+    expect(isValidCodeInsee("13055")).toBe(true); // Marseille
+    expect(isValidCodeInsee("69123")).toBe(true); // Lyon
+    expect(isValidCodeInsee("01001")).toBe(true); // L'Abergement-Clémenciat
+    expect(isValidCodeInsee("95040")).toBe(true); // Argenteuil
+  });
+
+  it("accepts Corse 2A/2B + 3 chiffres", () => {
+    expect(isValidCodeInsee("2A004")).toBe(true); // Ajaccio
+    expect(isValidCodeInsee("2B033")).toBe(true); // Bastia
+  });
+
+  it("accepts DOM 971xx-978xx", () => {
+    expect(isValidCodeInsee("97120")).toBe(true); // Guadeloupe
+    expect(isValidCodeInsee("97411")).toBe(true); // La Réunion
+    expect(isValidCodeInsee("97608")).toBe(true); // Mayotte
+  });
+
+  it("accepts COM 984xx-988xx", () => {
+    expect(isValidCodeInsee("98711")).toBe(true); // Polynésie
+    expect(isValidCodeInsee("98800")).toBe(true); // Nouvelle-Calédonie
+  });
+
+  it("rejects codes with invalid territorial prefix", () => {
+    expect(isValidCodeInsee("96000")).toBe(false); // 96xx n'existe pas
+    expect(isValidCodeInsee("99999")).toBe(false); // 99xx n'existe pas
+    expect(isValidCodeInsee("20001")).toBe(false); // 20xx → Corse 2A/2B requis
+    expect(isValidCodeInsee("97900")).toBe(false); // 979 hors range DOM
+    expect(isValidCodeInsee("98300")).toBe(false); // 983 hors range COM
+  });
+
+  it("rejects malformed inputs", () => {
+    expect(isValidCodeInsee("")).toBe(false);
+    expect(isValidCodeInsee("75")).toBe(false); // too short
+    expect(isValidCodeInsee("750560")).toBe(false); // too long
+    expect(isValidCodeInsee("75ABC")).toBe(false); // non-numeric tail
+    expect(isValidCodeInsee("2C001")).toBe(false); // 2C non valide (Corse = 2A/2B)
+    expect(isValidCodeInsee("00001")).toBe(false); // dept 00 inexistant
+  });
+});
+
+describe("assertValidCodeInsee", () => {
+  it("returns void on valid code", () => {
+    expect(() => assertValidCodeInsee("75056")).not.toThrow();
+  });
+
+  it("throws RangeError on invalid code (for MCP -32602 mapping)", () => {
+    expect(() => assertValidCodeInsee("99999")).toThrow(RangeError);
+    expect(() => assertValidCodeInsee("invalid")).toThrow(/code_insee must be/);
   });
 });

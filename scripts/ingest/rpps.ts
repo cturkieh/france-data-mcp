@@ -365,13 +365,34 @@ async function main(): Promise<void> {
     // 6. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "rpps" });
 
-    // 6b. CANARY POST-SWAP. Cibles seedées dans la migration `_canary_seed_rpps`
+    // 6b. REFRESH MATERIALIZED VIEWS post-swap. Les matviews `rpps_count_stats`
+    // (V0.8.3) et `rpps_savoir_faire_stats` (V0.8.2) pré-agrègent les comptages
+    // RPPS pour servir `densite_professionnels_sante` (compare_national) et
+    // `lister_specialites_medicales` en <50 ms. Sans REFRESH après l'ingest
+    // mensuel, elles dérivent silencieusement vs la prod (= les tools retournent
+    // des stats du mois précédent). CONCURRENTLY car les deux ont un UNIQUE
+    // INDEX et sont consultées par des requêtes anon en parallèle — un REFRESH
+    // non-concurrent poserait un AccessExclusiveLock bloquant.
+    //
+    // Erreur ici ne bloque PAS la prod (le swap est déjà commit), on log et on
+    // capture en ingest_log pour observabilité. Sentry côté MCP attrapera la
+    // matview vide (sentinelle SQLSTATE P0002 dans count_rpps).
+    await refreshRppsMatviews(supabase, log);
+
+    // 6c. CANARY POST-SWAP. Cibles seedées dans la migration `_canary_seed_rpps`
     // (placeholders à valider post 1er run prod — log warn non-bloquant si
     // tous missing tant que les vrais IDNPS référents n'ont pas remplacé les
     // placeholders).
     await runAndRecordCanary(supabase, "rpps", log, "rpps");
 
-    log.status = "success";
+    // IMPORTANT : préserver un éventuel `status: "partial"` posé par
+    // `refreshRppsMatviews` (V0.9). `runAndRecordCanary` actuel ne pose pas
+    // "partial" — il remplit seulement `canary_failures`. Si un futur change
+    // y ajoute "partial", ce check le préserve aussi. Écraser inconditionnel-
+    // lement masquerait un incident d'observabilité (régression V0.9 Passe 1).
+    if (log.status !== "partial") {
+      log.status = "success";
+    }
     log.finished_at = new Date().toISOString();
     await writeIngestLog(log);
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
@@ -581,6 +602,59 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
   };
 }
 
-export const __TESTING__ = { parseRppsRecord, COL };
+/**
+ * Refresh des matviews dépendantes de la table `rpps` après swap atomique.
+ *
+ * Deux matviews à refresh :
+ *   - `rpps_savoir_faire_stats` (V0.8.2) → `lister_specialites_medicales`
+ *   - `rpps_count_stats` (V0.8.3) → `densite_professionnels_sante` (compare_national)
+ *
+ * Best-effort : le swap est déjà commit, on n'annule pas la prod si REFRESH
+ * échoue. Cas de fail attendus :
+ *   - statement_timeout : ne devrait pas arriver côté service_role (timeout
+ *     bien plus élevé que côté anon), mais on log au cas où.
+ *   - lock conflict : query anon massive en cours sur la matview pendant
+ *     REFRESH CONCURRENTLY → retry possible, ici on accepte l'échec.
+ *   - relation does not exist : env dev sans matview (migration pas appliquée).
+ *
+ * Tous les fails sont console.error + marquent le log entry "partial" pour
+ * surfacer côté dashboard. La sentinelle SQLSTATE P0002 dans `count_rpps`
+ * (matview vide) catchera de toute façon une matview cassée côté MCP via Sentry.
+ *
+ * Exporté pour testabilité unitaire.
+ */
+export async function refreshRppsMatviews(
+  supabase: SupabaseClient,
+  log: IngestLogEntry,
+): Promise<void> {
+  const matviews = ["rpps_savoir_faire_stats", "rpps_count_stats"] as const;
+  const failures: string[] = [];
+
+  for (const matview of matviews) {
+    const start = Date.now();
+    const { error } = await supabase.rpc("ingest_refresh_matview", {
+      p_matview: matview,
+    });
+    const elapsedMs = Date.now() - start;
+
+    if (error) {
+      console.error(
+        `[rpps] REFRESH MATERIALIZED VIEW ${matview} failed [code=${error.code ?? "none"}] after ${elapsedMs}ms: ${error.message}`,
+      );
+      failures.push(`${matview} (${error.code ?? "no_code"}: ${error.message})`);
+      continue;
+    }
+
+    console.log(`[rpps] REFRESH MATERIALIZED VIEW ${matview} CONCURRENTLY OK in ${elapsedMs}ms`);
+  }
+
+  if (failures.length > 0) {
+    log.status = "partial";
+    const previousMsg = log.error_message ? `${log.error_message}; ` : "";
+    log.error_message = `${previousMsg}post-swap matview refresh failed: ${failures.join(", ")}`;
+  }
+}
+
+export const __TESTING__ = { parseRppsRecord, COL, refreshRppsMatviews };
 
 await runIfMain(import.meta.url, main);

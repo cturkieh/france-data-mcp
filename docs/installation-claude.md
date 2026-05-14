@@ -104,7 +104,7 @@ Pour l'ingestion des CSV source (FINESS bimestriel ~95 K rows, Ameli hebdo ~462 
 
 ---
 
-## Outils exposés (24 — V0.7.0)
+## Outils exposés (31 — V0.9.0)
 
 **🗺️ Territoire** : `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
 
@@ -116,9 +116,13 @@ Pour l'ingestion des CSV source (FINESS bimestriel ~95 K rows, Ameli hebdo ~462 
 
 **🩺 Tous les PS — RPPS / Annuaire Santé ANS** : `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name`, `professionnel_by_rpps`
 
-**🔀 Croisement multi-source** : `data_freshness`, `verifier_site_actif`, `compare_raison_sociale_finess_vs_rpps`, `historique_etablissement`, `reconcilier_finess_sirene`
+**📊 Démographie & densités — INSEE Melodi (V0.8 + V0.9)** : `population_par_commune`, `population_par_departement`, `densite_professionnels_sante` (département OU commune), `densite_etablissements_sante`, `lister_specialites_medicales`
 
-Voir le [README](../README.md#outils-mcp-exposés-24-tools) pour la description détaillée de chaque tool.
+**🧭 Agrégateur santé territoire (V0.9)** : `panorama_sante_territoire`
+
+**🔀 Croisement multi-source** : `data_freshness`, `verifier_site_actif`, `compare_raison_sociale_finess_vs_rpps`, `historique_etablissement`, `reconcilier_finess_sirene`, `finess_sirene_coverage_in_radius`
+
+Voir le [README](../README.md#outils-mcp-31-tools) pour la description détaillée de chaque tool.
 
 ---
 

@@ -56,6 +56,40 @@ export function assertValidDept(dept: string): void {
 }
 
 /**
+ * Validateur de code INSEE commune (5 chars). Accepte :
+ *  - Métropole : 5 chiffres dont les 2 premiers ∈ 01-19, 21-95 (Corse 20 exclue)
+ *  - Corse     : "2A" / "2B" + 3 chiffres
+ *  - DOM       : 971xx-978xx
+ *  - COM       : 984xx-988xx
+ *
+ * Plus strict que `^([0-9]{2}|2[AB])[0-9]{3}$` (regex côté SQL) car écarte les
+ * préfixes territoriaux fantaisistes (96, 99, etc.) qui passeraient le regex
+ * mais ne correspondent à aucune commune INSEE réelle. On délègue PAS à
+ * `isValidDept` qui est volontairement permissif (rétro-compat DB layer).
+ */
+export function isValidCodeInsee(codeInsee: string | null | undefined): boolean {
+  if (typeof codeInsee !== "string" || codeInsee.length !== 5) return false;
+  // Corse : 2A/2B + 3 chiffres exactement.
+  if (/^(2A|2B)\d{3}$/.test(codeInsee)) return true;
+  // Métropole 5 chiffres : préfixe dept ∈ 01-19, 21-95 (20 exclue → Corse).
+  if (/^(0[1-9]|1\d|2[1-9]|[3-8]\d|9[0-5])\d{3}$/.test(codeInsee)) return true;
+  // DOM : 971xx-978xx. COM : 984xx-988xx.
+  if (/^(97[1-8]|98[4-8])\d{2}$/.test(codeInsee)) return true;
+  return false;
+}
+
+/**
+ * Variante throw-on-invalid de `isValidCodeInsee`. Cohérent avec `assertValidDept` :
+ * `RangeError` pour mapping JSON-RPC -32602 côté boundary MCP.
+ */
+export function assertValidCodeInsee(codeInsee: string): void {
+  if (isValidCodeInsee(codeInsee)) return;
+  throw new RangeError(
+    `[france-data-mcp] code_insee must be a valid 5-char INSEE commune code, got "${codeInsee}"`,
+  );
+}
+
+/**
  * Dérive le code département depuis un code postal 5 chiffres. Sert au
  * fallback de l'ingestion RPPS V0.5.1 quand le CP+ville ne match aucune
  * commune INSEE — on garde au moins le dept pour permettre le filtrage

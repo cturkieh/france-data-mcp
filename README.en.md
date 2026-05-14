@@ -54,14 +54,15 @@ Brings together the most useful French government data sources under a uniform t
 
 ---
 
-## Tools (30)
+## Tools (31)
 
 - **Territory (4)**: `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
 - **Companies (3)**: `entreprises_in_radius`, `entreprise_by_siren` (+ INSEE SIRENE V3.11 fallback), `etablissement_by_siret`
 - **FINESS healthcare facilities (3)**: `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
 - **Ameli licensed practitioners (4)**: `professionnels_in_radius`, `professionnels_par_specialite_dept`, `lister_specialites_ameli`, `lister_types_ps_ameli`
 - **RPPS / ANS — all active practitioners (5)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name` (fuzzy trigram), `professionnel_by_rpps` (+ live FHIR ANS fallback)
-- **Demographics & densities — INSEE Melodi (5)**: `population_par_commune`, `population_par_departement`, `densite_professionnels_sante` (DREES methodology, per 100k inhab. + national benchmark), `densite_etablissements_sante` (labs, pharmacies, nursing homes, hospitals), `lister_specialites_medicales` (RPPS savoir_faire discovery)
+- **Demographics & densities — INSEE Melodi (5)**: `population_par_commune`, `population_par_departement`, `densite_professionnels_sante` (department OR commune, DREES methodology, per 100k inhab. + national benchmark), `densite_etablissements_sante` (labs, pharmacies, nursing homes, hospitals), `lister_specialites_medicales` (RPPS savoir_faire discovery)
+- **Territory health snapshot (1) — V0.9**: `panorama_sante_territoire` — single-call aggregator (population + multi-PS densities vs national + FINESS counts per family)
 - **Multi-source cross-checks (6)**: `data_freshness`, `verifier_site_actif`, `compare_raison_sociale_finess_vs_rpps`, `historique_etablissement`, `reconcilier_finess_sirene`, `finess_sirene_coverage_in_radius`
 
 ---
@@ -78,13 +79,13 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.8.3 — in production.** 30 tools, ~95K FINESS, ~462K Ameli, ~2.2M active RPPS. 642 tests passing, TypeScript strict, Biome clean. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so and glama.ai. GitHub Actions crons (FINESS bi-monthly, Ameli weekly, RPPS monthly) and Sentry monitoring active.
+✅ **v0.9.0 — in production.** 31 tools, ~95K FINESS, ~462K Ameli, ~2.2M active RPPS. 725 tests passing, TypeScript strict, Biome clean. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so and glama.ai. GitHub Actions crons (FINESS bi-monthly, Ameli weekly, RPPS monthly) and Sentry monitoring active.
 
 See [CHANGELOG](CHANGELOG.md) for the full history.
 
 ### Roadmap
 
-- **v0.9** — Commune-level density (`count_rpps_by_commune` RPC), `panorama_sante_territoire` aggregator
+- **v0.9.1** — `count_finess_by_commune` RPC (commune-level facility density), multi-source matview auto-refresh
 - **v1.0+** — DOM-COM support, INSEE IRIS (infra-communal demographics)
 
 ---

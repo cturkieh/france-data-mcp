@@ -4,6 +4,92 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.9.0] — 2026-05-14
+
+**Densité communale + agrégateur panorama + UX MCP — feature majeure.**
+
+V0.9.0 ajoute le niveau commune au tool `densite_professionnels_sante` via
+le nouveau RPC `count_rpps_by_commune`, introduit le tool agrégateur
+`panorama_sante_territoire` (densités multi-PS + count FINESS en 1 call),
+et applique 3 améliorations UX significatives (alias paramètres, descriptions
+inputSchema enrichies, messages d'erreur suggestifs) suite au constat partagé
+en testant le MCP via ChatGPT / Claude : 2-3 essais ratés en moyenne avant
+de trouver le bon nom de paramètre.
+
+### Ajouté
+
+- **`panorama_sante_territoire(code_insee, finess_familles?)`** — nouvel
+  agrégateur santé en 1 call. Retourne en parallèle population (Melodi),
+  densités médecins/infirmiers/pharmaciens vs national, et count FINESS par
+  famille (`labo`, `pharmacie`, `ehpad`, `mco`, `msp_cpts` par défaut).
+  Granularité mixte explicite : `niveau: "commune"` pour population + PS,
+  `niveauEtablissements: "departement" | "indisponible"` pour FINESS (le
+  RPC `count_finess_by_commune` est différé en V0.9.1). Réduit la friction
+  LLM de 7-10 calls séquentiels à 1.
+- **`densite_professionnels_sante` au niveau commune** — paramètre
+  `code_insee` alternatif et exclusif à `code_dept`. Le champ retour
+  `zone.niveau: "departement" | "commune"` rend la granularité observable.
+- **`count_rpps_by_commune` RPC** (migration `20260514T070000`) — brique
+  SQL. EXECUTE format + custom plan, index `rpps_insee_idx` existant.
+  Garde-fou sentinelle `EXISTS (SELECT 1 FROM rpps LIMIT 1)` → SQLSTATE
+  P0002 si table vide (anti faux positif « désert médical » sur ingest
+  cassé).
+- **`ingest_refresh_matview(p_matview TEXT)` RPC** (migration
+  `20260514T060000`) — SECURITY DEFINER + whitelist hardcoded. Permet le
+  REFRESH CONCURRENTLY post-swap atomique des matviews RPPS sans accorder
+  de DDL public au service_role.
+- **`refreshRppsMatviews` post-swap dans `scripts/ingest/rpps.ts`** —
+  refresh des 2 matviews RPPS après chaque ingest mensuel. `log.status =
+  "partial"` en cas de fail, préservé jusqu'à `writeIngestLog`.
+- **`isValidCodeInsee` + `assertValidCodeInsee`** dans
+  `src/territoire/dept-codes.ts` — validation stricte des codes INSEE
+  5 chars. Rejette les préfixes territoriaux fantaisistes (96, 99, 20xxx).
+- **Helpers UX `api/_lib/args.ts`** : `normalizeAliases` (warn sur
+  collision), `requireString` (distingue absent vs mauvais type),
+  `requireOneOf`, `suggestParamError`.
+- **Constantes centralisées `rpps-types.ts`** : `RPPS_PROFESSION` (codes
+  TRE_R94), `RPPS_SAVOIR_FAIRE` (anti-drift SM02/SM04 historique).
+- **`src/sante/sources.ts`** — `SOURCE_LABELS` centralisé pour les
+  attributions sources.
+
+### Modifié
+
+- **`densite_professionnels_sante` tool MCP** — XOR `code_dept` /
+  `code_insee`. Alias `dept`, `departement`, `codeInsee`, `insee` acceptés.
+  Description enrichie avec exemples, mention limite Paris/Marseille/Lyon
+  arrondissements, fix « SM04 » Cardiologie (SM02 = Anesthésie-réanimation).
+- **`densite_etablissements_sante`, `population_par_commune`,
+  `population_par_departement`, `get_commune_by_code`,
+  `autocomplete_commune` tools MCP** — alias paramètres applicables,
+  descriptions enrichies avec exemples, messages d'erreur suggestifs.
+- **`densiteProfessionnelsSante` + `densiteEtablissementsSante`** (lib TS)
+  — population introuvable Melodi → `RangeError` (mapping JSON-RPC -32602)
+  au lieu de `Error` générique.
+- **`buildRppsFilters` extrait** — factorise la shape filtres entre
+  builders dept et commune dans `densite.ts`.
+- **`parseFamilles` désormais utilisé** par `panorama_sante_territoire`
+  handler — throw au lieu de filter silencieux.
+
+### Fixed
+
+- Régression silencieuse `log.status = "success"` écrasant « partial »
+  posé par `refreshRppsMatviews` (chopped en /review Passe 1).
+- Sentinelle « rpps vide » initialement basée sur `pg_class.reltuples`
+  → faux positif post-swap (chopped en /review Passe 2) → remplacée
+  par `EXISTS`.
+- Drift documentaire SM02 = « Cardiologie » corrigé partout.
+
+### Documentation
+
+- README FR + EN : 30 → 31 tools (ajout panorama_sante_territoire).
+- `docs/installation-claude.md` : drift « 24 tools V0.7.0 » corrigé.
+- `docs/backlog.md` : items P0/P1 V0.9 cochés.
+
+### Tests
+
+- 642 → 725 tests verts (+83 nouveaux V0.9). tsc strict clean, Biome
+  clean. 3 passes /review (1 simplify + 2 review) — GO unanime Passe 3.
+
 ## [0.8.3] — 2026-05-14
 
 **Fix performance `count_rpps` — matview `rpps_count_stats` pré-agrégée.**

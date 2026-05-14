@@ -7,6 +7,7 @@
  * Les CSV bruts restent disponibles dans la lib pour les usages hors MCP.
  */
 
+import { normalizeAliases, requireOneOf, requireString } from "./_lib/args.js";
 import { INCLUDE_FRESHNESS_SCHEMA, withFreshness } from "../src/core/freshness.js";
 import {
   type AmeliQueryResult,
@@ -45,6 +46,7 @@ import {
   densiteProfessionnelsSante,
 } from "../src/sante/densite.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
+import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
 import {
   buildCategorieCodes,
   getRppsById,
@@ -797,13 +799,16 @@ export const TOOLS: McpTool[] = [
   {
     name: "autocomplete_commune",
     description:
-      "Recherche de communes françaises par nom, code postal ou code INSEE. Idéal pour autocomplétion. Source : geo.api.gouv.fr (DINUM/Etalab).",
+      "Recherche de communes françaises par nom, code postal ou code INSEE. Idéal pour autocomplétion. Source : geo.api.gouv.fr (DINUM/Etalab).\n\nUn (au moins) parmi `nom`, `codePostal`, `code` est requis. Alias acceptés : `q`/`query`/`search` → `nom`, `codepostal`/`postal_code` → `codePostal`, `code_insee`/`insee` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
-        nom: { type: "string", description: "Recherche par nom (autocomplétion)." },
-        codePostal: { type: "string", description: "Code postal exact (5 chiffres)." },
-        code: { type: "string", description: "Code INSEE exact (5 caractères)." },
+        nom: {
+          type: "string",
+          description: "Recherche par nom (autocomplétion). Ex: \"Villeneuve d'Ascq\", \"Lyon\".",
+        },
+        codePostal: { type: "string", description: "Code postal exact (5 chiffres). Ex: \"59650\"." },
+        code: { type: "string", description: "Code INSEE exact (5 caractères). Ex: \"59009\"." },
         limit: {
           type: "number",
           description: "Nombre max de résultats (1-30, défaut 10).",
@@ -818,7 +823,17 @@ export const TOOLS: McpTool[] = [
       },
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        q: "nom",
+        query: "nom",
+        search: "nom",
+        codepostal: "codePostal",
+        postal_code: "codePostal",
+        code_insee: "code",
+        insee: "code",
+      });
+      requireOneOf(args, ["nom", "codePostal", "code"], { nom: "Lyon" });
       const opts: Parameters<typeof searchCommunes>[0] = {
         boostPopulation: args.boostPopulation !== false,
       };
@@ -836,19 +851,27 @@ export const TOOLS: McpTool[] = [
   {
     name: "get_commune_by_code",
     description:
-      "Récupère une commune par son code INSEE. Retourne un objet `LookupResult` discriminé par `found`. `found: true` → champs commune à plat (nom, codesPostaux, centre…). `found: false` → `{ found: false, key, lookupStatus: 'not_found', message }` orientant vers `autocomplete_commune` pour disambiguer.",
+      "Récupère une commune par son code INSEE. Retourne un objet `LookupResult` discriminé par `found`. `found: true` → champs commune à plat (nom, codesPostaux, centre…). `found: false` → `{ found: false, key, lookupStatus: 'not_found', message }` orientant vers `autocomplete_commune` pour disambiguer.\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
-        code: { type: "string", description: "Code INSEE (5 caractères)." },
+        code: {
+          type: "string",
+          description: "Code INSEE 5 caractères. Ex: \"75056\" Paris, \"59009\" Villeneuve-d'Ascq, \"2A004\" Ajaccio.",
+        },
       },
       required: ["code"],
     },
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
-      if (typeof args.code !== "string") throw new RangeError("code (string) requis");
-      return getCommuneByCode(args.code);
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        code_insee: "code",
+        codeInsee: "code",
+        insee: "code",
+      });
+      const code = requireString(args, "code", { code: "75056" });
+      return getCommuneByCode(code);
     },
   },
   {
@@ -907,45 +930,56 @@ export const TOOLS: McpTool[] = [
   {
     name: "population_par_commune",
     description:
-      "Population municipale (PMUN), population comptée à part (PCAP) et population totale (PTOT) d'une commune française par son code INSEE (5 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN est la base légale officielle utilisée pour les indicateurs DREES (densité médicale, etc.). Retourne un `LookupResult` discriminé par `found`. Si la commune a fusionné ou changé de code, `found: false` avec orientation vers `autocomplete_commune`.",
+      "Population municipale (PMUN), population comptée à part (PCAP) et population totale (PTOT) d'une commune française par son code INSEE (5 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN est la base légale officielle utilisée pour les indicateurs DREES (densité médicale, etc.). Retourne un `LookupResult` discriminé par `found`. Si la commune a fusionné ou changé de code, `found: false` avec orientation vers `autocomplete_commune`.\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
         code: {
           type: "string",
           description:
-            "Code INSEE de la commune (5 caractères, ex: '75056' Paris, '13201' Marseille 1er, '2A004' Ajaccio).",
+            "Code INSEE de la commune (5 caractères). Ex: \"75056\" Paris, \"13201\" Marseille 1er, \"59009\" Villeneuve-d'Ascq, \"2A004\" Ajaccio.",
         },
       },
       required: ["code"],
     },
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
-      if (typeof args.code !== "string") throw new RangeError("code (string) requis");
-      return getPopulationByCommune(args.code);
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        code_insee: "code",
+        codeInsee: "code",
+        insee: "code",
+      });
+      const code = requireString(args, "code", { code: "59009" });
+      return getPopulationByCommune(code);
     },
   },
   {
     name: "population_par_departement",
     description:
-      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'un département français par son code INSEE (2-3 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN recommandée pour calculs de densité (méthodo DREES). Supporte la Corse (2A, 2B) et les DOM (971-976).",
+      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'un département français par son code INSEE (2-3 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN recommandée pour calculs de densité (méthodo DREES). Supporte la Corse (2A, 2B) et les DOM (971-976).\n\nAlias acceptés : `code_dept`/`dept`/`departement`/`code_departement` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
         code: {
           type: "string",
           description:
-            "Code INSEE du département (2-3 caractères, ex: '75' Paris, '13' Bouches-du-Rhône, '2A' Corse-du-Sud, '971' Guadeloupe).",
+            "Code INSEE du département (2-3 caractères). Ex: \"75\" Paris, \"59\" Nord, \"13\" Bouches-du-Rhône, \"2A\" Corse-du-Sud, \"971\" Guadeloupe.",
         },
       },
       required: ["code"],
     },
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
-      if (typeof args.code !== "string") throw new RangeError("code (string) requis");
-      return getPopulationByDept(args.code);
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        code_dept: "code",
+        dept: "code",
+        departement: "code",
+        code_departement: "code",
+      });
+      const code = requireString(args, "code", { code: "59" });
+      return getPopulationByDept(code);
     },
   },
   {
@@ -1606,14 +1640,19 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "densite_professionnels_sante",
-    description: `Densité de professionnels de santé pour 100 000 habitants dans un département. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex SM02 cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['1']\`.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
+    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9). Exactement un des deux requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nLimitation Paris/Marseille/Lyon : au niveau commune (\`code_insee\`), les rows RPPS portent l'arrondissement (75108, 13201, 69383). Pour la métropole entière, utiliser \`code_dept\` (75, 13, 69).\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
         code_dept: {
           type: "string",
           description:
-            "Code INSEE du département (2-3 caractères, ex: '75', '13', '2A', '971').",
+            "Code INSEE du département 2-3 caractères. Ex: \"75\" Paris, \"59\" Nord, \"2A\" Corse-du-Sud, \"971\" Guadeloupe. Exclusif avec code_insee.",
+        },
+        code_insee: {
+          type: "string",
+          description:
+            "Code INSEE de la commune 5 caractères (V0.9). Ex: \"59009\" Villeneuve-d'Ascq, \"75108\" Paris 8e, \"2A004\" Ajaccio. Exclusif avec code_dept.",
         },
         profession_code: {
           type: "string",
@@ -1622,7 +1661,7 @@ export const TOOLS: McpTool[] = [
         savoir_faire_code: {
           type: "string",
           description:
-            "Code spécialité (savoir_faire). Pertinent surtout pour profession_code=10 (médecin). Ex : 'SM02' Cardiologie, 'SM26' Dermato-vénérologie. Voir lister_specialites_medicales (V0.8 Phase 4).",
+            "Code spécialité (savoir_faire). Pertinent surtout pour profession_code=10 (médecin). Ex : 'SM04' Cardiologie, 'SM26' Dermato-vénérologie, 'SM02' Anesthésie-réanimation. Voir lister_specialites_medicales pour la liste exhaustive.",
         },
         mode_exercice_codes: {
           type: "array",
@@ -1637,16 +1676,26 @@ export const TOOLS: McpTool[] = [
         },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
       },
-      required: ["code_dept"],
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        dept: "code_dept",
+        departement: "code_dept",
+        codeInsee: "code_insee",
+        insee: "code_insee",
+      });
+      requireOneOf(args, ["code_dept", "code_insee"], { code_dept: "59" });
       const codeDept = asString(args.code_dept);
-      if (!codeDept) throw new RangeError("code_dept (string, 2-3 caractères) requis");
+      const codeInsee = asString(args.code_insee);
+      // Le check XOR (les deux fournis) est délégué à `resolveZone` côté lib
+      // (densite.ts) pour garder une source unique de wording d'erreur. Le
+      // boundary MCP cast `RangeError` en JSON-RPC -32602.
       const input: Parameters<typeof densiteProfessionnelsSante>[0] = {
-        departement: codeDept,
         categorieCodes: categorieCodesFromArgs(args),
       };
+      if (codeDept) input.departement = codeDept;
+      if (codeInsee) input.codeInsee = codeInsee;
       const professionCode = asString(args.profession_code);
       if (professionCode) input.professionCode = professionCode;
       const savoirFaireCode = asString(args.savoir_faire_code);
@@ -1655,11 +1704,6 @@ export const TOOLS: McpTool[] = [
         const filtered = args.mode_exercice_codes.filter(
           (v): v is string => typeof v === "string",
         );
-        // `[]` reçu du caller MCP : sémantique différente du défaut DREES.
-        // Si l'array est vide après filtrage (caller a passé [] OU [42, true] —
-        // tout filtré), on le signale comme désactivation explicite du filtre
-        // (= comptage tous statuts confondus, pas la méthodo DREES). Log warn
-        // pour traçabilité car risque de mécompréhension côté LLM.
         if (filtered.length === 0) {
           console.warn(
             `[france-data-mcp] densite_professionnels_sante: mode_exercice_codes vide reçu — interprété comme 'pas de filtre' (tous statuts), pas la méthodo DREES par défaut`,
@@ -1677,14 +1721,14 @@ export const TOOLS: McpTool[] = [
   {
     name: "densite_etablissements_sante",
     description:
-      "Densité d'établissements de santé pour 100 000 habitants dans un département, par famille FINESS. Croise FINESS DREES (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nFamilles disponibles : `labo` (laboratoires de biologie médicale), `pharmacie`, `ehpad`, `mco` (court séjour médecine/chirurgie/obstétrique), `ssr` (soins de suite), `psychiatrie`, `dialyse`, `imagerie`, `had` (hospitalisation à domicile), `msp_cpts` (maisons de santé + CPTS), `handicap_enfants`, `handicap_adultes`, `addictologie`, `pmi`, `prevention_sante`, etc. Famille obligatoire — sans filtre, le ratio mélangerait labos / hôpitaux / EHPAD et n'aurait pas de sens.\n\n`compare_national: true` ajoute la densité France entière (DOM inclus) + écart en %. Coût : 1 RPC count_finess + 1 appel Melodi (cacheable).",
+      "Densité d'établissements de santé pour 100 000 habitants dans un département, par famille FINESS. Croise FINESS DREES (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nFamilles disponibles : `labo` (laboratoires de biologie médicale), `pharmacie`, `ehpad`, `mco` (court séjour médecine/chirurgie/obstétrique), `ssr` (soins de suite), `psychiatrie`, `dialyse`, `imagerie`, `had` (hospitalisation à domicile), `msp_cpts` (maisons de santé + CPTS), `handicap_enfants`, `handicap_adultes`, `addictologie`, `pmi`, `prevention_sante`, etc. Famille obligatoire — sans filtre, le ratio mélangerait labos / hôpitaux / EHPAD et n'aurait pas de sens.\n\n`compare_national: true` ajoute la densité France entière (DOM inclus) + écart en %. Coût : 1 RPC count_finess + 1 appel Melodi (cacheable).\n\nAlias acceptés : `dept`/`departement` → `code_dept`.",
     inputSchema: {
       type: "object",
       properties: {
         code_dept: {
           type: "string",
           description:
-            "Code INSEE du département (2-3 caractères, ex: '75', '13', '2A', '971').",
+            "Code INSEE du département 2-3 caractères. Ex: \"75\" Paris, \"59\" Nord, \"2A\" Corse-du-Sud, \"971\" Guadeloupe.",
         },
         famille: {
           type: "string",
@@ -1701,9 +1745,15 @@ export const TOOLS: McpTool[] = [
       required: ["code_dept", "famille"],
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
-      const codeDept = asString(args.code_dept);
-      if (!codeDept) throw new RangeError("code_dept (string, 2-3 caractères) requis");
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        dept: "code_dept",
+        departement: "code_dept",
+      });
+      const codeDept = requireString(args, "code_dept", {
+        code_dept: "59",
+        famille: "labo",
+      });
       const famille = asFinessFamille(args.famille);
       if (!famille) {
         throw new RangeError(
@@ -1720,8 +1770,44 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
+    name: "panorama_sante_territoire",
+    description: `Panorama santé d'une commune française en 1 appel (V0.9). Agrège en parallèle : population (INSEE Melodi), densités médecins + infirmiers + pharmaciens avec comparaison nationale (méthodo DREES), et nombre d'établissements FINESS par famille (default ${JSON.stringify(DEFAULT_FAMILLES)}).\n\nRemplace 7-10 appels MCP individuels par 1 seul. Ne renvoie AUCUNE interprétation métier (pas de qualification automatique 'désert médical') — le caller LLM applique sa grille.\n\n**Granularité mixte** : les densités professionnels et la population sont calculées au niveau **commune** ; le décompte FINESS est agrégé au niveau **département** dérivé du code INSEE (limitation V0.9 — pas de RPC count_finess_by_commune encore). Le champ \`niveauEtablissements\` du résultat indique \`"departement"\` (succès), \`"indisponible"\` (dept indérivable, ex code DOM tronqué) — utiliser cette information pour ne pas confondre ratios commune et dept.\n\nLimitation Paris/Marseille/Lyon : le code INSEE correspond à un arrondissement (ex 75108 Paris 8e, 13206 Marseille 6e, 69383 Lyon 3e). Pour la métropole entière, appeler \`densite_professionnels_sante\` au niveau département.\n\nAlias acceptés : \`codeInsee\`/\`insee\`/\`code\` → \`code_insee\`.\n\nSources : RPPS / Annuaire Santé ANS (mensuel), FINESS DREES (bimensuel), INSEE Melodi (PMUN 2023).`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        code_insee: {
+          type: "string",
+          description:
+            "Code INSEE de la commune 5 caractères. Ex: \"59009\" Villeneuve-d'Ascq, \"75108\" Paris 8e, \"2A004\" Ajaccio.",
+        },
+        finess_familles: {
+          type: "array",
+          items: { type: "string" },
+          description: `Familles FINESS à inclure dans le décompte établissements. Default ${JSON.stringify(DEFAULT_FAMILLES)}. Passer [] pour omettre le décompte FINESS (renvoie uniquement population + densités PS).`,
+        },
+      },
+      required: ["code_insee"],
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        codeInsee: "code_insee",
+        insee: "code_insee",
+        code: "code_insee",
+      });
+      const codeInsee = requireString(args, "code_insee", { code_insee: "59009" });
+      const input: Parameters<typeof panoramaSanteTerritoire>[0] = { codeInsee };
+      // Cohérence avec les autres tools FINESS : `parseFamilles` throw
+      // RangeError sur famille invalide au lieu de filtrer silencieusement
+      // (fix /review V0.9 — anti-pattern "zéro catch silencieux").
+      const familles = parseFamilles(args.finess_familles);
+      if (familles !== undefined) input.finessFamilles = familles;
+      return panoramaSanteTerritoire(input);
+    },
+  },
+  {
     name: "lister_specialites_medicales",
-    description: `Liste les spécialités médicales (savoir_faire RPPS) avec leur libellé et le nombre de PS qui les portent. Tool d'aide à la découverte pour le LLM : avant d'appeler densite_professionnels_sante ou professionnels_rpps_par_dept avec un \`savoir_faire_code\` précis (ex 'SM02' Cardiologie), utiliser ce tool pour obtenir la liste exhaustive.\n\nFiltre par défaut : profession_code='${PROFESSION_CODE_MEDECIN}' (Médecin) — retourne donc les spécialités médicales (cardiologie, dermato, gynéco, etc.). Passer \`profession_code\` pour énumérer les spécialités d'une autre profession (ex '60' Infirmier → spécialités IDE), ou \`null\` pour tous savoir_faire confondus.\n\nRésultats triés par count_ps DESC (spécialités les plus représentées en premier). Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).`,
+    description: `Liste les spécialités médicales (savoir_faire RPPS) avec leur libellé et le nombre de PS qui les portent. Tool d'aide à la découverte pour le LLM : avant d'appeler densite_professionnels_sante ou professionnels_rpps_par_dept avec un \`savoir_faire_code\` précis (ex 'SM04' Cardiologie), utiliser ce tool pour obtenir la liste exhaustive.\n\nFiltre par défaut : profession_code='${PROFESSION_CODE_MEDECIN}' (Médecin) — retourne donc les spécialités médicales (cardiologie, dermato, gynéco, etc.). Passer \`profession_code\` pour énumérer les spécialités d'une autre profession (ex '60' Infirmier → spécialités IDE), ou \`null\` pour tous savoir_faire confondus.\n\nRésultats triés par count_ps DESC (spécialités les plus représentées en premier). Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).`,
     inputSchema: {
       type: "object",
       properties: {

@@ -29,7 +29,7 @@ import {
   rppsSearchByNameMetadata,
 } from "../core/query-metadata.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
-import { assertValidDept } from "../territoire/dept-codes.js";
+import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.js";
 import {
   clampLimit,
   clampOffset,
@@ -197,21 +197,39 @@ export interface CountRppsInput {
   departement?: string | null;
   /** Code profession ANS (ex "10" Médecin, "60" Infirmier, "21" Pharmacien). */
   professionCode?: string | null;
-  /** Code savoir_faire (spécialité, ex "SM02" Cardiologie). */
+  /** Code savoir_faire (spécialité, ex "SM04" Cardiologie). */
   savoirFaireCode?: string | null;
   /**
    * Codes mode_exercice ANS à inclure. Pour la méthodo DREES "activité régulière",
-   * passer ['1','2','3'] (libéral, salarié, mixte). Vide ou omis → pas de filtre.
+   * passer ['L','S','M'] (libéral, salarié, mixte). Vide ou omis → pas de filtre.
    */
   modeExerciceCodes?: string[];
   /** Codes catégorie ANS (TRE_R09). Vide ou omis → default ['C','M']. */
   categorieCodes?: string[];
 }
 
+export interface CountRppsByCommuneInput {
+  /**
+   * Code INSEE commune 5 chars. REQUIS. Pour Paris/Marseille/Lyon, les rows
+   * RPPS portent le code arrondissement (ex 75108 Paris 8e), pas la commune
+   * unique (75056). Pour le total Paris/Lyon/Marseille, utiliser le niveau
+   * département via `countRpps({ departement })`.
+   */
+  codeInsee: string;
+  /** Code profession ANS. Default RPC : pas de filtre (compte toutes les professions). */
+  professionCode?: string | null;
+  /** Code savoir_faire (spécialité). */
+  savoirFaireCode?: string | null;
+  /** Codes mode_exercice ANS. Vide ou omis → pas de filtre. */
+  modeExerciceCodes?: string[];
+  /** Codes catégorie ANS. Vide ou omis → default RPC ['C','M']. */
+  categorieCodes?: string[];
+}
+
 // --- Public query functions ------------------------------------------------
 
 export interface SavoirFaireEntry {
-  /** Code savoir_faire ANS (ex 'SM02' Cardiologie). */
+  /** Code savoir_faire ANS (ex 'SM04' Cardiologie ; 'SM02' = Anesthésie-réanimation). */
   code: string;
   /** Libellé clair (le plus fréquent quand des doublons existent). */
   libelle: string;
@@ -222,7 +240,7 @@ export interface SavoirFaireEntry {
 /**
  * Liste les savoir_faire (spécialités) présents en base RPPS, optionnellement
  * filtrés par profession. Tool d'aide LLM (V0.8) : permet de découvrir les
- * codes spécialité (ex 'SM02' Cardiologie) avant de les passer à
+ * codes spécialité (ex 'SM04' Cardiologie) avant de les passer à
  * `densiteProfessionnelsSante` ou aux autres tools de query.
  *
  * Triés par count_ps DESC (spécialités les plus représentées en premier).
@@ -295,6 +313,33 @@ export async function countRpps(input: CountRppsInput = {}): Promise<number> {
   if (typeof data !== "number") {
     throw new Error(
       `count_rpps returned unexpected type ${typeof data} (dept=${input.departement ?? "FRANCE"}, profession=${input.professionCode ?? "*"}, expected number, got: ${JSON.stringify(data)})`,
+    );
+  }
+  return data;
+}
+
+/**
+ * Compte les PS RPPS dans une commune INSEE (RPC `count_rpps_by_commune` V0.9).
+ * Brique pour `densiteProfessionnelsSante` au niveau commune.
+ *
+ * Limitation Paris/Marseille/Lyon : les rows portent l'insee arrondissement
+ * (75101-75120, 13201-13216, 69381-69389). Le caller qui veut Paris global doit
+ * utiliser `countRpps({ departement: "75" })`.
+ */
+export async function countRppsByCommune(input: CountRppsByCommuneInput): Promise<number> {
+  assertValidCodeInsee(input.codeInsee);
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("count_rpps_by_commune", {
+    p_code_insee: input.codeInsee,
+    p_profession_code: input.professionCode ?? null,
+    p_savoir_faire_code: input.savoirFaireCode ?? null,
+    p_mode_exercice_codes: input.modeExerciceCodes ?? [],
+    p_categorie_codes: input.categorieCodes ?? [],
+  });
+  if (error) throw new Error(formatRpcError("count_rpps_by_commune", error));
+  if (typeof data !== "number") {
+    throw new Error(
+      `count_rpps_by_commune returned unexpected type ${typeof data} (codeInsee=${input.codeInsee}, profession=${input.professionCode ?? "*"}, expected number, got: ${JSON.stringify(data)})`,
     );
   }
   return data;

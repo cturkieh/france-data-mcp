@@ -20,6 +20,7 @@ import {
   CATEGORIE_CODE_CIVIL,
   CATEGORIE_CODE_ETUDIANT,
   buildCategorieCodes,
+  countRppsByCommune,
   getRppsById,
   getRppsByName,
 } from "./rpps-db.js";
@@ -350,5 +351,83 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
     const notesJoined = result.query_metadata?.notes.join(" ") ?? "";
     expect(notesJoined).toContain("similarité trigram");
     expect(notesJoined).toContain("match_score");
+  });
+});
+
+describe("countRppsByCommune (V0.9)", () => {
+  beforeEach(() => {
+    mockRpc.mockReset();
+  });
+
+  it("appelle count_rpps_by_commune avec defaults `[]` (let RPC apply DREES)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: 42, error: null });
+    const result = await countRppsByCommune({ codeInsee: "59009" });
+    expect(result).toBe(42);
+    expect(mockRpc).toHaveBeenCalledWith("count_rpps_by_commune", {
+      p_code_insee: "59009",
+      p_profession_code: null,
+      p_savoir_faire_code: null,
+      p_mode_exercice_codes: [],
+      p_categorie_codes: [],
+    });
+  });
+
+  it("propage tous les filtres TS → RPC params", async () => {
+    mockRpc.mockResolvedValueOnce({ data: 17, error: null });
+    await countRppsByCommune({
+      codeInsee: "75108",
+      professionCode: "10",
+      savoirFaireCode: "SM04",
+      modeExerciceCodes: ["L", "S", "M"],
+      categorieCodes: ["C", "M"],
+    });
+    expect(mockRpc).toHaveBeenCalledWith("count_rpps_by_commune", {
+      p_code_insee: "75108",
+      p_profession_code: "10",
+      p_savoir_faire_code: "SM04",
+      p_mode_exercice_codes: ["L", "S", "M"],
+      p_categorie_codes: ["C", "M"],
+    });
+  });
+
+  it("code_insee malformé → RangeError AVANT appel RPC (mapping JSON-RPC -32602)", async () => {
+    await expect(countRppsByCommune({ codeInsee: "ZZZZZ" })).rejects.toThrow(RangeError);
+    await expect(countRppsByCommune({ codeInsee: "99999" })).rejects.toThrow(RangeError);
+    await expect(countRppsByCommune({ codeInsee: "75" })).rejects.toThrow(RangeError);
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  it("Corse 2A001 accepté + DOM 97411 accepté", async () => {
+    mockRpc.mockResolvedValue({ data: 5, error: null });
+    await countRppsByCommune({ codeInsee: "2A004" });
+    await countRppsByCommune({ codeInsee: "97411" });
+    expect(mockRpc).toHaveBeenCalledTimes(2);
+  });
+
+  it("RPC error → Error avec contexte formaté", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "22023", message: "p_code_insee invalid" },
+    });
+    await expect(countRppsByCommune({ codeInsee: "75056" })).rejects.toThrow(
+      /count_rpps_by_commune/,
+    );
+  });
+
+  it("RPC returns non-number → throw avec dump JSON pour debug", async () => {
+    mockRpc.mockResolvedValueOnce({ data: "not-a-number", error: null });
+    await expect(countRppsByCommune({ codeInsee: "75056" })).rejects.toThrow(
+      /unexpected type/,
+    );
+  });
+
+  it("RPC returns 0 (commune sans PS matching) → return 0 (pas une erreur)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: 0, error: null });
+    const result = await countRppsByCommune({
+      codeInsee: "59009",
+      professionCode: "10",
+      savoirFaireCode: "SM04", // cardiologue à Villeneuve-d'Ascq, possible 0
+    });
+    expect(result).toBe(0);
   });
 });

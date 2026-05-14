@@ -6,14 +6,18 @@ import * as finessDb from "./finess-db.js";
 import * as rppsDb from "./rpps-db.js";
 
 const countRppsSpy = vi.spyOn(rppsDb, "countRpps");
+const countRppsByCommuneSpy = vi.spyOn(rppsDb, "countRppsByCommune");
 const countFinessSpy = vi.spyOn(finessDb, "countFiness");
 const popByDeptSpy = vi.spyOn(melodi, "getPopulationByDept");
+const popByCommuneSpy = vi.spyOn(melodi, "getPopulationByCommune");
 const popFranceSpy = vi.spyOn(melodi, "getPopulationFrance");
 
 beforeEach(() => {
   countRppsSpy.mockReset();
+  countRppsByCommuneSpy.mockReset();
   countFinessSpy.mockReset();
   popByDeptSpy.mockReset();
+  popByCommuneSpy.mockReset();
   popFranceSpy.mockReset();
 });
 
@@ -40,6 +44,25 @@ function popFranceFound(value: number, annee = 2023): Awaited<
   return {
     codeInsee: "FRANCE",
     geoLevel: "FRANCE",
+    annee,
+    populationMunicipale: value,
+    populationComptageApart: 0,
+    populationTotale: value,
+    millesimeGeographique: "2025",
+    source: "INSEE Melodi (DS_POPULATIONS_REFERENCE)",
+  };
+}
+
+function popCommuneFound(
+  value: number,
+  annee = 2023,
+  code = "59009",
+): Awaited<ReturnType<typeof melodi.getPopulationByCommune>> {
+  return {
+    found: true,
+    lookupStatus: "found",
+    codeInsee: code,
+    geoLevel: "COM",
     annee,
     populationMunicipale: value,
     populationComptageApart: 0,
@@ -87,9 +110,9 @@ describe("densiteProfessionnelsSante", () => {
     countRppsSpy.mockResolvedValue(120);
     await densiteProfessionnelsSante({
       departement: "75",
-      savoirFaireCode: "SM02",
+      savoirFaireCode: "SM04", // Cardiologie (SM02 = Anesthésie-réanimation)
     });
-    expect(countRppsSpy.mock.calls[1]?.[0]?.savoirFaireCode).toBe("SM02");
+    expect(countRppsSpy.mock.calls[1]?.[0]?.savoirFaireCode).toBe("SM04");
   });
 
   it("modeExerciceCodes=null → désactive le filtre (tous statuts)", async () => {
@@ -167,6 +190,82 @@ describe("densiteProfessionnelsSante", () => {
       compareNational: true,
     });
     expect(result.comparaisonNationale?.ecartVsNationalPct).toBe(0);
+  });
+
+  it("niveau departement par défaut quand departement fourni", async () => {
+    countRppsSpy.mockResolvedValue(7900);
+    popByDeptSpy.mockResolvedValue(popFound(2103778));
+    const result = await densiteProfessionnelsSante({ departement: "75" });
+    expect(result.zone.niveau).toBe("departement");
+  });
+
+  // --- V0.9 : niveau commune via codeInsee --------------------------------
+
+  it("V0.9 — codeInsee → appelle countRppsByCommune + getPopulationByCommune", async () => {
+    countRppsByCommuneSpy.mockResolvedValue(85);
+    popByCommuneSpy.mockResolvedValue(popCommuneFound(62868, 2023, "59009"));
+
+    const result = await densiteProfessionnelsSante({ codeInsee: "59009" });
+
+    expect(countRppsByCommuneSpy).toHaveBeenCalledWith({
+      codeInsee: "59009",
+      professionCode: "10",
+      savoirFaireCode: null,
+      modeExerciceCodes: ["L", "S", "M"],
+      categorieCodes: [],
+    });
+    expect(popByCommuneSpy).toHaveBeenCalledWith("59009");
+    expect(result.zone.niveau).toBe("commune");
+    expect(result.zone.zone).toBe("59009");
+    expect(result.zone.countPs).toBe(85);
+    expect(result.zone.population).toBe(62868);
+    expect(countRppsSpy).not.toHaveBeenCalled();
+    expect(popByDeptSpy).not.toHaveBeenCalled();
+  });
+
+  it("V0.9 — codeInsee + compareNational → density commune vs France entière", async () => {
+    countRppsByCommuneSpy.mockResolvedValue(85);
+    popByCommuneSpy.mockResolvedValue(popCommuneFound(62868, 2023, "59009"));
+    countRppsSpy.mockResolvedValue(220000);
+    popFranceSpy.mockResolvedValue(popFranceFound(68094280));
+
+    const result = await densiteProfessionnelsSante({
+      codeInsee: "59009",
+      compareNational: true,
+    });
+
+    expect(result.comparaisonNationale).toBeDefined();
+    expect(result.comparaisonNationale?.national.countPs).toBe(220000);
+    // National call : pas de filtre dept (buildCountInput omet le champ
+    // quand departement=null) → countRpps querye France entière.
+    const nationalCall = countRppsSpy.mock.calls[0]?.[0];
+    expect(nationalCall?.departement).toBeUndefined();
+    expect(nationalCall?.professionCode).toBe("10");
+  });
+
+  it("V0.9 — XOR violation : departement + codeInsee → RangeError", async () => {
+    await expect(
+      densiteProfessionnelsSante({ departement: "59", codeInsee: "59009" }),
+    ).rejects.toThrow(RangeError);
+    expect(countRppsSpy).not.toHaveBeenCalled();
+    expect(countRppsByCommuneSpy).not.toHaveBeenCalled();
+  });
+
+  it("V0.9 — aucun des deux fournis → RangeError", async () => {
+    await expect(densiteProfessionnelsSante({})).rejects.toThrow(RangeError);
+  });
+
+  it("V0.9 — population commune introuvable → throw message clair", async () => {
+    countRppsByCommuneSpy.mockResolvedValue(0);
+    popByCommuneSpy.mockResolvedValue({
+      found: false,
+      lookupStatus: "not_found",
+      key: "99999",
+      message: "Commune 99999 introuvable",
+    });
+    await expect(
+      densiteProfessionnelsSante({ codeInsee: "99999" }),
+    ).rejects.toThrow(/Commune 99999 introuvable/u);
   });
 });
 
@@ -246,6 +345,9 @@ describe("densiteEtablissementsSante", () => {
       key: "99",
       message: "Département 99 introuvable",
     });
+    await expect(
+      densiteEtablissementsSante({ departement: "99", famille: "labo" }),
+    ).rejects.toThrow(RangeError);
     await expect(
       densiteEtablissementsSante({ departement: "99", famille: "labo" }),
     ).rejects.toThrow(/Département 99 introuvable/u);
