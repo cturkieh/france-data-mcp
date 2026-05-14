@@ -104,7 +104,7 @@ Pour l'ingestion des CSV source (FINESS bimestriel ~95 K rows, Ameli hebdo ~462 
 
 ---
 
-## Outils exposés (31 — V0.9.0)
+## Outils exposés (31 — V0.9.1)
 
 **🗺️ Territoire** : `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
 

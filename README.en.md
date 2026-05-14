@@ -79,13 +79,13 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.9.0 — in production.** 31 tools, ~95K FINESS, ~462K Ameli, ~2.2M active RPPS. 725 tests passing, TypeScript strict, Biome clean. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so and glama.ai. GitHub Actions crons (FINESS bi-monthly, Ameli weekly, RPPS monthly) and Sentry monitoring active.
+✅ **v0.9.1 — in production.** 31 tools, ~95K FINESS, ~462K Ameli, ~2.2M active RPPS. 741 tests passing, TypeScript strict, Biome clean. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so and glama.ai. GitHub Actions crons (FINESS bi-monthly, Ameli weekly, RPPS monthly) active. Observability: Sentry monitoring + Axiom log drain (30-day retention, fail-soft).
 
 See [CHANGELOG](CHANGELOG.md) for the full history.
 
 ### Roadmap
 
-- **v0.9.1** — `count_finess_by_commune` RPC (commune-level facility density), multi-source matview auto-refresh
+- **v0.9.2** — `count_finess_by_commune` RPC (commune-level facility density), Axiom 4xx circuit breaker, healthz endpoint
 - **v1.0+** — DOM-COM support, INSEE IRIS (infra-communal demographics)
 
 ---
@@ -93,8 +93,9 @@ See [CHANGELOG](CHANGELOG.md) for the full history.
 ## Public limits
 
 - **Rate limit**: 60 req/min per IP on `tools/call` (handshake methods stay free). Over the limit: JSON-RPC error `-32000` with `data.retryAfterSeconds`.
-- **Structured JSON logs** per request: `ts`, `method`, `tool`, `ip_hash` (SHA-256), `duration_ms`, `outcome`. No raw IPs, no tool args persisted (GDPR-friendly).
+- **Structured JSON logs** per request: `ts`, `method`, `tool`, `ip_hash` (salted SHA-256), `duration_ms`, `outcome`. No raw IPs, no tool args persisted.
 - **Sentry error monitoring** on internal 500s (tags `mcp.method`, `mcp.tool`, `mcp.outcome`).
+- **GDPR**: 30-day Axiom retention, salted IP hash, access/erasure rights. Full policy in [PRIVACY.md](./PRIVACY.md).
 
 For heavy use, throttle client-side or self-host.
 
