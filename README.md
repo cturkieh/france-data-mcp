@@ -61,7 +61,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 ---
 
-## Outils MCP (25 tools)
+## Outils MCP (30 tools)
 
 ### 🗺️ Territoire (4)
 `autocomplete_commune` · `get_commune_by_code` · `geocode_adresse` · `reverse_geocode`
@@ -84,6 +84,11 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 > ~2,2 M PS actifs (libéraux + salariés privés + hospitaliers contractuels + agents publics). Par défaut : Civils uniquement.
 
+### 📊 Démographie & densités — INSEE Melodi (5)
+Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DREES (ratios pour 100 k hab.).
+
+`population_par_commune` · `population_par_departement` · `densite_professionnels_sante` (+ comparaison nationale matview <50 ms) · `densite_etablissements_sante` (labos, pharmacies, EHPAD, hôpitaux) · `lister_specialites_medicales` (découverte des codes savoir_faire RPPS)
+
 ### 🔀 Croisement multi-source (6)
 Réconciliation FINESS ↔ RPPS ↔ SIRENE — faits bruts sans interprétation métier.
 
@@ -103,16 +108,14 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.8.3 — en production.** Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp) (`io.github.cturkieh/france-data-mcp`), mcp.so et glama.ai. **30 tools** avec annotations MCP + outputSchema (spec 2025-06-18, structuredContent émis), ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. **642 tests verts** (19 integration tests Supabase requièrent des creds locaux), TypeScript strict, Biome clean. Crons GitHub Actions actifs (FINESS bimensuel, Ameli hebdo, RPPS mensuel). Sentry monitoring live (filtre bot-noise actif). V0.8.3 perf : `densite_professionnels_sante` avec `compare_national:true` passe de timeout 57014 (~22 s sur COUNT France entière) à <50 ms via matview pré-agrégée `rpps_count_stats`. V0.8.2 a appliqué le même pattern à `lister_specialites_medicales` (matview `rpps_savoir_faire_stats`).
+✅ **V0.8.3 — en production.** 30 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. 642 tests verts, TypeScript strict, Biome clean. Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so et glama.ai. Crons GitHub Actions (FINESS bimensuel, Ameli hebdo, RPPS mensuel) et Sentry monitoring actifs.
 
-V0.8 ajoute 5 tools croisant **INSEE Melodi** (population de référence) avec RPPS et FINESS : `population_par_commune`, `population_par_departement`, `densite_professionnels_sante` (méthodo DREES, ratio médecins/100k hab. + comparaison nationale), `densite_etablissements_sante` (labos / pharmacies / EHPAD / hôpitaux par famille FINESS), `lister_specialites_medicales` (découverte des codes savoir_faire RPPS pour le LLM).
-
-Voir [CHANGELOG](CHANGELOG.md) pour l'historique.
+Voir [CHANGELOG](CHANGELOG.md) pour l'historique détaillé.
 
 ### Roadmap
 
-- [ ] **V0.8.1** — Densité commune (RPC `count_rpps_by_commune` via code postal), `panorama_sante_territoire` agrégateur, polish docs/installation-claude.md (drift count tools)
-- [ ] **V0.9+** — Support DOM-COM widening (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
+- [ ] **V0.9** — Densité commune (RPC `count_rpps_by_commune`), agrégateur `panorama_sante_territoire`
+- [ ] **V1.0+** — Support DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 
 ---
 
