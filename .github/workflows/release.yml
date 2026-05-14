@@ -1,0 +1,111 @@
+# Release workflow — déclenché par push d'un tag v*.*.*.
+#
+# Volontairement sans `npm publish` ni `mcp-publisher publish` automatique :
+#  - npm 2FA exige OTP interactif (ou npm automation token sans 2FA — moins safe)
+#  - mcp-publisher exige device code GitHub OAuth (ou JWT à renouveler ~30j)
+#
+# Ce workflow valide la qualité (build, typecheck, lint, tests) et crée la
+# GitHub Release automatiquement avec les notes extraites du CHANGELOG. La
+# publication npm + MCP Registry reste manuelle (voir `scripts/release.sh`
+# section 8). Si à terme tu veux automatiser : ajouter les secrets
+# `NPM_TOKEN` (automation token) et `MCP_PUBLISHER_TOKEN` (JWT).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write # gh release create
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Récupère l'historique complet pour extraction du CHANGELOG (sinon
+          # tag-only checkout ne donne pas accès aux commits parents).
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Unit tests
+        run: pnpm test:unit
+
+      - name: Build
+        run: pnpm build
+
+      - name: Extract version from tag
+        id: version
+        env:
+          TAG_REF: ${{ github.ref_name }}
+        run: echo "version=${TAG_REF#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version sync (package.json + server.json + src/core/version.ts)
+        env:
+          EXPECTED: ${{ steps.version.outputs.version }}
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          SERVER_VERSION=$(node -p "require('./server.json').version")
+          CORE_VERSION=$(grep -oE '"[0-9]+\.[0-9]+\.[0-9]+"' src/core/version.ts | tr -d '"')
+          echo "Tag: $EXPECTED | package: $PKG_VERSION | server: $SERVER_VERSION | core: $CORE_VERSION"
+          if [[ "$PKG_VERSION" != "$EXPECTED" ]] || [[ "$SERVER_VERSION" != "$EXPECTED" ]] || [[ "$CORE_VERSION" != "$EXPECTED" ]]; then
+            echo "::error::Version mismatch — tag=$EXPECTED, package=$PKG_VERSION, server=$SERVER_VERSION, core=$CORE_VERSION"
+            exit 1
+          fi
+
+      - name: Extract release notes from CHANGELOG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          awk -v v="$VERSION" \
+            'BEGIN{p=0} /^## \[/{ if(p) exit; if($0 ~ "^## \\[" v "\\]") p=1 } p' \
+            CHANGELOG.md > /tmp/release-notes.md
+          if [[ ! -s /tmp/release-notes.md ]]; then
+            echo "::error::Section ## [$VERSION] introuvable dans CHANGELOG.md"
+            exit 1
+          fi
+          head -30 /tmp/release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md
+
+      - name: Summary
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "### Release $TAG créée ✅"
+            echo ""
+            echo "- GitHub Release : https://github.com/$REPO/releases/tag/$TAG"
+            echo "- À faire manuellement (maintainer-only) :"
+            echo "  - \`pnpm publish --no-git-checks\` (OTP 2FA)"
+            echo "  - \`mcp-publisher login github && mcp-publisher publish\`"
+            echo ""
+            echo "Voir \`CLAUDE.md\` section Release process pour la séquence détaillée."
+          } >> "$GITHUB_STEP_SUMMARY"
