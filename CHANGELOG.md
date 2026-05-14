@@ -4,6 +4,71 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.8.3] — 2026-05-14
+
+**Fix performance `count_rpps` — matview `rpps_count_stats` pré-agrégée.**
+
+Sentry FRANCE-DATA-MCP-4 reproduit en prod V0.8.2 :
+`densite_professionnels_sante({code_dept:"75", profession_code:"10",
+compare_national:true})` → `count_rpps(p_dept=NULL, profession_code='10',
+mode_exercice IN ('L','S','M'), categorie IN ('C','M'))` → COUNT(*)
+France entière sur ~500 K médecins, heap visit pour filtrer mode + categorie
+→ ~22 s, statement_timeout anon (3 s) cancel 57014.
+
+V0.8.0 (RPC count_rpps initial) avait anticipé ça via EXECUTE format pour
+forcer un custom plan côté dept précis, mais la branche France entière
+(p_dept IS NULL) reste un seq scan + filtres : pas viable.
+
+### Modifié
+
+- **Migration `20260514T050000_matview_rpps_count_stats.sql`** :
+  - `CREATE MATERIALIZED VIEW rpps_count_stats` agrégée par
+    (code_departement, profession_code, savoir_faire_code, mode_exercice_code,
+    categorie_code) → COUNT(*). ~50-100 K rows attendus. Peuplée
+    immédiatement au CREATE (WITH DATA default Postgres) — pas de REFRESH
+    inconditionnel après pour éviter le double peuplement au 1er run et
+    le risque d'AccessExclusiveLock prod au replay.
+  - `CREATE UNIQUE INDEX … NULLS NOT DISTINCT` (PG15+) requis pour REFRESH
+    CONCURRENTLY future. Cohérent avec GROUP BY (NULL=NULL). Préfixe
+    `(profession_code)` couvre déjà le pattern de filtre le plus commun
+    → pas d'index secondaire dédié (matview ~50-100 K rows, index scan
+    <50 ms quel que soit le combo).
+  - `GRANT SELECT TO anon`.
+  - `CREATE OR REPLACE FUNCTION count_rpps` réécrite : `SUM(count_ps)`
+    sur la matview, plus besoin d'EXECUTE format ni de branchement
+    dept précis vs France entière. Sémantique strictement identique à
+    V0.8.0 (defaults DREES, gestion NULL, validation regex dept).
+  - **`SET statement_timeout = '2s'`** clause sur la fonction (scope
+    invocation, pas `SET LOCAL` qui aurait fuité sur la transaction
+    englobante du caller) : fail-fast si la matview drift en cardinalité
+    ou si un seq scan inattendu se déclenche (cible <50 ms, marge x40).
+    Au-delà → erreur Sentry observable au lieu de dégrader silencieusement
+    vers le timeout anon par défaut (3 s).
+  - **Garde-fou matview vide** : `SELECT COUNT(*) INTO v_matview_total
+    FROM rpps_count_stats` en début de fonction, `RAISE EXCEPTION P0002`
+    si la matview est vide (REFRESH WITH NO DATA, GRANT SELECT cassé,
+    rollback partiel). Évite le pattern V0.8.1 (mode_exercice 1/2/3 vs
+    L/S/M → 0 silencieux toute la France). Sentinelle <1 ms (PK index).
+
+### Notes opérationnelles
+
+- **Perf attendue** : <50 ms quel que soit le pattern de filtre
+  (dept précis, France entière, combinaisons arbitraires) vs ~22 s en V0.8.2.
+- **Matview figée jusqu'à REFRESH explicite** — même trade-off que
+  `rpps_savoir_faire_stats` (V0.8.2). Au déploiement V0.8.3 : `CREATE`
+  peuple immédiatement, aucune action manuelle requise.
+- **TODO V0.8.4** : intégrer `REFRESH MATERIALIZED VIEW CONCURRENTLY
+  rpps_count_stats` ET `rpps_savoir_faire_stats` dans
+  `scripts/ingest/rpps.ts` post-swap atomique pour refresh mensuel
+  automatique. Backporter aussi la suppression du REFRESH inconditionnel
+  de `20260514T040000_matview_rpps_savoir_faire.sql` (gaspillage
+  négligeable ~250 rows mais même risque rejeu).
+- **Tests TS inchangés** : la signature TS de `countRpps` (rpps-db.ts:280)
+  ne change pas. 642 tests existants doivent rester verts.
+- **Dette docs notée hors scope** : `README.en.md` ligne 80 mentionne
+  encore "v0.7.7" + "25 tools" alors qu'on est à V0.8.3 / 30 tools.
+  À synchroniser au prochain passage docs.
+
 ## [0.7.5] — 2026-05-13
 
 **Smithery quick win #2 : outputSchema sur 22 tools + structuredContent.**
