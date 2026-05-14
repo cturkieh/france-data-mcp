@@ -199,18 +199,15 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
   const host = process.env.AXIOM_HOST?.trim() || AXIOM_DEFAULT_HOST;
   const batch = axiomBuffer.splice(0);
   try {
-    const res = await fetch(
-      `https://${host}/v1/datasets/${encodeURIComponent(dataset)}/ingest`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(batch),
-        signal: AbortSignal.timeout(AXIOM_INGEST_TIMEOUT_MS),
+    const res = await fetch(`https://${host}/v1/datasets/${encodeURIComponent(dataset)}/ingest`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
       },
-    );
+      body: JSON.stringify(batch),
+      signal: AbortSignal.timeout(AXIOM_INGEST_TIMEOUT_MS),
+    });
     if (!res.ok) {
       let body = "";
       try {
@@ -219,9 +216,7 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
         const bodyReason = bodyErr instanceof Error ? bodyErr.message : String(bodyErr);
         console.warn(`[france-data-mcp] Axiom ingest body unreadable: ${bodyReason}`);
       }
-      console.warn(
-        `[france-data-mcp] Axiom ingest HTTP ${res.status}: ${body.slice(0, 200)}`,
-      );
+      console.warn(`[france-data-mcp] Axiom ingest HTTP ${res.status}: ${body.slice(0, 200)}`);
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

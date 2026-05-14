@@ -348,9 +348,7 @@ describe("flushMcpEventsToAxiom", () => {
   it("warn si Axiom répond 4xx/5xx (fail-soft, pas de throw)", async () => {
     process.env.AXIOM_TOKEN = "tok";
     process.env.AXIOM_DATASET = "ds";
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("Forbidden", { status: 403 }),
-    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("Forbidden", { status: 403 }));
     logSuccessEvent();
     await expect(flushMcpEventsToAxiom()).resolves.toBeUndefined();
     const warnSpy = vi.mocked(console.warn);
@@ -364,9 +362,7 @@ describe("flushMcpEventsToAxiom", () => {
     logSuccessEvent();
     await expect(flushMcpEventsToAxiom()).resolves.toBeUndefined();
     const warnSpy = vi.mocked(console.warn);
-    expect(warnSpy.mock.calls.some((c) => String(c[0]).includes("network unreachable"))).toBe(
-      true,
-    );
+    expect(warnSpy.mock.calls.some((c) => String(c[0]).includes("network unreachable"))).toBe(true);
   });
 
   it("logMcpEvent enqueue automatiquement dans le buffer", () => {
@@ -404,9 +400,7 @@ describe("flushMcpEventsToAxiom", () => {
     logSuccessEvent();
     await flushMcpEventsToAxiom();
     const errSpy = vi.mocked(console.error);
-    expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("AXIOM_TOKEN"))).toHaveLength(
-      0,
-    );
+    expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("AXIOM_TOKEN"))).toHaveLength(0);
   });
 
   it("warn une seule fois par cold start, même sur plusieurs flush", async () => {
@@ -418,8 +412,6 @@ describe("flushMcpEventsToAxiom", () => {
     logSuccessEvent();
     await flushMcpEventsToAxiom();
     const errSpy = vi.mocked(console.error);
-    expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("AXIOM_TOKEN"))).toHaveLength(
-      1,
-    );
+    expect(errSpy.mock.calls.filter((c) => String(c[0]).includes("AXIOM_TOKEN"))).toHaveLength(1);
   });
 });
