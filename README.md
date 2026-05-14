@@ -99,8 +99,9 @@ Réconciliation FINESS ↔ RPPS ↔ SIRENE — faits bruts sans interprétation 
 ## Garde-fous publics
 
 - **Rate limit** : 60 req/min par IP sur `tools/call` (les méthodes meta restent libres). Au-delà : erreur `-32000` avec `data.retryAfterSeconds`.
-- **Logs JSON structurés** par requête : `ts`, `method`, `tool`, `ip_hash` (SHA-256), `duration_ms`, `outcome`. Aucune IP en clair, aucun argument tool persisté (RGPD-friendly).
+- **Logs JSON structurés** par requête : `ts`, `method`, `tool`, `ip_hash` (SHA-256 salé), `duration_ms`, `outcome`. Aucune IP en clair, aucun argument tool persisté.
 - **Sentry error monitoring** sur les 500 internes (tags `mcp.method`, `mcp.tool`, `mcp.outcome`).
+- **RGPD** : rétention 30j (si Axiom activé), hash IP salé, droits d'accès / effacement. Politique complète dans [PRIVACY.md](./PRIVACY.md).
 
 Usage intensif : throttler côté client ou self-héberger.
 

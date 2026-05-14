@@ -1,7 +1,8 @@
 import type { VercelRequest } from "@vercel/node";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __resetForTesting,
+  __resetSaltWarningForTesting,
   checkRateLimit,
   extractIp,
   getRateLimitPerMinute,
@@ -22,12 +23,16 @@ const ENV_KEYS = [
   "UPSTASH_REDIS_REST_TOKEN",
   "RATE_LIMIT_PER_MINUTE",
   "RATE_LIMIT_ENABLED",
+  "FRANCE_DATA_IP_SALT",
+  "VERCEL_ENV",
+  "NODE_ENV",
 ];
 
 beforeEach(() => {
   for (const k of ENV_KEYS) SAVED_ENV[k] = process.env[k];
   for (const k of ENV_KEYS) delete process.env[k];
   __resetForTesting();
+  __resetSaltWarningForTesting();
 });
 
 afterEach(() => {
@@ -36,6 +41,7 @@ afterEach(() => {
     else process.env[k] = SAVED_ENV[k];
   }
   __resetForTesting();
+  __resetSaltWarningForTesting();
 });
 
 describe("extractIp", () => {
@@ -97,6 +103,75 @@ describe("hashIp", () => {
 
   it("hash différent pour IPs différentes", () => {
     expect(hashIp("203.0.113.1")).not.toBe(hashIp("203.0.113.2"));
+  });
+
+  it("salt env change le hash (rotation crypto)", () => {
+    const hUnsalted = hashIp("203.0.113.1");
+    process.env.FRANCE_DATA_IP_SALT = "salt-2026-05";
+    const hSaltedA = hashIp("203.0.113.1");
+    process.env.FRANCE_DATA_IP_SALT = "salt-2026-06";
+    const hSaltedB = hashIp("203.0.113.1");
+    expect(hSaltedA).not.toBe(hUnsalted);
+    expect(hSaltedA).not.toBe(hSaltedB);
+    expect(hSaltedA).toMatch(/^[a-f0-9]{16}$/);
+  });
+
+  it("salt vide string ≡ salt absent (même hash que le fallback)", () => {
+    const hAbsent = hashIp("203.0.113.1");
+    process.env.FRANCE_DATA_IP_SALT = "";
+    expect(hashIp("203.0.113.1")).toBe(hAbsent);
+  });
+
+  it("salt whitespace seul ≡ salt absent (trim appliqué)", () => {
+    const hAbsent = hashIp("203.0.113.1");
+    process.env.FRANCE_DATA_IP_SALT = "   ";
+    expect(hashIp("203.0.113.1")).toBe(hAbsent);
+  });
+});
+
+describe("hashIp — silent-failure warn", () => {
+  it("warn une fois en production si salt absent", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.VERCEL_ENV = "production";
+    hashIp("1.2.3.4");
+    hashIp("5.6.7.8");
+    hashIp("9.10.11.12");
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0]?.[0]).toContain("FRANCE_DATA_IP_SALT");
+    errSpy.mockRestore();
+  });
+
+  it("ne warn pas en preview (silence sur staging)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.VERCEL_ENV = "preview";
+    hashIp("1.2.3.4");
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("ne warn pas en dev local", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    hashIp("1.2.3.4");
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("ne warn pas en production si salt présent", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.VERCEL_ENV = "production";
+    process.env.FRANCE_DATA_IP_SALT = "valid-salt-string";
+    hashIp("1.2.3.4");
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("warn en production si salt = whitespace seul (anti-empty trick)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.VERCEL_ENV = "production";
+    process.env.FRANCE_DATA_IP_SALT = "   ";
+    hashIp("1.2.3.4");
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
   });
 });
 

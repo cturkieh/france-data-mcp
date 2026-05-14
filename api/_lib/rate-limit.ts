@@ -128,9 +128,37 @@ export function extractIp(req: VercelRequest): string {
   return req.socket?.remoteAddress ?? "unknown";
 }
 
-/** Hash IP to SHA-256 truncated to 16 chars. Stable across invocations. */
+/**
+ * Hash IP avec salt via `FRANCE_DATA_IP_SALT` (cf. PRIVACY.md). Sans salt, le
+ * hash reste pseudonyme (rainbow-tableable sur 4 milliards d'IPv4). Rotater
+ * le salt casse volontairement la stabilité du hash entre périodes.
+ */
 export function hashIp(ip: string): string {
-  return createHash("sha256").update(ip).digest("hex").slice(0, 16);
+  const salt = (process.env.FRANCE_DATA_IP_SALT ?? "").trim();
+  if (salt.length === 0) warnMissingSaltOnce();
+  // `:` sépare salt/IP pour éviter une collision si salt et IP se chevauchent.
+  return createHash("sha256").update(`${salt}:${ip}`).digest("hex").slice(0, 16);
+}
+
+/**
+ * Émet UN warn par instance Vercel si le salt manque/est vide en production.
+ * Sans ce signal, un oubli d'env var = violation RGPD silencieuse (PRIVACY.md
+ * promet un hash salé mais on tombe en pratique sur un hash rainbow-tableable).
+ */
+let saltWarningEmitted = false;
+function warnMissingSaltOnce(): void {
+  if (saltWarningEmitted) return;
+  const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "";
+  if (env !== "production") return;
+  saltWarningEmitted = true;
+  console.error(
+    "[france-data-mcp] FRANCE_DATA_IP_SALT absent ou vide en production — hash IP rainbow-tableable, promesse PRIVACY.md non tenue. Configurer la var d'env via `openssl rand -hex 32`.",
+  );
+}
+
+/** Test-only hook : reset le flag pour re-tester le path warn en isolation. */
+export function __resetSaltWarningForTesting(): void {
+  saltWarningEmitted = false;
 }
 
 /* ------------------------------------------------------------------ */
