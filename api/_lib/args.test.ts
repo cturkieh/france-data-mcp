@@ -1,10 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  normalizeAliases,
-  requireOneOf,
-  requireString,
-  suggestParamError,
-} from "./args.js";
+import { normalizeAliases, requireOneOf, requireString, suggestParamError } from "./args.js";
 
 describe("normalizeAliases", () => {
   it("remappe les clés alternatives vers le nom canonique", () => {
@@ -14,18 +9,13 @@ describe("normalizeAliases", () => {
   });
 
   it("conserve la clé canonique si elle est déjà présente (n'écrase pas)", () => {
-    expect(
-      normalizeAliases({ q: "ignored", nom: "Lyon" }, { q: "nom" }),
-    ).toEqual({ nom: "Lyon" });
+    expect(normalizeAliases({ q: "ignored", nom: "Lyon" }, { q: "nom" })).toEqual({ nom: "Lyon" });
   });
 
   it("préserve les clés non-aliasées intactes (limit, boostPopulation, etc.)", () => {
-    expect(
-      normalizeAliases(
-        { q: "Lyon", limit: 5, boostPopulation: false },
-        { q: "nom" },
-      ),
-    ).toEqual({ nom: "Lyon", limit: 5, boostPopulation: false });
+    expect(normalizeAliases({ q: "Lyon", limit: 5, boostPopulation: false }, { q: "nom" })).toEqual(
+      { nom: "Lyon", limit: 5, boostPopulation: false },
+    );
   });
 
   it("ne mute pas l'input (objet retourné distinct)", () => {
@@ -109,9 +99,7 @@ describe("requireOneOf", () => {
 
   it("throw avec suggestion si toutes les clés sont absentes", () => {
     expect(() => requireOneOf({ q: "Lyon" }, ["nom"], { nom: "Lyon" })).toThrow(RangeError);
-    expect(() => requireOneOf({ q: "Lyon" }, ["nom"], { nom: "Lyon" })).toThrow(
-      /Reçu: \["q"\]/,
-    );
+    expect(() => requireOneOf({ q: "Lyon" }, ["nom"], { nom: "Lyon" })).toThrow(/Reçu: \["q"\]/);
   });
 
   it("string vide compte comme absente (force le caller à fournir une valeur exploitable)", () => {
@@ -137,7 +125,9 @@ describe("requireString", () => {
   });
 
   it("throw si la valeur n'est pas une string (number, boolean) — strict", () => {
-    expect(() => requireString({ code: 42 } as Record<string, unknown>, "code", { code: "75056" })).toThrow();
+    expect(() =>
+      requireString({ code: 42 } as Record<string, unknown>, "code", { code: "75056" }),
+    ).toThrow();
     expect(() =>
       requireString({ code: true } as Record<string, unknown>, "code", { code: "75056" }),
     ).toThrow();

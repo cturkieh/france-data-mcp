@@ -95,9 +95,7 @@ describe("getPopulationByCommune", () => {
       obs("2025-COM-75056", "2023", "PCAP", 15634),
       obs("2025-COM-75056", "2023", "PTOT", 2119412),
     ]);
-    await expect(getPopulationByCommune("75056")).rejects.toThrow(
-      /PMUN absent du payload/u,
-    );
+    await expect(getPopulationByCommune("75056")).rejects.toThrow(/PMUN absent du payload/u);
   });
 
   it("throw si TIME_PERIOD non parsable (régression schéma SDMX)", async () => {
@@ -106,9 +104,7 @@ describe("getPopulationByCommune", () => {
     // valable car parseInt extrait quand même l'année. Vrai cas pathologique :
     // string totalement non-numérique (régression schéma profond).
     mockMelodi([obs("2025-COM-75056", "Q1-2024", "PMUN", 2103778)]);
-    await expect(getPopulationByCommune("75056")).rejects.toThrow(
-      /aucune TIME_PERIOD parsable/u,
-    );
+    await expect(getPopulationByCommune("75056")).rejects.toThrow(/aucune TIME_PERIOD parsable/u);
   });
 
   it("mappe HTTP 400 INSEE en lookupNotFound (code rejeté par l'API)", async () => {
