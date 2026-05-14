@@ -4,6 +4,70 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.9.1] — 2026-05-14
+
+**Patch — log drain Axiom + privacy hardening + fix format CI.**
+
+V0.9.1 publie officiellement le code Axiom log drain (push miroir des logs
+MCP vers un dataset Axiom avec rétention 30 jours, fail-soft) et le privacy
+hardening du hash IP (salt via `FRANCE_DATA_IP_SALT`, warn one-shot anti
+silent-failure RGPD) qui avaient été embarqués accidentellement dans le
+commit Biome `f54b87f` mais sans le format Biome final. Cette release fix
+le format CI, synchronise `src/core/version.ts` (qui était resté à 0.8.3),
+et expose ces fonctionnalités au consommateur du wrapper npm.
+
+### Ajouté
+
+- **`flushMcpEventsToAxiom`** — log drain Axiom (push batch en `finally` du
+  handler MCP, parallèle à `flushSentry` via `Promise.allSettled`). Config via
+  `AXIOM_TOKEN` + `AXIOM_DATASET` + `AXIOM_HOST` optionnel (`api.axiom.co`
+  par défaut, `api.eu.axiom.co` pour la région EU). Buffer module-level cap 500
+  avec warn one-shot si overflow. Timeout 1.5 s via `AbortSignal`. Fail-soft sur
+  tout chemin (token absent, fetch reject, HTTP 4xx/5xx, body unreadable).
+- **`warnMissingAxiomOnce`** — `console.error` one-shot en production si Axiom
+  non configuré, signalant que la promesse PRIVACY.md de rétention 30 j n'est
+  pas tenue. Symétrique à `warnMissingSaltOnce` côté `rate-limit.ts`.
+- **Type `AxiomEvent`** — exige `_time: string` au compile time pour cohérence
+  avec l'indexation Axiom.
+- **16 nouveaux tests** sur le push Axiom (no-op, batch headers, URL encoding,
+  `AXIOM_HOST` override + whitespace fallback, 4xx/5xx, fetch reject, body
+  unreadable, buffer cap + overflow warn, warn one-shot prod, idempotence).
+
+### Modifié
+
+- **`logMcpEvent`** — refactor : extraction de `buildCanonicalRecord` partagé
+  entre l'émission console et l'enqueue Axiom. Comportement public inchangé.
+- **`api/mcp.ts` finally** — `await Promise.allSettled([flushSentry(),
+  flushMcpEventsToAxiom()])` pour borner la latence ajoutée à
+  `max(flushSentry, flushAxiom)` (acceptable ~1.5 s p99 sur endpoint MCP
+  non-temps-réel).
+- **`hashIp` (rate-limit.ts)** — salt SHA-256 via `FRANCE_DATA_IP_SALT`,
+  `.trim()` appliqué (whitespace ≡ absent), warn one-shot en production si
+  salt manquant. Documenté dans `PRIVACY.md`.
+- **`PRIVACY.md`** — politique RGPD complète : données collectées, données NON
+  collectées, sous-traitants avec localisation, base légale (art. 6.1.f RGPD),
+  rétention 30 j sur Axiom (région selon compte), droits d'accès / effacement /
+  portabilité, contact data controller.
+- **`.env.example`** — sections `FRANCE_DATA_IP_SALT` et `AXIOM_*` documentées
+  avec procédure least-privilege.
+- **`README.md`** — section *Garde-fous publics* mise à jour (hash IP salé,
+  bullet RGPD pointant vers `PRIVACY.md`).
+
+### Corrigé
+
+- **`src/core/version.ts`** — était resté à `0.8.3`, désormais synchronisé à
+  `0.9.1` (la version `0.9.0` initialement publiée annonçait `0.8.3` au client
+  MCP via `initialize.serverInfo.version`).
+- **CI Biome** — format des fichiers Axiom (`observability.ts`, tests).
+- **`.gitignore`** — ajout `*.tgz` pour éviter de tracker les artefacts
+  `npm pack` locaux.
+
+### Backloggé (acceptable jusqu'à ~10 RPS)
+
+- Circuit breaker après N erreurs 4xx Axiom consécutives.
+- Healthz endpoint exposant l'état de configuration (Axiom, salt, Sentry).
+- `Sentry.captureMessage` sur les warns one-shot (Sentry capte déjà les 500).
+
 ## [0.9.0] — 2026-05-14
 
 **Densité communale + agrégateur panorama + UX MCP — feature majeure.**
