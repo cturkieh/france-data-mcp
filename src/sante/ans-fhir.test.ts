@@ -161,6 +161,65 @@ describe("lookupPractitionerByRpps (V0.7.0 — discriminated result)", () => {
     errSpy.mockRestore();
   });
 
+  it("status='api_error' quand ANS répond 429 sustained (rate limit dépasse les retries fetchJson)", async () => {
+    vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
+    vi.useFakeTimers();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // 4 tentatives (1 initial + 3 retries de fetchJson) toutes 429 → RateLimitExceededError
+    // dans le catch → mappé en status: "api_error". `retry-after: 1` cap au minimum
+    // pour que les sleeps soient courts ; fake timers les flushent immédiatement.
+    fetchMock.mockResolvedValue(
+      new Response("rate limited", { status: 429, headers: { "retry-after": "1" } }),
+    );
+    const promise = lookupPractitionerByRpps("810009647990");
+    // Laisse fetchJson épuiser ses 3 retries (sleep entre chaque) sans bloquer le test.
+    await vi.runAllTimersAsync();
+    const result = await promise;
+    expect(result.found).toBe(false);
+    if (!result.found) {
+      expect(result.status).toBe("api_error");
+      expect(result.message).toContain("Retry recommandé");
+    }
+    // 4 fetch (1 + 3 retries) avant abandon
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("HTTP 429"));
+    errSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("retry 429 puis 200 → found=true (transient resolved)", async () => {
+    vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
+    vi.useFakeTimers();
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response("rate limited", { status: 429, headers: { "retry-after": "1" } }),
+      )
+      .mockResolvedValueOnce(
+        fhirBundle([
+          {
+            resource: {
+              resourceType: "Practitioner",
+              id: "003-X",
+              identifier: [
+                {
+                  use: "official",
+                  system: "urn:oid:1.2.250.1.71.4.2.1",
+                  value: "810009647990",
+                },
+              ],
+              name: [{ family: "TEST", given: ["A"] }],
+            },
+          },
+        ]),
+      );
+    const promise = lookupPractitionerByRpps("810009647990");
+    await vi.runAllTimersAsync();
+    const result = await promise;
+    expect(result.found).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
   it("fallback sur la valeur d'URL quand la ressource omet le system d'identifier", async () => {
     vi.stubEnv("ANS_FHIR_API_KEY", "test-key");
     // Cas dégénéré : ANS répond avec un Practitioner dont l'identifier

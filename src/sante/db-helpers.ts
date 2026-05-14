@@ -127,6 +127,20 @@ export function trimOrNull(s: string | null | undefined): string | null {
 export const NUM_FINESS_PATTERN = /^\d{9}$/;
 
 /**
+ * Pattern SIRET (14 chiffres). Source de vérité partagée entre la lib
+ * (validation pre-fetch INSEE) et le tool boundary (`requireSiretId`).
+ */
+export const SIRET_PATTERN = /^\d{14}$/;
+
+/**
+ * Pattern RPPS ID (IDNPS national ANS, 11 ou 12 chiffres). 12 chars = IDs
+ * modernes émis depuis 2020 avec préfixe "81" ; 11 chars = anciens IDs sans
+ * préfixe. Source de vérité partagée entre `getRppsById` (lib) et
+ * `requireRppsId` (tool boundary).
+ */
+export const RPPS_ID_PATTERN = /^\d{11,12}$/;
+
+/**
  * Valide un numéro FINESS site (9 chiffres) côté boundary public. Renvoie le
  * `numFiness` trimmed pour que le caller forward la version normalisée à la
  * RPC. Throw `RangeError` (mappé JSON-RPC -32602 par `api/mcp.ts`) sur format

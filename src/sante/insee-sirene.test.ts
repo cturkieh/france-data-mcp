@@ -125,6 +125,48 @@ describe("lookupSirenViaInsee", () => {
     errSpy.mockRestore();
   });
 
+  it("retourne null + console.error quand l'API SIRENE répond 429 sustained (rate limit dépasse les retries)", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "test-key");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // 4 tentatives (1 initial + 3 retries) toutes 429 → RateLimitExceededError
+    // dans le catch (status === 429, donc console.error pas console.warn). Le
+    // contrat de lookupSirenViaInsee = fallback gracieux → null.
+    fetchMock.mockResolvedValue(
+      new Response("rate limited", { status: 429, headers: { "retry-after": "1" } }),
+    );
+    vi.useFakeTimers();
+    const promise = lookupSirenViaInsee("787120435");
+    await vi.runAllTimersAsync();
+    const result = await promise;
+    vi.useRealTimers();
+    expect(result).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(errSpy).toHaveBeenCalled();
+    expect(errSpy.mock.calls[0]?.[0]).toContain("HTTP 429");
+    errSpy.mockRestore();
+  });
+
+  it("retry 429 puis 200 → mappe normalement (transient resolved)", async () => {
+    vi.stubEnv("INSEE_SIRENE_API_KEY", "test-key");
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response("rate limited", { status: 429, headers: { "retry-after": "1" } }),
+      )
+      .mockResolvedValueOnce(
+        inseeResponse({
+          denominationUniteLegale: "ACME",
+          etatAdministratifUniteLegale: "A",
+        }),
+      );
+    vi.useFakeTimers();
+    const promise = lookupSirenViaInsee("787120435");
+    await vi.runAllTimersAsync();
+    const result = await promise;
+    vi.useRealTimers();
+    expect(result?.nomComplet).toBe("ACME");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("retourne null + console.error quand l'API SIRENE est injoignable (network error)", async () => {
     vi.stubEnv("INSEE_SIRENE_API_KEY", "test-key");
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});

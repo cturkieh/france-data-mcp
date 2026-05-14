@@ -157,11 +157,15 @@ export async function getFinessInRadius(input: InRadiusInput): Promise<FinessQue
 export async function getFinessByCategorie(input: ByCategorieInput): Promise<FinessQueryResult> {
   const limit = clampLimit(input.limit);
 
-  const supabase = getAnonClient();
+  // Untyped client : les types Supabase générés exigent `string` pour
+  // `p_departement`/`p_code_insee` alors que la RPC accepte `null` (= "pas de
+  // filtre"). Sans untyped, on tombait sur `null as unknown as string` overkill.
+  // Pattern aligné sur `countFiness` et tous les wrappers `rpps-db.ts`.
+  const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("finess_by_categorie", {
     p_codes: [...FINESS_FAMILY_CODES[input.famille]],
-    p_departement: input.departement ?? (null as unknown as string),
-    p_code_insee: input.code_insee ?? (null as unknown as string),
+    p_departement: input.departement ?? null,
+    p_code_insee: input.code_insee ?? null,
     p_limit: limit + 1,
   });
   if (error) {

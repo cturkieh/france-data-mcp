@@ -66,7 +66,14 @@ import {
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
-import { normalizeAliases, requireFinessId, requireOneOf, requireString } from "./_lib/args.js";
+import {
+  normalizeAliases,
+  requireFinessId,
+  requireOneOf,
+  requireRppsId,
+  requireSiretId,
+  requireString,
+} from "./_lib/args.js";
 
 /** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
 const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
@@ -1179,14 +1186,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const siret = asString(args.siret);
-      if (!siret) throw new RangeError("siret (string, 14 chiffres) requis");
-      const trimmed = siret.trim();
-      if (!/^\d{14}$/.test(trimmed)) {
-        throw new RangeError(
-          `siret invalide "${siret}" — attendu 14 chiffres (siège ou établissement secondaire).`,
-        );
-      }
+      const trimmed = requireSiretId(args);
       return lookupSiretViaInsee(trimmed);
     },
   },
@@ -1886,8 +1886,7 @@ export const TOOLS: McpTool[] = [
     outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const rppsId = asString(args.rpps_id)?.trim();
-      if (!rppsId) throw new RangeError("rpps_id (string) requis");
+      const rppsId = requireRppsId(args);
       const sites = await getRppsById(rppsId);
       if (sites.length > 0) {
         // V0.7.5 : `lookupStatus` ajouté manuellement (le tool a des champs

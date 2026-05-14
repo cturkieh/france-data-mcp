@@ -21,7 +21,7 @@
  *   - Coût négligeable (un objet spread + lookup par clé).
  */
 
-import { NUM_FINESS_PATTERN } from "../../src/sante/db-helpers.js";
+import { NUM_FINESS_PATTERN, RPPS_ID_PATTERN, SIRET_PATTERN } from "../../src/sante/db-helpers.js";
 
 /** RangeError mapping JSON-RPC -32602 côté boundary MCP (Invalid params). */
 function paramError(message: string): RangeError {
@@ -168,22 +168,73 @@ export function requireString(
  * Source de vérité regex : `NUM_FINESS_PATTERN` (`src/sante/db-helpers.ts`),
  * partagée avec `assertValidNumFiness` (defense-in-depth lib + tool boundary).
  */
-export function requireFinessId(args: Record<string, unknown>, key = "num_finess"): string {
-  const example = { [key]: "690780150" };
+/**
+ * Cœur partagé des validators `requireFinessId` / `requireSiretId` /
+ * `requireRppsId`. Trois branches d'erreur cohérentes (clé absente, type
+ * wrong, format wrong) pour donner au LLM caller un signal stable. Toute
+ * évolution du contrat d'erreur se propage automatiquement aux 3 façades
+ * publiques + tout futur `requireSiren` / `requireAdeli`.
+ */
+function requireIdPattern(
+  args: Record<string, unknown>,
+  key: string,
+  pattern: RegExp,
+  formatHuman: string,
+  example: Record<string, string>,
+): string {
   if (!(key in args)) {
     throw suggestParamError(args, [key], example);
   }
   const raw = args[key];
   if (typeof raw !== "string") {
     throw paramError(
-      `Paramètre "${key}" doit être une string de 9 chiffres. Reçu: type=${typeof raw}, valeur=${JSON.stringify(raw)}. Exemple: ${JSON.stringify(example)}`,
+      `Paramètre "${key}" doit être une string (${formatHuman}). Reçu: type=${typeof raw}, valeur=${JSON.stringify(raw)}. Exemple: ${JSON.stringify(example)}`,
     );
   }
   const trimmed = raw.trim();
-  if (!NUM_FINESS_PATTERN.test(trimmed)) {
+  if (!pattern.test(trimmed)) {
     throw paramError(
-      `Paramètre "${key}" invalide : attendu exactement 9 chiffres (FINESS DREES). Reçu: ${JSON.stringify(raw)}. Exemple: ${JSON.stringify(example)}`,
+      `Paramètre "${key}" invalide : ${formatHuman}. Reçu: ${JSON.stringify(raw)}. Exemple: ${JSON.stringify(example)}`,
     );
   }
   return trimmed;
+}
+
+export function requireFinessId(args: Record<string, unknown>, key = "num_finess"): string {
+  return requireIdPattern(
+    args,
+    key,
+    NUM_FINESS_PATTERN,
+    "attendu exactement 9 chiffres (FINESS DREES)",
+    { [key]: "690780150" },
+  );
+}
+
+/**
+ * Valide un SIRET (14 chiffres exactement). Miroir de `requireFinessId` au
+ * tool boundary, partage `SIRET_PATTERN` avec la lib.
+ */
+export function requireSiretId(args: Record<string, unknown>, key = "siret"): string {
+  return requireIdPattern(
+    args,
+    key,
+    SIRET_PATTERN,
+    "attendu exactement 14 chiffres (SIRET, siège ou établissement secondaire)",
+    { [key]: "39839170300012" },
+  );
+}
+
+/**
+ * Valide un RPPS ID / IDNPS national ANS (11 ou 12 chiffres exactement,
+ * préfixe "81" optionnel pour les IDs émis depuis 2020). Miroir de
+ * `requireFinessId`, partage `RPPS_ID_PATTERN` avec `getRppsById` côté lib.
+ */
+export function requireRppsId(args: Record<string, unknown>, key = "rpps_id"): string {
+  return requireIdPattern(
+    args,
+    key,
+    RPPS_ID_PATTERN,
+    'attendu 11 ou 12 chiffres (IDNPS national ANS — préfixe "81" optionnel pour IDs émis depuis 2020)',
+    { [key]: "810002066537" },
+  );
 }

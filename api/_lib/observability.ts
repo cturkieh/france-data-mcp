@@ -151,6 +151,28 @@ const AXIOM_INGEST_TIMEOUT_MS = 1500;
 const AXIOM_DEFAULT_HOST = "api.axiom.co";
 
 /**
+ * Circuit breaker Axiom — coupe l'ingest après N erreurs 4xx consécutives
+ * pour ne pas spammer Sentry + Axiom quand le token est révoqué, le dataset
+ * supprimé, ou le scope insuffisant. Reset au premier succès. Les 5xx (panne
+ * temporaire Axiom) n'incrémentent PAS le compteur — ils sont transients et
+ * on retry au prochain flush.
+ *
+ * Seuil 5 erreurs : assez bas pour réagir vite à une misconfig (token expiré
+ * remarqué en ~5 requêtes), assez haut pour ne pas tripper sur un 4xx isolé
+ * (load balancer transient, request mal formée corrigée au flush suivant).
+ *
+ * Cool-down 5 min : laisse le temps à un humain de corriger sans retries
+ * infinis. Au-delà, on retente — si la misconfig persiste, le breaker
+ * re-tripp et émet à nouveau le warn (état figé tant que la cause n'est pas
+ * résolue).
+ */
+const AXIOM_BREAKER_THRESHOLD = 5;
+const AXIOM_BREAKER_COOL_DOWN_MS = 5 * 60 * 1000;
+let consecutive4xxCount = 0;
+let breakerOpenUntilMs = 0;
+let breakerOpenWarned = false;
+
+/**
  * Retourne le host Axiom effectif : valeur de `AXIOM_HOST` (trimée) si set
  * non-vide, sinon `api.axiom.co` (région US par défaut). Exporté pour que
  * `healthz` puisse exposer la même valeur que celle utilisée à l'ingest réel.
@@ -206,6 +228,21 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
     warnMissingAxiomOnce();
     return;
   }
+  // Circuit breaker OPEN : drop le buffer sans tenter de fetch. Évite de
+  // spammer Axiom (un fetch HTTP par flush) + Sentry (un event par fetch raté)
+  // quand la misconfig persiste. Voir `AXIOM_BREAKER_COOL_DOWN_MS`.
+  if (Date.now() < breakerOpenUntilMs) {
+    axiomBuffer.length = 0;
+    return;
+  }
+  // Cool-down expiré : reset les flags one-shot pour permettre la
+  // re-émission du warn si la misconfig persiste après cool-down. Sans ce
+  // reset, l'état "figé tant que la cause n'est pas résolue" annoncé par
+  // la JSDoc breaker serait silencieux après le 1er trip.
+  if (breakerOpenUntilMs > 0) {
+    breakerOpenUntilMs = 0;
+    breakerOpenWarned = false;
+  }
   const host = getAxiomHost();
   const batch = axiomBuffer.splice(0);
   try {
@@ -218,7 +255,12 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
       body: JSON.stringify(batch),
       signal: AbortSignal.timeout(AXIOM_INGEST_TIMEOUT_MS),
     });
-    if (!res.ok) {
+    if (res.ok) {
+      // Succès : reset le compteur et le warn one-shot (laisse re-déclencher
+      // si la misconfig revient plus tard sur la même instance).
+      consecutive4xxCount = 0;
+      breakerOpenWarned = false;
+    } else {
       let body = "";
       try {
         body = await res.text();
@@ -227,11 +269,39 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
         console.warn(`[france-data-mcp] Axiom ingest body unreadable: ${bodyReason}`);
       }
       console.warn(`[france-data-mcp] Axiom ingest HTTP ${res.status}: ${body.slice(0, 200)}`);
+      registerAxiomFailure(res.status);
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.warn(`[france-data-mcp] Axiom ingest error: ${reason}`);
+    // Network error (fetch reject) = pas un signal de misconfig — transient,
+    // pas d'incrément breaker. Cohérent avec le traitement des 5xx.
   }
+}
+
+/**
+ * Comptabilise une réponse HTTP non-2xx d'Axiom dans le circuit breaker. Les
+ * 4xx (auth/scope/dataset) signalent une misconfig persistante — on coupe.
+ * Les 5xx (panne temporaire Axiom) sont transients — on retry au prochain
+ * flush sans toucher au compteur.
+ */
+function registerAxiomFailure(status: number): void {
+  // Hors 4xx (5xx, ou status exotique 1xx/3xx) : transient, pas d'incrément.
+  if (status < 400 || status >= 500) return;
+  consecutive4xxCount += 1;
+  if (consecutive4xxCount < AXIOM_BREAKER_THRESHOLD) return;
+  breakerOpenUntilMs = Date.now() + AXIOM_BREAKER_COOL_DOWN_MS;
+  consecutive4xxCount = 0;
+  warnBreakerOpenOnce(status);
+}
+
+function warnBreakerOpenOnce(lastStatus: number): void {
+  if (breakerOpenWarned) return;
+  breakerOpenWarned = true;
+  const coolDownMin = AXIOM_BREAKER_COOL_DOWN_MS / 60_000;
+  const message = `Axiom circuit breaker OPEN — pause ingest pendant ${coolDownMin} min après ${AXIOM_BREAKER_THRESHOLD} erreurs 4xx consécutives (dernier=${lastStatus}). Vérifier AXIOM_TOKEN (révoqué/expiré ?), AXIOM_DATASET (existe ?) et les scopes du token.`;
+  console.error(`[france-data-mcp] ${message}`);
+  captureMcpConfigWarning("axiom_circuit_breaker_open", message);
 }
 
 /**
@@ -260,15 +330,36 @@ function warnMissingAxiomOnce(): void {
 
 /**
  * Test-only : reset complet de l'état module Axiom (buffer + flags one-shot
- * warn). À appeler dans `beforeEach`/`afterEach` pour isoler chaque test.
+ * warn + circuit breaker). À appeler dans `beforeEach`/`afterEach` pour
+ * isoler chaque test.
  */
 export function __resetAxiomStateForTesting(): void {
   axiomBuffer.length = 0;
   axiomWarningEmitted = false;
   bufferOverflowWarned = false;
+  consecutive4xxCount = 0;
+  breakerOpenUntilMs = 0;
+  breakerOpenWarned = false;
 }
 
 /** Test-only : taille du buffer pour les assertions de tests. */
 export function __getAxiomBufferLengthForTesting(): number {
   return axiomBuffer.length;
+}
+
+/**
+ * Test-only : état du circuit breaker (compteur 4xx, instant de réouverture,
+ * flag one-shot warn). Exposé pour les assertions de tests sans casser
+ * l'encapsulation runtime.
+ */
+export function __getAxiomBreakerStateForTesting(): {
+  consecutive4xx: number;
+  openUntilMs: number;
+  warned: boolean;
+} {
+  return {
+    consecutive4xx: consecutive4xxCount,
+    openUntilMs: breakerOpenUntilMs,
+    warned: breakerOpenWarned,
+  };
 }

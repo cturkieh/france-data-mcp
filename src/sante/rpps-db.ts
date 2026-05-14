@@ -31,6 +31,7 @@ import {
 import { getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.js";
 import {
+  RPPS_ID_PATTERN,
   assertValidNumFiness,
   clampLimit,
   clampOffset,
@@ -181,6 +182,23 @@ export function buildCategorieCodes(opts: {
   if (opts.includeAgentsPublics) codes.push(CATEGORIE_CODE_AGENT_PUBLIC);
   if (opts.includeEtudiants) codes.push(CATEGORIE_CODE_ETUDIANT);
   return codes;
+}
+
+/**
+ * Résout `categorieCodes` côté TS pour les wrappers qui veulent expliciter le
+ * default `[C]` au lieu de laisser la RPC retomber sur son propre `COALESCE`.
+ *
+ * À utiliser UNIQUEMENT pour les wrappers où on veut un default TS-side
+ * (`getRppsParSpecialiteDept`, `getRppsByName`). Les wrappers qui passent
+ * `?? []` (countRpps, getRppsInRadius, etc.) ont une sémantique différente :
+ * `[]` côté TS = "pas de filtre TS-side, la RPC applique son propre default
+ * (varie selon RPC)". Ne PAS substituer naïvement les 2 patterns.
+ *
+ * Retourne un `readonly string[]` : le RPC Supabase sérialise l'array en
+ * JSON sans muter l'input, donc pas besoin d'allouer une copie défensive.
+ */
+function resolveCategorieCodes(codes: readonly string[] | undefined): readonly string[] {
+  return codes && codes.length > 0 ? codes : CATEGORIE_CODES_DEFAUT;
 }
 
 /** Référence stable de la nomenclature ANS. Alias re-exporté pour la doc. */
@@ -383,20 +401,15 @@ export async function getRppsParSpecialiteDept(
   // Le client untyped ne contraint pas les types des params RPC — on peut
   // passer `null` directement pour les filtres optionnels (le RPC PostgreSQL
   // gère `NULL → pas de filtre` via `IS NULL OR ... = ...`).
-  // `categorieCodes` vide ou omis → default = `[C]` (Civil seul). La RPC
-  // V0.5.4 (LANGUAGE plpgsql + EXECUTE format) accepte `[]` et retombe sur
-  // son propre default `['C']` côté SQL, mais on explicite ici pour rester
-  // cohérent avec les 2 autres callers et faciliter le debug.
-  const categorieCodes =
-    input.categorieCodes && input.categorieCodes.length > 0
-      ? input.categorieCodes
-      : [...CATEGORIE_CODES_DEFAUT];
+  // `categorieCodes` vide ou omis → default TS-side = `[C]` (Civil seul).
+  // La RPC V0.5.4 a son propre `COALESCE(... , ARRAY['C'])` en défense, on
+  // explicite côté TS pour cohérence avec `getRppsByName` + debug facilité.
   const { data, error } = await supabase.rpc("rpps_par_specialite_dept", {
     p_departement: input.departement,
     p_profession_code: input.professionCode ?? null,
     p_savoir_faire_code: input.savoirFaireCode ?? null,
     p_mode_exercice_code: input.modeExerciceCode ?? null,
-    p_categorie_codes: categorieCodes,
+    p_categorie_codes: resolveCategorieCodes(input.categorieCodes),
     p_limit: limit + 1,
     p_offset: offset,
   });
@@ -454,13 +467,9 @@ export async function getRppsByName(input: RppsSearchByNameInput): Promise<RppsQ
   const prenom = input.prenom?.trim();
   const limit = clampLimit(input.limit);
   if (input.departement !== undefined) assertValidDept(input.departement);
-  // Default `[C]` (Civil seul) cohérent avec les 3 autres tools RPPS — un
+  // Default `[C]` (Civil seul) cohérent avec `getRppsParSpecialiteDept` — un
   // caller cherchant un PS par nom récupère par défaut les libéraux + salariés
   // privés + hospitaliers contractuels, pas les étudiants ni les agents publics.
-  const categorieCodes =
-    input.categorieCodes && input.categorieCodes.length > 0
-      ? input.categorieCodes
-      : [...CATEGORIE_CODES_DEFAUT];
 
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("rpps_search_by_name", {
@@ -469,7 +478,7 @@ export async function getRppsByName(input: RppsSearchByNameInput): Promise<RppsQ
     // (undefined) ET vide après trim (chaîne vide).
     p_prenom: prenom && prenom.length > 0 ? prenom : null,
     p_departement: input.departement ?? null,
-    p_categorie_codes: categorieCodes,
+    p_categorie_codes: resolveCategorieCodes(input.categorieCodes),
     p_limit: limit + 1,
   });
 
@@ -491,7 +500,7 @@ export async function getRppsByName(input: RppsSearchByNameInput): Promise<RppsQ
  */
 export async function getRppsById(rppsId: string): Promise<RppsLookupResult[]> {
   const trimmed = rppsId.trim();
-  if (!/^\d{11,12}$/.test(trimmed)) {
+  if (!RPPS_ID_PATTERN.test(trimmed)) {
     throw new RangeError(
       `[france-data-mcp] rpps_id invalide "${rppsId}" — attendu 11 ou 12 chiffres (IDNPS national, format ANS — préfixe "81" optionnel pour les IDs émis depuis 2020 = 12 chars, sans préfixe = 11 chars).`,
     );

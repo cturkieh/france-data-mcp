@@ -2,7 +2,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { IngestError, type PreValidateConfig, getNonEmpty, preValidateFile } from "./shared.js";
+import {
+  IngestError,
+  type PreValidateConfig,
+  getNonEmpty,
+  parseDropStalePreviousOutcome,
+  preValidateFile,
+} from "./shared.js";
 
 function tempFileWith(content: string): string {
   const file = path.join(
@@ -84,5 +90,44 @@ describe("getNonEmpty", () => {
     expect(getNonEmpty({ x: "  spaced  " }, "x")).toBe("spaced");
     expect(getNonEmpty({ x: "\r\n\t" }, "x")).toBeNull();
     expect(getNonEmpty({ x: "   " }, "x")).toBeNull();
+  });
+});
+
+describe("parseDropStalePreviousOutcome", () => {
+  it("parse 'dropped:<table>:<n>d' avec ageDays numeric", () => {
+    expect(parseDropStalePreviousOutcome("dropped:rpps_previous:14d")).toEqual({
+      kind: "dropped",
+      table: "rpps_previous",
+      ageDays: 14,
+    });
+  });
+
+  it("parse 'kept:<table>:<n>d' avec ageDays numeric", () => {
+    expect(parseDropStalePreviousOutcome("kept:finess_previous:3d")).toEqual({
+      kind: "kept",
+      table: "finess_previous",
+      ageDays: 3,
+    });
+  });
+
+  it("parse 'absent:<table>' (pas de previous existant)", () => {
+    expect(parseDropStalePreviousOutcome("absent:ameli_ps_previous")).toEqual({
+      kind: "absent",
+      table: "ameli_ps_previous",
+    });
+  });
+
+  it("parse 'no_history:<table>' (premier déploiement, aucun ingest_log success)", () => {
+    expect(parseDropStalePreviousOutcome("no_history:rpps_previous")).toEqual({
+      kind: "no_history",
+      table: "rpps_previous",
+    });
+  });
+
+  it("throw IngestError sur format inattendu (drift contrat SQL)", () => {
+    expect(() => parseDropStalePreviousOutcome("unknown_format")).toThrow(IngestError);
+    expect(() => parseDropStalePreviousOutcome("")).toThrow(IngestError);
+    expect(() => parseDropStalePreviousOutcome("dropped:no_age")).toThrow(IngestError);
+    expect(() => parseDropStalePreviousOutcome("dropped:table:nan_d")).toThrow(IngestError);
   });
 });

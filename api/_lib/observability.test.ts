@@ -1,6 +1,7 @@
 import type { VercelRequest } from "@vercel/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __getAxiomBreakerStateForTesting,
   __getAxiomBufferLengthForTesting,
   __resetAxiomStateForTesting,
   extractUserAgent,
@@ -460,5 +461,198 @@ describe("flushMcpEventsToAxiom", () => {
     logSuccessEvent();
     await flushMcpEventsToAxiom();
     expect(captureMcpConfigWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe("flushMcpEventsToAxiom — circuit breaker 4xx", () => {
+  const SAVED_ENV: Record<string, string | undefined> = {};
+  const ENV_KEYS = ["AXIOM_TOKEN", "AXIOM_DATASET", "VERCEL_ENV", "NODE_ENV"];
+  const AXIOM_BREAKER_THRESHOLD = 5;
+  const AXIOM_BREAKER_COOL_DOWN_MS = 5 * 60 * 1000;
+
+  beforeEach(() => {
+    for (const k of ENV_KEYS) SAVED_ENV[k] = process.env[k];
+    process.env.AXIOM_TOKEN = "tok";
+    process.env.AXIOM_DATASET = "ds";
+    delete process.env.VERCEL_ENV;
+    delete process.env.NODE_ENV;
+    __resetAxiomStateForTesting();
+    vi.mocked(captureMcpConfigWarning).mockClear();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (SAVED_ENV[k] === undefined) delete process.env[k];
+      else process.env[k] = SAVED_ENV[k];
+    }
+    __resetAxiomStateForTesting();
+    vi.restoreAllMocks();
+  });
+
+  function logEvent(): void {
+    logMcpEvent({
+      method: "tools/call",
+      tool: "x",
+      ipHash: "h",
+      userAgent: "ua",
+      durationMs: 1,
+      status: 200,
+      outcome: "success",
+    });
+  }
+
+  it("incrémente le compteur 4xx mais ne tripp pas avant le seuil", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD - 1; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    const state = __getAxiomBreakerStateForTesting();
+    expect(state.consecutive4xx).toBe(AXIOM_BREAKER_THRESHOLD - 1);
+    expect(state.openUntilMs).toBe(0);
+    expect(captureMcpConfigWarning).not.toHaveBeenCalled();
+  });
+
+  it("ouvre le breaker au N-ième 4xx consécutif (token révoqué, dataset absent, scope insuffisant)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("Unauthorized", { status: 401 }));
+    const before = Date.now();
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    const state = __getAxiomBreakerStateForTesting();
+    // Compteur reset à l'ouverture pour ne pas réémettre le warn au prochain failure post-cool-down
+    expect(state.consecutive4xx).toBe(0);
+    expect(state.openUntilMs).toBeGreaterThanOrEqual(before + AXIOM_BREAKER_COOL_DOWN_MS - 100);
+    expect(state.warned).toBe(true);
+  });
+
+  it("émet un seul Sentry config_warning à l'ouverture (one-shot par instance)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD + 3; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    // Threshold atteint puis breaker ouvert → tous les events suivants sont droppés
+    // sans fetch supplémentaire, donc aucune accumulation de warns.
+    expect(captureMcpConfigWarning).toHaveBeenCalledTimes(1);
+    expect(captureMcpConfigWarning).toHaveBeenCalledWith(
+      "axiom_circuit_breaker_open",
+      expect.stringContaining("4xx"),
+    );
+  });
+
+  it("drop le buffer sans fetch quand breaker ouvert (économise réseau + Sentry)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    // Breaker maintenant ouvert. Les flushes suivants ne doivent PAS appeler fetch.
+    const fetchSpy = vi.mocked(globalThis.fetch);
+    const callsBefore = fetchSpy.mock.calls.length;
+    logEvent();
+    logEvent();
+    await flushMcpEventsToAxiom();
+    expect(fetchSpy.mock.calls.length).toBe(callsBefore);
+    expect(__getAxiomBufferLengthForTesting()).toBe(0);
+  });
+
+  it("reset le compteur au premier succès (200) — un 4xx isolé ne tripp jamais", async () => {
+    let callCount = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      callCount++;
+      // Pattern : 4xx, 4xx, 4xx, 200, 4xx → reset après 200, n'atteint jamais le seuil.
+      if (callCount === 4) return new Response(null, { status: 200 });
+      return new Response("Forbidden", { status: 403 });
+    });
+    for (let i = 0; i < 5; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    const state = __getAxiomBreakerStateForTesting();
+    expect(state.consecutive4xx).toBe(1); // un 4xx après le reset
+    expect(state.openUntilMs).toBe(0);
+    expect(captureMcpConfigWarning).not.toHaveBeenCalled();
+  });
+
+  it("ignore les 5xx (panne transient Axiom) — pas d'incrément breaker", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Internal Server Error", { status: 503 }),
+    );
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD + 2; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    const state = __getAxiomBreakerStateForTesting();
+    expect(state.consecutive4xx).toBe(0);
+    expect(state.openUntilMs).toBe(0);
+    expect(captureMcpConfigWarning).not.toHaveBeenCalled();
+  });
+
+  it("ignore les fetch errors réseau — pas d'incrément breaker", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network unreachable"));
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD + 2; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    const state = __getAxiomBreakerStateForTesting();
+    expect(state.consecutive4xx).toBe(0);
+    expect(state.openUntilMs).toBe(0);
+    expect(captureMcpConfigWarning).not.toHaveBeenCalled();
+  });
+
+  it("re-tente après cool-down (timer mock + fetch OK) et reset le flag warned", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    // Breaker ouvert
+    expect(__getAxiomBreakerStateForTesting().warned).toBe(true);
+
+    // Avance le temps au-delà du cool-down
+    vi.advanceTimersByTime(AXIOM_BREAKER_COOL_DOWN_MS + 1000);
+
+    // Token redevenu valide
+    fetchSpy.mockResolvedValue(new Response(null, { status: 200 }));
+    logEvent();
+    await flushMcpEventsToAxiom();
+    const state = __getAxiomBreakerStateForTesting();
+    expect(state.consecutive4xx).toBe(0);
+    expect(state.warned).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it("re-tripp après cool-down si la misconfig persiste (état figé tant que la cause persiste)", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("Forbidden", { status: 403 }),
+    );
+    // Premier cycle : 5 erreurs → breaker ouvert
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    expect(__getAxiomBreakerStateForTesting().warned).toBe(true);
+    expect(vi.mocked(captureMcpConfigWarning)).toHaveBeenCalledTimes(1);
+
+    // Cool-down passé, mais la misconfig persiste (token toujours invalide)
+    vi.advanceTimersByTime(AXIOM_BREAKER_COOL_DOWN_MS + 1000);
+
+    // 5 nouvelles erreurs → breaker ré-ouvert et nouveau Sentry warning émis
+    for (let i = 0; i < AXIOM_BREAKER_THRESHOLD; i++) {
+      logEvent();
+      await flushMcpEventsToAxiom();
+    }
+    expect(__getAxiomBreakerStateForTesting().warned).toBe(true);
+    expect(vi.mocked(captureMcpConfigWarning)).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 });

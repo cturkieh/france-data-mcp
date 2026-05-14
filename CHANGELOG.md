@@ -4,6 +4,80 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.9.3] — 2026-05-14
+
+**Patch — polish refactor legacy + observabilité avancée.**
+
+Second mini-sprint quick wins V0.9.x sur le backlog `P2 — Polish` et
+`P2 — Observabilité` : circuit breaker Axiom pour stopper les fetch quand
+le token est révoqué/dataset absent, helpers boundary `requireRppsId` /
+`requireSiretId` (miroirs V0.9.2 `requireFinessId`), DROP différé des
+`<source>_previous` quand l'ingestion stagne, et 4 micro-refactors qui
+suppriment des duplications repérées en review V0.9.2.
+
+### Ajouté
+
+- **Circuit breaker Axiom** (`api/_lib/observability.ts`) — après
+  `AXIOM_BREAKER_THRESHOLD = 5` erreurs 4xx consécutives (auth/scope/dataset),
+  coupe les fetch pendant `AXIOM_BREAKER_COOL_DOWN_MS = 5 min` et émet UN
+  `Sentry.captureMessage("axiom_circuit_breaker_open", warning)` avec
+  fingerprint stable. Les 5xx (panne transient Axiom) et erreurs réseau
+  n'incrémentent PAS le compteur — retry au prochain flush. Succès → reset.
+  Évite de spammer Axiom + Sentry quand la misconfig persiste.
+- **`requireRppsId(args, key="rpps_id")`** (`api/_lib/args.ts`) — validator
+  tool boundary, miroir de `requireFinessId` (3 branches d'erreur : clé
+  absente, type wrong, format wrong via `RPPS_ID_PATTERN`). Refactor caller
+  `professionnel_by_rpps` qui dupliquait `asString + trim + custom error`.
+- **`requireSiretId(args, key="siret")`** — validator tool boundary,
+  partage `SIRET_PATTERN` (14 chiffres) avec la lib. Refactor caller
+  `etablissement_by_siret` qui dupliquait la regex inline.
+- **`RPPS_ID_PATTERN` + `SIRET_PATTERN`** (`src/sante/db-helpers.ts`) —
+  source de vérité unique, miroirs de `NUM_FINESS_PATTERN` (V0.9.2). Le
+  pattern RPPS est aussi consommé par `getRppsById` (lib).
+- **`dropStalePrevious()`** + RPC `ingest_drop_stale_previous(p_prod_table,
+  p_source, p_max_age_days=7)` (migration `20260514T080000`) — drop
+  `<prod>_previous` si `MAX(ingest_log.started_at WHERE status='success') >
+  max_age_days`. Retour discriminé (`dropped` / `kept` / `absent` /
+  `no_history`) parsé par `parseDropStalePreviousOutcome`. Idempotent.
+  Économie disk principale sur `rpps_previous` (~700 MB) et `ameli_ps_previous`
+  (~150 MB) quand l'ingestion stagne.
+- **`scripts/ingest/drop-stale-previous.ts`** — CLI standalone qui boucle
+  sur les 3 sources (`finess`, `ameli_ps`, `rpps`) et appelle
+  `dropStalePrevious` avec `--max-age-days=N` configurable. À lancer
+  manuellement ou via GitHub Action de maintenance hebdo.
+- **`resolveCategorieCodes(codes?)`** (`src/sante/rpps-db.ts`) — helper
+  pure qui défausse explicitement le default TS-side `[C]` (Civil seul)
+  quand l'array d'input est vide ou undefined. Consommé par
+  `getRppsParSpecialiteDept` et `getRppsByName`. JSDoc documente le piège
+  sémantique avec les 4 autres wrappers qui passent `?? []` (sémantique
+  différente : laisse la RPC retomber sur son COALESCE SQL).
+- **17 tests ajoutés** : 7 circuit breaker (threshold, 5xx ignoré, network
+  error ignoré, reset success, cool-down, one-shot Sentry, drop buffer),
+  4 INSEE/ANS 429 (sustained → null/api_error, transient → recover),
+  5 `parseDropStalePreviousOutcome` (4 formats + drift contrat),
+  1 re-tripp breaker après cool-down,
+  2 sémantique `resolveCategorieCodes` (`[]` vs `[C]`). Total 801 tests
+  verts (vs 781 V0.9.2).
+
+### Modifié
+
+- **`getFinessByCategorie`** (`src/sante/finess-db.ts`) — migré de
+  `getAnonClient` (typé) vers `getUntypedAnonClient` pour supprimer le cast
+  overkill `null as unknown as string`. Pattern aligné sur `countFiness`
+  et tous les wrappers `rpps-db.ts`.
+- **`getRppsById`** — utilise désormais `RPPS_ID_PATTERN` (source de vérité
+  partagée) au lieu de la regex inline `/^\d{11,12}$/`.
+- **`__resetAxiomStateForTesting`** — reset aussi le state du circuit
+  breaker (compteur 4xx, instant de réouverture, flag warned). Helper
+  `__getAxiomBreakerStateForTesting()` exposé pour les assertions.
+
+### Backlog post-V0.9.3
+
+- Tools composés `panorama_sante_territoire` / `inspect_site(num_finess)`
+- CDS centres de santé (CSV 3 Mo, pipeline Ameli-like)
+- DOM widening FINESS (`code_insee` CHAR(5))
+- INSEE Melodi (séries macro libre sans clé pour dénominateurs population)
+
 ## [0.9.2] — 2026-05-14
 
 **Patch — observabilité production + nettoyage dette legacy.**

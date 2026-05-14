@@ -338,6 +338,114 @@ export async function atomicSwapTables(input: AtomicSwapInput): Promise<void> {
   }
 }
 
+export interface DropStalePreviousInput {
+  /** Logical name of the production table (e.g. "rpps"). `<prodTable>_previous` is the candidate. */
+  prodTable: string;
+  /** Source name as written in `ingest_log` (e.g. "rpps", "finess", "ameli_ps"). */
+  source: string;
+  /** Tolerance before DROP. Default 7 days. */
+  maxAgeDays?: number;
+}
+
+/**
+ * Outcome retourné par `ingest_drop_stale_previous` (RPC SQL). Discriminé
+ * pour que le caller distingue économie réelle vs no-op cosmétique.
+ */
+export type DropStalePreviousOutcome =
+  | { kind: "dropped"; table: string; ageDays: number }
+  | { kind: "kept"; table: string; ageDays: number }
+  | { kind: "absent"; table: string }
+  | { kind: "no_history"; table: string };
+
+/**
+ * Drop `<prodTable>_previous` si l'âge dépasse `maxAgeDays` (default 7).
+ * Mesuré contre `MAX(ingest_log.started_at WHERE status='success')` de la
+ * source — la date du dernier swap réussi. Idempotent : safe d'appeler
+ * répétitivement (job de maintenance, post-mortem, etc.).
+ *
+ * Pas intégré au flow d'ingestion lui-même : le swap suivant overwrite
+ * previous de toute façon. Utile UNIQUEMENT quand l'ingestion stagne (cron
+ * down, source upstream cassée, checksum identique répété) — économie disk
+ * sur RPPS_previous (~700 MB) et Ameli_previous (~150 MB) principalement.
+ */
+export async function dropStalePrevious(
+  input: DropStalePreviousInput,
+): Promise<DropStalePreviousOutcome> {
+  const supabase = getServiceClient();
+  const { data, error } = await supabase.rpc("ingest_drop_stale_previous", {
+    p_prod_table: input.prodTable,
+    p_source: input.source,
+    p_max_age_days: input.maxAgeDays ?? 7,
+  });
+  if (error) {
+    throw new IngestError(
+      "swap",
+      `DROP stale previous failed for table "${input.prodTable}": ${error.message}`,
+    );
+  }
+  if (typeof data !== "string") {
+    throw new IngestError(
+      "swap",
+      `ingest_drop_stale_previous returned non-string for "${input.prodTable}" (got ${typeof data}: ${JSON.stringify(data)})`,
+    );
+  }
+  return parseDropStalePreviousOutcome(data);
+}
+
+/**
+ * Parse la string retournée par `ingest_drop_stale_previous` en union
+ * discriminée. Exporté pour permettre des tests unitaires sans mock Supabase.
+ *
+ * Formats reconnus (kind:table[:ageDays]) :
+ *   - `dropped:<table>:<n>d`
+ *   - `kept:<table>:<n>d`
+ *   - `absent:<table>`
+ *   - `no_history:<table>`
+ *
+ * Le pattern table reproduit `^[a-z_][a-z0-9_]*$` (miroir du check SQL
+ * `p_prod_table !~ '...'`) pour bloquer un drift de contrat où la RPC
+ * retournerait une string hostile ou mal échappée.
+ */
+const DROP_STALE_OUTCOME_PATTERN =
+  /^(dropped|kept|absent|no_history):([a-z_][a-z0-9_]*)(?::(\d+)d)?$/;
+
+export function parseDropStalePreviousOutcome(raw: string): DropStalePreviousOutcome {
+  const match = raw.match(DROP_STALE_OUTCOME_PATTERN);
+  if (!match) {
+    throw new IngestError(
+      "swap",
+      `ingest_drop_stale_previous returned unexpected format: ${JSON.stringify(raw)}`,
+    );
+  }
+  const kind = match[1];
+  const table = match[2];
+  const ageGroup = match[3];
+  if (table === undefined) {
+    throw new IngestError(
+      "swap",
+      `ingest_drop_stale_previous: missing table name in "${raw}"`,
+    );
+  }
+  if (kind === "dropped" || kind === "kept") {
+    if (ageGroup === undefined) {
+      throw new IngestError(
+        "swap",
+        `ingest_drop_stale_previous: missing ageDays for kind "${kind}" in "${raw}"`,
+      );
+    }
+    return { kind, table, ageDays: Number(ageGroup) };
+  }
+  if (kind === "absent" || kind === "no_history") {
+    return { kind, table };
+  }
+  // Inatteignable car la regex contraint déjà les 4 valeurs — defense-in-depth
+  // au cas où la regex serait élargie sans mise à jour du discriminé TS.
+  throw new IngestError(
+    "swap",
+    `ingest_drop_stale_previous: unknown kind "${kind}" in "${raw}"`,
+  );
+}
+
 /**
  * Best-effort serialize an `IngestLogEntry` for the stderr fallback.
  * `JSON.stringify` itself can throw on a circular ref or BigInt — and the

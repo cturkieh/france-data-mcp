@@ -268,6 +268,27 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
     );
   });
 
+  it("resolveCategorieCodes : array vide explicite → fallback default `[C]` (pas pass-through `[]`)", async () => {
+    // Sémantique critique : `categorieCodes: []` côté caller ne signifie PAS
+    // "pas de filtre" ici — ce wrapper force le default TS-side `[C]`. À
+    // distinguer des wrappers `?? []` (countRpps/getRppsInRadius/etc.) qui
+    // laissent la RPC retomber sur son COALESCE SQL. Cf. JSDoc de
+    // `resolveCategorieCodes` dans rpps-db.ts.
+    await getRppsByName({ nom: "Martin", categorieCodes: [] });
+    expect(mockRpc).toHaveBeenCalledWith(
+      "rpps_search_by_name",
+      expect.objectContaining({ p_categorie_codes: ["C"] }),
+    );
+  });
+
+  it("resolveCategorieCodes : array non-vide → forwardé tel quel (pas de copy défensive observable)", async () => {
+    await getRppsByName({ nom: "Martin", categorieCodes: ["C", "E"] });
+    expect(mockRpc).toHaveBeenCalledWith(
+      "rpps_search_by_name",
+      expect.objectContaining({ p_categorie_codes: ["C", "E"] }),
+    );
+  });
+
   it("mappe match_score depuis row.match_score quand finite", async () => {
     mockRpc.mockResolvedValueOnce({
       data: [
