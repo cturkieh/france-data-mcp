@@ -4,6 +4,85 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.9.4] — 2026-05-14
+
+**Patch — fix timeout 57014 Ameli + polish dette technique.**
+
+Mini-sprint quick wins V0.9.x focalisé sur Sentry FRANCE-DATA-MCP-3 (timeout
+SQL 57014 sur `professionnels_par_specialite_dept`, 3 events 13-14 mai sur
+users OpenAI et Claude). Fix structurel par index couvrant aligné sur
+l'ORDER BY de la RPC, instrumentation diagnostic Sentry, et 5 refactors
+post-V0.9.3 backlog `P2 — Polish` exécutés en parallèle. 829 tests verts
+(vs 801 V0.9.3, +28 tests).
+
+### Ajouté
+
+- **Index couvrant Ameli** (migration `20260514T090000_idx_ameli_dept_sort_covering`) —
+  `annuaire_ameli (code_departement, code_insee NULLS LAST, nom, prenom, id)`
+  aligné sur l'ORDER BY exact de `ameli_by_specialite_dept`. Postgres peut
+  désormais faire un Index Range Scan + ordering gratuit et s'arrêter au
+  LIMIT au lieu d'un top-N heapsort en RAM sur les départements denses.
+  Coût query : O(N log N) → O(LIMIT). Bénéficie en particulier au cas
+  "department-only sans filtre" non couvert par les composite indexes V0.4.1.
+  Mirror staging via `ingest_create_annuaire_ameli_staging` superset strict
+  → survit au swap hebdo.
+- **`api/_lib/error-context.ts`** — propagation de context diagnostic
+  anonymisé via symbol non-enumerable, lu par `captureMcpError` pour
+  enrichir le scope Sentry. Garde la lib `src/` libre de toute dépendance
+  Sentry (règle OSS). Double anti-leak : `Symbol.for("mcp.query_context")`
+  (invisible à `JSON.stringify` / `Object.keys` / `getOwnPropertyNames`) +
+  non-enumerable defense-in-depth. Rejet explicite des arrays
+  (Sentry `setContext` attend un object plain).
+- **`api/_lib/once-warner.ts`** — helper `onceWarner()` + spécialisation
+  `prodOnlyConfigWarner(code, message, captureFn)` qui factorise les 4
+  flags one-shot warn module-level (`axiomWarningEmitted`, `bufferOverflowWarned`,
+  `breakerOpenWarned`, `saltWarningEmitted`). Rend la mécanique mécanique
+  au lieu de discipline humaine ("aligné avec X").
+- **Instrumentation Sentry tool `professionnels_par_specialite_dept`** —
+  context anonymisé (`departement`, `has_specialite_filter`, `has_type_ps_filter`,
+  `offset`, `limit`) attaché au throw, surfacé dans le scope `mcp_query`.
+  Type `AmeliQueryErrorContext` strict bloque l'ajout de PII au compile time.
+  Si retimeout malgré l'index, on aura le pattern exact en un click Sentry.
+- **Constantes `DROP_STALE_PREVIOUS_DEFAULT_DAYS = 7`** et
+  **`DROP_STALE_PREVIOUS_MAX_DAYS = 365`** exportées depuis
+  `scripts/ingest/shared.ts` — miroir des bornes RPC SQL. Consommées par la
+  CLI `drop-stale-previous.ts` (auparavant magic numbers en dur).
+- **Log `axiom_circuit_breaker_closed: cool-down expired, retrying flush`**
+  émis quand le breaker se réarme. Observabilité ops côté Vercel Logs sans
+  re-pinger Sentry (event d'origine `axiom_circuit_breaker_open` reste seul
+  côté alerting).
+- **28 tests ajoutés** : 10 `error-context` (attach/extract/Array reject/
+  getOwnPropertyNames defense), 16 `once-warner` (8 `onceWarner` idempotence /
+  reset / payload variable / exception non catchée + 8 `prodOnlyConfigWarner`
+  prod/preview/dev gate / idempotence / reset / verbatim code+message),
+  2 `sentry.test` (scope `mcp_query` push + absent quand no context),
+  1 assertion ajoutée à `observability.test` (log `circuit_breaker_closed` au
+  reset cool-down). Total 829 tests verts.
+
+### Modifié
+
+- **`captureMcpError`** (`api/_lib/sentry.ts`) — lit le context attaché
+  via `extractErrorContext(err)` et push dans `scope.setContext("mcp_query", ...)`
+  uniquement si non-undefined (pas de scope vide).
+- **`warnMissingSaltOnce` / `warnMissingAxiomOnce`** — refactorés vers
+  `prodOnlyConfigWarner`. Comportement runtime identique (env check
+  prod+preview, fingerprint Sentry stable), code 50 % plus court.
+- **Tool handler `professionnels_par_specialite_dept`** — wrap try/catch
+  qui attache un context anonymisé à l'erreur AVANT re-throw. `console.error`
+  en 1re ligne du catch (robuste au hook `enforce-logging` qui scanne 8
+  lignes après le `catch (err) {`).
+
+### Backlog post-V0.9.4
+
+- Union typée `McpConfigWarningCode` pour fermer les codes Sentry config_warning
+  (reporté tant que <4 codes en usage)
+- Si retimeout 57014 malgré l'index couvrant : Option B — réécrire la RPC
+  `ameli_by_specialite_dept` en `EXECUTE format(...)` pour custom plan
+  systématique (lesson V0.5.2-V0.5.4 documentée dans CLAUDE.md)
+- Tools composés `panorama_sante_territoire` / `inspect_site(num_finess)`
+- CDS centres de santé (CSV 3 Mo, pipeline Ameli-like)
+- DOM widening FINESS (`code_insee` CHAR(5))
+
 ## [0.9.3] — 2026-05-14
 
 **Patch — polish refactor legacy + observabilité avancée.**

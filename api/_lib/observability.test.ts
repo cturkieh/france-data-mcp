@@ -611,12 +611,14 @@ describe("flushMcpEventsToAxiom — circuit breaker 4xx", () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    const warnSpy = vi.spyOn(console, "warn");
     for (let i = 0; i < AXIOM_BREAKER_THRESHOLD; i++) {
       logEvent();
       await flushMcpEventsToAxiom();
     }
     // Breaker ouvert
     expect(__getAxiomBreakerStateForTesting().warned).toBe(true);
+    warnSpy.mockClear();
 
     // Avance le temps au-delà du cool-down
     vi.advanceTimersByTime(AXIOM_BREAKER_COOL_DOWN_MS + 1000);
@@ -628,6 +630,8 @@ describe("flushMcpEventsToAxiom — circuit breaker 4xx", () => {
     const state = __getAxiomBreakerStateForTesting();
     expect(state.consecutive4xx).toBe(0);
     expect(state.warned).toBe(false);
+    // V0.9.4 — signal ops Vercel Logs lors du cool-down expiré (re-arm).
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("axiom_circuit_breaker_closed"));
     vi.useRealTimers();
   });
 

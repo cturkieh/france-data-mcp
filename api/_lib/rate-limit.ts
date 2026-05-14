@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import type { VercelRequest } from "@vercel/node";
+import { prodOnlyConfigWarner } from "./once-warner.js";
 import { captureMcpConfigWarning } from "./sentry.js";
 
 const WINDOW = "1 m" as const;
@@ -136,7 +137,7 @@ export function extractIp(req: VercelRequest): string {
  */
 export function hashIp(ip: string): string {
   const salt = (process.env.FRANCE_DATA_IP_SALT ?? "").trim();
-  if (salt.length === 0) warnMissingSaltOnce();
+  if (salt.length === 0) saltMissingWarner.warn();
   // `:` sépare salt/IP pour éviter une collision si salt et IP se chevauchent.
   return createHash("sha256").update(`${salt}:${ip}`).digest("hex").slice(0, 16);
 }
@@ -145,28 +146,17 @@ export function hashIp(ip: string): string {
  * Émet UN warn par instance Vercel si le salt manque/est vide en production.
  * Sans ce signal, un oubli d'env var = violation RGPD silencieuse (PRIVACY.md
  * promet un hash salé mais on tombe en pratique sur un hash rainbow-tableable).
+ * Émis en production + preview uniquement — voir `prodOnlyConfigWarner`.
  */
-let saltWarningEmitted = false;
-const MISSING_SALT_MESSAGE =
-  "FRANCE_DATA_IP_SALT absent ou vide — hash IP rainbow-tableable, promesse PRIVACY.md non tenue. Configurer la var d'env via `openssl rand -hex 32`.";
-/**
- * Émet le warn pour les env Vercel servant du trafic réel (production +
- * preview). Les preview deployments servent souvent des smoke tests / demos
- * pre-prod qui doivent respecter la même promesse RGPD que la prod. `test` et
- * `development` (CI, dev local) restent silencieux pour ne pas polluer.
- */
-function warnMissingSaltOnce(): void {
-  if (saltWarningEmitted) return;
-  const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "";
-  if (env !== "production" && env !== "preview") return;
-  saltWarningEmitted = true;
-  console.error(`[france-data-mcp] ${MISSING_SALT_MESSAGE}`);
-  captureMcpConfigWarning("missing_ip_salt", MISSING_SALT_MESSAGE);
-}
+const saltMissingWarner = prodOnlyConfigWarner(
+  "missing_ip_salt",
+  "FRANCE_DATA_IP_SALT absent ou vide — hash IP rainbow-tableable, promesse PRIVACY.md non tenue. Configurer la var d'env via `openssl rand -hex 32`.",
+  captureMcpConfigWarning,
+);
 
 /** Test-only hook : reset le flag pour re-tester le path warn en isolation. */
 export function __resetSaltWarningForTesting(): void {
-  saltWarningEmitted = false;
+  saltMissingWarner.reset();
 }
 
 /* ------------------------------------------------------------------ */

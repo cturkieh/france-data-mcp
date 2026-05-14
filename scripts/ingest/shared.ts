@@ -348,6 +348,21 @@ export interface DropStalePreviousInput {
 }
 
 /**
+ * Default age threshold (jours) avant DROP automatique de `<prod>_previous`.
+ * Miroir du `p_max_age_days INT DEFAULT 7` côté SQL (migration
+ * `20260514T080000_rpc_drop_stale_previous.sql`) — toute modification doit
+ * synchroniser les deux côtés.
+ */
+export const DROP_STALE_PREVIOUS_DEFAULT_DAYS = 7;
+
+/**
+ * Borne maximale autorisée par la RPC SQL (`p_max_age_days <= 365`). Au-delà,
+ * la RPC lève EXCEPTION. Exposé pour pré-valider côté TS avant l'appel et
+ * éviter un round-trip réseau juste pour découvrir une borne SQL.
+ */
+export const DROP_STALE_PREVIOUS_MAX_DAYS = 365;
+
+/**
  * Outcome retourné par `ingest_drop_stale_previous` (RPC SQL). Discriminé
  * pour que le caller distingue économie réelle vs no-op cosmétique.
  */
@@ -379,7 +394,7 @@ export async function dropStalePrevious(
   const { data, error } = await supabase.rpc("ingest_drop_stale_previous", {
     p_prod_table: input.prodTable,
     p_source: input.source,
-    p_max_age_days: input.maxAgeDays ?? 7,
+    p_max_age_days: input.maxAgeDays ?? DROP_STALE_PREVIOUS_DEFAULT_DAYS,
   });
   if (error) {
     throw new IngestError(

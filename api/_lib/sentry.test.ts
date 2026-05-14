@@ -1,5 +1,6 @@
 import * as Sentry from "@sentry/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { attachErrorContext } from "./error-context.js";
 import {
   __ensureInitForTesting,
   __resetSentryForTesting,
@@ -226,6 +227,36 @@ describe("Sentry integration", () => {
           layer: "json_stringify",
         }),
       );
+    });
+
+    it("captureMcpError push attached error context into mcp_query scope (V0.9.4)", () => {
+      const err = new Error("ameli_by_specialite_dept (57014): timeout");
+      attachErrorContext(err, {
+        tool: "professionnels_par_specialite_dept",
+        departement: "75",
+        has_specialite_filter: false,
+        has_type_ps_filter: false,
+        offset: 0,
+        limit: 100,
+      });
+      captureMcpError(err, ctx);
+      const scope = mockedScope();
+      expect(scope.setContext).toHaveBeenCalledWith(
+        "mcp_query",
+        expect.objectContaining({
+          tool: "professionnels_par_specialite_dept",
+          departement: "75",
+          has_specialite_filter: false,
+          has_type_ps_filter: false,
+        }),
+      );
+    });
+
+    it("captureMcpError does not push mcp_query when no context attached", () => {
+      captureMcpError(new Error("plain error"), ctx);
+      const scope = mockedScope();
+      const queryCalls = scope.setContext.mock.calls.filter((c) => c[0] === "mcp_query");
+      expect(queryCalls).toHaveLength(0);
     });
 
     it("flushSentry appelle Sentry.flush avec timeout par défaut 2000ms", async () => {

@@ -18,6 +18,7 @@
  */
 
 import type { VercelRequest } from "@vercel/node";
+import { onceWarner, prodOnlyConfigWarner } from "./once-warner.js";
 import { captureMcpConfigWarning } from "./sentry.js";
 
 export type LogLevel = "info" | "warn" | "error";
@@ -170,7 +171,7 @@ const AXIOM_BREAKER_THRESHOLD = 5;
 const AXIOM_BREAKER_COOL_DOWN_MS = 5 * 60 * 1000;
 let consecutive4xxCount = 0;
 let breakerOpenUntilMs = 0;
-let breakerOpenWarned = false;
+const breakerOpenWarner = onceWarner();
 
 /**
  * Retourne le host Axiom effectif : valeur de `AXIOM_HOST` (trimée) si set
@@ -181,17 +182,16 @@ export function getAxiomHost(): string {
   return process.env.AXIOM_HOST?.trim() || AXIOM_DEFAULT_HOST;
 }
 
-let bufferOverflowWarned = false;
+const bufferOverflowWarner = onceWarner();
 
 function enqueueAxiomEvent(payload: Record<string, unknown>): void {
   if (axiomBuffer.length >= AXIOM_BUFFER_MAX) {
     axiomBuffer.shift();
-    if (!bufferOverflowWarned) {
-      bufferOverflowWarned = true;
+    bufferOverflowWarner.warn(() => {
       console.warn(
         `[france-data-mcp] Axiom buffer overflow (>${AXIOM_BUFFER_MAX} events sans flush) — drop du plus ancien. Indique soit un trafic burst soit un flush jamais déclenché. Investiguer le finally du handler root.`,
       );
-    }
+    });
   }
   // Axiom indexe les events par `_time` (ISO 8601). On réutilise le `ts` canonique.
   const ts = typeof payload.ts === "string" ? payload.ts : new Date().toISOString();
@@ -223,9 +223,10 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
   const dataset = process.env.AXIOM_DATASET;
   if (!token || !dataset) {
     // Drop silencieux : pas configuré = dev local OU env vars oubliées. Le
-    // warn dédié pour "AXIOM_TOKEN absent en prod" est dans `warnMissingAxiomOnce`.
+    // warn dédié pour "AXIOM_TOKEN absent en prod" est porté par
+    // `axiomMissingWarner` (gate prod/preview + Sentry one-shot).
     axiomBuffer.length = 0;
-    warnMissingAxiomOnce();
+    axiomMissingWarner.warn();
     return;
   }
   // Circuit breaker OPEN : drop le buffer sans tenter de fetch. Évite de
@@ -241,7 +242,13 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
   // la JSDoc breaker serait silencieux après le 1er trip.
   if (breakerOpenUntilMs > 0) {
     breakerOpenUntilMs = 0;
-    breakerOpenWarned = false;
+    breakerOpenWarner.reset();
+    // V0.9.4 — signal ops Vercel Logs que le breaker se réarme. Pas de
+    // Sentry (l'event d'origine `axiom_circuit_breaker_open` est suffisant
+    // côté alerting ; ce log est purement informatif côté logs ingest).
+    console.warn(
+      "[france-data-mcp] axiom_circuit_breaker_closed: cool-down expired, retrying flush",
+    );
   }
   const host = getAxiomHost();
   const batch = axiomBuffer.splice(0);
@@ -259,7 +266,7 @@ export async function flushMcpEventsToAxiom(): Promise<void> {
       // Succès : reset le compteur et le warn one-shot (laisse re-déclencher
       // si la misconfig revient plus tard sur la même instance).
       consecutive4xxCount = 0;
-      breakerOpenWarned = false;
+      breakerOpenWarner.reset();
     } else {
       let body = "";
       try {
@@ -296,37 +303,25 @@ function registerAxiomFailure(status: number): void {
 }
 
 function warnBreakerOpenOnce(lastStatus: number): void {
-  if (breakerOpenWarned) return;
-  breakerOpenWarned = true;
-  const coolDownMin = AXIOM_BREAKER_COOL_DOWN_MS / 60_000;
-  const message = `Axiom circuit breaker OPEN — pause ingest pendant ${coolDownMin} min après ${AXIOM_BREAKER_THRESHOLD} erreurs 4xx consécutives (dernier=${lastStatus}). Vérifier AXIOM_TOKEN (révoqué/expiré ?), AXIOM_DATASET (existe ?) et les scopes du token.`;
-  console.error(`[france-data-mcp] ${message}`);
-  captureMcpConfigWarning("axiom_circuit_breaker_open", message);
+  breakerOpenWarner.warn(() => {
+    const coolDownMin = AXIOM_BREAKER_COOL_DOWN_MS / 60_000;
+    const message = `Axiom circuit breaker OPEN — pause ingest pendant ${coolDownMin} min après ${AXIOM_BREAKER_THRESHOLD} erreurs 4xx consécutives (dernier=${lastStatus}). Vérifier AXIOM_TOKEN (révoqué/expiré ?), AXIOM_DATASET (existe ?) et les scopes du token.`;
+    console.error(`[france-data-mcp] ${message}`);
+    captureMcpConfigWarning("axiom_circuit_breaker_open", message);
+  });
 }
 
 /**
  * Émet UN warn par instance Vercel si Axiom n'est pas configuré en production.
- * Symétrique à `warnMissingSaltOnce` côté rate-limit : sans ce signal, un oubli
- * d'env var Axiom = dégrade silencieusement la rétention 30j promise par PRIVACY.md.
+ * Symétrique à `saltMissingWarner` côté rate-limit (même mécanique via
+ * `prodOnlyConfigWarner`) : sans ce signal, un oubli d'env var Axiom =
+ * dégrade silencieusement la rétention 30j promise par PRIVACY.md.
  */
-let axiomWarningEmitted = false;
-const MISSING_AXIOM_MESSAGE =
-  "AXIOM_TOKEN ou AXIOM_DATASET absent — logs détaillés non persistés au-delà de la fenêtre Vercel Runtime Logs. PRIVACY.md rétention 30j non tenue.";
-/**
- * Émet le warn pour les env Vercel servant du trafic réel (production +
- * preview). Aligné avec `warnMissingSaltOnce` (rate-limit.ts) — preview
- * deployments servent smoke tests / demos pre-prod qui doivent respecter
- * la même promesse RGPD. `test` et `development` (CI, dev local) restent
- * silencieux pour ne pas polluer.
- */
-function warnMissingAxiomOnce(): void {
-  if (axiomWarningEmitted) return;
-  const env = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? "";
-  if (env !== "production" && env !== "preview") return;
-  axiomWarningEmitted = true;
-  console.error(`[france-data-mcp] ${MISSING_AXIOM_MESSAGE}`);
-  captureMcpConfigWarning("missing_axiom_config", MISSING_AXIOM_MESSAGE);
-}
+const axiomMissingWarner = prodOnlyConfigWarner(
+  "missing_axiom_config",
+  "AXIOM_TOKEN ou AXIOM_DATASET absent — logs détaillés non persistés au-delà de la fenêtre Vercel Runtime Logs. PRIVACY.md rétention 30j non tenue.",
+  captureMcpConfigWarning,
+);
 
 /**
  * Test-only : reset complet de l'état module Axiom (buffer + flags one-shot
@@ -335,11 +330,11 @@ function warnMissingAxiomOnce(): void {
  */
 export function __resetAxiomStateForTesting(): void {
   axiomBuffer.length = 0;
-  axiomWarningEmitted = false;
-  bufferOverflowWarned = false;
+  axiomMissingWarner.reset();
+  bufferOverflowWarner.reset();
   consecutive4xxCount = 0;
   breakerOpenUntilMs = 0;
-  breakerOpenWarned = false;
+  breakerOpenWarner.reset();
 }
 
 /** Test-only : taille du buffer pour les assertions de tests. */
@@ -360,6 +355,6 @@ export function __getAxiomBreakerStateForTesting(): {
   return {
     consecutive4xx: consecutive4xxCount,
     openUntilMs: breakerOpenUntilMs,
-    warned: breakerOpenWarned,
+    warned: breakerOpenWarner.hasWarned(),
   };
 }

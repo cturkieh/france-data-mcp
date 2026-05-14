@@ -14,7 +14,13 @@
  */
 
 import "./load-env.js";
-import { type DropStalePreviousOutcome, IngestError, dropStalePrevious } from "./shared.js";
+import {
+  DROP_STALE_PREVIOUS_DEFAULT_DAYS,
+  DROP_STALE_PREVIOUS_MAX_DAYS,
+  type DropStalePreviousOutcome,
+  IngestError,
+  dropStalePrevious,
+} from "./shared.js";
 
 const SOURCES: Array<{ prodTable: string; source: string }> = [
   { prodTable: "finess", source: "finess" },
@@ -24,11 +30,13 @@ const SOURCES: Array<{ prodTable: string; source: string }> = [
 
 function parseMaxAgeDaysFromArgv(): number {
   const arg = process.argv.find((a) => a.startsWith("--max-age-days="));
-  if (!arg) return 7;
+  if (!arg) return DROP_STALE_PREVIOUS_DEFAULT_DAYS;
   const raw = arg.slice("--max-age-days=".length);
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 365) {
-    throw new Error(`--max-age-days invalide: "${raw}" (attendu [1, 365])`);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > DROP_STALE_PREVIOUS_MAX_DAYS) {
+    throw new Error(
+      `--max-age-days invalide: "${raw}" (attendu [1, ${DROP_STALE_PREVIOUS_MAX_DAYS}])`,
+    );
   }
   return parsed;
 }

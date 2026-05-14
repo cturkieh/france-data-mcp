@@ -19,6 +19,7 @@
  */
 
 import * as Sentry from "@sentry/node";
+import { extractErrorContext } from "./error-context.js";
 import type { McpOutcome, McpRequestContext } from "./observability.js";
 
 let initialized = false;
@@ -230,6 +231,14 @@ export function captureMcpError(err: unknown, ctx: SentryContext): void {
         user_agent: ctx.userAgent,
         ...ctx.extra,
       });
+      // V0.9.4 — diagnostic context attached by tool handlers (e.g.
+      // `professionnels_par_specialite_dept` joint dept/filters/pagination
+      // pour différencier les patterns qui timeout dans FRANCE-DATA-MCP-3).
+      // Anonymisé par construction côté handler — pas de PII.
+      const queryContext = extractErrorContext(err);
+      if (queryContext !== undefined) {
+        scope.setContext("mcp_query", queryContext);
+      }
       Sentry.captureException(err);
     });
   } catch (sentryErr) {

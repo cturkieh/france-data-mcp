@@ -74,6 +74,24 @@ import {
   requireSiretId,
   requireString,
 } from "./_lib/args.js";
+import { attachErrorContext } from "./_lib/error-context.js";
+
+/**
+ * Diagnostic context anonymisé attaché aux erreurs du tool
+ * `professionnels_par_specialite_dept`. Type FERMÉ (pas d'intersection avec
+ * `Readonly<Record<string, unknown>>` — l'index signature dominerait et
+ * permettrait l'ajout silencieux de champs PII via excess-property holes côté
+ * object literal). Toute évolution du contract doit passer par l'édition
+ * explicite de ce type, pas par un add-on dans l'objet construit côté catch.
+ */
+type AmeliQueryErrorContext = {
+  readonly tool: "professionnels_par_specialite_dept";
+  readonly departement: string;
+  readonly has_specialite_filter: boolean;
+  readonly has_type_ps_filter: boolean;
+  readonly offset: number;
+  readonly limit: number;
+};
 
 /** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
 const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
@@ -1442,10 +1460,30 @@ export const TOOLS: McpTool[] = [
       if (typePsCode) input.typePsCode = typePsCode;
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
-      const result = await getAmeliBySpecialiteDept(input);
-      return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
-        "ameli_ps",
-      ]);
+      try {
+        const result = await getAmeliBySpecialiteDept(input);
+        return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
+          "ameli_ps",
+        ]);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[france-data-mcp] ameli_query_failed: ${message}`);
+        // V0.9.4 — diagnostic anonymisé pour Sentry FRANCE-DATA-MCP-3 (timeout
+        // 57014). `has_*_filter` reflète l'application EFFECTIVE du filtre
+        // (truthy check `if (specialiteCode) input.specialiteCode = …` plus
+        // haut — `""` n'est PAS un filtre actif), sinon le scope Sentry
+        // mentirait sur le pattern qui timeout.
+        const queryContext: AmeliQueryErrorContext = {
+          tool: "professionnels_par_specialite_dept",
+          departement,
+          has_specialite_filter: Boolean(specialiteCode),
+          has_type_ps_filter: Boolean(typePsCode),
+          offset: offset ?? 0,
+          limit: limit ?? 100,
+        };
+        attachErrorContext(err, queryContext);
+        throw err;
+      }
     },
   },
   {
