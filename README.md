@@ -112,13 +112,13 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.9.1 — en production.** 31 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. 741 tests verts, TypeScript strict, Biome clean. Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so et glama.ai. Crons GitHub Actions (FINESS bimensuel, Ameli hebdo, RPPS mensuel) actifs. Observabilité : Sentry monitoring + Axiom log drain (rétention 30 j, fail-soft).
+✅ **V0.9.2 — en production.** 31 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. 781 tests verts, TypeScript strict, Biome clean. Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so et glama.ai. Crons GitHub Actions (FINESS bimensuel, Ameli hebdo, RPPS mensuel) actifs. Observabilité : Sentry monitoring + Axiom log drain (rétention 30 j, fail-soft) + endpoint `/healthz` pour monitors externes (status `ok`/`degraded` selon les dépendances critiques).
 
 Voir [CHANGELOG](CHANGELOG.md) pour l'historique détaillé.
 
 ### Roadmap
 
-- [ ] **V0.9.2** — RPC `count_finess_by_commune` (granularité commune côté établissements), circuit breaker 4xx Axiom, healthz endpoint
+- [ ] **V0.9.3** — RPC `count_finess_by_commune` (granularité commune côté établissements), circuit breaker 4xx Axiom, helpers `requireSiretId` / `requireRppsId`
 - [ ] **V1.0+** — Support DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 
 ---
