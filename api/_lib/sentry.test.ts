@@ -334,9 +334,7 @@ describe("captureMcpConfigWarning", () => {
     });
 
     expect(() => captureMcpConfigWarning("missing_axiom_config", "axiom absent")).not.toThrow();
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Sentry captureMessage failed"),
-    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Sentry captureMessage failed"));
     void warnSpy;
   });
 

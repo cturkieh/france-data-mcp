@@ -371,7 +371,11 @@ export type DropStalePreviousOutcome =
 export async function dropStalePrevious(
   input: DropStalePreviousInput,
 ): Promise<DropStalePreviousOutcome> {
-  const supabase = getServiceClient();
+  // Untyped client : la RPC `ingest_drop_stale_previous` (V0.9.3, migration
+  // 20260514T080000) n'est pas encore dans les types Supabase générés
+  // — `getServiceClient` typé la refuserait au compile time. Pattern miroir
+  // de `countFiness` / wrappers `rpps-db.ts`.
+  const supabase = getUntypedServiceClient(`drop-stale:${input.source}`);
   const { data, error } = await supabase.rpc("ingest_drop_stale_previous", {
     p_prod_table: input.prodTable,
     p_source: input.source,
@@ -421,10 +425,7 @@ export function parseDropStalePreviousOutcome(raw: string): DropStalePreviousOut
   const table = match[2];
   const ageGroup = match[3];
   if (table === undefined) {
-    throw new IngestError(
-      "swap",
-      `ingest_drop_stale_previous: missing table name in "${raw}"`,
-    );
+    throw new IngestError("swap", `ingest_drop_stale_previous: missing table name in "${raw}"`);
   }
   if (kind === "dropped" || kind === "kept") {
     if (ageGroup === undefined) {
@@ -440,10 +441,7 @@ export function parseDropStalePreviousOutcome(raw: string): DropStalePreviousOut
   }
   // Inatteignable car la regex contraint déjà les 4 valeurs — defense-in-depth
   // au cas où la regex serait élargie sans mise à jour du discriminé TS.
-  throw new IngestError(
-    "swap",
-    `ingest_drop_stale_previous: unknown kind "${kind}" in "${raw}"`,
-  );
+  throw new IngestError("swap", `ingest_drop_stale_previous: unknown kind "${kind}" in "${raw}"`);
 }
 
 /**

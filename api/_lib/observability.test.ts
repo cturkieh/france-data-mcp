@@ -472,10 +472,11 @@ describe("flushMcpEventsToAxiom — circuit breaker 4xx", () => {
 
   beforeEach(() => {
     for (const k of ENV_KEYS) SAVED_ENV[k] = process.env[k];
+    // Reset complet des env vars (cohérent avec le 1er describe + biome noDelete OK
+    // sur la bracket notation), puis remet les 2 nécessaires pour ce describe.
+    for (const k of ENV_KEYS) delete process.env[k];
     process.env.AXIOM_TOKEN = "tok";
     process.env.AXIOM_DATASET = "ds";
-    delete process.env.VERCEL_ENV;
-    delete process.env.NODE_ENV;
     __resetAxiomStateForTesting();
     vi.mocked(captureMcpConfigWarning).mockClear();
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -632,9 +633,7 @@ describe("flushMcpEventsToAxiom — circuit breaker 4xx", () => {
 
   it("re-tripp après cool-down si la misconfig persiste (état figé tant que la cause persiste)", async () => {
     vi.useFakeTimers();
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("Forbidden", { status: 403 }),
-    );
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("Forbidden", { status: 403 }));
     // Premier cycle : 5 erreurs → breaker ouvert
     for (let i = 0; i < AXIOM_BREAKER_THRESHOLD; i++) {
       logEvent();

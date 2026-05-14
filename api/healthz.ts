@@ -21,8 +21,8 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getAxiomHost } from "./_lib/observability.js";
 import { VERSION } from "../src/core/version.js";
+import { getAxiomHost } from "./_lib/observability.js";
 
 /** `"ok"` quand toutes les dépendances critiques sont OK, `"degraded"` sinon. */
 export type HealthStatus = "ok" | "degraded";
