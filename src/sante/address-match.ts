@@ -26,12 +26,18 @@ export function normalizeForCompare(value: string): string {
   // pour portabilité éditeur — certaines toolchains affichent le range comme
   // un caractère unique et le mangent au save. Combine accents + ponctuation
   // + whitespace en une seule passe regex pour réduire le nb d'allocations.
-  return value
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[.,'’\-\s]+/g, " ")
-    .trim();
+  return (
+    value
+      .normalize("NFD")
+      // Strip toutes les marks Unicode (combining diacritics post-NFD :
+      // U+0300-U+036F + spacing/enclosing marks). `\p{M}` avec flag `u` au lieu
+      // d'un range littéral de combining chars (invisibles à l'œil + flag
+      // `lint/suspicious/noMisleadingCharacterClass` Biome).
+      .replace(/\p{M}/gu, "")
+      .toLowerCase()
+      .replace(/[.,'’\-\s]+/g, " ")
+      .trim()
+  );
 }
 
 /**

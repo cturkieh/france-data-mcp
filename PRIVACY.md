@@ -9,7 +9,7 @@
 - On loggue **qui appelle quel tool** (hash anonymisé d'IP + User-Agent + nom du tool + durée + statut).
 - On **ne loggue PAS les paramètres** des tools (pas de SIRET, RPPS, nom de commune ou coordonnée).
 - On **ne loggue PAS les réponses** des tools.
-- Rétention : **30 jours** sur Axiom (si activé, cf. section sous-traitants) ; sinon limitée à la rétention runtime de Vercel (~1 h sur Hobby, ~24 h sur Pro).
+- Rétention : **30 jours** sur Axiom (actif en production, cf. section sous-traitants).
 - Tu peux demander la suppression de tes données à tout moment via [contact](#contact-droits-rgpd).
 
 ## Données collectées sur le endpoint public
@@ -62,14 +62,14 @@ Sentry est utilisé uniquement pour le **debugging des erreurs serveur**. Les re
 | **Vercel** (US) | Hébergement serverless du endpoint + logs runtime | Région européenne (Frankfurt `fra1`) |
 | **Upstash** | Rate limit (compteurs glissants 60s) | Frankfurt `eu-central-1` |
 | **Sentry** (US, org `command-center`) | Capture des erreurs 500 serveur uniquement | Europe (sentry.io DE) |
-| **Axiom** *(si activé)* | Stockage des logs JSON structurés | Europe |
+| **Axiom** | Stockage des logs JSON structurés, recherche/agrégats sur 30 jours | Selon la région du compte Axiom (par défaut US, configurable EU via `AXIOM_HOST=api.eu.axiom.co`) |
 | **Supabase** | DB des référentiels publics (FINESS/Ameli/RPPS), **aucune donnée utilisateur** | `eu-west-1` (Dublin) |
 
-Tous nos sous-traitants opèrent en région européenne et appliquent le RGPD.
+Vercel, Upstash, Sentry et Supabase opèrent en région européenne. Axiom est configurable par l'opérateur (région du compte). Tous appliquent le RGPD.
 
 ## Durée de conservation
 
-- **Logs détaillés (IP-hash + UA + tool)** : 30 jours glissants sur Axiom (si activé). Sans Axiom, rétention limitée à celle des Vercel Runtime Logs (~1 h Hobby, ~24 h Pro).
+- **Logs détaillés (IP-hash + UA + tool)** : 30 jours glissants sur Axiom (activé en production). Vercel Runtime Logs miroir (~1 h Hobby) en backup.
 - **Compteurs rate-limit Upstash** : 60 secondes (sliding window).
 - **Agrégats anonymes** (volume par tool par jour, sans IP-hash) : conservation illimitée pour métriques publiques.
 - **Erreurs Sentry** : durée selon le plan Sentry en vigueur (30 jours sur le plan Developer).

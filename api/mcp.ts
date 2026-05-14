@@ -27,6 +27,7 @@ import {
   type McpOutcome,
   type McpRequestContext,
   extractUserAgent,
+  flushMcpEventsToAxiom,
   logMcpEvent,
 } from "./_lib/observability.js";
 import { checkRateLimit, extractIp, hashIp } from "./_lib/rate-limit.js";
@@ -175,12 +176,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     });
     throw err;
   } finally {
-    // Flush APRÈS la réponse pour ne pas pénaliser la latence côté client.
-    // Vercel garde le process en vie jusqu'au resolve du handler async — on a
-    // donc le temps de flush avant kill. Le `finally` garantit que tout chemin
-    // de retour (incluant les early returns OPTIONS/GET/405/400 et l'exception
-    // re-throw du catch root) flush si un event Sentry est en attente.
-    await flushSentry();
+    // Flush en parallèle pour borner la latence ajoutée au pire à
+    // `max(flushSentry, flushAxiom)` plutôt que leur somme. Sur `@vercel/node`,
+    // la réponse HTTP n'est libérée qu'à la résolution du handler async, donc
+    // ces awaits bloquent bien la réponse client (acceptable pour un endpoint
+    // MCP non-temps-réel — pire cas ~1.5s si Axiom timeout). Le `finally` garantit
+    // que tout chemin de retour (early returns OPTIONS/GET/405/400, re-throw du
+    // catch root) flush les events en attente.
+    await Promise.allSettled([flushSentry(), flushMcpEventsToAxiom()]);
   }
 }
 
