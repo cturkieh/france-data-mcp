@@ -272,8 +272,7 @@ export async function listSavoirFaireRpps(
     // PostgREST sérialise BIGINT parfois en string si > Number.MAX_SAFE_INTEGER.
     // Sur 2.23M PS, les counts par savoir_faire sont au max ~100K → toujours
     // safe en number. Conversion défensive quand même.
-    const count =
-      typeof row.count_ps === "number" ? row.count_ps : Number(row.count_ps ?? 0);
+    const count = typeof row.count_ps === "number" ? row.count_ps : Number(row.count_ps ?? 0);
     if (!Number.isFinite(count)) {
       console.warn(
         `[france-data-mcp] lister_savoir_faire_rpps: count_ps non parsable pour code=${row.code} (raw=${JSON.stringify(row.count_ps)}) — fallback 0`,

@@ -416,9 +416,7 @@ describe("countRppsByCommune (V0.9)", () => {
 
   it("RPC returns non-number → throw avec dump JSON pour debug", async () => {
     mockRpc.mockResolvedValueOnce({ data: "not-a-number", error: null });
-    await expect(countRppsByCommune({ codeInsee: "75056" })).rejects.toThrow(
-      /unexpected type/,
-    );
+    await expect(countRppsByCommune({ codeInsee: "75056" })).rejects.toThrow(/unexpected type/);
   });
 
   it("RPC returns 0 (commune sans PS matching) → return 0 (pas une erreur)", async () => {

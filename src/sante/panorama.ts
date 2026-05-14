@@ -16,12 +16,9 @@
  */
 
 import { assertValidCodeInsee, deptFromCodeInsee } from "../territoire/dept-codes.js";
-import { type CountFinessInput, countFiness } from "./finess-db.js";
+import { type DensiteProfessionnelsSanteResult, densiteProfessionnelsSante } from "./densite.js";
 import type { FinessFamilleQuery } from "./finess-categories.js";
-import {
-  type DensiteProfessionnelsSanteResult,
-  densiteProfessionnelsSante,
-} from "./densite.js";
+import { type CountFinessInput, countFiness } from "./finess-db.js";
 import { RPPS_PROFESSION } from "./rpps-types.js";
 import { SOURCE_LABELS } from "./sources.js";
 

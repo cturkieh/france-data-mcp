@@ -88,10 +88,7 @@ describe("panoramaSanteTerritoire", () => {
       finessFamilles: ["pharmacie", "mco"],
     });
 
-    expect(result.etablissementsParFamille.map((e) => e.famille)).toEqual([
-      "pharmacie",
-      "mco",
-    ]);
+    expect(result.etablissementsParFamille.map((e) => e.famille)).toEqual(["pharmacie", "mco"]);
   });
 
   it("finessFamilles=[] → aucun appel countFiness, etablissementsParFamille vide", async () => {
@@ -120,7 +117,10 @@ describe("panoramaSanteTerritoire", () => {
 
     // Tous les `start-X` doivent précéder tous les `end-Y` si parallélisé.
     const firstEnd = order.findIndex((s) => s.startsWith("end-"));
-    const lastStart = order.map((s, i) => (s.startsWith("start-") ? i : -1)).filter((i) => i >= 0).pop();
+    const lastStart = order
+      .map((s, i) => (s.startsWith("start-") ? i : -1))
+      .filter((i) => i >= 0)
+      .pop();
     expect(firstEnd).toBeGreaterThan(lastStart ?? -1);
   });
 
@@ -131,9 +131,7 @@ describe("panoramaSanteTerritoire", () => {
     });
     countFinessSpy.mockResolvedValue(0);
 
-    await expect(
-      panoramaSanteTerritoire({ codeInsee: "59009" }),
-    ).rejects.toThrow(/Melodi 500/);
+    await expect(panoramaSanteTerritoire({ codeInsee: "59009" })).rejects.toThrow(/Melodi 500/);
   });
 
   it("DOM-COM tronqué (code_insee 2A001) → dept dérivé correctement", async () => {
@@ -151,9 +149,7 @@ describe("panoramaSanteTerritoire", () => {
     // assertValidCodeInsee upfront (Passe 1 fix) → 1 seule erreur claire au
     // lieu de 4 sub-calls qui plantent chacune. Le test garantit que la
     // validation n'est pas retirée par un futur refactor.
-    await expect(
-      panoramaSanteTerritoire({ codeInsee: "INVALID" }),
-    ).rejects.toThrow(RangeError);
+    await expect(panoramaSanteTerritoire({ codeInsee: "INVALID" })).rejects.toThrow(RangeError);
     expect(densiteSpy).not.toHaveBeenCalled();
     expect(countFinessSpy).not.toHaveBeenCalled();
   });
