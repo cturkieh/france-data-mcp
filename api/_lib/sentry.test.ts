@@ -361,9 +361,7 @@ describe("beforeSendEvent (FRANCE-DATA-MCP-1 bot noise filter)", () => {
         exMessage: "Cannot read properties of undefined",
       });
       beforeSendEvent(event);
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining("dropping bot-noise event"),
-      );
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("dropping bot-noise event"));
     });
 
     it("retourne l'event sanitizé sur genuine error", () => {
@@ -431,9 +429,9 @@ describe("beforeSendEvent (FRANCE-DATA-MCP-1 bot noise filter)", () => {
       });
       beforeSendEvent(event);
       // L'event d'origine doit toujours avoir authorization (pas muté).
-      expect(
-        (event.request?.headers as Record<string, string> | undefined)?.authorization,
-      ).toBe("Bearer secret");
+      expect((event.request?.headers as Record<string, string> | undefined)?.authorization).toBe(
+        "Bearer secret",
+      );
     });
 
     it("ne crash pas si event sans request", () => {

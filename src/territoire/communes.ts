@@ -95,9 +95,7 @@ export async function searchCommunes(options: SearchCommunesOptions): Promise<Co
     // RangeError → JSON-RPC -32602 (faute caller, pas -32603 internal_error).
     // Cf. FRANCE-DATA-MCP-2 : sans ce typage, Sentry captait un "internal error"
     // alors que c'est juste un appel mal formé côté caller.
-    throw new RangeError(
-      "searchCommunes: au moins un critère (nom, codePostal, code) est requis",
-    );
+    throw new RangeError("searchCommunes: au moins un critère (nom, codePostal, code) est requis");
   }
 
   const params = new URLSearchParams();
