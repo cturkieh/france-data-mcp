@@ -20,13 +20,13 @@
 
 import { round2 } from "../core/numbers.js";
 import {
+  type PopulationData,
   getPopulationByCommune,
   getPopulationByDept,
   getPopulationFrance,
-  type PopulationData,
 } from "../territoire/insee-melodi.js";
-import { type CountFinessInput, countFiness } from "./finess-db.js";
 import type { FinessFamilleQuery } from "./finess-categories.js";
+import { type CountFinessInput, countFiness } from "./finess-db.js";
 import {
   type CountRppsByCommuneInput,
   type CountRppsInput,
@@ -213,9 +213,7 @@ function resolveZone(
     );
   }
   if (!hasDept && !hasInsee) {
-    throw new RangeError(
-      "densiteProfessionnelsSante: departement ou codeInsee requis",
-    );
+    throw new RangeError("densiteProfessionnelsSante: departement ou codeInsee requis");
   }
   return hasInsee
     ? { kind: "commune", code: input.codeInsee as string }

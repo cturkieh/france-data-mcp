@@ -7,7 +7,6 @@
  * Les CSV bruts restent disponibles dans la lib pour les usages hors MCP.
  */
 
-import { normalizeAliases, requireOneOf, requireString } from "./_lib/args.js";
 import { INCLUDE_FRESHNESS_SCHEMA, withFreshness } from "../src/core/freshness.js";
 import {
   type AmeliQueryResult,
@@ -26,6 +25,12 @@ import {
   verifierSiteActif,
 } from "../src/sante/cross-source.js";
 import { RADIUS_MAX_KM, RADIUS_MIN_KM } from "../src/sante/db-helpers.js";
+import {
+  MODE_EXERCICE_ACTIVITE_REGULIERE,
+  PROFESSION_CODE_MEDECIN,
+  densiteEtablissementsSante,
+  densiteProfessionnelsSante,
+} from "../src/sante/densite.js";
 import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
 import {
   type FinessFamilleQuery,
@@ -39,12 +44,6 @@ import {
   getEntrepriseBySiren,
   searchEntreprises,
 } from "../src/sante/index.js";
-import {
-  MODE_EXERCICE_ACTIVITE_REGULIERE,
-  PROFESSION_CODE_MEDECIN,
-  densiteEtablissementsSante,
-  densiteProfessionnelsSante,
-} from "../src/sante/densite.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
 import {
@@ -67,6 +66,7 @@ import {
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
+import { normalizeAliases, requireOneOf, requireString } from "./_lib/args.js";
 
 /** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
 const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
@@ -358,7 +358,8 @@ const DATA_FRESHNESS_OUTPUT_SCHEMA: Record<string, unknown> = {
           last_attempt_status: { type: ["string", "null"] },
           staleness_days: {
             type: ["number", "null"],
-            description: "null si la source n'a jamais été synchronisée (signal alarmant à propager au caller).",
+            description:
+              "null si la source n'a jamais été synchronisée (signal alarmant à propager au caller).",
           },
           cadence_hint: { type: "string" },
         },
@@ -805,10 +806,10 @@ export const TOOLS: McpTool[] = [
       properties: {
         nom: {
           type: "string",
-          description: "Recherche par nom (autocomplétion). Ex: \"Villeneuve d'Ascq\", \"Lyon\".",
+          description: 'Recherche par nom (autocomplétion). Ex: "Villeneuve d\'Ascq", "Lyon".',
         },
-        codePostal: { type: "string", description: "Code postal exact (5 chiffres). Ex: \"59650\"." },
-        code: { type: "string", description: "Code INSEE exact (5 caractères). Ex: \"59009\"." },
+        codePostal: { type: "string", description: 'Code postal exact (5 chiffres). Ex: "59650".' },
+        code: { type: "string", description: 'Code INSEE exact (5 caractères). Ex: "59009".' },
         limit: {
           type: "number",
           description: "Nombre max de résultats (1-30, défaut 10).",
@@ -857,7 +858,8 @@ export const TOOLS: McpTool[] = [
       properties: {
         code: {
           type: "string",
-          description: "Code INSEE 5 caractères. Ex: \"75056\" Paris, \"59009\" Villeneuve-d'Ascq, \"2A004\" Ajaccio.",
+          description:
+            'Code INSEE 5 caractères. Ex: "75056" Paris, "59009" Villeneuve-d\'Ascq, "2A004" Ajaccio.',
         },
       },
       required: ["code"],
@@ -937,7 +939,7 @@ export const TOOLS: McpTool[] = [
         code: {
           type: "string",
           description:
-            "Code INSEE de la commune (5 caractères). Ex: \"75056\" Paris, \"13201\" Marseille 1er, \"59009\" Villeneuve-d'Ascq, \"2A004\" Ajaccio.",
+            'Code INSEE de la commune (5 caractères). Ex: "75056" Paris, "13201" Marseille 1er, "59009" Villeneuve-d\'Ascq, "2A004" Ajaccio.',
         },
       },
       required: ["code"],
@@ -964,7 +966,7 @@ export const TOOLS: McpTool[] = [
         code: {
           type: "string",
           description:
-            "Code INSEE du département (2-3 caractères). Ex: \"75\" Paris, \"59\" Nord, \"13\" Bouches-du-Rhône, \"2A\" Corse-du-Sud, \"971\" Guadeloupe.",
+            'Code INSEE du département (2-3 caractères). Ex: "75" Paris, "59" Nord, "13" Bouches-du-Rhône, "2A" Corse-du-Sud, "971" Guadeloupe.',
         },
       },
       required: ["code"],
@@ -1525,7 +1527,8 @@ export const TOOLS: McpTool[] = [
         },
         mode_exercice_codes: {
           type: "array",
-          description: "Codes mode d'exercice ANS (libéral / salarié / mixte). Si omis, tous modes.",
+          description:
+            "Codes mode d'exercice ANS (libéral / salarié / mixte). Si omis, tous modes.",
           items: { type: "string" },
         },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
@@ -1647,12 +1650,12 @@ export const TOOLS: McpTool[] = [
         code_dept: {
           type: "string",
           description:
-            "Code INSEE du département 2-3 caractères. Ex: \"75\" Paris, \"59\" Nord, \"2A\" Corse-du-Sud, \"971\" Guadeloupe. Exclusif avec code_insee.",
+            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe. Exclusif avec code_insee.',
         },
         code_insee: {
           type: "string",
           description:
-            "Code INSEE de la commune 5 caractères (V0.9). Ex: \"59009\" Villeneuve-d'Ascq, \"75108\" Paris 8e, \"2A004\" Ajaccio. Exclusif avec code_dept.",
+            'Code INSEE de la commune 5 caractères (V0.9). Ex: "59009" Villeneuve-d\'Ascq, "75108" Paris 8e, "2A004" Ajaccio. Exclusif avec code_dept.',
         },
         profession_code: {
           type: "string",
@@ -1701,9 +1704,7 @@ export const TOOLS: McpTool[] = [
       const savoirFaireCode = asString(args.savoir_faire_code);
       if (savoirFaireCode) input.savoirFaireCode = savoirFaireCode;
       if (Array.isArray(args.mode_exercice_codes)) {
-        const filtered = args.mode_exercice_codes.filter(
-          (v): v is string => typeof v === "string",
-        );
+        const filtered = args.mode_exercice_codes.filter((v): v is string => typeof v === "string");
         if (filtered.length === 0) {
           console.warn(
             `[france-data-mcp] densite_professionnels_sante: mode_exercice_codes vide reçu — interprété comme 'pas de filtre' (tous statuts), pas la méthodo DREES par défaut`,
@@ -1728,7 +1729,7 @@ export const TOOLS: McpTool[] = [
         code_dept: {
           type: "string",
           description:
-            "Code INSEE du département 2-3 caractères. Ex: \"75\" Paris, \"59\" Nord, \"2A\" Corse-du-Sud, \"971\" Guadeloupe.",
+            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe.',
         },
         famille: {
           type: "string",
@@ -1756,9 +1757,7 @@ export const TOOLS: McpTool[] = [
       });
       const famille = asFinessFamille(args.famille);
       if (!famille) {
-        throw new RangeError(
-          `famille requise et valide — valeurs : ${FAMILLES_LIST}`,
-        );
+        throw new RangeError(`famille requise et valide — valeurs : ${FAMILLES_LIST}`);
       }
       const input: Parameters<typeof densiteEtablissementsSante>[0] = {
         departement: codeDept,
@@ -1778,7 +1777,7 @@ export const TOOLS: McpTool[] = [
         code_insee: {
           type: "string",
           description:
-            "Code INSEE de la commune 5 caractères. Ex: \"59009\" Villeneuve-d'Ascq, \"75108\" Paris 8e, \"2A004\" Ajaccio.",
+            'Code INSEE de la commune 5 caractères. Ex: "59009" Villeneuve-d\'Ascq, "75108" Paris 8e, "2A004" Ajaccio.',
         },
         finess_familles: {
           type: "array",

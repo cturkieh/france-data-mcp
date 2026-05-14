@@ -21,9 +21,11 @@ beforeEach(() => {
   popFranceSpy.mockReset();
 });
 
-function popFound(value: number, annee = 2023, code = "75"): Awaited<
-  ReturnType<typeof melodi.getPopulationByDept>
-> {
+function popFound(
+  value: number,
+  annee = 2023,
+  code = "75",
+): Awaited<ReturnType<typeof melodi.getPopulationByDept>> {
   return {
     found: true,
     lookupStatus: "found",
@@ -38,9 +40,10 @@ function popFound(value: number, annee = 2023, code = "75"): Awaited<
   };
 }
 
-function popFranceFound(value: number, annee = 2023): Awaited<
-  ReturnType<typeof melodi.getPopulationFrance>
-> {
+function popFranceFound(
+  value: number,
+  annee = 2023,
+): Awaited<ReturnType<typeof melodi.getPopulationFrance>> {
   return {
     codeInsee: "FRANCE",
     geoLevel: "FRANCE",
@@ -263,9 +266,9 @@ describe("densiteProfessionnelsSante", () => {
       key: "99999",
       message: "Commune 99999 introuvable",
     });
-    await expect(
-      densiteProfessionnelsSante({ codeInsee: "99999" }),
-    ).rejects.toThrow(/Commune 99999 introuvable/u);
+    await expect(densiteProfessionnelsSante({ codeInsee: "99999" })).rejects.toThrow(
+      /Commune 99999 introuvable/u,
+    );
   });
 });
 
