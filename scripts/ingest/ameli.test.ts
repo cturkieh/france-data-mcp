@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildCommuneIndex } from "../../src/territoire/commune-index.js";
 import type { Commune } from "../../src/territoire/communes.js";
-import { parseAmeliRecord } from "./ameli.js";
+import { __TESTING__ } from "./ameli.js";
+import type { IngestLogEntry } from "./shared.js";
+
+const { parseAmeliRecord, refreshAmeliMatviews } = __TESTING__;
 
 const fixtures: Commune[] = [
   {
@@ -167,5 +170,76 @@ describe("parseAmeliRecord", () => {
     if (!r.row) throw new Error("expected row");
     expect(r.row.telephone).toBeNull();
     expect(r.row.option_tarifaire_code).toBeNull();
+  });
+});
+
+// --- refreshAmeliMatviews (V0.10.1) ------------------------------------------
+
+function makeLog(): IngestLogEntry {
+  return {
+    source: "ameli_ps",
+    started_at: "2026-05-15T10:00:00Z",
+    status: "success",
+  };
+}
+
+function makeSupabaseStub(rpcImpl: (name: string, args: unknown) => { error: unknown }) {
+  return { rpc: vi.fn(rpcImpl) } as unknown as Parameters<typeof refreshAmeliMatviews>[0];
+}
+
+describe("refreshAmeliMatviews", () => {
+  it("appelle ingest_refresh_matview pour ameli_nomenclature_stats", async () => {
+    const calls: string[] = [];
+    const supabase = makeSupabaseStub((name, args) => {
+      expect(name).toBe("ingest_refresh_matview");
+      calls.push((args as { p_matview: string }).p_matview);
+      return { error: null };
+    });
+    const log = makeLog();
+
+    await refreshAmeliMatviews(supabase, log);
+
+    expect(calls).toEqual(["ameli_nomenclature_stats"]);
+    expect(log.status).toBe("success");
+    expect(log.error_message).toBeUndefined();
+  });
+
+  it("marque status=partial et inclut le code sur échec REFRESH", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "57014", message: "canceling statement due to timeout" },
+    }));
+    const log = makeLog();
+
+    await refreshAmeliMatviews(supabase, log);
+
+    expect(log.status).toBe("partial");
+    expect(log.error_message).toContain("ameli_nomenclature_stats");
+    expect(log.error_message).toContain("57014");
+  });
+
+  it("préserve un error_message préexistant et concatène", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "42P01", message: "relation does not exist" },
+    }));
+    const log = makeLog();
+    log.error_message = "earlier non-fatal warning";
+
+    await refreshAmeliMatviews(supabase, log);
+
+    expect(log.status).toBe("partial");
+    expect(log.error_message?.startsWith("earlier non-fatal warning;")).toBe(true);
+  });
+
+  it("ne mute PAS le status sur succès (best-effort : laisse main() décider)", async () => {
+    // Seed un status NON-success : si refreshAmeliMatviews le forçait à
+    // "success" sur le happy path, ce serait un bug (c'est le rôle de
+    // main()). Le contrat est : ne toucher au log QUE sur erreur.
+    const supabase = makeSupabaseStub(() => ({ error: null }));
+    const log: IngestLogEntry = { ...makeLog(), status: "failed" };
+
+    await refreshAmeliMatviews(supabase, log);
+
+    expect(log.status).toBe("failed");
+    expect(log.error_message).toBeUndefined();
   });
 });

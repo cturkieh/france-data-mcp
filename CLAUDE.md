@@ -46,7 +46,8 @@ CI GitHub Actions vérifie typecheck (2 tsconfigs) + biome + tests + Supabase lo
 - `ST_AsGeoJSON(geom)::jsonb` obligatoire en sortie RPC (sinon hex EWKB).
 - Colonne calculée `geog GEOGRAPHY ... STORED` + index GIST (cast runtime tue le plan).
 - PostgREST proxy timeout **60s** ≠ Postgres `statement_timeout` → batch UPDATEs par 10K.
-- `LANGUAGE plpgsql + EXECUTE format(...)` pour forcer custom plan sur RPC avec param ciblé (sinon generic plan biaisé).
+- `LANGUAGE plpgsql + EXECUTE format(... %L::CHAR(3) ...)` pour RPC filtrant une colonne `CHAR(n)` indexée par un param `TEXT`. **Jamais `WHERE col_char = p_text`** : Postgres caste la COLONNE indexée en text (`(col)::text = $1`) → index inutilisable → fallback seq/mauvais index (post-mortem V0.10.1, 254 ms→5,5 ms / 265 786→90 buffers). Interpoler le param en literal typé via `%L::CHAR(n)`, garder les autres params en `USING $n`.
+- Nomenclature/agrégat full-table récurrent (GROUP BY non indexable sur table dense) → **materialized view** rafraîchie post-swap via `ingest_refresh_matview` (pattern `rpps_savoir_faire_stats`). Toute nouvelle matview refresh par un script ingest DOIT être ajoutée à la whitelist `ingest_refresh_matview` ET wirée post-swap — `scripts/ingest/staging-parity.test.ts` garde-fou les deux (+ parité index prod↔staging-create, perte silencieuse au swap hebdo).
 - `(date - date)` retourne jours total ; **pas** `EXTRACT(DAY FROM interval)` (fragile, retourne le champ "day").
 
 ## Discipline post-fix (avant commit feature)

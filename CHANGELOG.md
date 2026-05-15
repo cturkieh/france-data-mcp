@@ -4,6 +4,47 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.10.1] — 2026-05-15
+
+**Patch — fix timeout Postgres 57014 sur 3 RPC Ameli (root cause prouvée en prod).**
+
+Symptôme : `ameli_lister_specialites`, `ameli_lister_types_ps`,
+`ameli_by_specialite_dept` renvoyaient par intermittence
+`57014: canceling statement due to statement timeout` (systématique à cache
+froid post-ingest hebdo / éviction par les requêtes RPPS 2.23M). Diagnostic
+EXPLAIN ANALYZE en prod (transaction ROLLBACK, zéro mutation) :
+
+- **`ameli_by_specialite_dept`** : `WHERE a.code_departement = p_departement`
+  avec `p_departement` typé `TEXT` → Postgres caste la **colonne indexée
+  `code_departement CHAR(3)` en text** (`(code_departement)::text = $1`),
+  rendant `annuaire_ameli_dept_sort_covering_idx` inutilisable → fallback
+  `insee_idx`, scan/filtre ~460K lignes (254 ms / **265 786 buffers**).
+  Ce n'était PAS un problème generic-vs-custom plan (les deux étaient lents).
+  **Fix A** : RPC réécrite `LANGUAGE plpgsql` + `EXECUTE format(... %L::CHAR(3)
+  ...)` (même pattern que `rpps_par_specialite_dept` V0.5.4, jamais porté à
+  Ameli jusqu'ici). Mesuré : **254 ms / 265 786 buffers → 5,5 ms / 90
+  buffers**, parité de sortie byte-identique vérifiée sur 6 cas.
+
+- **`ameli_lister_specialites` / `ameli_lister_types_ps`** : `Seq Scan` de
+  462K lignes / 154 MB + HashAggregate à chaque appel (GROUP BY non
+  indexable). La sous-requête corrélée O(N²) était négligeable (red herring).
+  **Fix B/C** : materialized view `ameli_nomenclature_stats` pré-agrégée (~65
+  lignes), refresh post-swap via `ingest_refresh_matview` (whitelist étendue),
+  pattern `rpps_savoir_faire_stats` V0.8.2. Mesuré : **~330 ms → ~43 ms**,
+  parité byte-identique. Garde `status: "partial"` ajouté côté
+  `scripts/ingest/ameli.ts` (symétrie RPPS) pour ne pas masquer un échec de
+  refresh en `success`.
+
+- **Garde-fou** : nouveau test structurel `scripts/ingest/staging-parity.test.ts`
+  (sans DB) — échoue si un index prod `annuaire_ameli` n'est pas répliqué
+  dans `ingest_create_annuaire_ameli_staging()` (perte silencieuse au swap
+  hebdo, déjà arrivé 2× historiquement) ou si une matview refresh par un
+  script ingest est hors whitelist `ingest_refresh_matview`.
+
+Migrations : `20260515T020000_ameli_by_specialite_dept_execute_format.sql`,
+`20260515T020100_matview_ameli_nomenclature.sql`. Aucun changement d'API MCP
+(sémantique de sortie strictement identique). 876 tests verts.
+
 ## [0.10.0] — 2026-05-15
 
 **Minor — `inspect_site` agrégateur 360 + nouvelle source CDS (centres de santé).**

@@ -265,14 +265,31 @@ async function main(): Promise<void> {
     // 6. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "annuaire_ameli" });
 
-    // 6b. CANARY POST-SWAP — non-bloquant. La table `ingest_canary_targets`
+    // 6b. REFRESH MATERIALIZED VIEW post-swap. `ameli_nomenclature_stats`
+    // (V0.10.1) pré-agrège la nomenclature Ameli pour servir
+    // `ameli_lister_specialites` + `ameli_lister_types_ps` en <5 ms. Sans
+    // REFRESH après l'ingest hebdo, elle dérive silencieusement vs la prod
+    // (= les tools renvoient la nomenclature de la semaine précédente).
+    // CONCURRENTLY car la matview a un UNIQUE INDEX et est consultée par des
+    // requêtes anon en parallèle. Erreur ici ne bloque PAS la prod (le swap
+    // est déjà commit) : on log et on marque le log "partial".
+    await refreshAmeliMatviews(supabase, log);
+
+    // 6c. CANARY POST-SWAP — non-bloquant. La table `ingest_canary_targets`
     // n'a pas encore de cibles seedées pour `ameli_ps` ; tant qu'elle est vide
     // côté Ameli, le RPC retourne `[]` et le canary est inactif sans bruit.
     // Une migration corrective ajoutera des cibles stables (ex: MG 75 + IDE 13).
     await runAndRecordCanary(supabase, "ameli_ps", log, "ameli");
 
-    // SUCCESS
-    log.status = "success";
+    // SUCCESS — préserver un éventuel `status: "partial"` posé par
+    // `refreshAmeliMatviews` (V0.10.1) : un REFRESH matview échoué (timeout
+    // 57014, lock CONCURRENTLY, matview absente) doit rester visible en
+    // ingest_log, pas être masqué en "success". Symétrique du garde RPPS
+    // (rpps.ts) — sans ça le scénario même que ce refresh rend observable
+    // serait silencieusement écrasé.
+    if (log.status !== "partial") {
+      log.status = "success";
+    }
     log.finished_at = new Date().toISOString();
     await writeIngestLog(log);
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
@@ -550,7 +567,51 @@ export function parseAmeliRecord(rec: Record<string, string>, index: CommuneInde
   };
 }
 
-export const __TESTING__ = { parseAmeliRecord };
+/**
+ * Refresh des matviews dépendantes de `annuaire_ameli` après swap atomique.
+ *
+ * Une matview à refresh : `ameli_nomenclature_stats` (V0.10.1) →
+ * `ameli_lister_specialites` + `ameli_lister_types_ps`.
+ *
+ * Best-effort : le swap est déjà commit, on n'annule pas la prod si REFRESH
+ * échoue. Cas de fail attendus, alignés sur `refreshRppsMatviews` :
+ *   - statement_timeout : improbable côté service_role (timeout 10min via
+ *     ingest_refresh_matview), mais on log au cas où.
+ *   - lock conflict : query anon massive en cours pendant REFRESH
+ *     CONCURRENTLY → on accepte l'échec (matview garde l'ancien snapshot).
+ *   - relation does not exist : env dev sans matview (migration pas appliquée).
+ *
+ * Tout fail est console.error + marque le log entry "partial" pour surfacer
+ * côté dashboard. La matview garde alors la nomenclature de l'ingest
+ * précédent (dégradation silencieuse acceptable vs blocage prod).
+ *
+ * Exporté pour testabilité unitaire (miroir de refreshRppsMatviews).
+ */
+export async function refreshAmeliMatviews(
+  supabase: SupabaseClient,
+  log: IngestLogEntry,
+): Promise<void> {
+  const matview = "ameli_nomenclature_stats";
+  const start = Date.now();
+  const { error } = await supabase.rpc("ingest_refresh_matview", {
+    p_matview: matview,
+  });
+  const elapsedMs = Date.now() - start;
+
+  if (error) {
+    console.error(
+      `[ameli] REFRESH MATERIALIZED VIEW ${matview} failed [code=${error.code ?? "none"}] after ${elapsedMs}ms: ${error.message}`,
+    );
+    log.status = "partial";
+    const previousMsg = log.error_message ? `${log.error_message}; ` : "";
+    log.error_message = `${previousMsg}post-swap matview refresh failed: ${matview} (${error.code ?? "no_code"}: ${error.message})`;
+    return;
+  }
+
+  console.log(`[ameli] REFRESH MATERIALIZED VIEW ${matview} CONCURRENTLY OK in ${elapsedMs}ms`);
+}
+
+export const __TESTING__ = { parseAmeliRecord, refreshAmeliMatviews };
 
 // Only run main() when this file is executed as a script. Without this guard,
 // vitest pulls in the module to test the pure helpers and immediately tries
