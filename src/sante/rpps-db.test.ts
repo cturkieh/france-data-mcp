@@ -23,7 +23,39 @@ import {
   countRppsByCommune,
   getRppsById,
   getRppsByName,
+  getRppsInRadius,
 } from "./rpps-db.js";
+
+/** Row brute RPPS minimale (tous champs présents) — surcharger via overrides. */
+function makeRawRppsRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    rpps_id: "810005156566",
+    civilite: null,
+    nom: "MARTIN",
+    prenom: "JEAN",
+    profession_code: null,
+    profession_libelle: null,
+    savoir_faire_code: null,
+    savoir_faire_libelle: null,
+    mode_exercice_code: null,
+    mode_exercice_libelle: null,
+    categorie_code: "C",
+    categorie_libelle: "Civil",
+    num_finess: null,
+    num_finess_ej: null,
+    siret: null,
+    raison_sociale: null,
+    adresse: null,
+    code_postal: null,
+    ville: null,
+    code_departement: "75",
+    code_insee: null,
+    telephone: null,
+    geom: null,
+    ...overrides,
+  };
+}
 
 // Pure unit tests pour les helpers catégorie ANS TRE_R09. Verrouille le
 // contrat contre la dérive vers les codes fictifs `R`/`S`/`D` (jamais en
@@ -291,35 +323,7 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
 
   it("mappe match_score depuis row.match_score quand finite", async () => {
     mockRpc.mockResolvedValueOnce({
-      data: [
-        {
-          id: 1,
-          rpps_id: "810005156566",
-          civilite: null,
-          nom: "MARTIN",
-          prenom: "JEAN",
-          profession_code: null,
-          profession_libelle: null,
-          savoir_faire_code: null,
-          savoir_faire_libelle: null,
-          mode_exercice_code: null,
-          mode_exercice_libelle: null,
-          categorie_code: "C",
-          categorie_libelle: "Civil",
-          num_finess: null,
-          num_finess_ej: null,
-          siret: null,
-          raison_sociale: null,
-          adresse: null,
-          code_postal: null,
-          ville: null,
-          code_departement: "75",
-          code_insee: null,
-          telephone: null,
-          geom: null,
-          match_score: 0.87,
-        },
-      ],
+      data: [makeRawRppsRow({ match_score: 0.87 })],
       error: null,
     });
 
@@ -330,35 +334,7 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
 
   it("omet match_score quand row.match_score est null ou non-finite", async () => {
     mockRpc.mockResolvedValueOnce({
-      data: [
-        {
-          id: 1,
-          rpps_id: "810005156566",
-          civilite: null,
-          nom: "MARTIN",
-          prenom: "JEAN",
-          profession_code: null,
-          profession_libelle: null,
-          savoir_faire_code: null,
-          savoir_faire_libelle: null,
-          mode_exercice_code: null,
-          mode_exercice_libelle: null,
-          categorie_code: "C",
-          categorie_libelle: "Civil",
-          num_finess: null,
-          num_finess_ej: null,
-          siret: null,
-          raison_sociale: null,
-          adresse: null,
-          code_postal: null,
-          ville: null,
-          code_departement: "75",
-          code_insee: null,
-          telephone: null,
-          geom: null,
-          match_score: null,
-        },
-      ],
+      data: [makeRawRppsRow({ match_score: null })],
       error: null,
     });
 
@@ -448,5 +424,34 @@ describe("countRppsByCommune (V0.9)", () => {
       savoirFaireCode: "SM04", // cardiologue à Villeneuve-d'Ascq, possible 0
     });
     expect(result).toBe(0);
+  });
+});
+
+describe("getRppsInRadius — geo_precision par PS (B5)", () => {
+  const radiusRow = makeRawRppsRow({
+    id: 7,
+    prenom: "PIERRE",
+    profession_code: "10",
+    profession_libelle: "Médecin",
+    mode_exercice_code: "L",
+    mode_exercice_libelle: "Libéral",
+    ville: "LILLE",
+    code_departement: "59",
+    code_insee: "59350",
+    geom: { type: "Point", coordinates: [3.0573, 50.6292] },
+    distance_meters: 1830,
+  });
+
+  it("marque geo_precision=centroide_commune sur chaque PS géolocalisé", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [radiusRow], error: null });
+    const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+    expect(out.results[0]?.geo_precision).toBe("centroide_commune");
+  });
+
+  it("omet geo_precision quand les coords sont absentes", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [{ ...radiusRow, geom: null }], error: null });
+    const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+    expect(out.results[0]?.coords).toBeNull();
+    expect(out.results[0]?.geo_precision).toBeUndefined();
   });
 });

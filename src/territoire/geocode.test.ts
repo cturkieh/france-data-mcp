@@ -98,3 +98,58 @@ describe("reverseGeocode", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toContain("/reverse/");
   });
 });
+
+describe("confidence_low (B1)", () => {
+  function singleFeature(score: number) {
+    return geocodeResponse([
+      {
+        geometry: { type: "Point", coordinates: [4.7, 49.7] },
+        properties: { label: "Rue X 08000 Y", score, type: "street" },
+      },
+    ]);
+  }
+
+  it("confidence_low=false quand score >= seuil", async () => {
+    fetchMock.mockResolvedValue(singleFeature(0.82));
+    const result = await geocode("62 Boulevard de la Liberté Lille");
+    expect(result?.confidence_low).toBe(false);
+  });
+
+  it("confidence_low=true quand score < seuil (match douteux)", async () => {
+    fetchMock.mockResolvedValue(singleFeature(0.33));
+    const result = await geocode("62 Boulevard de la Liberté Lille");
+    expect(result?.confidence_low).toBe(true);
+  });
+
+  it("propage confidence_low via reverseGeocode", async () => {
+    fetchMock.mockResolvedValue(singleFeature(0.4));
+    const result = await reverseGeocode({ lon: 4.7, lat: 49.7 });
+    expect(result?.confidence_low).toBe(true);
+  });
+
+  it("score absent du payload IGN → confidence_low=true (prudence, pas faux négatif)", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([
+        {
+          geometry: { type: "Point", coordinates: [4.7, 49.7] },
+          properties: { label: "Rue X 08000 Y", type: "street" },
+        },
+      ]),
+    );
+    const result = await geocode("adresse au score manquant");
+    expect(result?.confidence_low).toBe(true);
+  });
+
+  it("score NaN → confidence_low=true (pas false silencieux)", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([
+        {
+          geometry: { type: "Point", coordinates: [4.7, 49.7] },
+          properties: { label: "Rue X 08000 Y", score: Number.NaN, type: "street" },
+        },
+      ]),
+    );
+    const result = await geocode("adresse au score NaN");
+    expect(result?.confidence_low).toBe(true);
+  });
+});

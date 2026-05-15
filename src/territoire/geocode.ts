@@ -24,6 +24,12 @@ export type GeocodeResult = {
   label: string;
   /** Score de confiance (0-1). >= 0.8 = bon match, < 0.5 = douteux. */
   score: number;
+  /**
+   * `true` si `score < 0.5` : match très incertain (souvent un fallback
+   * rue/commune sans rapport avec l'adresse demandée). Le caller ne doit PAS
+   * utiliser `point` pour une décision quand ce flag est `true`.
+   */
+  confidence_low: boolean;
   /** Code postal */
   codePostal?: string;
   /** Code INSEE de la commune */
@@ -56,7 +62,12 @@ type ApiFeature = {
   geometry: { type: "Point"; coordinates: [number, number] };
   properties: {
     label: string;
-    score: number;
+    /**
+     * Optionnel à l'exécution : `fetchJson` ne valide pas le payload IGN
+     * (pas de Zod). Une feature dégradée peut ne pas porter de `score` — le
+     * traiter comme absent plutôt que faire confiance au type compilé.
+     */
+    score?: number;
     type: string;
     postcode?: string;
     citycode?: string;
@@ -141,10 +152,21 @@ export async function reverseGeocode(
 
 function toGeocodeResult(feature: ApiFeature): GeocodeResult {
   const [lon, lat] = feature.geometry.coordinates;
+  const rawScore = feature.properties.score;
+  const scoreValid = typeof rawScore === "number" && Number.isFinite(rawScore);
+  if (!scoreValid) {
+    // Score absent/NaN = anomalie payload IGN, pas "pas de résultat". Sans ce
+    // garde-fou, `undefined < 0.5` → false → un match douteux serait présenté
+    // comme fiable silencieusement (faux négatif le plus dangereux ici).
+    console.warn(
+      `[france-data-mcp] geocode: feature sans score numérique exploitable (label: "${feature.properties.label}", type: "${feature.properties.type}") — confidence_low forcé à true par prudence.`,
+    );
+  }
   return {
     point: { lon, lat },
     label: feature.properties.label,
-    score: feature.properties.score,
+    score: scoreValid ? rawScore : 0,
+    confidence_low: scoreValid ? rawScore < LOW_SCORE_THRESHOLD : true,
     type: feature.properties.type,
     ...pickDefined({
       codePostal: feature.properties.postcode,

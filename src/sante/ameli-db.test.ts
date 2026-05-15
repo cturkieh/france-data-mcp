@@ -68,6 +68,20 @@ describe("getAmeliInRadius", () => {
     expect(out.results[0]?.distance_km).toBe(0.28); // 280.5m → 0.28km
   });
 
+  it("marque geo_precision=centroide_commune sur chaque PS géolocalisé (B5)", async () => {
+    mockRpc.mockResolvedValue({ data: [sampleRow], error: null });
+    const out = await getAmeliInRadius({ center: { lat: 49.77, lon: 4.72 }, radiusKm: 5 });
+    expect(out.results[0]?.geo_precision).toBe("centroide_commune");
+  });
+
+  it("omet geo_precision quand les coords sont absentes (B5)", async () => {
+    const noGeom = { ...sampleRow, geom: null };
+    mockRpc.mockResolvedValue({ data: [noGeom], error: null });
+    const out = await getAmeliInRadius({ center: { lat: 49.77, lon: 4.72 }, radiusKm: 5 });
+    expect(out.results[0]?.coords).toBeNull();
+    expect(out.results[0]?.geo_precision).toBeUndefined();
+  });
+
   it("flags truncation when RPC returns limit+1 rows", async () => {
     const rows = Array.from({ length: 11 }, () => sampleRow);
     mockRpc.mockResolvedValue({ data: rows, error: null });

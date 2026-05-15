@@ -594,6 +594,18 @@ const AMELI_TYPE_PS_HELP =
   "Codes type_ps Ameli présents en base (3) : '1' médecins, '2' auxiliaires médicaux (fourre-tout : IDE, kinés, sages-femmes, podologues, orthophonistes, orthoptistes, IPA), '5' chirurgiens-dentistes.";
 
 /**
+ * Avertissement anti-collision (audit B3) : les nomenclatures Ameli
+ * (`specialite_code`, `type_ps_code`) et ANS/RPPS (`profession_code`,
+ * `savoir_faire_code`) sont DISTINCTES et partagent des valeurs numériques
+ * homographes (ex: le code `10` = Neurochirurgien côté Ameli, mais = Médecin
+ * côté ANS). Un code Ameli passé à un paramètre ANS ne lève pas d'erreur — il
+ * filtre dans le vide silencieusement. Injecté dans toute description de tool
+ * RPPS prenant un code en paramètre.
+ */
+const NOMENCLATURE_COLLISION_WARNING =
+  "ATTENTION nomenclatures : les codes ANS (`profession_code`, `savoir_faire_code`) sont une nomenclature DISTINCTE des codes Ameli (`specialite_code`, `type_ps_code`) — un même nombre désigne des choses différentes (ex: '10' = Médecin côté ANS, Neurochirurgien côté Ameli). Ne JAMAIS passer un code Ameli à un paramètre ANS : le filtre renverrait vide sans erreur. Découvrir les codes ANS via `lister_specialites_medicales`.";
+
+/**
  * Réponse enrichie du fallback `naf + center+radiusKm` (limite API DINUM).
  *
  * Le champ `fallback` documente la stratégie ET signale honnêtement quand la
@@ -906,7 +918,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "geocode_adresse",
     description:
-      "Géocode une adresse française en coordonnées GPS. Source : IGN Géoplateforme (data.geopf.fr). Précision au numéro de rue.",
+      "Géocode une adresse française en coordonnées GPS. Source : IGN Géoplateforme (data.geopf.fr). Précision au numéro de rue.\n\nLe champ `score` (0-1) qualifie la fiabilité du match : >= 0.8 fiable, < 0.5 = match douteux (souvent un fallback rue/commune sans rapport avec l'adresse demandée). Le champ booléen `confidence_low` vaut `true` dans ce cas : ne PAS utiliser `point` pour une décision quand `confidence_low: true`. Le champ `type` indique aussi la granularité (housenumber > street > locality > municipality).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1445,7 +1457,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_in_radius",
-    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). Chaque PS géolocalisé porte \`geo_precision: "centroide_commune"\` : \`coords\` et \`distance_km\` sont au centroïde commune, donc tous les PS d'une même commune ont la MÊME \`distance_km\` — ne pas l'utiliser pour classer/choisir un PS individuel, uniquement comme filtre de zone. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1637,7 +1649,7 @@ export const TOOLS: McpTool[] = [
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
   {
     name: "professionnels_rpps_in_radius",
-    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. Le filtrage rayon est résolu à la granularité **commune** (une commune est incluse si son centroïde représentatif est dans le rayon), cohérent avec la précision centroïde ci-dessus ; tri par distance commune croissante. Si la commune la plus proche contient plus de \`limit\` PS correspondants, le résultat est intégralement puisé dans cette commune (les communes plus lointaines sont évincées du même \`limit\`) : augmenter \`limit\` ou resserrer les filtres pour couvrir plusieurs communes. ${RPPS_CGU_NOTICE}`,
+    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. Chaque PS géolocalisé porte \`geo_precision: "centroide_commune"\` : tous les PS d'une même commune ont la MÊME \`distance_km\` — ne pas l'utiliser pour classer/choisir un PS individuel, uniquement comme filtre de zone. Le filtrage rayon est résolu à la granularité **commune** (une commune est incluse si son centroïde représentatif est dans le rayon), cohérent avec la précision centroïde ci-dessus ; tri par distance commune croissante. Si la commune la plus proche contient plus de \`limit\` PS correspondants, le résultat est intégralement puisé dans cette commune (les communes plus lointaines sont évincées du même \`limit\`) : augmenter \`limit\` ou resserrer les filtres pour couvrir plusieurs communes. ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1705,7 +1717,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_rpps_par_dept",
-    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_CATEGORIES_HINT} ${RPPS_CGU_NOTICE}`,
+    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_CATEGORIES_HINT} ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1785,7 +1797,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "densite_professionnels_sante",
-    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9). Exactement un des deux requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nLimitation Paris/Marseille/Lyon : au niveau commune (\`code_insee\`), les rows RPPS portent l'arrondissement (75108, 13201, 69383). Pour la métropole entière, utiliser \`code_dept\` (75, 13, 69).\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
+    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9). Exactement un des deux requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nLimitation Paris/Marseille/Lyon : au niveau commune (\`code_insee\`), les rows RPPS portent l'arrondissement (75108, 13201, 69383). Pour la métropole entière, utiliser \`code_dept\` (75, 13, 69).\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${NOMENCLATURE_COLLISION_WARNING}\n\n${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1806,7 +1818,7 @@ export const TOOLS: McpTool[] = [
         savoir_faire_code: {
           type: "string",
           description:
-            "Code spécialité (savoir_faire). Pertinent surtout pour profession_code=10 (médecin). Ex : 'SM04' Cardiologie, 'SM26' Dermato-vénérologie, 'SM02' Anesthésie-réanimation. Voir lister_specialites_medicales pour la liste exhaustive.",
+            "Code spécialité (savoir_faire). Pertinent surtout pour profession_code=10 (médecin). Ex : 'SM04' Cardiologie, 'SM15' Dermatologie et vénéréologie, 'SM02' Anesthésie-réanimation, 'SM26' Médecine générale. Voir lister_specialites_medicales pour la liste exhaustive.",
         },
         mode_exercice_codes: {
           type: "array",

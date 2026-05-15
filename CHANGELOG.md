@@ -4,6 +4,45 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+**Patch — corrections audit qualité externe (B1/B3/B4/B5) : code spécialité
+ANS faux, transparence géo, collision de nomenclatures.**
+
+### Fixed
+
+- **B4 — `RPPS_SAVOIR_FAIRE.DERMATO_VENEREOLOGIE` était `SM26` (faux).**
+  `SM26` = « Qualifié en Médecine Générale » (61 273 PS), PAS la dermato.
+  Corrigé en `SM15` (« Dermatologie et vénéréologie », 7 594 PS) ; ajout
+  `MEDECINE_GENERALE: "SM26"`. La description MCP `savoir_faire_code` de
+  `densite_professionnels_sante` propageait l'erreur (un appel densité
+  dermato avec `SM26` renvoyait l'effectif médecine générale, 8× faux,
+  silencieusement). Valeurs vérifiées sur dump prod le 2026-05-15 via
+  `lister_specialites_medicales`. Garde-fou : `rpps-types.test.ts`.
+
+### Added
+
+- **B1 — `GeocodeResult.confidence_low`** (booléen) : `true` quand
+  `score < 0.5` (match douteux, souvent fallback rue/commune sans rapport).
+  Calculé dans `toGeocodeResult` (couvre `geocode`/`geocodeMany`/
+  `reverseGeocode`). Robuste à un `score` absent/`NaN` du payload IGN
+  (`score?: number` typé honnête, `confidence_low: true` par prudence +
+  `console.warn` préfixé — pas de faux négatif silencieux). Description MCP
+  `geocode_adresse` enrichie (interprétation du score).
+- **B5 — `geo_precision?: PerResultGeoPrecision`** par PS dans les résultats
+  Ameli (`professionnels_in_radius`) et RPPS (`professionnels_rpps_in_radius`,
+  etc.), présent quand `coords` non-null. Rappelle, au niveau de chaque PS,
+  que `coords`/`distance_km` sont au centroïde commune : tous les PS d'une
+  même commune ont la MÊME `distance_km` (ne discrimine pas un praticien).
+  Type partagé dans `src/core/query-metadata.ts`. Descriptions MCP des 2
+  tools radius explicitées.
+- **B3 — `NOMENCLATURE_COLLISION_WARNING`** injecté dans les descriptions de
+  `densite_professionnels_sante`, `professionnels_rpps_par_dept`,
+  `professionnels_rpps_in_radius` : avertit que les codes Ameli
+  (`specialite_code`/`type_ps_code`) et ANS (`profession_code`/
+  `savoir_faire_code`) sont des nomenclatures DISTINCTES à valeurs
+  numériques homographes (ex : `10` = Médecin ANS vs Neurochirurgien Ameli).
+
 ## [0.10.3] — 2026-05-15
 
 **Patch — fix ingestion CDS (centres de santé) : pivot FINESS pour la

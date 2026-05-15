@@ -50,14 +50,18 @@ export const RPPS_PROFESSION = {
  * SM02/SM04 chopés en V0.8/V0.9. ATTENTION historique :
  *   - SM02 = Anesthésie-réanimation (PAS Cardiologie)
  *   - SM04 = Cardiologie et maladies vasculaires
+ *   - SM15 = Dermatologie et vénéréologie (PAS SM26)
+ *   - SM26 = Qualifié en Médecine Générale (PAS la dermato — bug B4)
  *
- * Source : extraction RPPS / Annuaire Santé ANS (V0.9 smoke test prod).
+ * Source : extraction RPPS / Annuaire Santé ANS, vérifiée sur dump prod le
+ * 2026-05-15 via `lister_specialites_medicales` (profession_code='10').
  * Étendre uniquement avec des codes vérifiés sur dump prod.
  */
 export const RPPS_SAVOIR_FAIRE = {
   ANESTHESIE_REANIMATION: "SM02",
   CARDIOLOGIE: "SM04",
-  DERMATO_VENEREOLOGIE: "SM26",
+  DERMATO_VENEREOLOGIE: "SM15",
+  MEDECINE_GENERALE: "SM26",
 } as const;
 
 /**

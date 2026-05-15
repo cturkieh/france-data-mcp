@@ -22,6 +22,7 @@
 
 import { metersToKm } from "../core/numbers.js";
 import {
+  type PerResultGeoPrecision,
   type QueryMetadata,
   rppsDeptMetadata,
   rppsEtablissementMetadata,
@@ -75,6 +76,8 @@ export interface RppsResult {
   };
   coords: { lat: number; lon: number } | null;
   distance_km: number | null;
+  /** Présent quand `coords` est non-null. Voir {@link PerResultGeoPrecision}. */
+  geo_precision?: PerResultGeoPrecision;
   telephone: string | null;
   /**
    * Score de pertinence trigram (0..1) — présent uniquement pour les retours
@@ -629,6 +632,7 @@ function toResult(row: RawRppsRow): RppsResult {
     },
     coords,
     distance_km: metersToKm(row.distance_meters),
+    ...(coords ? { geo_precision: "centroide_commune" as const } : {}),
     telephone: row.telephone,
   };
 }

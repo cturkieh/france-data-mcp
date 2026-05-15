@@ -11,6 +11,7 @@
 
 import { metersToKm } from "../core/numbers.js";
 import {
+  type PerResultGeoPrecision,
   type QueryMetadata,
   ameliDeptMetadata,
   ameliRadiusMetadata,
@@ -47,6 +48,8 @@ export interface AmeliResult {
   };
   coords: { lat: number; lon: number } | null;
   distance_km: number | null;
+  /** Présent quand `coords` est non-null. Voir {@link PerResultGeoPrecision}. */
+  geo_precision?: PerResultGeoPrecision;
   telephone: string | null;
   conventions: {
     secteur_code: string | null;
@@ -299,6 +302,7 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
     },
     coords,
     distance_km: distance,
+    ...(coords ? { geo_precision: "centroide_commune" as const } : {}),
     telephone: trimOrNull(row.telephone),
     conventions: {
       secteur_code: row.secteur_conventionnel_code,

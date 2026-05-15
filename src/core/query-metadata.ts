@@ -31,6 +31,17 @@ export type GeoPrecision =
   | "structure_finess";
 
 /**
+ * Précision géo exposée au niveau de CHAQUE PS (champ `geo_precision` des
+ * résultats Ameli/RPPS), volontairement plus générique que `GeoPrecision`
+ * (source-spécifique, au niveau global du résultat). Co-localisée avec
+ * `coords`/`distance_km` pour rappeler, par PS, que tous les PS d'une même
+ * commune partagent ces valeurs (centroïde) et ne peuvent pas être classés
+ * entre eux par `distance_km`. Le détail source reste dans
+ * `query_metadata.geo_precision`.
+ */
+export type PerResultGeoPrecision = "centroide_commune";
+
+/**
  * Méthode de calcul des distances exposées dans `distance_km`.
  *
  * - `haversine_postgis` : ST_Distance sur le type `geography` PostGIS.

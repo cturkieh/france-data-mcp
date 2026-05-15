@@ -117,6 +117,7 @@ function mockReverseGeocodeOk() {
     point: CENTER,
     label: "Charleville-Mézières",
     score: 0.9,
+    confidence_low: false,
     type: "municipality",
     codeCommune: "08105",
     codePostal: "08000",

@@ -639,6 +639,7 @@ describe("entreprises_in_radius — perPage propagation (B5 fix)", () => {
       point: { lon: 4.7192, lat: 49.7672 },
       label: "10 Rue Foch 08000 Charleville-Mézières",
       score: 0.95,
+      confidence_low: false,
       codeCommune: "08105",
       type: "housenumber",
     });
@@ -678,6 +679,7 @@ describe("entreprises_in_radius — perPage propagation (B5 fix)", () => {
       point: { lon: 4.7192, lat: 49.7672 },
       label: "10 Rue Foch 08000 Charleville-Mézières",
       score: 0.95,
+      confidence_low: false,
       codeCommune: "08105",
       type: "housenumber",
     });
@@ -1107,5 +1109,56 @@ describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
       if (tool.outputSchema === undefined) continue;
       expect(tool.outputSchema.type).toBe("object");
     }
+  });
+});
+
+describe("densite_professionnels_sante — exemples savoir_faire_code (régression B4)", () => {
+  const savoirFaireDesc = () => {
+    const tool = findTool("densite_professionnels_sante");
+    const props = tool?.inputSchema.properties as
+      | Record<string, { description: string }>
+      | undefined;
+    return props?.savoir_faire_code?.description ?? "";
+  };
+
+  it("n'associe JAMAIS SM26 à la dermatologie (SM26 = médecine générale)", () => {
+    expect(savoirFaireDesc()).not.toMatch(/SM26[^.]*[Dd]ermato/);
+  });
+
+  it("documente SM15 comme code dermato-vénéréologie", () => {
+    expect(savoirFaireDesc()).toMatch(/SM15[^.]*[Dd]ermato/);
+  });
+});
+
+describe("radius PS — distance non discriminante intra-commune (régression B5)", () => {
+  for (const name of ["professionnels_in_radius", "professionnels_rpps_in_radius"]) {
+    it(`${name} : la description explique geo_precision + distance identique par commune`, () => {
+      const tool = findTool(name);
+      expect(tool?.description).toMatch(/geo_precision/);
+      expect(tool?.description).toMatch(/m[êe]me .*commune|ne (pas|discrimine)/i);
+    });
+  }
+});
+
+describe("collision nomenclatures Ameli/ANS (régression B3)", () => {
+  for (const name of [
+    "densite_professionnels_sante",
+    "professionnels_rpps_par_dept",
+    "professionnels_rpps_in_radius",
+  ]) {
+    it(`${name} avertit que les codes Ameli ≠ codes ANS`, () => {
+      const tool = findTool(name);
+      expect(tool?.description).toMatch(/Ameli/);
+      expect(tool?.description).toMatch(/nomenclature|ANS/);
+      expect(tool?.description).toMatch(/distincte|différent|ne (jamais|pas) (passer|confondre)/i);
+    });
+  }
+});
+
+describe("geocode_adresse — interprétation du score (régression B1)", () => {
+  it("la description explique le score et confidence_low", () => {
+    const tool = findTool("geocode_adresse");
+    expect(tool?.description).toMatch(/confidence_low/);
+    expect(tool?.description).toMatch(/0\.5|douteux|incertain/i);
   });
 });
