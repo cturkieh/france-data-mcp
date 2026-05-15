@@ -4,6 +4,42 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.10.3] — 2026-05-15
+
+**Patch — fix ingestion CDS (centres de santé) : pivot FINESS pour la
+résolution commune, échec prod 7,20 % `unmatched_locality` sur adresses
+CEDEX.**
+
+### Root cause
+
+La 1ʳᵉ ingestion CDS réelle (GitHub Actions run 25927997008) a échoué au
+seuil `unmatched_locality` (7,20 % > 5 %). Cause : le CSV CNAM porte des
+adresses CEDEX (`DIJON CEDEX`, code postal CEDEX `21078`…) non matchables
+contre l'index `(code_postal, ville)` de geo.api.gouv. Le message d'erreur
+suggérait à tort un « INSEE commune drift ».
+
+### Fix
+
+- **Pivot FINESS autoritaire** : la commune (`code_insee`/dept/`geom`) est
+  désormais résolue via la table `finess` déjà ingérée (`num_finess →
+  code_insee`), le géocodage DREES étant fiable et immunisé contre les
+  adresses CEDEX. Fallback `(cp, ville)` conservé pour les CDS pas encore
+  dans FINESS (latence sync bimestrielle DREES).
+- **Fold arrondissement → commune** (`parentCommuneInsee`) : FINESS porte
+  l'INSEE arrondissement (Paris 75101-75120, Lyon 69381-69389, Marseille
+  13201-13216) que geo.api.gouv `/communes` n'expose pas — sans ce repli le
+  pivot ratait 100 % des CDS de ces 3 villes (cohort le plus dense).
+- **Index `byInsee`** ajouté à `CommuneIndex` (résolution O(1) par code INSEE).
+- **Garde-fous anti-silent-failure** : seuil drop-ratio `code_insee` null
+  dans `finess` (`FINESS_NULL_INSEE_THRESHOLD` 2 %, dénominateur = lignes
+  fetchées), plancher index relevé 50K → 70K, compteur orphan-INSEE
+  (FINESS présent mais code_insee absent de l'index commune) séparé de la
+  latence DREES et thresholdé (`ORPHAN_INSEE_THRESHOLD` 1 %) avant l'atomic
+  swap. Log de résolution discriminé `via_finess / fallback_drees_lag /
+  fallback_orphan_insee`.
+- Message d'erreur `unmatched_locality` corrigé (pointe la fraîcheur FINESS
+  puis le format source, plus le faux « INSEE drift »).
+
 ## [0.10.2] — 2026-05-15
 
 **Patch — fix P0 `professionnels_rpps_in_radius` (timeout 57014 dans les

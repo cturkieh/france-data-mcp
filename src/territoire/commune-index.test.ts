@@ -4,6 +4,7 @@ import {
   matchCommune,
   normalizeCityName,
   normalizeCp,
+  parentCommuneInsee,
 } from "./commune-index.js";
 import type { Commune } from "./communes.js";
 
@@ -69,6 +70,29 @@ describe("normalizeCityName", () => {
   });
 });
 
+describe("parentCommuneInsee", () => {
+  it("replie les arrondissements Paris / Lyon / Marseille sur la commune parente", () => {
+    expect(parentCommuneInsee("75101")).toBe("75056");
+    expect(parentCommuneInsee("75112")).toBe("75056");
+    expect(parentCommuneInsee("75120")).toBe("75056");
+    expect(parentCommuneInsee("69381")).toBe("69123");
+    expect(parentCommuneInsee("69389")).toBe("69123");
+    expect(parentCommuneInsee("13201")).toBe("13055");
+    expect(parentCommuneInsee("13216")).toBe("13055");
+  });
+
+  it("laisse les codes hors plages arrondissement inchangés (commune, DOM, Corse)", () => {
+    expect(parentCommuneInsee("75056")).toBe("75056");
+    expect(parentCommuneInsee("13055")).toBe("13055");
+    expect(parentCommuneInsee("08105")).toBe("08105");
+    expect(parentCommuneInsee("75121")).toBe("75121");
+    expect(parentCommuneInsee("69390")).toBe("69390");
+    expect(parentCommuneInsee("13217")).toBe("13217");
+    expect(parentCommuneInsee("97411")).toBe("97411");
+    expect(parentCommuneInsee("2A004")).toBe("2A004");
+  });
+});
+
 describe("normalizeCp", () => {
   it("returns first 5 digits of a CEDEX-suffixed CP", () => {
     expect(normalizeCp("75008 CEDEX 8")).toBe("75008");
@@ -98,6 +122,17 @@ describe("buildCommuneIndex", () => {
     expect(idx.byCpAndName.get("75001|PARIS")?.codeInsee).toBe("75056");
     expect(idx.byCpAndName.get("75116|PARIS")?.codeInsee).toBe("75056");
     expect(idx.byCpAndName.get("75008|PARIS")?.codeInsee).toBe("75056");
+  });
+
+  it("indexes communes by code INSEE (pivot autoritaire FINESS)", () => {
+    const idx = buildCommuneIndex(fixtures);
+    const m = idx.byInsee.get("08105");
+    expect(m?.codeInsee).toBe("08105");
+    expect(m?.codeDepartement).toBe("08");
+    expect(m?.lon).toBe(4.7203);
+    // Une commune multi-CP n'apparaît qu'une fois, clé = son code INSEE.
+    expect(idx.byInsee.get("75056")?.codeInsee).toBe("75056");
+    expect(idx.byInsee.size).toBeLessThan(idx.byCpAndName.size);
   });
 
   it("groups multiple communes sharing a CP for fallback resolution", () => {

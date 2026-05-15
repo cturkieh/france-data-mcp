@@ -42,6 +42,13 @@ export interface IndexedCommune {
 export interface CommuneIndex {
   /** Map `${cp5}|${normName}` → IndexedCommune. */
   byCpAndName: Map<string, IndexedCommune>;
+  /**
+   * Map `code INSEE` → IndexedCommune. Permet une résolution autoritaire
+   * quand le code INSEE est déjà connu d'une source amont fiable (ex: pivot
+   * FINESS pour les CDS), en contournant le matching fragile `(cp, ville)`
+   * sensible aux adresses CEDEX.
+   */
+  byInsee: Map<string, IndexedCommune>;
   /** Map `${cp5}` → liste des communes indexables desservies (centre valide). */
   byCp: Map<string, IndexedCommune[]>;
   /**
@@ -90,6 +97,25 @@ export function normalizeCp(cp: string): string | null {
 }
 
 /**
+ * Replie un code INSEE d'arrondissement municipal sur le code de sa commune
+ * parente. FINESS (et RPPS) portent l'INSEE arrondissement pour Paris / Lyon
+ * / Marseille (ex 75112 = Paris 12e), alors que geo.api.gouv `/communes`
+ * n'expose que la commune unique (75056 / 69123 / 13055) — sans ce repli, le
+ * pivot FINESS rate 100 % des établissements de ces 3 villes (où les CDS
+ * municipaux sont les plus concentrés). Ranges officiels INSEE :
+ *  - Paris      75101–75120 → 75056
+ *  - Lyon       69381–69389 → 69123
+ *  - Marseille  13201–13216 → 13055
+ * Tout autre code est rendu inchangé.
+ */
+export function parentCommuneInsee(codeInsee: string): string {
+  if (codeInsee >= "75101" && codeInsee <= "75120") return "75056";
+  if (codeInsee >= "69381" && codeInsee <= "69389") return "69123";
+  if (codeInsee >= "13201" && codeInsee <= "13216") return "13055";
+  return codeInsee;
+}
+
+/**
  * Bornes WGS84 enveloppant France métropole + DOM-TOM (Polynésie côté ouest,
  * Mayotte/Réunion côté est, Manche côté nord, Polynésie côté sud). Tout
  * `centre` hors de cette boîte signale un payload geo.api.gouv corrompu —
@@ -122,6 +148,7 @@ function isValidFrenchCoord(lon: number, lat: number): boolean {
  */
 export function buildCommuneIndex(communes: Commune[]): CommuneIndex {
   const byCpAndName = new Map<string, IndexedCommune>();
+  const byInsee = new Map<string, IndexedCommune>();
   const byCp = new Map<string, IndexedCommune[]>();
   const byCpRawCount = new Map<string, number>();
 
@@ -156,6 +183,7 @@ export function buildCommuneIndex(communes: Commune[]): CommuneIndex {
       lon: c.centre.lon,
       lat: c.centre.lat,
     };
+    byInsee.set(c.code, indexed);
     const normName = normalizeCityName(c.nom);
     for (const cp of c.codesPostaux) {
       const cp5 = normalizeCp(cp);
@@ -180,7 +208,7 @@ export function buildCommuneIndex(communes: Commune[]): CommuneIndex {
     );
   }
 
-  return { byCpAndName, byCp, byCpRawCount };
+  return { byCpAndName, byInsee, byCp, byCpRawCount };
 }
 
 /**

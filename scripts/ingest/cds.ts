@@ -8,6 +8,7 @@ import {
   type IndexedCommune,
   buildCommuneIndex,
   matchCommune,
+  parentCommuneInsee,
 } from "../../src/territoire/commune-index.js";
 import { fetchAllCommunes } from "../../src/territoire/communes.js";
 import {
@@ -75,6 +76,118 @@ const STRUCTURAL_FAIL_THRESHOLD = 0.01;
  * sales sans hairtrigger ; un drift réel est à ~100 %.
  */
 const BOOLEAN_FALLBACK_THRESHOLD = 0.01;
+
+/**
+ * Plancher de l'index FINESS chargé pour la résolution commune. La table
+ * `finess` prod compte ~80-95K établissements (sync bimestrielle DREES). En
+ * dessous = table vide / stale / RLS qui bloque le service_role. Sans ce
+ * garde, un index vide ferait silencieusement basculer 100 % des CDS sur le
+ * fallback `(cp, ville)` — donc échec en cascade sur les adresses CEDEX —
+ * avec un diagnostic trompeur "unmatched_locality" au lieu de "FINESS stale".
+ * Calé à 70K (et non 50K) : le steady-state réel est ~80-95K, un plancher
+ * trop bas tolère une perte silencieuse de ~45 % avant de crier.
+ */
+const MIN_FINESS_INDEX = 70_000;
+
+/**
+ * Taux max de lignes `finess` fetchées mais sans `code_insee` exploitable.
+ * Au-delà = table `finess` partiellement géocodée / colonne INSEE renommée
+ * upstream → l'index serait silencieusement sous-dimensionné (et passerait
+ * MIN_FINESS_INDEX si la perte est < ~25 %), produisant le diagnostic
+ * trompeur "unmatched_locality / CDS source" au lieu de "finess stale".
+ * Quasi-zéro attendu (code_insee est NOT NULL dans le schéma `finess`).
+ */
+const FINESS_NULL_INSEE_THRESHOLD = 0.02;
+
+/**
+ * Taux max de CDS dont le `finess.code_insee` existe mais est absent de
+ * l'index commune geo.api.gouv (orphan). Distinct de la latence DREES
+ * (FINESS pas encore dans la table) : un orphan = vrai désalignement de
+ * codification INSEE (fusion de communes, arrondissement non replié,
+ * commune sans centre droppée par geo.api). Post-fold arrondissement, ce
+ * taux doit être ~0 ; au-delà = le fallback `(cp, ville)` géocode peut-être
+ * faux en silence (adresses CEDEX) → on refuse le swap. 1 % tolère le
+ * résidu légitime (≈ communes sans centre droppées à l'index).
+ */
+const ORPHAN_INSEE_THRESHOLD = 0.01;
+
+/**
+ * Charge l'index `num_finess → code_insee` depuis la table `finess` déjà
+ * ingérée. Sert de résolution commune AUTORITAIRE pour les CDS : tout CDS
+ * est un établissement FINESS, et le géocodage DREES (reprojeté Lambert 93 →
+ * WGS84 à l'ingestion FINESS) est fiable, contrairement au couple
+ * `(code_postal, ville)` du CSV CNAM qui charrie des adresses CEDEX
+ * (`DIJON CEDEX` / CP CEDEX `21078`) non matchables contre geo.api.gouv.
+ *
+ * On ne sélectionne QUE `num_finess, code_insee` (colonnes texte) : pas de
+ * `geom`, donc pas de sérialisation hex EWKB PostgREST à gérer. Le centroïde
+ * commune est ensuite résolu via `communeIndex.byInsee`.
+ *
+ * Pagination explicite par `range()` : PostgREST plafonne à 1000 lignes/req.
+ */
+async function buildFinessInseeMap(supabase: SupabaseClient): Promise<Map<string, string>> {
+  const PAGE = 1000;
+  const map = new Map<string, string>();
+  // Compteurs discriminés (convention repo : jamais un compteur générique).
+  // `fetched` = dénominateur du seuil de drop ; `map.size` n'en diffère que
+  // par les lignes droppées (num_finess/code_insee nuls). Le fold
+  // arrondissement → commune est appliqué côté lookup (parseCdsRecord), pas
+  // ici : l'index conserve le code_insee FINESS brut.
+  let fetched = 0;
+  let droppedNullFiness = 0;
+  let droppedNullInsee = 0;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from("finess")
+      .select("num_finess, code_insee")
+      .range(from, from + PAGE - 1);
+    if (error) {
+      throw new IngestError(
+        "pre_validate",
+        `FINESS index load failed [code=${error.code ?? "none"}]: ${error.message}`,
+        error,
+      );
+    }
+    const rows = (data ?? []) as { num_finess: string; code_insee: string | null }[];
+    for (const r of rows) {
+      fetched++;
+      // CHAR(9)/CHAR(5) prod : PostgREST renvoie le pad d'espaces → trim.
+      const nf = r.num_finess?.trim();
+      const insee = r.code_insee?.trim();
+      if (!nf) {
+        droppedNullFiness++;
+        continue;
+      }
+      if (!insee) {
+        droppedNullInsee++;
+        continue;
+      }
+      map.set(nf, insee);
+    }
+    if (rows.length < PAGE) break;
+  }
+  console.log(
+    `[cds] FINESS index: fetched=${fetched}, indexed=${map.size}, dropped(null_finess=${droppedNullFiness}, null_insee=${droppedNullInsee})`,
+  );
+  // Seuil sur le RATIO de drop (pas la taille finale) : une colonne INSEE
+  // partiellement nulle peut laisser `map.size > MIN_FINESS_INDEX` tout en
+  // étant un signal de corruption upstream — on refuse plutôt que de
+  // produire le diagnostic trompeur "unmatched_locality / CDS source".
+  const nullInseeRate = fetched === 0 ? 0 : droppedNullInsee / fetched;
+  if (nullInseeRate > FINESS_NULL_INSEE_THRESHOLD) {
+    throw new IngestError(
+      "pre_validate",
+      `FINESS index: ${droppedNullInsee}/${fetched} rows have null code_insee (${(nullInseeRate * 100).toFixed(2)}% > ${(FINESS_NULL_INSEE_THRESHOLD * 100).toFixed(2)}%) — table 'finess' partially geocoded or INSEE column renamed upstream. CDS commune resolution pivots on it; refuse to swap with a silently undersized index.`,
+    );
+  }
+  if (map.size < MIN_FINESS_INDEX) {
+    throw new IngestError(
+      "pre_validate",
+      `FINESS index too small (${map.size} < ${MIN_FINESS_INDEX}) — table 'finess' empty/stale or service_role blocked by RLS. CDS commune resolution pivots on it; refuse to swap a mis-geocoded table.`,
+    );
+  }
+  return map;
+}
 
 /**
  * Groupe de toutes les lignes CSV partageant le même etab_finess. Aggrégé
@@ -201,12 +314,29 @@ async function main(): Promise<void> {
     // est la 2e ligne de défense pour les misses sous load.
     await new Promise((resolve) => setTimeout(resolve, 2000));
 
-    const stats = await streamCsvAndInsert(downloaded.filePath, supabase, communeIndex);
+    // Index FINESS num_finess → code_insee (résolution commune autoritaire,
+    // contourne le bruit CEDEX du couple (cp, ville) CSV CNAM). Construit
+    // APRÈS la création staging : la table `finess` prod est indépendante,
+    // mais on garde l'ordre download → validate → index pour un diagnostic
+    // d'échec attribué à la bonne phase.
+    console.log("[cds] loading FINESS num_finess → code_insee index…");
+    const finessInseeMap = await buildFinessInseeMap(supabase);
+    console.log(`[cds] FINESS index loaded: ${finessInseeMap.size} num_finess entries`);
+
+    const stats = await streamCsvAndInsert(
+      downloaded.filePath,
+      supabase,
+      communeIndex,
+      finessInseeMap,
+    );
     log.row_count = stats.inserted;
 
     // 5. VALIDATE COHERENCE
     console.log(
       `[cds] insert summary: inserted=${stats.inserted}, raw_rows=${stats.rawRows}, no_finess=${stats.skippedNoFiness}, no_locality=${stats.skippedNoLocality}, unmatched_locality=${stats.skippedUnmatchedLocality}`,
+    );
+    console.log(
+      `[cds] commune resolution: via_finess=${stats.resolvedViaFiness}, fallback_drees_lag=${stats.resolvedViaFallbackDreesLag}, fallback_orphan_insee=${stats.resolvedViaOrphanInsee}`,
     );
 
     // Garde explicite "total skip" : diagnostic non ambigu indépendant de la
@@ -278,7 +408,7 @@ async function main(): Promise<void> {
       if (unmatchedRate > UNMATCHED_LOCALITY_THRESHOLD) {
         throw new IngestError(
           "validate",
-          `Unmatched-locality rate ${fmt(unmatchedRate)} above ${fmt(UNMATCHED_LOCALITY_THRESHOLD)} — likely INSEE commune drift; refresh geo.api.gouv index or update CDS source`,
+          `Unmatched-locality rate ${fmt(unmatchedRate)} above ${fmt(UNMATCHED_LOCALITY_THRESHOLD)} — these CDS are absent from the FINESS table (DREES sync lag) AND their (cp, ville) is not matchable via fallback (CEDEX address, typo, or geo.api.gouv drift). Check FINESS ingestion freshness first, then the CDS source format.`,
         );
       }
     }
@@ -299,6 +429,28 @@ async function main(): Promise<void> {
         throw new IngestError(
           "validate",
           `Boolean fallback rate ${fmt(booleanFallbackRate)} above ${fmt(BOOLEAN_FALLBACK_THRESHOLD)} — suspected CNAM schema drift on etab_carte_vitale/etab_apcv (true/false → 1/0?). Refuse to swap a table with massively wrong carte_vitale data.`,
+        );
+      }
+    }
+
+    // Garde orphan-INSEE : un FINESS présent dont le code_insee est absent
+    // de l'index commune est tombé en fallback `(cp, ville)` — qui peut mal
+    // géocoder une adresse CEDEX en silence. Quasi-zéro attendu post-fold
+    // arrondissement ; un taux élevé = désalignement de codification INSEE
+    // (fusion de communes, geo.api.gouv drift) → on refuse le swap. Distinct
+    // de fallback_drees_lag (bénin, non thresholdé). Dénominateur = CDS
+    // uniques résolus (= stats.inserted), pas rawRows.
+    const resolvedTotal =
+      stats.resolvedViaFiness + stats.resolvedViaFallbackDreesLag + stats.resolvedViaOrphanInsee;
+    if (stats.resolvedViaOrphanInsee > 0 && resolvedTotal > 0) {
+      const orphanRate = stats.resolvedViaOrphanInsee / resolvedTotal;
+      console.warn(
+        `[cds] orphan-insee fallbacks: ${stats.resolvedViaOrphanInsee}/${resolvedTotal} (${fmt(orphanRate)})`,
+      );
+      if (orphanRate > ORPHAN_INSEE_THRESHOLD) {
+        throw new IngestError(
+          "validate",
+          `Orphan-INSEE rate ${fmt(orphanRate)} above ${fmt(ORPHAN_INSEE_THRESHOLD)} — ${stats.resolvedViaOrphanInsee} CDS have a FINESS code_insee absent from the geo.api.gouv commune index (arrondissement not folded, INSEE commune fusion, or geo.api drift). The (cp, ville) fallback may silently mis-geocode CEDEX addresses. Refuse to swap.`,
         );
       }
     }
@@ -363,8 +515,22 @@ interface CdsStreamStats {
   skippedNoFiness: number;
   /** Lignes CSV sans CP ni ville. Anomalie structurelle. */
   skippedNoLocality: number;
-  /** Lignes CSV avec CP+ville mais commune introuvable dans geo.api. Drift upstream. */
+  /**
+   * Lignes CSV dont la commune n'a pu être résolue ni via le pivot FINESS
+   * ni via le fallback `(cp, ville)`. Signal d'un CDS absent de la table
+   * FINESS (latence DREES) ET d'une adresse non matchable (CEDEX, typo).
+   */
   skippedUnmatchedLocality: number;
+  /** CDS dont la commune a été résolue via le pivot FINESS (chemin nominal). */
+  resolvedViaFiness: number;
+  /** CDS résolus via fallback `(cp, ville)` car FINESS absent (latence DREES, bénin). */
+  resolvedViaFallbackDreesLag: number;
+  /**
+   * CDS résolus via fallback alors que le FINESS est PRÉSENT mais son
+   * code_insee est orphelin de l'index commune. Anomalie thresholdée
+   * (`ORPHAN_INSEE_THRESHOLD`) : le fallback peut mal géocoder une CEDEX.
+   */
+  resolvedViaOrphanInsee: number;
   unmatchedSampleCounts: Map<string, number>;
   unmatchedDistinctKeysDropped: number;
   /** Total de booléens tombés en fallback (ni "true" ni "false"). */
@@ -379,6 +545,7 @@ async function streamCsvAndInsert(
   filePath: string,
   supabase: SupabaseClient,
   index: CommuneIndex,
+  finessInseeMap: Map<string, string>,
 ): Promise<CdsStreamStats> {
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
 
@@ -401,6 +568,12 @@ async function streamCsvAndInsert(
   let skippedNoFiness = 0;
   let skippedNoLocality = 0;
   let skippedUnmatchedLocality = 0;
+  // Compté par CDS unique (1ère occurrence de l'etab_finess), pas par ligne
+  // brute : resolvedVia est une propriété de l'établissement, constante sur
+  // toutes ses lignes spécialité.
+  let resolvedViaFiness = 0;
+  let resolvedViaFallbackDreesLag = 0;
+  let resolvedViaOrphanInsee = 0;
   let unmatchedDistinctKeysDropped = 0;
   // Comptage du drift booléen : numérateur (fallbacks) + dénominateur
   // (lignes ayant atteint le boolean-parse, soit 2 booléens / ligne acc).
@@ -410,7 +583,7 @@ async function streamCsvAndInsert(
 
   for await (const record of parser as AsyncIterable<Record<string, string>>) {
     rawRows++;
-    const parsed = parseCdsRecord(record, index);
+    const parsed = parseCdsRecord(record, index, finessInseeMap);
     if (parsed.acc) {
       booleanParseFallbacks += parsed.booleanFallbacks;
       booleanParsedLines++;
@@ -423,6 +596,9 @@ async function streamCsvAndInsert(
         }
       } else {
         accumulators.set(parsed.acc.etab_finess, parsed.acc);
+        if (parsed.resolvedVia === "finess") resolvedViaFiness++;
+        else if (parsed.resolvedVia === "fallback_orphan_insee") resolvedViaOrphanInsee++;
+        else resolvedViaFallbackDreesLag++;
       }
     } else {
       const reason = parsed.skipReason;
@@ -526,6 +702,9 @@ async function streamCsvAndInsert(
     skippedNoFiness,
     skippedNoLocality,
     skippedUnmatchedLocality,
+    resolvedViaFiness,
+    resolvedViaFallbackDreesLag,
+    resolvedViaOrphanInsee,
     unmatchedSampleCounts,
     unmatchedDistinctKeysDropped,
     booleanParseFallbacks,
@@ -535,21 +714,41 @@ async function streamCsvAndInsert(
 
 type SkipReason = "no_finess" | "no_locality" | "unmatched_locality";
 
+/**
+ * Voie de résolution de la commune (code_insee/dept/geom) :
+ *  - `finess` : pivot FINESS (nominal)
+ *  - `fallback_drees_lag` : FINESS absent de la table (latence sync DREES) →
+ *    fallback `(cp, ville)`. Bénin.
+ *  - `fallback_orphan_insee` : FINESS présent mais son code_insee est absent
+ *    de l'index commune (désalignement codification) → fallback `(cp, ville)`,
+ *    potentiellement mal géocodé sur adresse CEDEX. Anomalie, thresholdée.
+ */
+type ResolvedVia = "finess" | "fallback_drees_lag" | "fallback_orphan_insee";
+
 type ParsedCdsRow =
   | {
       acc: CdsAccumulator;
       /** Nombre de booléens (0..2) tombés en fallback faute de "true"/"false". */
       booleanFallbacks: number;
+      /** Pivot FINESS (nominal) ou fallback texte `(cp, ville)`. */
+      resolvedVia: ResolvedVia;
       skipReason?: never;
       sampleKey?: never;
     }
   | {
       acc?: never;
       booleanFallbacks?: never;
+      resolvedVia?: never;
       skipReason: Exclude<SkipReason, "unmatched_locality">;
       sampleKey?: never;
     }
-  | { acc?: never; booleanFallbacks?: never; skipReason: "unmatched_locality"; sampleKey: string };
+  | {
+      acc?: never;
+      booleanFallbacks?: never;
+      resolvedVia?: never;
+      skipReason: "unmatched_locality";
+      sampleKey: string;
+    };
 
 /**
  * Parse 1 ligne CSV CDS en accumulator (1 row par etab_finess). Le caller
@@ -566,7 +765,15 @@ type ParsedCdsRow =
  *     Décision V0.10 : strict — `null`/empty → ingest échoue (anomalie),
  *     "true"/"false" only.
  */
-export function parseCdsRecord(rec: Record<string, string>, index: CommuneIndex): ParsedCdsRow {
+export function parseCdsRecord(
+  rec: Record<string, string>,
+  index: CommuneIndex,
+  // Défaut = Map vide → chemin fallback `(cp, ville)`. Sucre de test
+  // uniquement : la prod passe TOUJOURS un index explicite via
+  // `streamCsvAndInsert`, et `buildFinessInseeMap`/MIN_FINESS_INDEX garde
+  // contre un index réellement vide en amont.
+  finessInseeMap: Map<string, string> = new Map(),
+): ParsedCdsRow {
   const etabFinessRaw = getNonEmpty(rec, "etab_finess");
   if (!etabFinessRaw) return { skipReason: "no_finess" };
   // Defense-in-depth : trim + validate 9 digits exact. Préserve les leading
@@ -575,17 +782,39 @@ export function parseCdsRecord(rec: Record<string, string>, index: CommuneIndex)
   const etabFiness = etabFinessRaw.trim();
   if (!NUM_FINESS_PATTERN.test(etabFiness)) return { skipReason: "no_finess" };
 
+  // CP + ville restent requis : le schéma `centres_sante` impose
+  // `code_postal CHAR(5) NOT NULL` + `ville TEXT NOT NULL` (adresse réelle
+  // du centre, affichée côté MCP). Le pivot FINESS ne sert qu'à fiabiliser
+  // le géocodage (code_insee/dept/geom), pas à suppléer l'adresse.
   const codePostalRaw = getNonEmpty(rec, "coordonnees_code_postal");
   const villeRaw = getNonEmpty(rec, "coordonnees_ville");
   if (!codePostalRaw || !villeRaw) return { skipReason: "no_locality" };
 
-  const matched: IndexedCommune | null = matchCommune(index, codePostalRaw, villeRaw);
+  // Résolution commune : 1) pivot FINESS autoritaire (tout CDS est un
+  // établissement FINESS au géocodage DREES fiable, immunisé contre les
+  // adresses CEDEX) → 2) fallback texte `(cp, ville)`. Le fallback est
+  // discriminé : FINESS absent de la table (latence DREES, bénin) vs
+  // code_insee FINESS orphelin de l'index commune (désalignement, anomalie
+  // thresholdée car le fallback peut mal géocoder une adresse CEDEX).
+  // Fold arrondissement → commune parente : finess porte l'INSEE
+  // arrondissement (75112 = Paris 12e) que geo.api.gouv `/communes` n'expose
+  // pas (il ne connaît que 75056). Sans ce fold, 100 % des CDS de Paris /
+  // Lyon / Marseille (où ils sont les plus concentrés) ratent le pivot.
+  const inseeFromFiness = finessInseeMap.get(etabFiness);
+  const finessMatch: IndexedCommune | null = inseeFromFiness
+    ? (index.byInsee.get(parentCommuneInsee(inseeFromFiness)) ?? null)
+    : null;
+  const matched = finessMatch ?? matchCommune(index, codePostalRaw, villeRaw);
   if (!matched) {
     return {
       skipReason: "unmatched_locality",
       sampleKey: `${codePostalRaw}|${villeRaw}`,
     };
   }
+  let resolvedVia: ResolvedVia;
+  if (finessMatch) resolvedVia = "finess";
+  else if (inseeFromFiness) resolvedVia = "fallback_orphan_insee";
+  else resolvedVia = "fallback_drees_lag";
 
   // Boolean parsing : une régression schema CNAM (bascule "true"/"false" →
   // "1"/"0") doit faire ÉCHOUER le swap, pas produire des `false` silencieux.
@@ -622,7 +851,7 @@ export function parseCdsRecord(rec: Record<string, string>, index: CommuneIndex)
     geom,
     specialites: new Map([[specialiteCode, specialiteLibelle]]),
   };
-  return { acc, booleanFallbacks };
+  return { acc, booleanFallbacks, resolvedVia };
 }
 
 /**
