@@ -112,7 +112,7 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.9.4 — en production.** 31 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs. 829 tests verts, TypeScript strict, Biome clean. Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so et glama.ai. Crons GitHub Actions (FINESS bimensuel, Ameli hebdo, RPPS mensuel) actifs. Observabilité : Sentry monitoring + Axiom log drain (rétention 30 j, fail-soft) + endpoint `/healthz` pour monitors externes (status `ok`/`degraded` selon les dépendances critiques).
+✅ **V0.10.0 — en production.** 34 tools, ~95 K FINESS, ~462 K Ameli, ~2,2 M RPPS actifs + source Centres de Santé (CDS, ~3 K, hebdo). 866 tests verts, TypeScript strict, Biome clean. Référencé sur le [registry MCP Anthropic officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so et glama.ai. Crons GitHub Actions (FINESS bimensuel, Ameli hebdo, RPPS mensuel, CDS hebdo) actifs. Observabilité : Sentry monitoring + Axiom log drain (rétention 30 j, fail-soft) + endpoint `/healthz` pour monitors externes (status `ok`/`degraded` selon les dépendances critiques).
 
 Voir [CHANGELOG](CHANGELOG.md) pour l'historique détaillé.
 
@@ -120,6 +120,8 @@ Voir [CHANGELOG](CHANGELOG.md) pour l'historique détaillé.
 
 - [x] **V0.9.3** — Circuit breaker 4xx Axiom, helpers `requireSiretId` / `requireRppsId`, DROP différé `<source>_previous`
 - [x] **V0.9.4** — Index couvrant Ameli pour `professionnels_par_specialite_dept` (fix timeout 57014), instrumentation Sentry params anonymisés, factor `prodOnlyConfigWarner`
+- [x] **V0.10.0** — `inspect_site` (vue 360 d'un établissement en 1 appel) + source Centres de Santé (CDS Annuaire Ameli CNAM : `centres_sante_in_radius`, `centres_sante_by_finess` — carte Vitale, APCV, spécialités exercées sur place)
+- [ ] **V0.10.1** — Câblage `withFreshness` pour la source CDS, seeds canary CDS réels
 - [ ] **V1.0+** — Support DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 
 ---

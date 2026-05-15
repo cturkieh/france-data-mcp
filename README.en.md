@@ -79,7 +79,7 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.9.4 — in production.** 31 tools, ~95K FINESS, ~462K Ameli, ~2.2M active RPPS. 829 tests passing, TypeScript strict, Biome clean. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so and glama.ai. GitHub Actions crons (FINESS bi-monthly, Ameli weekly, RPPS monthly) active. Observability: Sentry monitoring + Axiom log drain (30-day retention, fail-soft) + `/healthz` endpoint for external monitors (`ok`/`degraded` status based on critical dependencies).
+✅ **v0.10.0 — in production.** 34 tools, ~95K FINESS, ~462K Ameli, ~2.2M active RPPS + Health Centres source (CDS, ~3K, weekly). 866 tests passing, TypeScript strict, Biome clean. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp), mcp.so and glama.ai. GitHub Actions crons (FINESS bi-monthly, Ameli weekly, RPPS monthly, CDS weekly) active. Observability: Sentry monitoring + Axiom log drain (30-day retention, fail-soft) + `/healthz` endpoint for external monitors (`ok`/`degraded` status based on critical dependencies).
 
 See [CHANGELOG](CHANGELOG.md) for the full history.
 
@@ -87,6 +87,8 @@ See [CHANGELOG](CHANGELOG.md) for the full history.
 
 - ✅ **v0.9.3** — Axiom 4xx circuit breaker, `requireSiretId` / `requireRppsId` helpers, deferred drop of `<source>_previous`
 - ✅ **v0.9.4** — Covering index for Ameli `professionnels_par_specialite_dept` (fix 57014 timeout), anonymized Sentry params instrumentation, `prodOnlyConfigWarner` factor
+- ✅ **v0.10.0** — `inspect_site` (360° view of a facility in one call) + Health Centres source (CDS, French Ameli CNAM directory: `centres_sante_in_radius`, `centres_sante_by_finess` — Vitale card, APCV, on-site specialties)
+- **v0.10.1** — Wire `withFreshness` for the CDS source, real CDS canary seeds
 - **v1.0+** — DOM-COM support, INSEE IRIS (infra-communal demographics)
 
 ---
