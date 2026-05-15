@@ -43,7 +43,10 @@ EXPLAIN ANALYZE en prod (transaction ROLLBACK, zéro mutation) :
 
 Migrations : `20260515T020000_ameli_by_specialite_dept_execute_format.sql`,
 `20260515T020100_matview_ameli_nomenclature.sql`. Aucun changement d'API MCP
-(sémantique de sortie strictement identique). 876 tests verts.
+(sémantique de sortie strictement identique). 872 tests verts. Hotfix
+DB-side : package npm/MCP Registry inchangé vs 0.10.0 (la lib `src/` et
+l'endpoint `api/` ne changent pas — fix dans les migrations SQL + script
+d'ingestion, non packagés).
 
 ## [0.10.0] — 2026-05-15
 
