@@ -118,7 +118,7 @@ Historique complet : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-- [ ] **V0.10.1** — `withFreshness` pour la source CDS, seeds canary CDS réels
+- [ ] **V0.10.3** — seeds canary CDS réels (post 1ère ingest), DROP `rpps_insee_idx` redondant
 - [ ] **V1.0+** — DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 
 ---
