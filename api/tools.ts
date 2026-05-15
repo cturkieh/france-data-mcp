@@ -248,10 +248,15 @@ const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
       type: "number",
       description: "Nombre d'entrées retournées dans `results` (post-troncature).",
     },
+    total: {
+      type: "number",
+      description:
+        "Effectif réel avant troncature. Présent sur les tools de nomenclature paginés (lister_*) : `count` = échantillon, `total` = total réel, re-appeler avec un `limit` supérieur si `truncated`.",
+    },
     truncated: {
       type: "boolean",
       description:
-        "true si le total réel dépasse `limit` (re-paginer via `offset` si supporté). Optional sur les tools de listing exhaustif (lister_*).",
+        "true si le total réel dépasse `limit` (re-paginer via `offset` si supporté, ou augmenter `limit` sur les lister_*). Optional sur les tools de listing exhaustif (lister_*).",
     },
     results: {
       type: "array",
@@ -481,6 +486,42 @@ function coerceBoolean(v: unknown, paramName: string): boolean | undefined {
   throw new RangeError(`${paramName} doit être un booléen (reçu : ${JSON.stringify(v)})`);
 }
 
+const NOMENCLATURE_DEFAULT_LIMIT = 50;
+const NOMENCLATURE_MAX_LIMIT = 1000;
+
+/**
+ * Tronque une liste de nomenclature triée par fréquence décroissante (audit
+ * B2 : ces tools renvoyaient 65-95 entrées d'un coup, ~6-10K tokens). Le
+ * contrat reste honnête : `count` = taille de l'échantillon renvoyé, `total`
+ * = effectif réel, `truncated` = il en reste (re-appeler avec un `limit`
+ * supérieur). Jamais de "total" mensonger (convention QueryResult du repo).
+ */
+function limitNomenclature<T>(
+  all: T[],
+  rawLimit: unknown,
+): { count: number; total: number; truncated: boolean; results: T[] } {
+  const requested = coerceNumber(rawLimit, "limit") ?? NOMENCLATURE_DEFAULT_LIMIT;
+  if (requested < 1) {
+    throw new RangeError(`limit doit être >= 1 (reçu : ${JSON.stringify(rawLimit)})`);
+  }
+  // Clamp doux (≠ `clampLimit` de db-helpers qui throw sur dépassement) :
+  // ici la liste complète tient en mémoire, plafonner à MAX rend juste
+  // l'effet "tout" — `total`/`truncated` restent honnêtes, aucun bug masqué.
+  const limit = Math.min(Math.floor(requested), NOMENCLATURE_MAX_LIMIT);
+  const results = all.slice(0, limit);
+  return {
+    count: results.length,
+    total: all.length,
+    truncated: results.length < all.length,
+    results,
+  };
+}
+
+const NOMENCLATURE_LIMIT_SCHEMA = {
+  type: "number" as const,
+  description: `Nombre max de résultats (défaut ${NOMENCLATURE_DEFAULT_LIMIT}, max ${NOMENCLATURE_MAX_LIMIT}). Triés par fréquence décroissante. La réponse expose \`total\` (effectif réel) et \`truncated\` — re-appeler avec un \`limit\` supérieur pour la liste complète.`,
+};
+
 /**
  * Familles FINESS exposées en input. Dérivé directement des clés de
  * `FINESS_FAMILY_CODES` pour avoir une seule source de vérité — ajouter une
@@ -490,6 +531,15 @@ const FINESS_FAMILLE_INPUTS = Object.keys(FINESS_FAMILY_CODES) as readonly Fines
 
 /** Liste des familles formatée pour les descriptions des tools MCP. */
 const FAMILLES_LIST = FINESS_FAMILLE_INPUTS.join(", ");
+
+/**
+ * Note partagée (audit B6) : le dump FINESS DREES abrège les libellés longs
+ * (~38 car. max). Limitation amont, pas une troncature de notre pipeline
+ * (colonne DB `TEXT` illimitée). Injectée dans les descriptions des tools
+ * FINESS exposant `raison_sociale`.
+ */
+const FINESS_RS_TRUNCATION_NOTE =
+  "Note : `raison_sociale` provient du dump DREES qui abrège les libellés longs (~38 car. max, ex 'CERBALLIANCE HA' pour 'CERBALLIANCE HAZEBROUCK'). Pour le nom légal complet, cross-check via SIREN/SIRET (entreprise_by_siren / etablissement_by_siret).";
 
 /** Garde de typage : valide qu'une string est une famille FINESS queryable. */
 function asFinessFamille(v: unknown): FinessFamilleQuery | undefined {
@@ -1124,6 +1174,9 @@ export const TOOLS: McpTool[] = [
     inputSchema: {
       type: "object",
       properties: {},
+      // Tool sans paramètre : schema strict explicite (les clients LLM en
+      // strict-mode rejettent un `properties:{}` ambigu sans cette borne).
+      additionalProperties: false,
     },
     outputSchema: DATA_FRESHNESS_OUTPUT_SCHEMA,
     annotations: READ_ONLY_TIME_VARYING_ANNOTATIONS,
@@ -1224,7 +1277,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_in_radius",
-    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public).`,
+    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1274,7 +1327,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_by_categorie",
-    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public).`,
+    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1322,8 +1375,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissement_by_finess",
-    description:
-      "Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Retourne un objet `LookupResult` discriminé par `found`. `found: true` → champs FINESS à plat. `found: false` → `{ found: false, key, lookupStatus: 'not_found', message }`. Le référentiel DREES a 1-2 mois de retard sur le terrain : pour des structures émergentes (CPTS récentes, MSP en agrément), cross-check ARS / Service Public. Source : FINESS / DREES. Note : champ `email` toujours `null` (non exposé par FINESS public).",
+    description: `Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Retourne un objet \`LookupResult\` discriminé par \`found\`. \`found: true\` → champs FINESS à plat. \`found: false\` → \`{ found: false, key, lookupStatus: 'not_found', message }\`. Le référentiel DREES a 1-2 mois de retard sur le terrain : pour des structures émergentes (CPTS récentes, MSP en agrément), cross-check ARS / Service Public. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1610,10 +1662,11 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "lister_specialites_ameli",
-    description: `Liste les codes spécialité Ameli effectivement présents en base, avec leur libellé natif, leur \`type_ps_code\` de rattachement et leur count. Triés par fréquence décroissante. Utile pour découvrir la nomenclature avant de filtrer un \`professionnels_in_radius\` ou \`professionnels_par_specialite_dept\`. Le champ \`libelle_clarifie\` désambigüise les libellés partagés par plusieurs codes (ex: "Médecin généraliste" regroupe les codes 01/22/23, "Chirurgien-dentiste" 19/53/54, "Psychiatre" 33/75, "Gynécologue / Obstétricien" 07/70/77/79). Format quand partagé : \`'{libelle} (code {code}, {count_compact})'\` (ex: "Médecin généraliste (code 01, 55K)"). Sinon identique à \`libelle\`. \`is_libelle_partage: true\` quand au moins 2 codes utilisent le même libellé — utiliser ce flag côté caller pour décider d'afficher le code à l'utilisateur. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Liste les codes spécialité Ameli effectivement présents en base, avec leur libellé natif, leur \`type_ps_code\` de rattachement et leur count. Triés par fréquence décroissante. Utile pour découvrir la nomenclature avant de filtrer un \`professionnels_in_radius\` ou \`professionnels_par_specialite_dept\`. Le champ \`libelle_clarifie\` désambigüise les libellés partagés par plusieurs codes (ex: "Médecin généraliste" regroupe les codes 01/22/23, "Chirurgien-dentiste" 19/53/54, "Psychiatre" 33/75, "Gynécologue / Obstétricien" 07/70/77/79). Format quand partagé : \`'{libelle} (code {code}, {count_compact})'\` (ex: "Médecin généraliste (code 01, 55K)"). Sinon identique à \`libelle\`. \`is_libelle_partage: true\` quand au moins 2 codes utilisent le même libellé — utiliser ce flag côté caller pour décider d'afficher le code à l'utilisateur. Paginé : \`limit\` (défaut ${NOMENCLATURE_DEFAULT_LIMIT}), la réponse expose \`total\` et \`truncated\`. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
+        limit: NOMENCLATURE_LIMIT_SCHEMA,
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
     },
@@ -1621,19 +1674,24 @@ export const TOOLS: McpTool[] = [
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const specialites = await listAmeliSpecialites();
-      return withFreshness(
-        { count: specialites.length, results: specialites },
-        args.include_freshness,
-        ["ameli_ps"],
-      );
+      return withFreshness(limitNomenclature(specialites, args.limit), args.include_freshness, [
+        "ameli_ps",
+      ]);
     },
   },
   {
     name: "lister_types_ps_ameli",
-    description: `Liste les codes \`type_ps\` Ameli présents en base, avec leur libellé natif (\`libelle_source\`), un libellé clarifié (\`libelle_clarifie\`) résolvant l'ambiguïté du code "2" fourre-tout, leur count total, et \`specialites_presentes\` (la liste effective des spécialités regroupées sous chaque type_ps avec leurs counts). Pas de dictionnaire inventé : la clarification est dérivée de la donnée live à chaque appel. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Liste les codes \`type_ps\` Ameli présents en base, avec leur libellé natif (\`libelle_source\`), un libellé clarifié (\`libelle_clarifie\`) résolvant l'ambiguïté du code "2" fourre-tout, leur count total, et \`specialites_presentes\` (la liste effective des spécialités regroupées sous chaque type_ps avec leurs counts). Pas de dictionnaire inventé : la clarification est dérivée de la donnée live à chaque appel. Payload léger possible via \`include_specialites: false\` (remplace le sous-tableau par \`nb_specialites\`). ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
+        limit: NOMENCLATURE_LIMIT_SCHEMA,
+        include_specialites: {
+          type: "boolean",
+          description:
+            "Inclure le sous-tableau `specialites_presentes` détaillé par type_ps (défaut true). Passer `false` pour un payload léger : `specialites_presentes` est remplacé par `nb_specialites` (compteur), ~6K tokens économisés.",
+          default: true,
+        },
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
     },
@@ -1641,7 +1699,19 @@ export const TOOLS: McpTool[] = [
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
       const typesPs = await listAmeliTypesPs();
-      return withFreshness({ count: typesPs.length, results: typesPs }, args.include_freshness, [
+      // Branches séparées (pas de ternaire) : chaque appel à limitNomenclature
+      // a un type concret, sinon TS unifie sur AmeliTypePsListEntry[] et
+      // rejette la projection allégée.
+      if (coerceBoolean(args.include_specialites, "include_specialites") === false) {
+        const light = typesPs.map(({ specialites_presentes, ...rest }) => ({
+          ...rest,
+          nb_specialites: specialites_presentes.length,
+        }));
+        return withFreshness(limitNomenclature(light, args.limit), args.include_freshness, [
+          "ameli_ps",
+        ]);
+      }
+      return withFreshness(limitNomenclature(typesPs, args.limit), args.include_freshness, [
         "ameli_ps",
       ]);
     },
@@ -1961,7 +2031,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "inspect_site",
     description:
-      "Vue 360 d'un établissement de santé en 1 appel (V0.10). Pendant naturel de `panorama_sante_territoire` côté **site** : agrège en parallèle (a) identification FINESS DREES (raison sociale, adresse, téléphone), (b) statut administratif SIRENE via le resolver SIRET (verdicts site + groupe, best_match, SIREN explorés, dinum_errors, explication LLM-friendly), (c) professionnels rattachés via num_finess (sample borné + flag `truncated` si le site a plus de PS — PAS un count total), (d) historique INSEE (timeline périodes administratives par SIRET candidat).\n\nRemplace 3 appels MCP individuels (`verifier_site_actif` + `rpps_dans_etablissement` + `historique_etablissement`) par 1 seul. Utile pour : prospection (qualifier un site avant outreach), audit territorial (cross-check rapide d'un FINESS suspect), enrichissement CRM en batch.\n\n**Format de retour** : objet `LookupResult`. Quand `found: true`, payload avec 4 sections (finess, statut_site, professionnels, historique). La section `historique` peut être `available: false` quand le FINESS existe mais qu'aucun SIRET candidat n'a été identifié (RPPS vide + DINUM 0 match) — dans ce cas le `message` reprend celui de `historique_etablissement`. Quand `num_finess` est absent de FINESS DREES, retourne `{found: false, lookupStatus: 'not_found', message}`.\n\nCoût : 3 sous-appels parallèles. Cache PostgreSQL absorbe la duplication FINESS-RPC ; le pivot RPPS→DINUM est exécuté en double (verifier + historique partagent la cascade), surcoût p95 ≤ 600 ms — acceptable pour un agrégateur. Pour les besoins ciblés (juste le verdict, juste l'historique), préférer les tools individuels.\n\nAlias acceptés : `numFiness`/`finess`/`id` → `num_finess`.",
+      "Vue 360 d'un établissement de santé en 1 appel (V0.10). Pendant naturel de `panorama_sante_territoire` côté **site** : agrège en parallèle (a) identification FINESS DREES (raison sociale, adresse, téléphone), (b) statut administratif SIRENE via le resolver SIRET (verdicts site + groupe, best_match, SIREN explorés, dinum_errors, explication LLM-friendly), (c) professionnels rattachés via num_finess (sample borné + flag `truncated` si le site a plus de PS — PAS un count total), (d) historique INSEE (timeline périodes administratives par SIRET candidat).\n\nRemplace 3 appels MCP individuels (`verifier_site_actif` + `rpps_dans_etablissement` + `historique_etablissement`) par 1 seul. Utile pour : prospection (qualifier un site avant outreach), audit territorial (cross-check rapide d'un FINESS suspect), enrichissement CRM en batch.\n\n**Format de retour** : objet `LookupResult`. Quand `found: true`, payload avec 4 sections (finess, statut_site, professionnels, historique). La section `historique` peut être `available: false` quand le FINESS existe mais qu'aucun SIRET candidat n'a été identifié (RPPS vide + DINUM 0 match) — dans ce cas le `message` reprend celui de `historique_etablissement`. Quand `num_finess` est absent de FINESS DREES, retourne `{found: false, lookupStatus: 'not_found', message}`.\n\nCoût : 3 sous-appels parallèles. Cache PostgreSQL absorbe la duplication FINESS-RPC ; le pivot RPPS→DINUM est exécuté en double (verifier + historique partagent la cascade), surcoût p95 ≤ 600 ms — acceptable pour un agrégateur. Pour les besoins ciblés (juste le verdict, juste l'historique), préférer les tools individuels. Payload lourd (~7K tokens) : passer `historique_detail: false` pour un retour allégé (résumé au lieu des timelines SIRENE complètes) en usage batch.\n\nAlias acceptés : `numFiness`/`finess`/`id` → `num_finess`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1973,6 +2043,12 @@ export const TOOLS: McpTool[] = [
           type: "integer",
           description:
             "Nombre max de PS dans `professionnels.sample`. `professionnels.count` = taille du sample (≤ cette borne), pas le total du site ; `truncated: true` signale qu'il y a davantage de PS. Borné [1, 50]. Défaut 10.",
+        },
+        historique_detail: {
+          type: "boolean",
+          description:
+            "Inclure les timelines SIRENE détaillées dans `historique.siret_timelines` (défaut true). `false` = payload allégé (~7K tokens en moins) : `historique` ne porte qu'un `resume` (counts) + un pointeur vers `historique_etablissement`.",
+          default: true,
         },
       },
       required: ["num_finess"],
@@ -1994,12 +2070,14 @@ export const TOOLS: McpTool[] = [
       // source unique des bornes). `coerceNumber` retourne undefined si absent.
       const rppsLimit = coerceNumber(args.rpps_limit, "rpps_limit");
       if (rppsLimit !== undefined) input.rppsLimit = rppsLimit;
+      const historiqueDetail = coerceBoolean(args.historique_detail, "historique_detail");
+      if (historiqueDetail !== undefined) input.historiqueDetail = historiqueDetail;
       return inspectSite(input);
     },
   },
   {
     name: "lister_specialites_medicales",
-    description: `Liste les spécialités médicales (savoir_faire RPPS) avec leur libellé et le nombre de PS qui les portent. Tool d'aide à la découverte pour le LLM : avant d'appeler densite_professionnels_sante ou professionnels_rpps_par_dept avec un \`savoir_faire_code\` précis (ex 'SM04' Cardiologie), utiliser ce tool pour obtenir la liste exhaustive.\n\nFiltre par défaut : profession_code='${PROFESSION_CODE_MEDECIN}' (Médecin) — retourne donc les spécialités médicales (cardiologie, dermato, gynéco, etc.). Passer \`profession_code\` pour énumérer les spécialités d'une autre profession (ex '60' Infirmier → spécialités IDE), ou \`null\` pour tous savoir_faire confondus.\n\nRésultats triés par count_ps DESC (spécialités les plus représentées en premier). Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).`,
+    description: `Liste les spécialités médicales (savoir_faire RPPS) avec leur libellé et le nombre de PS qui les portent. Tool d'aide à la découverte pour le LLM : avant d'appeler densite_professionnels_sante ou professionnels_rpps_par_dept avec un \`savoir_faire_code\` précis (ex 'SM04' Cardiologie), utiliser ce tool pour obtenir la liste exhaustive.\n\nFiltre par défaut : profession_code='${PROFESSION_CODE_MEDECIN}' (Médecin) — retourne donc les spécialités médicales (cardiologie, dermato, gynéco, etc.). Passer \`profession_code\` pour énumérer les spécialités d'une autre profession (ex '60' Infirmier → spécialités IDE), ou \`null\` pour tous savoir_faire confondus.\n\nRésultats triés par count_ps DESC (spécialités les plus représentées en premier). Paginé : \`limit\` (défaut ${NOMENCLATURE_DEFAULT_LIMIT}), la réponse expose \`total\` et \`truncated\`. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2007,6 +2085,7 @@ export const TOOLS: McpTool[] = [
           type: "string",
           description: `Code profession ANS (TRE_R94). Default '${PROFESSION_CODE_MEDECIN}' (Médecin). Passer une string vide ou 'null' pour énumérer tous savoir_faire toutes professions confondues.`,
         },
+        limit: NOMENCLATURE_LIMIT_SCHEMA,
       },
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
@@ -2024,12 +2103,12 @@ export const TOOLS: McpTool[] = [
         professionCode = PROFESSION_CODE_MEDECIN;
       }
       const results = await listSavoirFaireRpps(professionCode);
-      return { count: results.length, profession_code: professionCode, results };
+      return { profession_code: professionCode, ...limitNomenclature(results, args.limit) };
     },
   },
   {
     name: "rpps_search_by_name",
-    description: `Recherche fuzzy de professionnels de santé par identité (nom + prénom optionnel + département optionnel). Utilise un matching trigram (pg_trgm) tolérant aux accents, typos et variations d'orthographe. Tri par pertinence décroissante. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).\n\nUsage typique : "trouve-moi le Dr Martin à Paris" (nom obligatoire, prénom et département facultatifs pour affiner). Sans département, recherche nationale (peut renvoyer beaucoup d'homonymes — utiliser le \`match_score\` pour trier).\n\n**Format de retour** : objet \`{ count, truncated, results, query_metadata }\` aligné sur les autres tools RPPS de listing. Chaque résultat porte un champ \`match_score\` ∈ [0..1] (score trigram pg_trgm). Un score < 0.5 indique souvent une homonymie partielle à confirmer côté caller.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
+    description: `Recherche fuzzy de professionnels de santé par identité (nom + prénom optionnel + département optionnel). Utilise un matching trigram (pg_trgm) tolérant aux accents, typos et variations d'orthographe. Tri par pertinence décroissante. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).\n\nUsage typique : "trouve-moi le Dr Martin à Paris" (nom obligatoire, prénom et département facultatifs pour affiner). Sans département, recherche nationale : des homonymes exacts (ex. plusieurs « Pierre Martin ») obtiennent TOUS le même \`match_score\` ~1.0 — il ne les départage pas. Pour désambiguïser, filtrer par \`departement\` (ou affiner avec \`prénom\`). \`truncated: true\` signifie que d'autres résultats existent : restreindre la requête plutôt que parcourir.\n\n**Format de retour** : objet \`{ count, truncated, results, query_metadata }\` aligné sur les autres tools RPPS de listing. Chaque résultat porte un champ \`match_score\` ∈ [0..1] (score trigram pg_trgm). Un score < 0.5 indique souvent une homonymie partielle à confirmer côté caller.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {

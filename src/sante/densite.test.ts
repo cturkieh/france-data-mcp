@@ -102,7 +102,26 @@ describe("densiteProfessionnelsSante", () => {
     // (incohérence panorama vs standalone corrigée).
     expect(result.parametres.categorieCodes).toEqual(["C"]);
     expect(result.parametres.methodologie).toContain("DREES");
+    expect(result.parametres.methodologie).toMatch(/médecin/i);
     expect(result.comparaisonNationale).toBeUndefined();
+  });
+
+  it("methodologie ne dit pas 'médecins' quand la profession est infirmier (B7)", async () => {
+    countRppsSpy.mockResolvedValue(450);
+    popByDeptSpy.mockResolvedValue(popFound(2103778));
+    const result = await densiteProfessionnelsSante({ departement: "75", professionCode: "60" });
+    expect(result.parametres.methodologie).not.toMatch(/médecins en activité/i);
+    expect(result.parametres.methodologie).toContain("60");
+  });
+
+  it("methodologie mentionne le savoir_faire quand fourni (B7)", async () => {
+    countRppsSpy.mockResolvedValue(120);
+    popByDeptSpy.mockResolvedValue(popFound(2103778));
+    const result = await densiteProfessionnelsSante({
+      departement: "75",
+      savoirFaireCode: "SM15",
+    });
+    expect(result.parametres.methodologie).toContain("SM15");
   });
 
   it("permet de surcharger la profession (infirmiers) et la spécialité (cardiologues)", async () => {

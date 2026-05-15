@@ -43,6 +43,49 @@ ANS faux, transparence géo, collision de nomenclatures.**
   `savoir_faire_code`) sont des nomenclatures DISTINCTES à valeurs
   numériques homographes (ex : `10` = Médecin ANS vs Neurochirurgien Ameli).
 
+**Patch — corrections audit qualité externe (lot 3-4, B2/B6/B7/B8/B10) :
+verbosité, méthodologie, doc.**
+
+### Changed
+
+- **BREAKING (mineur, OSS pré-1.0) — B2 : `lister_specialites_ameli`,
+  `lister_types_ps_ameli`, `lister_specialites_medicales` sont paginés.**
+  Param `limit` (défaut **50**, max 1000, triés par fréquence). Le contrat de
+  sortie passe à `{ count, total, truncated, results }` : `count` = taille de
+  l'échantillon renvoyé (était l'effectif total), `total` = effectif réel,
+  `truncated` = il en reste. Un caller qui lisait `count` comme "nombre total
+  de codes" doit lire `total`. `total` déclaré dans
+  `QUERY_RESULT_OUTPUT_SCHEMA` (optionnel). Réduit ~6-10K tokens par appel.
+- **B7 — `densite_professionnels_sante.methodologie` paramétrée.** Le champ
+  reprenait toujours « médecins en activité régulière » même pour infirmiers
+  /pharmaciens (copier-coller). Désormais interpolé selon `profession_code` /
+  `savoir_faire_code` ; texte par défaut (médecin, méthodo DREES) inchangé.
+
+### Added
+
+- **B2 — `lister_types_ps_ameli` : param `include_specialites`** (défaut
+  `true`). `false` remplace le sous-tableau `specialites_presentes` par
+  `nb_specialites` (payload léger, ~6K tokens en moins).
+- **`inspect_site` : param `historique_detail`** (défaut `true`). `false` =
+  payload allégé (~7K tokens) : `historique` porte un `resume`
+  (`sirets`, `periodes_total`, `sirets_en_erreur`) + pointeur vers
+  `historique_etablissement` au lieu des timelines SIRENE complètes.
+  `sirets_en_erreur` lève l'ambiguïté `periodes_total: 0` vs SIRENE
+  injoignable.
+- **B6 — note de troncature DREES** dans les descriptions de
+  `etablissement_by_finess`, `etablissements_finess_in_radius`,
+  `etablissements_finess_by_categorie` : `raison_sociale` est abrégée
+  (~38 car.) en amont DREES — cross-check SIREN/SIRET pour le nom complet.
+
+### Fixed
+
+- **B8 — `rpps_search_by_name` : wording désambiguïsation.** La description
+  conseillait à tort « utiliser `match_score` pour trier » alors que des
+  homonymes exacts ont tous le même score ~1.0. Oriente désormais vers le
+  filtre `departement`/`prénom` et explique `truncated`.
+- **B10 — `data_freshness` : `inputSchema.additionalProperties: false`.**
+  Le `properties: {}` vide ambigu pouvait gêner les clients LLM strict-mode.
+
 ## [0.10.3] — 2026-05-15
 
 **Patch — fix ingestion CDS (centres de santé) : pivot FINESS pour la

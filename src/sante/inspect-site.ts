@@ -45,6 +45,14 @@ export interface InspectSiteInput {
    * 10-20 PS pour un site).
    */
   rppsLimit?: number;
+  /**
+   * Inclure les timelines SIRENE détaillées dans `historique.siret_timelines`
+   * (défaut `true`). `false` = payload allégé (~7K tokens en moins, audit
+   * B2/lot3) : `historique` ne porte qu'un `resume` (counts) + un pointeur
+   * vers `historique_etablissement` pour le détail. Le sous-appel reste
+   * exécuté (le `status`/`available` en dépend) — seul le payload est réduit.
+   */
+  historiqueDetail?: boolean;
 }
 
 const RPPS_LIMIT_DEFAULT = 10;
@@ -84,6 +92,21 @@ export type InspectSiteHistoriqueSection =
       siret_timelines: HistoriqueEtablissementResult["siret_timelines"];
     }
   | {
+      /** Variante allégée (`historiqueDetail: false`) : counts au lieu des
+       * timelines complètes. `siret_timelines` volontairement absent. */
+      available: true;
+      detail_omitted: true;
+      status: HistoriqueEtablissementResult["status"];
+      /**
+       * `sirets_en_erreur` : nb de SIRET dont le lookup SIRENE a échoué
+       * (`sirene: null`). Sans lui, `periodes_total: 0` serait ambigu entre
+       * "0 période réelle" et "SIRENE injoignable" — le détail par SIRET
+       * (`sirene_error`) n'étant exposé qu'en mode `historiqueDetail: true`.
+       */
+      resume: { sirets: number; periodes_total: number; sirets_en_erreur: number };
+      note: string;
+    }
+  | {
       /**
        * `available: false` quand FINESS existe mais aucun SIRET candidat
        * (RPPS vide + pas de match DINUM). Le `message` reprend celui de
@@ -118,6 +141,43 @@ export interface InspectSiteResult {
     statut: string;
     professionnels: typeof SOURCE_LABELS.rpps;
     historique: typeof SOURCE_LABELS.insee_sirene;
+  };
+}
+
+/**
+ * Projette le lookup `historiqueEtablissement` en section `historique`.
+ * `detail=false` → variante allégée (counts au lieu des timelines SIRENE
+ * complètes, ~7K tokens en moins).
+ */
+function buildHistoriqueSection(
+  lookup: Awaited<ReturnType<typeof historiqueEtablissement>>,
+  detail: boolean,
+): InspectSiteHistoriqueSection {
+  if (!lookup.found) {
+    return { available: false, message: lookup.message };
+  }
+  if (detail) {
+    return {
+      available: true,
+      status: lookup.status,
+      siret_timelines: lookup.siret_timelines,
+    };
+  }
+  const periodesTotal = lookup.siret_timelines.reduce(
+    (acc, t) => acc + (t.sirene?.periodes.length ?? 0),
+    0,
+  );
+  const siretsEnErreur = lookup.siret_timelines.filter((t) => t.sirene === null).length;
+  return {
+    available: true,
+    detail_omitted: true,
+    status: lookup.status,
+    resume: {
+      sirets: lookup.siret_timelines.length,
+      periodes_total: periodesTotal,
+      sirets_en_erreur: siretsEnErreur,
+    },
+    note: "Timelines SIRENE détaillées omises (historique_detail=false) — appeler historique_etablissement pour le détail par SIRET (dont sirene_error).",
   };
 }
 
@@ -172,13 +232,10 @@ export async function inspectSite(
   // un `status` dégradé. Donc `available: false` n'est jamais un masquage de
   // panne ; c'est une absence réelle de candidat. On l'encapsule pour ne pas
   // perdre le signal au lieu d'écraser silencieusement.
-  const historique: InspectSiteHistoriqueSection = historiqueLookup.found
-    ? {
-        available: true,
-        status: historiqueLookup.status,
-        siret_timelines: historiqueLookup.siret_timelines,
-      }
-    : { available: false, message: historiqueLookup.message };
+  const historique: InspectSiteHistoriqueSection = buildHistoriqueSection(
+    historiqueLookup,
+    input.historiqueDetail !== false,
+  );
 
   return lookupFound<InspectSiteResult>({
     num_finess: trimmed,

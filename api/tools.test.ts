@@ -379,6 +379,34 @@ describe("lister_specialites_ameli (MCP tool)", () => {
     expect(result.count).toBe(1);
     expect(result.results).toHaveLength(1);
   });
+
+  it("limit défaut tronque + expose total/truncated (B2)", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      code: String(i),
+      libelle: `S${i}`,
+      libelle_clarifie: `S${i}`,
+      type_ps_code: "1",
+      type_ps_libelle: "Médecins",
+      count: 1000 - i,
+      is_libelle_partage: false,
+    }));
+    vi.spyOn(ameliDb, "listAmeliSpecialites").mockResolvedValue(many);
+    const tool = findTool("lister_specialites_ameli");
+    const def = (await tool?.handler({})) as {
+      count: number;
+      total: number;
+      truncated: boolean;
+      results: unknown[];
+    };
+    expect(def.count).toBe(50);
+    expect(def.total).toBe(60);
+    expect(def.truncated).toBe(true);
+    expect(def.results).toHaveLength(50);
+
+    const all = (await tool?.handler({ limit: 1000 })) as { count: number; truncated: boolean };
+    expect(all.count).toBe(60);
+    expect(all.truncated).toBe(false);
+  });
 });
 
 describe("lister_types_ps_ameli (MCP tool)", () => {
@@ -410,6 +438,27 @@ describe("lister_types_ps_ameli (MCP tool)", () => {
     expect(spy).toHaveBeenCalledOnce();
     expect(result.count).toBe(1);
     expect(result.results[0]?.specialites_presentes).toHaveLength(1);
+  });
+
+  it("include_specialites=false remplace le sous-tableau par nb_specialites (B2)", async () => {
+    vi.spyOn(ameliDb, "listAmeliTypesPs").mockResolvedValueOnce([
+      {
+        code: "2",
+        libelle_source: "Autres PS",
+        libelle_clarifie: "Auxiliaires médicaux",
+        count: 245990,
+        specialites_presentes: [
+          { code: "24", libelle: "Infirmier", count: 104041 },
+          { code: "26", libelle: "Kiné", count: 80000 },
+        ],
+      },
+    ]);
+    const tool = findTool("lister_types_ps_ameli");
+    const result = (await tool?.handler({ include_specialites: false })) as {
+      results: Array<{ specialites_presentes?: unknown[]; nb_specialites?: number }>;
+    };
+    expect(result.results[0]?.specialites_presentes).toBeUndefined();
+    expect(result.results[0]?.nb_specialites).toBe(2);
   });
 });
 
@@ -1153,6 +1202,64 @@ describe("collision nomenclatures Ameli/ANS (régression B3)", () => {
       expect(tool?.description).toMatch(/distincte|différent|ne (jamais|pas) (passer|confondre)/i);
     });
   }
+});
+
+describe("lister_specialites_medicales — limit + profession_code (B2)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("applique limit défaut, expose total/truncated et conserve profession_code", async () => {
+    const many = Array.from({ length: 95 }, (_, i) => ({
+      code: `SM${i}`,
+      libelle: `Spé ${i}`,
+      count_ps: 1000 - i,
+    }));
+    vi.spyOn(rppsDb, "listSavoirFaireRpps").mockResolvedValue(many);
+    const tool = findTool("lister_specialites_medicales");
+    const result = (await tool?.handler({})) as {
+      count: number;
+      total: number;
+      truncated: boolean;
+      profession_code: string | null;
+      results: unknown[];
+    };
+    expect(result.count).toBe(50);
+    expect(result.total).toBe(95);
+    expect(result.truncated).toBe(true);
+    expect(result.profession_code).toBe("10");
+  });
+});
+
+describe("FINESS — note troncature raison_sociale (régression B6)", () => {
+  for (const name of [
+    "etablissement_by_finess",
+    "etablissements_finess_in_radius",
+    "etablissements_finess_by_categorie",
+  ]) {
+    it(`${name} signale que raison_sociale est abrégée en amont DREES`, () => {
+      const tool = findTool(name);
+      expect(tool?.description).toMatch(/raison.?social/i);
+      expect(tool?.description).toMatch(/abrég|tronqu|38/i);
+    });
+  }
+});
+
+describe("rpps_search_by_name — désambiguïsation homonymes (régression B8)", () => {
+  it("ne conseille pas de trier par match_score et oriente vers departement", () => {
+    const tool = findTool("rpps_search_by_name");
+    expect(tool?.description).not.toMatch(/match_score.{0,20}pour (trier|affiner)/i);
+    expect(tool?.description).toMatch(/homonym/i);
+    expect(tool?.description).toMatch(/departement|prénom/i);
+    expect(tool?.description).toMatch(/truncated/);
+  });
+});
+
+describe("data_freshness — schema paramètres explicite (régression B10)", () => {
+  it("déclare additionalProperties:false (pas de schema vide ambigu)", () => {
+    const tool = findTool("data_freshness");
+    expect(tool?.inputSchema.additionalProperties).toBe(false);
+  });
 });
 
 describe("geocode_adresse — interprétation du score (régression B1)", () => {

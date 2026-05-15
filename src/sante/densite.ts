@@ -59,6 +59,25 @@ export const MODE_EXERCICE_ACTIVITE_REGULIERE = [
 
 const PER_100K_FACTOR = 100_000;
 
+/**
+ * Décrit la population réellement comptée selon les filtres. Le texte par
+ * défaut (médecins activité régulière, méthodo DREES) n'est exact que pour
+ * `profession_code` médecin sans `savoir_faire_code` — l'annoncer tel quel
+ * pour un autre filtre était trompeur (audit B7).
+ */
+function buildMethodologie(professionCode: string, savoirFaireCode: string | null): string {
+  const formula = "Densité = count(RPPS matching filtres) / population municipale × 100 000.";
+  if (professionCode === PROFESSION_CODE_MEDECIN && !savoirFaireCode) {
+    return `${formula} Population comptée : médecins en activité régulière (libéral + salarié + mixte) hors étudiants — méthodo DREES.`;
+  }
+  const specialite = savoirFaireCode ? ` spécialité savoir_faire '${savoirFaireCode}'` : "";
+  const profession =
+    professionCode === PROFESSION_CODE_MEDECIN
+      ? "médecins"
+      : `PS profession ANS '${professionCode}'`;
+  return `${formula} Population comptée : ${profession}${specialite} selon les filtres mode_exercice fournis (voir parametres.modeExerciceCodes).`;
+}
+
 export interface DensiteProfessionnelsSanteInput {
   /**
    * Code département (2-3 chars). Exactement UN des deux entre `departement`
@@ -282,8 +301,7 @@ export async function densiteProfessionnelsSante(
       modeExerciceCodes:
         modeExerciceCodes.length > 0 ? modeExerciceCodes : [...MODE_EXERCICE_ACTIVITE_REGULIERE],
       categorieCodes: filters.categorieCodes,
-      methodologie:
-        "Densité PS = count(RPPS matching filtres) / population municipale × 100 000. Default : médecins en activité régulière (libéral + salarié + mixte) hors étudiants — méthodo DREES.",
+      methodologie: buildMethodologie(filters.professionCode, filters.savoirFaireCode),
     },
     source: {
       ps: SOURCE_LABELS.rpps,

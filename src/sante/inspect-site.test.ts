@@ -189,6 +189,42 @@ describe("inspectSite — propagation lookup et composition", () => {
     }
   });
 
+  it("historique_detail=false : timelines omises, résumé + flag (B2/lot3)", async () => {
+    vi.spyOn(crossSource, "verifierSiteActif").mockResolvedValue(fakeVerifierFound());
+    vi.spyOn(rppsDb, "getRppsDansEtablissement").mockResolvedValue(fakeRppsResult(3));
+    vi.spyOn(crossSource, "historiqueEtablissement").mockResolvedValue(
+      fakeHistoriqueFound("partial"),
+    );
+
+    const lookup = await inspectSite({ numFiness: VALID_FINESS, historiqueDetail: false });
+    expect(lookup.found).toBe(true);
+    if (!lookup.found) throw new Error("unreachable");
+    expect(lookup.historique.available).toBe(true);
+    if (!lookup.historique.available) throw new Error("unreachable");
+    expect("siret_timelines" in lookup.historique).toBe(false);
+    if ("detail_omitted" in lookup.historique) {
+      expect(lookup.historique.detail_omitted).toBe(true);
+      expect(lookup.historique.resume.sirets).toBe(1);
+      // fixture : 1 SIRET avec sirene:null → compté comme en erreur (lève
+      // l'ambiguïté periodes_total:0 vs SIRENE injoignable).
+      expect(lookup.historique.resume.sirets_en_erreur).toBe(1);
+      expect(lookup.historique.status).toBe("partial");
+    } else {
+      throw new Error("variante résumé attendue");
+    }
+  });
+
+  it("historique détaillé par défaut (siret_timelines présent)", async () => {
+    vi.spyOn(crossSource, "verifierSiteActif").mockResolvedValue(fakeVerifierFound());
+    vi.spyOn(rppsDb, "getRppsDansEtablissement").mockResolvedValue(fakeRppsResult(3));
+    vi.spyOn(crossSource, "historiqueEtablissement").mockResolvedValue(
+      fakeHistoriqueFound("partial"),
+    );
+    const lookup = await inspectSite({ numFiness: VALID_FINESS });
+    if (!lookup.found || !lookup.historique.available) throw new Error("unreachable");
+    expect("siret_timelines" in lookup.historique).toBe(true);
+  });
+
   it("transmet rppsLimit à getRppsDansEtablissement (pas de surprise)", async () => {
     vi.spyOn(crossSource, "verifierSiteActif").mockResolvedValue(fakeVerifierFound());
     const rppsSpy = vi
