@@ -251,7 +251,11 @@ describe("refreshRppsMatviews", () => {
 
     await refreshRppsMatviews(supabase, log);
 
-    expect(calls).toEqual(["rpps_savoir_faire_stats", "rpps_count_stats"]);
+    expect(calls).toEqual([
+      "rpps_savoir_faire_stats",
+      "rpps_count_stats",
+      "rpps_commune_centroids",
+    ]);
     expect(log.status).toBe("success");
     expect(log.error_message).toBeUndefined();
   });
@@ -300,7 +304,11 @@ describe("refreshRppsMatviews", () => {
 
     await refreshRppsMatviews(supabase, log);
 
-    expect(visited).toEqual(["rpps_savoir_faire_stats", "rpps_count_stats"]);
+    expect(visited).toEqual([
+      "rpps_savoir_faire_stats",
+      "rpps_count_stats",
+      "rpps_commune_centroids",
+    ]);
     expect(log.status).toBe("partial");
     expect(log.error_message).toContain("rpps_savoir_faire_stats");
     expect(log.error_message).not.toContain("rpps_count_stats (");

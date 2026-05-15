@@ -1108,7 +1108,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "data_freshness",
     description:
-      "Retourne la fraîcheur des dumps de données ingérés côté serveur : FINESS DREES (bimestriel), Annuaire Santé Ameli (hebdomadaire), RPPS / Annuaire Santé ANS (mensuel). Pour chaque source : `last_success_at` ISO timestamp, `last_success_row_count`, `last_attempt_at`, `last_attempt_status`, `staleness_days` (jours depuis la dernière ingestion réussie), `cadence_hint` (cadence attendue côté éditeur).\n\nUsage typique : avant un audit territorial ou une analyse temporelle, le caller appelle ce tool pour savoir si les données sont à jour. Une `staleness_days > 90` côté FINESS = alerte (dernier sync DREES manqué), `> 14` côté Ameli = alerte (job hebdo cassé), `> 45` côté RPPS = alerte (job mensuel cassé).\n\nLes sources LIVE (DINUM Recherche Entreprises, INSEE SIRENE V3.11, ANS FHIR live) ne sont PAS listées ici puisqu'elles n'ont pas de cycle d'ingestion — leur fraîcheur est celle des API amont (live, ~secondes).\n\nCache serveur : 5 minutes. Coût : 1 SELECT sur `ingest_log` au pire (sinon hit cache).",
+      "Retourne la fraîcheur des dumps de données ingérés côté serveur : FINESS DREES (bimestriel), Annuaire Santé Ameli (hebdomadaire), RPPS / Annuaire Santé ANS (mensuel), Centres de Santé CNAM (hebdomadaire). Pour chaque source : `last_success_at` ISO timestamp, `last_success_row_count`, `last_attempt_at`, `last_attempt_status`, `staleness_days` (jours depuis la dernière ingestion réussie), `cadence_hint` (cadence attendue côté éditeur).\n\nUsage typique : avant un audit territorial ou une analyse temporelle, le caller appelle ce tool pour savoir si les données sont à jour. Une `staleness_days > 90` côté FINESS = alerte (dernier sync DREES manqué), `> 14` côté Ameli = alerte (job hebdo cassé), `> 45` côté RPPS = alerte (job mensuel cassé), `> 14` côté CDS = alerte (job hebdo cassé).\n\nLes sources LIVE (DINUM Recherche Entreprises, INSEE SIRENE V3.11, ANS FHIR live) ne sont PAS listées ici puisqu'elles n'ont pas de cycle d'ingestion — leur fraîcheur est celle des API amont (live, ~secondes).\n\nCache serveur : 5 minutes. Coût : 1 SELECT sur `ingest_log` au pire (sinon hit cache).",
     inputSchema: {
       type: "object",
       properties: {},
@@ -1409,11 +1409,7 @@ export const TOOLS: McpTool[] = [
         );
       }
       if (limit !== undefined) input.limit = limit;
-      // `cds` n'est pas encore dans le type IngestSource côté freshness (toujours
-      // typé sur les 3 sources V0.9). En attendant l'ajout dans `withFreshness`,
-      // on retourne sans freshness — fonctionnellement OK, l'utilisateur peut
-      // appeler `data_freshness` séparément avec source='cds'.
-      return getCdsInRadius(input);
+      return withFreshness(await getCdsInRadius(input), args.include_freshness, ["cds"]);
     },
   },
   {
@@ -1427,6 +1423,7 @@ export const TOOLS: McpTool[] = [
           type: "string",
           description: "Numéro FINESS exact 9 chiffres. Ex: '750000123'.",
         },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["num_finess"],
     },
@@ -1439,7 +1436,11 @@ export const TOOLS: McpTool[] = [
         etab_finess: "num_finess",
       });
       const numFiness = requireFinessId(args);
-      return getCdsByFiness(numFiness);
+      const result = await getCdsByFiness(numFiness);
+      // Symétrie avec etablissement_by_finess : pas de freshness sur le
+      // not_found (payload sans metadata métier — bruit pour le caller).
+      if (!result.found) return result;
+      return withFreshness(result, args.include_freshness, ["cds"]);
     },
   },
   {
@@ -1636,7 +1637,7 @@ export const TOOLS: McpTool[] = [
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
   {
     name: "professionnels_rpps_in_radius",
-    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. ${RPPS_CGU_NOTICE}`,
+    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. Le filtrage rayon est résolu à la granularité **commune** (une commune est incluse si son centroïde représentatif est dans le rayon), cohérent avec la précision centroïde ci-dessus ; tri par distance commune croissante. Si la commune la plus proche contient plus de \`limit\` PS correspondants, le résultat est intégralement puisé dans cette commune (les communes plus lointaines sont évincées du même \`limit\`) : augmenter \`limit\` ou resserrer les filtres pour couvrir plusieurs communes. ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {

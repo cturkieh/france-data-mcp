@@ -4,6 +4,81 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.10.2] — 2026-05-15
+
+**Patch — fix P0 `professionnels_rpps_in_radius` (timeout 57014 dans les
+communes denses) + 2 corrections de cohérence + garde-fou généralisé.**
+
+### Fix P0 — `rpps_in_radius` timeout systématique en commune dense
+
+Symptôme : `professionnels_rpps_in_radius` renvoyait systématiquement
+`57014: canceling statement due to statement timeout` dès que le point de
+recherche tombait près du centroïde d'une commune dense.
+
+Root cause **prouvée** (EXPLAIN ANALYZE prod, transaction ROLLBACK) : les
+coordonnées RPPS sont des centroïdes commune. Les communes denses empilent
+des dizaines de milliers de lignes au **point géographique identique**
+(Paris/75056 = 76 798 lignes, Marseille = 29 993, Toulouse = 21 695,
+Lyon = 17 276). L'index GiST `rpps_geog_gist` ne peut rien élaguer (tous les
+points identiques passent le `&&` bbox) → recalcul `ST_DWithin`/`ST_Distance`
+géographique **par ligne sur les ~77 k lignes co-localisées** = **15 913 ms**
+mesurés → dépasse le `statement_timeout=3s` du rôle `anon`. Ni régression de
+code, ni index perdu (`rpps_geog_gist` présent 163 MB), ni stats périmées
+(analyze 2026-05-13), ni generic plan (custom plan littéral AUSSI à 15,9 s).
+Bug latent de scaling O(lignes/commune) : un point rural résout en 198 ms.
+
+Fix (`20260515T030000_rpps_in_radius_commune_centroids.sql`) : nouvelle
+matview `rpps_commune_centroids` (1 centroïde représentatif par commune,
+~milliers de lignes, GiST dédié) ; `rpps_in_radius` réécrite pour résoudre
+d'abord les communes dans le rayon (KNN instantané sur la petite matview)
+puis récupérer ≤ `p_limit` lignes **par commune** en early-stop déterministe
+(`CROSS JOIN LATERAL` + `ORDER BY r.id` adossé au nouvel index
+`rpps_insee_id_idx (code_insee, id)`) — aucun calcul géo par-ligne sur le
+cluster. Sentinelle `P0002` si la matview est vide (doctrine anti-"0
+silencieux" héritée de `count_rpps`). Mesuré end-to-end en prod :
+**15 913 ms → 63 ms (~250×)**. Signature,
+colonnes `RETURNS TABLE`, GRANT, contrat MCP **strictement inchangés**.
+Trade-off documenté : filtrage rayon à la granularité commune (cohérent avec
+la précision centroïde ~3 km déjà documentée du tool ; vérifié : 0 ligne
+`geog NOT NULL` sans `code_insee` → résolution complète, aucune perte).
+Matview wirée dans le refresh post-swap (`scripts/ingest/rpps.ts`) +
+whitelist `ingest_refresh_matview`.
+
+### Garde-fou staging-parity généralisé à RPPS (bug latent corrigé)
+
+`scripts/ingest/staging-parity.test.ts` étendu à la table `rpps` (était
+limité à `annuaire_ameli`) + découverte matview élargie (`_stats`|
+`_centroids`) + ancre `rpps_commune_centroids`. Ce garde-fou a **révélé un
+bug latent pré-existant** : 3 index prod `rpps` créés après la dernière
+`ingest_create_rpps_staging` (20260510T020000) n'y étaient pas répliqués —
+`rpps_nom_trgm_idx`, `rpps_prenom_trgm_idx` (→ `rpps_search_by_name` cassé
+au swap mensuel), `rpps_profession_savoir_faire_partial_idx`. Corrigé :
+`ingest_create_rpps_staging` recréée en superset strict (section 4 de la
+migration).
+
+### Cohérence `categorieCodes` densité (panorama vs standalone)
+
+`densiteProfessionnelsSante` retombait sur `?? []` → la RPC appliquait son
+propre défaut `['C','M']` quand aucune catégorie n'était passée (chemin
+`panorama_sante_territoire`), alors que le tool standalone
+`densite_professionnels_sante` passe `['C']` explicite — MÊME commune,
+densités différentes selon le chemin. Résolu sur la source unique
+`CATEGORIE_CODES_DEFAUT` (`['C']`, Civil seul) dans `buildRppsFilters`,
+appliqué à TOUS les callers ; le param échoué `parametres.categorieCodes`
+reflète désormais exactement ce qui est compté.
+
+### `centres_sante_*` : `include_freshness` désormais honoré
+
+`cds` ajouté à `INGEST_SOURCES` (+ cadence hebdo). `centres_sante_in_radius`
+honorait un `include_freshness` exposé au schéma mais ignoré silencieusement
+(no-op) ; `centres_sante_by_finess` n'avait pas le param (asymétrie vs
+`etablissement_by_finess`). Les deux wirent maintenant `withFreshness(['cds'])`
+(symétrie `not_found` sans freshness). `data_freshness` liste désormais CDS.
+
+Migrations : `20260515T030000_rpps_in_radius_commune_centroids.sql` (4
+sections : matview + RPC + whitelist + staging-create superset). Lib (`src/`)
+modifiée → package npm bumpé. 873 tests verts.
+
 ## [0.10.1] — 2026-05-15
 
 **Patch — fix timeout Postgres 57014 sur 3 RPC Ameli (root cause prouvée en prod).**

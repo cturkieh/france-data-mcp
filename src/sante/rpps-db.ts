@@ -188,16 +188,18 @@ export function buildCategorieCodes(opts: {
  * Résout `categorieCodes` côté TS pour les wrappers qui veulent expliciter le
  * default `[C]` au lieu de laisser la RPC retomber sur son propre `COALESCE`.
  *
- * À utiliser UNIQUEMENT pour les wrappers où on veut un default TS-side
- * (`getRppsParSpecialiteDept`, `getRppsByName`). Les wrappers qui passent
- * `?? []` (countRpps, getRppsInRadius, etc.) ont une sémantique différente :
- * `[]` côté TS = "pas de filtre TS-side, la RPC applique son propre default
- * (varie selon RPC)". Ne PAS substituer naïvement les 2 patterns.
+ * À utiliser pour les wrappers qui veulent expliciter le default TS-side
+ * (`getRppsParSpecialiteDept`, `getRppsByName`, `densiteProfessionnelsSante`)
+ * — garantit un default canonique unique vs laisser la RPC retomber sur son
+ * propre `COALESCE` (qui varie selon RPC : `rpps_categorie_match` = `C`+`M`).
+ * Les wrappers qui passent `?? []` (countRpps brut, getRppsInRadius) ont une
+ * sémantique différente : `[]` = "pas de filtre TS-side". Ne PAS substituer
+ * naïvement les 2 patterns.
  *
  * Retourne un `readonly string[]` : le RPC Supabase sérialise l'array en
  * JSON sans muter l'input, donc pas besoin d'allouer une copie défensive.
  */
-function resolveCategorieCodes(codes: readonly string[] | undefined): readonly string[] {
+export function resolveCategorieCodes(codes: readonly string[] | undefined): readonly string[] {
   return codes && codes.length > 0 ? codes : CATEGORIE_CODES_DEFAUT;
 }
 

@@ -605,9 +605,12 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
 /**
  * Refresh des matviews dépendantes de la table `rpps` après swap atomique.
  *
- * Deux matviews à refresh :
+ * Trois matviews à refresh :
  *   - `rpps_savoir_faire_stats` (V0.8.2) → `lister_specialites_medicales`
  *   - `rpps_count_stats` (V0.8.3) → `densite_professionnels_sante` (compare_national)
+ *   - `rpps_commune_centroids` (V0.10.2) → `rpps_in_radius` (pré-résolution
+ *     rayon ; sans refresh, les centroïdes restent figés au mois précédent
+ *     → un PS d'une commune nouvellement peuplée serait invisible au rayon)
  *
  * Best-effort : le swap est déjà commit, on n'annule pas la prod si REFRESH
  * échoue. Cas de fail attendus :
@@ -627,7 +630,11 @@ export async function refreshRppsMatviews(
   supabase: SupabaseClient,
   log: IngestLogEntry,
 ): Promise<void> {
-  const matviews = ["rpps_savoir_faire_stats", "rpps_count_stats"] as const;
+  const matviews = [
+    "rpps_savoir_faire_stats",
+    "rpps_count_stats",
+    "rpps_commune_centroids",
+  ] as const;
   const failures: string[] = [];
 
   for (const matview of matviews) {

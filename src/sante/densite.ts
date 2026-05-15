@@ -32,6 +32,7 @@ import {
   type CountRppsInput,
   countRpps,
   countRppsByCommune,
+  resolveCategorieCodes,
 } from "./rpps-db.js";
 import { RPPS_MODE_EXERCICE, RPPS_PROFESSION } from "./rpps-types.js";
 import { SOURCE_LABELS } from "./sources.js";
@@ -176,7 +177,10 @@ function buildRppsFilters(
     professionCode: input.professionCode ?? PROFESSION_CODE_MEDECIN,
     savoirFaireCode: input.savoirFaireCode ?? null,
     modeExerciceCodes,
-    categorieCodes: input.categorieCodes ?? [],
+    // Défaut canonique TS-side appliqué à TOUS les callers (V0.10.2). Sans
+    // ça, panorama (pas de categorieCodes) divergeait du tool standalone :
+    // la RPC a son propre défaut `C`+`M`, le standalone passe `['C']`.
+    categorieCodes: [...resolveCategorieCodes(input.categorieCodes)],
   };
 }
 
@@ -277,8 +281,7 @@ export async function densiteProfessionnelsSante(
       savoirFaireCode: filters.savoirFaireCode,
       modeExerciceCodes:
         modeExerciceCodes.length > 0 ? modeExerciceCodes : [...MODE_EXERCICE_ACTIVITE_REGULIERE],
-      categorieCodes:
-        input.categorieCodes && input.categorieCodes.length > 0 ? input.categorieCodes : ["C", "M"],
+      categorieCodes: filters.categorieCodes,
       methodologie:
         "Densité PS = count(RPPS matching filtres) / population municipale × 100 000. Default : médecins en activité régulière (libéral + salarié + mixte) hors étudiants — méthodo DREES.",
     },

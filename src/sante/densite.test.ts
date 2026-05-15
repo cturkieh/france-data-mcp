@@ -87,7 +87,7 @@ describe("densiteProfessionnelsSante", () => {
       professionCode: "10",
       savoirFaireCode: null,
       modeExerciceCodes: ["L", "S", "M"],
-      categorieCodes: [],
+      categorieCodes: ["C"],
     });
     expect(result.zone.zone).toBe("75");
     expect(result.zone.countPs).toBe(7900);
@@ -96,6 +96,11 @@ describe("densiteProfessionnelsSante", () => {
     expect(result.zone.densitePour100k).toBe(round2((7900 / 2103778) * 100_000));
     expect(result.parametres.professionCode).toBe("10");
     expect(result.parametres.modeExerciceCodes).toEqual(["L", "S", "M"]);
+    // Cohérence V0.10.2 : le param échoué == ce qui est envoyé au count
+    // (source unique CATEGORIE_CODES_DEFAUT=['C']). Garde contre la
+    // ré-introduction d'un défaut divergent ['C','M'] côté echo
+    // (incohérence panorama vs standalone corrigée).
+    expect(result.parametres.categorieCodes).toEqual(["C"]);
     expect(result.parametres.methodologie).toContain("DREES");
     expect(result.comparaisonNationale).toBeUndefined();
   });
@@ -215,7 +220,7 @@ describe("densiteProfessionnelsSante", () => {
       professionCode: "10",
       savoirFaireCode: null,
       modeExerciceCodes: ["L", "S", "M"],
-      categorieCodes: [],
+      categorieCodes: ["C"],
     });
     expect(popByCommuneSpy).toHaveBeenCalledWith("59009");
     expect(result.zone.niveau).toBe("commune");

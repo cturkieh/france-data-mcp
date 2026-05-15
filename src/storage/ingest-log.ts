@@ -19,7 +19,7 @@ import { getUntypedAnonClient } from "./supabase.js";
  * `ingest_log` par les scripts dans `scripts/ingest/*`). Les sources live
  * (DINUM, INSEE, ANS FHIR) ne passent pas par ingest_log car non DB-backed.
  */
-export const INGEST_SOURCES = ["finess", "ameli_ps", "rpps"] as const;
+export const INGEST_SOURCES = ["finess", "ameli_ps", "rpps", "cds"] as const;
 export type IngestSource = (typeof INGEST_SOURCES)[number];
 
 /**
@@ -31,6 +31,7 @@ export const INGEST_CADENCE: Record<IngestSource, string> = {
   finess: "bimestrielle (~tous les 2 mois côté DREES)",
   ameli_ps: "hebdomadaire (côté Annuaire Santé Ameli)",
   rpps: "mensuelle (côté Annuaire Santé ANS)",
+  cds: "hebdomadaire (Centres de Santé — Annuaire Ameli CNAM)",
 };
 
 export interface IngestFreshnessRow {
@@ -80,8 +81,9 @@ export async function getDataFreshness(): Promise<IngestFreshnessRow[]> {
     return cache.value;
   }
 
-  // Limit raisonnable : 100 rows / source max = 300 rows. Plus que largement
-  // suffisant pour trouver le dernier success même après une série d'échecs.
+  // Limit raisonnable : 100 rows / source max (= 100 × INGEST_SOURCES.length).
+  // Plus que largement suffisant pour trouver le dernier success même après
+  // une série d'échecs.
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase
     .from("ingest_log")
