@@ -112,7 +112,7 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.10.2 — en production.** 34 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 873 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`.
+✅ **V0.10.3 — en production.** 34 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 880 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`.
 
 Historique complet : [CHANGELOG](CHANGELOG.md).
 

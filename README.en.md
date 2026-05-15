@@ -79,7 +79,7 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.10.2 — in production.** 34 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 873 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
+✅ **v0.10.3 — in production.** 34 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 880 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
 
 Full history: [CHANGELOG](CHANGELOG.md).
 
