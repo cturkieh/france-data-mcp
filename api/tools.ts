@@ -17,6 +17,7 @@ import {
   listAmeliTypesPs,
 } from "../src/sante/ameli-db.js";
 import { lookupPractitionerByRpps } from "../src/sante/ans-fhir.js";
+import { getCdsByFiness, getCdsInRadius } from "../src/sante/cds-db.js";
 import { type CoverageInput, getCoverageFinessVsSireneInRadius } from "../src/sante/coverage.js";
 import {
   compareRaisonSocialeFinessVsRpps,
@@ -45,6 +46,7 @@ import {
   searchEntreprises,
 } from "../src/sante/index.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
+import { inspectSite } from "../src/sante/inspect-site.js";
 import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
 import {
   buildCategorieCodes,
@@ -1334,6 +1336,113 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
+    name: "centres_sante_in_radius",
+    description:
+      "Recherche des Centres de Santé (CDS) dans un rayon géographique (PostGIS ST_DWithin). Source : Annuaire santé Ameli, Assurance Maladie (mention obligatoire L.1461-2 CSP — sync hebdomadaire CNAM). Différenciateur métier vs `etablissements_finess_in_radius` filtré famille=124 : expose **carte_vitale**, **APCV**, **spécialités exercées sur place** (Annexe A nomenclature CNAM, ~70 codes).\n\nCDS = structures de soins ambulatoires non lucratives encadrées L.6323-1 CSP (associations, mutuelles, communes, hôpitaux). Volume ~3K en France. Filtres :\n- `specialite_codes` : array Annexe A (ex: ['01'] médecine générale, ['53'] dentaire). Match any-of — retourne les CDS qui exercent AU MOINS UNE des spécialités demandées.\n- `accepte_carte_vitale` : true / false / omis. Quasi-totalité accepte CV en pratique → filtre surtout utile en `false` pour audits.\n- `type_etab_codes` : ['124'] CDS standard, ['125'] CDS dentaire (deprecated CNAM, en voie d'extinction).\n\nCoords = centroïde commune (~3 km moyenne) — pour précision adresse, pivoter via `etab_finess` retourné avec `etablissement_by_finess`. PAS d'horaires/tarifs/secteur 1/2 (retirés du nouvel annuaire CNAM post-2025).\n\nAlias acceptés : `radius`/`radius_meters` → `radius_km`, `latitude`/`longitude` → `lat`/`lon`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lon: { type: "number", description: "Longitude du centre (WGS84). Ex: 2.317 (Paris)." },
+        lat: { type: "number", description: "Latitude du centre (WGS84). Ex: 48.872 (Paris)." },
+        radius_km: {
+          type: "number",
+          description: "Rayon en km (0.1-50, défaut 5).",
+          minimum: RADIUS_MIN_KM,
+          maximum: RADIUS_MAX_KM,
+          default: 5,
+        },
+        specialite_codes: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Codes spécialité CNAM Annexe A (ex: ['01'] médecine générale, ['53'] chirurgien-dentiste). Match any-of. Vide = pas de filtre spécialité.",
+        },
+        accepte_carte_vitale: {
+          type: "boolean",
+          description:
+            "Filtre par acceptation carte Vitale. true = uniquement CDS qui acceptent CV, false = uniquement ceux qui ne l'acceptent pas. Omis = pas de filtre.",
+        },
+        type_etab_codes: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Codes type établissement Annexe B : ['124'] CDS standard (défaut implicite), ['125'] CDS dentaire deprecated. Vide = tous types.",
+        },
+        limit: {
+          type: "number",
+          description: "Nombre max de résultats (1-500, défaut 100).",
+          minimum: 1,
+          maximum: 500,
+          default: 100,
+        },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
+      },
+      required: ["lon", "lat"],
+    },
+    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        radius: "radius_km",
+        radius_meters: "radius_km",
+        latitude: "lat",
+        longitude: "lon",
+      });
+      const { lon, lat } = requireLonLatStrict(args);
+      const radiusKm = coerceNumber(args.radius_km, "radius_km") ?? 5;
+      const limit = coerceNumber(args.limit, "limit");
+      const input: Parameters<typeof getCdsInRadius>[0] = {
+        center: { lon, lat },
+        radiusKm,
+      };
+      if (Array.isArray(args.specialite_codes) && args.specialite_codes.length > 0) {
+        input.specialiteCodes = args.specialite_codes.filter(
+          (s): s is string => typeof s === "string",
+        );
+      }
+      if (typeof args.accepte_carte_vitale === "boolean") {
+        input.accepteCarteVitale = args.accepte_carte_vitale;
+      }
+      if (Array.isArray(args.type_etab_codes) && args.type_etab_codes.length > 0) {
+        input.typeEtabCodes = args.type_etab_codes.filter(
+          (s): s is string => typeof s === "string",
+        );
+      }
+      if (limit !== undefined) input.limit = limit;
+      // `cds` n'est pas encore dans le type IngestSource côté freshness (toujours
+      // typé sur les 3 sources V0.9). En attendant l'ajout dans `withFreshness`,
+      // on retourne sans freshness — fonctionnellement OK, l'utilisateur peut
+      // appeler `data_freshness` séparément avec source='cds'.
+      return getCdsInRadius(input);
+    },
+  },
+  {
+    name: "centres_sante_by_finess",
+    description:
+      "Récupère le détail d'un Centre de Santé (CDS) par son numéro FINESS. Différenciateur métier vs `etablissement_by_finess` : expose **carte_vitale**, **APCV**, et **spécialités exercées sur place** (Annexe A CNAM). Retourne un `LookupResult` discriminé par `found`.\n\n`found: true` → payload CDS complet (raison sociale, accepte_carte_vitale/apcv, specialites.codes/libelles alignés, type_etab 124/125, adresse, coords centroïde commune, telephone). `found: false` → `{found: false, key, lookupStatus: 'not_found', message}` quand le numéro FINESS pointe vers une structure non-CDS (hôpital, EHPAD, labo) ou un CDS très récent (CNAM latence ~1 sem).\n\nSource : Annuaire santé Ameli, Assurance Maladie (sync hebdomadaire CNAM, mention obligatoire L.1461-2 CSP). Pour les structures non-CDS, utiliser `etablissement_by_finess`.\n\nAlias acceptés : `numFiness`/`finess`/`etab_finess` → `num_finess`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: {
+          type: "string",
+          description: "Numéro FINESS exact 9 chiffres. Ex: '750000123'.",
+        },
+      },
+      required: ["num_finess"],
+    },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        numFiness: "num_finess",
+        finess: "num_finess",
+        etab_finess: "num_finess",
+      });
+      const numFiness = requireFinessId(args);
+      return getCdsByFiness(numFiness);
+    },
+  },
+  {
     name: "professionnels_in_radius",
     description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo : centroïde commune (~3 km en moyenne — adapté à l'analyse de densité, pas au géocodage adresse). ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
@@ -1834,6 +1943,45 @@ export const TOOLS: McpTool[] = [
       const familles = parseFamilles(args.finess_familles);
       if (familles !== undefined) input.finessFamilles = familles;
       return panoramaSanteTerritoire(input);
+    },
+  },
+  {
+    name: "inspect_site",
+    description:
+      "Vue 360 d'un établissement de santé en 1 appel (V0.10). Pendant naturel de `panorama_sante_territoire` côté **site** : agrège en parallèle (a) identification FINESS DREES (raison sociale, adresse, téléphone), (b) statut administratif SIRENE via le resolver SIRET (verdicts site + groupe, best_match, SIREN explorés, dinum_errors, explication LLM-friendly), (c) professionnels rattachés via num_finess (sample borné + flag `truncated` si le site a plus de PS — PAS un count total), (d) historique INSEE (timeline périodes administratives par SIRET candidat).\n\nRemplace 3 appels MCP individuels (`verifier_site_actif` + `rpps_dans_etablissement` + `historique_etablissement`) par 1 seul. Utile pour : prospection (qualifier un site avant outreach), audit territorial (cross-check rapide d'un FINESS suspect), enrichissement CRM en batch.\n\n**Format de retour** : objet `LookupResult`. Quand `found: true`, payload avec 4 sections (finess, statut_site, professionnels, historique). La section `historique` peut être `available: false` quand le FINESS existe mais qu'aucun SIRET candidat n'a été identifié (RPPS vide + DINUM 0 match) — dans ce cas le `message` reprend celui de `historique_etablissement`. Quand `num_finess` est absent de FINESS DREES, retourne `{found: false, lookupStatus: 'not_found', message}`.\n\nCoût : 3 sous-appels parallèles. Cache PostgreSQL absorbe la duplication FINESS-RPC ; le pivot RPPS→DINUM est exécuté en double (verifier + historique partagent la cascade), surcoût p95 ≤ 600 ms — acceptable pour un agrégateur. Pour les besoins ciblés (juste le verdict, juste l'historique), préférer les tools individuels.\n\nAlias acceptés : `numFiness`/`finess`/`id` → `num_finess`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: {
+          type: "string",
+          description: "Numéro FINESS exact 9 chiffres. Ex: '590048997'.",
+        },
+        rpps_limit: {
+          type: "integer",
+          description:
+            "Nombre max de PS dans `professionnels.sample`. `professionnels.count` = taille du sample (≤ cette borne), pas le total du site ; `truncated: true` signale qu'il y a davantage de PS. Borné [1, 50]. Défaut 10.",
+        },
+      },
+      required: ["num_finess"],
+    },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, {
+        numFiness: "num_finess",
+        finess: "num_finess",
+        id: "num_finess",
+      });
+      const numFiness = requireFinessId(args);
+      const input: Parameters<typeof inspectSite>[0] = { numFiness };
+      // `coerceNumber` (et non `Number()`) pour un message d'erreur fidèle à
+      // la valeur reçue (`Number("abc")` → NaN masquerait l'input réel) et
+      // l'homogénéité avec tous les autres tools numériques du fichier. Le
+      // clamp [1,50] + RangeError reste délégué à `inspectSite` (boundary lib,
+      // source unique des bornes). `coerceNumber` retourne undefined si absent.
+      const rppsLimit = coerceNumber(args.rpps_limit, "rpps_limit");
+      if (rppsLimit !== undefined) input.rppsLimit = rppsLimit;
+      return inspectSite(input);
     },
   },
   {

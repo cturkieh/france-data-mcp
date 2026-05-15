@@ -182,3 +182,49 @@ export function expectRpcRows<T>(rpc: string, data: unknown): T[] {
   }
   return data as T[];
 }
+
+/**
+ * Shape commune des réponses de listing : `count` post-troncature + flag
+ * `truncated` + `results` mappés + `query_metadata`. Générique sur la row
+ * brute RPC (`TRaw`) et la row mappée (`TOut`).
+ *
+ * `TMeta` est laissé générique (au lieu d'importer `QueryMetadata` depuis
+ * `core/query-metadata.ts`) pour garder `db-helpers.ts` sans dépendance
+ * vers `core/` — chaque module passe sa metadata déjà construite.
+ */
+export interface ListQueryResult<TOut, TMeta> {
+  count: number;
+  truncated: boolean;
+  results: TOut[];
+  query_metadata: TMeta;
+}
+
+/**
+ * Factorise le pattern `expectRpcRows` → détection truncation (`rows.length >
+ * limit`) → slice → map → `{ count, truncated, results, query_metadata }`.
+ * Introduit en V0.10 et adopté par `cds-db.ts`. Les 5 occurrences manuelles
+ * pré-existantes (`finess-db.ts`, `ameli-db.ts`, `rpps-db.ts` ×3) restent à
+ * migrer ici : refactor sur code stable+testé suivi en backlog (PR dédiée
+ * avec tests de non-régression, hors scope feature V0.10).
+ *
+ * Le caller passe le `mapRow` qui transforme `TRaw` (row PostgREST brute) en
+ * `TOut` (shape métier). Le `limit` est la borne logique (le RPC est appelé
+ * avec `limit + 1` pour détecter la troncature — convention inchangée).
+ */
+export function buildListQueryResult<TRaw, TOut, TMeta>(
+  rpc: string,
+  data: unknown,
+  limit: number,
+  metadata: TMeta,
+  mapRow: (row: TRaw) => TOut,
+): ListQueryResult<TOut, TMeta> {
+  const rows = expectRpcRows<TRaw>(rpc, data);
+  const truncated = rows.length > limit;
+  const sliced = truncated ? rows.slice(0, limit) : rows;
+  return {
+    count: sliced.length,
+    truncated,
+    results: sliced.map(mapRow),
+    query_metadata: metadata,
+  };
+}

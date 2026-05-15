@@ -4,6 +4,106 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.10.0] — 2026-05-15
+
+**Minor — `inspect_site` agrégateur 360 + nouvelle source CDS (centres de santé).**
+
+Sprint V0.10.0 : 1 nouveau tool composé pour la vue 360 d'un établissement
+santé (pendant naturel de `panorama_sante_territoire` côté site), + nouvelle
+source d'ingestion CDS (centres de santé Annuaire Ameli CNAM) avec 2 tools
+MCP dédiés exposant la donnée métier carte_vitale / APCV / spécialités
+exercées sur place que FINESS catégorie 124 n'a pas. **34 tools exposés**
+(31 V0.9.4 + 3). 865 tests verts (+36 vs V0.9.4).
+
+### Ajouté
+
+- **`inspect_site(num_finess)`** — vue 360 d'un établissement santé en 1
+  call MCP. Composition pure de `verifier_site_actif` + `rpps_dans_etablissement`
+  + `historique_etablissement` en parallèle (`Promise.all`). Retourne 4
+  sections : identification FINESS (raison sociale, adresse, téléphone),
+  statut administratif SIRENE (verdicts site + groupe via SIRET resolver,
+  best_match, dinum_errors, explication LLM-friendly), professionnels
+  rattachés (count exact + sample), historique INSEE (timeline périodes).
+  Section `historique` encapsulée en `available: false` quand FINESS existe
+  mais aucun SIRET candidat (RPPS vide + DINUM 0 match) — au lieu d'un
+  silent dropping. `LookupResult` discriminé pour cohérence avec les
+  sous-tools. Surcoût admis : pivot RPPS→DINUM exécuté en double (verifier
+  + historique partagent la cascade), p95 ≤ 600 ms — acceptable pour un
+  agrégateur. Optimisation différée à V0.11+ via factor `_loadSiteContext`
+  dans `cross-source.ts`. Alias DX : `numFiness`/`finess`/`id` → `num_finess`.
+- **Source CDS — Centres de Santé** (Annuaire santé Ameli CNAM, ~3K
+  structures, sync hebdomadaire). Pipeline complet calqué sur Ameli PS :
+  - **Migrations SQL** :
+    - `20260515T010000_table_centres_sante` — table `centres_sante`
+      (PK `etab_finess` CHAR(9), donnée métier `accepte_carte_vitale` /
+      `accepte_apcv` BOOLEAN, `specialites_codes`/`libelles` TEXT[]
+      dénormalisé, `type_etab_code` 124/125, geog GENERATED STORED, RLS anon
+      SELECT). Indexes GIST sur geog, B-tree sur dept/insee/type, GIN sur
+      `specialites_codes` pour `?|` any-of performant.
+    - `20260515T010100_rpc_centres_sante_staging` — RPC SECURITY DEFINER
+      superset strict (lesson V0.5.1).
+    - `20260515T010200_canary_cds_extension` — étend `check_ingest_canary`
+      à la source `cds`, seed 2 cibles canary TODO à valider après 1ère
+      ingestion réelle.
+    - `20260515T010300_rpc_centres_sante_query` — RPCs `centres_sante_in_radius`
+      (PostGIS ST_DWithin + filtre GIN any-of spécialités + carte_vitale +
+      type_etab) et `centres_sante_by_finess` (lookup PK).
+  - **Script `scripts/ingest/cds.ts`** (276 lignes) — pattern download
+    SHA256 short-circuit + pre-validate + fetchAllCommunes + groupBy
+    `etab_finess` (volume bound ~600 KB RAM) + dédup spécialités via Map +
+    insert batched + atomic_swap + canary. Thresholds calibrés (MIN_CDS=2K,
+    MAX_CDS=5K, structural ≤ 1%, unmatched_locality ≤ 5%). Gestion des
+    leading zeros etab_finess + parseStrictBoolean + warn sur drift schéma
+    CNAM (carte_vitale = "1" / "yes" → false par défaut, observable ops).
+  - **Workflow `.github/workflows/ingest-cds.yml`** — cron lundi 06:00 UTC
+    (2h après le slot Ameli pour ne pas saturer data.gouv), timeout 15 min,
+    auto-issue on failure avec causes typiques pré-listées.
+  - **Lib `src/sante/cds-db.ts`** (200 lignes) — `getCdsInRadius` +
+    `getCdsByFiness` (LookupResult discriminé), shape métier propre
+    (`specialites: { codes, libelles }`, `type_etab: { code, libelle }`,
+    coords centroïde commune null si geom malformé — pas de Golfe-de-Guinée
+    silencieux).
+  - **Tools MCP** : `centres_sante_in_radius` (filtres `specialite_codes`
+    array any-of, `accepte_carte_vitale` boolean optionnel, `type_etab_codes`
+    array, alias DX radius/latitude) + `centres_sante_by_finess` (alias DX
+    numFiness/finess/etab_finess). Documentation stricte L.1461-2 CSP
+    "Source : Annuaire santé Ameli, Assurance Maladie".
+- **Type `IngestSource`** étendu à `"cds"` (4 sources désormais : finess,
+  ameli_ps, rpps, cds).
+- **GeoPrecision `centroide_commune_cds`** — note dédiée mentionnant la
+  source CNAM + L.1461-2 CSP + pivot via `etab_finess` pour précision
+  adresse. Helper `cdsRadiusMetadata`.
+- **Helper générique `buildListQueryResult<TRaw,TOut,TMeta>`** (`db-helpers.ts`)
+  — factorise le pattern `expectRpcRows → truncation → slice → map`. Adopté
+  par `cds-db.ts` ; migration des 5 occurrences pré-existantes au backlog.
+- **Garde anti-drift booléen CDS** — `parseStrictBoolean` signale les
+  fallbacks (valeur ni "true" ni "false") ; l'ingestion REFUSE le swap si
+  le taux dépasse `BOOLEAN_FALLBACK_THRESHOLD` (1 %). Empêche de publier
+  une table où `accepte_carte_vitale` est massivement faux si CNAM bascule
+  le schéma `true/false` → `1/0` (donnée santé métier différenciante).
+- **Const `CDS_TYPE_ETAB`** {STANDARD: "124", DENTAIRE: "125"} — source de
+  vérité unique pour les codes type établissement Annexe B.
+- **Script package.json `ingest:cds`** — `tsx scripts/ingest/cds.ts`.
+
+### Notes opérationnelles
+
+- **Migrations à appliquer en prod manuellement** via Dashboard SQL Editor
+  (les 4 fichiers `20260515T010*`) ou via `mcp__claude_ai_Supabase__apply_migration`.
+  L'ordre est important : `010000` (table) → `010100` (staging RPC) →
+  `010200` (canary) → `010300` (query RPCs).
+- **Canary CDS inactif par design** — la migration `010200` ne seed AUCUNE
+  cible `cds` (les vrais `etab_finess` notoires sont inconnus avant la 1ère
+  ingestion). Le RPC retourne `[]` pour `cds` (inactif sans bruit, comme
+  `ameli_ps`) — pas de cry-wolf. Activation via migration corrective
+  `_canary_cds_real_seeds` une fois 3-5 CDS stables identifiés en base.
+- **`withFreshness` non câblé pour `cds`** — `centres_sante_in_radius` ne
+  passe pas par le wrapper freshness pour l'instant (le type `IngestSource`
+  côté freshness reste sur 3 sources). Workaround : appeler `data_freshness`
+  séparément avec `source: "cds"`. Câblage propre prévu en V0.10.1.
+- **Bump version** : 3 sources (`package.json`, `server.json`,
+  `src/core/version.ts`) à passer de `0.9.4` à `0.10.0` AVANT release npm
+  (séquence `scripts/release.sh`).
+
 ## [0.9.4] — 2026-05-14
 
 **Patch — fix timeout 57014 Ameli + polish dette technique.**

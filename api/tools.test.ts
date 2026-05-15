@@ -1082,14 +1082,14 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
 });
 
 describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
-  it("expose un outputSchema sur les tools object-root (24 tools attendus)", () => {
+  it("expose un outputSchema sur les tools object-root (27 tools attendus)", () => {
     const withOutput = TOOLS.filter((t) => t.outputSchema !== undefined);
-    // 30 tools (V0.8 ajoute 5 tools : population x2, densite x2, lister_specialites)
+    // 33 tools après V0.10 (+ inspect_site, centres_sante_in_radius, centres_sante_by_finess)
     // - 3 spec-violating (autocomplete_commune array-root, geocode_adresse / reverse_geocode nullable)
     // - 3 V0.8 sans outputSchema (densite_professionnels_sante, densite_etablissements_sante,
     //   lister_specialites_medicales — objets riches imbriqués, schema détaillé reporté en V0.8.1)
-    // = 24.
-    expect(withOutput).toHaveLength(24);
+    // = 27.
+    expect(withOutput).toHaveLength(27);
   });
 
   it("omet volontairement l'outputSchema pour les tools array-root ou nullable", () => {

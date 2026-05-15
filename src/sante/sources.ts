@@ -12,4 +12,6 @@ export const SOURCE_LABELS = {
   rpps: "RPPS / Annuaire Santé ANS (Supabase, mensuel)",
   finess: "FINESS DREES (Supabase, bimensuel)",
   melodi: "INSEE Melodi (DS_POPULATIONS_REFERENCE)",
+  dinum: "Recherche Entreprises DINUM (live)",
+  insee_sirene: "INSEE SIRENE V3.11 (live, fallback)",
 } as const;

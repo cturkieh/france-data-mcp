@@ -27,6 +27,7 @@ export type GeoPrecision =
   | "lambert93_natif_finess"
   | "centroide_commune_ameli"
   | "centroide_commune_ans"
+  | "centroide_commune_cds"
   | "structure_finess";
 
 /**
@@ -55,6 +56,8 @@ const SOURCE_NOTE: Record<GeoPrecision, string> = {
     "Coordonnées RPPS/ANS = centroïde commune (~3 km moyenne). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour une précision adresse, croiser num_finess avec etablissement_by_finess.",
   structure_finess:
     "Liste rattachée à un FINESS site. Le mode_exercice révèle la nature du lien (libéral / salarié). Couverture RPPS quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts.",
+  centroide_commune_cds:
+    "Coordonnées CDS = centroïde commune (~3 km moyenne) — pas de coords natives dans le CSV CNAM. Source : Annuaire santé Ameli, Assurance Maladie (mention obligatoire L.1461-2 CSP). Pivot via etab_finess vers FINESS DREES pour précision adresse.",
 };
 
 const HAVERSINE_NOTE =
@@ -93,6 +96,8 @@ export const rppsDeptMetadata = (): QueryMetadata => buildMetadata("centroide_co
 
 export const rppsEtablissementMetadata = (): QueryMetadata =>
   buildMetadata("structure_finess", false);
+
+export const cdsRadiusMetadata = (): QueryMetadata => buildMetadata("centroide_commune_cds", true);
 
 /**
  * Métadonnées pour `rpps_search_by_name` : recherche fuzzy par identité. La

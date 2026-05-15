@@ -1,0 +1,66 @@
+# .github/workflows/ingest-cds.yml
+name: Ingest Centres de Santé (CDS)
+
+on:
+  schedule:
+    # Mondays 06:00 UTC. CNAM regenerate l'extract dans la nuit dimanche → lundi
+    # (documenté §2.B doc PDF). On laisse 2h de marge après le slot Ameli (04:00)
+    # pour ne pas saturer le rate limit data.gouv.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+# Never run on pull_request - secrets are not available there, by design.
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ingest-cds
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # CDS = ~3 Mo CSV / ~3K CDS uniques (post-dédup) + 35K commune fetch.
+    # Full run < 2 min en local ; 15 min couvrent les jours data.gouv lents
+    # et la contention PostgREST.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22 pour WebSocket natif — même raison que finess/ameli.
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run CDS ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: pnpm ingest:cds
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[ingestion-failure] CDS run failed (run #${context.runId})`,
+              body: `Le workflow CDS (centres de santé) a échoué.\n\n` +
+                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                    `Check la table \`ingest_log\` pour la dernière ligne \`failed\` (source = 'cds') — error_phase et error_message. ` +
+                    `Causes typiques : CDS_CSV_URL stale (resource id rotated par CNAM), unmatched_locality > 5% (INSEE drift), CDS count < 2K (troncature CSV), structural skips > 1% (rename colonne CNAM).`,
+              labels: ['ingestion-failure', 'cds'],
+            })
