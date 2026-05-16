@@ -73,12 +73,63 @@ function indexColumnLists(sql: string, table: string): Set<string> {
   return out;
 }
 
+/**
+ * Listes de colonnes des index prod RÉELLEMENT VIVANTS sur `<table>` après
+ * application de toutes les migrations : `CREATE INDEX` capturé PAR NOM, puis
+ * retiré du set si une migration ultérieure `DROP INDEX <nom>` le supprime.
+ *
+ * Sans ça (post-mortem dette #3, 2026-05-16), `indexColumnLists` retient un
+ * index créé PUIS droppé (ex. `rpps_insee_idx (code_insee)` retiré car
+ * redondant avec `(code_insee, id)`, ou `rpps_profession_savoir_faire_partial_idx`
+ * remplacé par une matview) : il l'exigerait à tort dans la staging-create →
+ * faux NÉGATIF inverse (le garde-fou réclame un index qu'on a sciemment
+ * supprimé, bloquant un DROP légitime). On rejoue create/drop dans l'ordre
+ * d'application (= ordre de concaténation des fichiers triés).
+ *
+ * `DROP INDEX` n'est pas table-scopé en Postgres (nom global) : on ne
+ * supprime que les noms qu'on suit pour cette table, les autres sont no-op.
+ * Une recréation par le swap mensuel (staging-create) n'est PAS visible ici
+ * (c'est un RENAME runtime, pas un `CREATE INDEX ON <table>`) — correct : ce
+ * que ce set modélise, ce sont les index déclarés en dur sur la prod par
+ * migration, qui DOIVENT être mirrorés dans staging-create pour survivre.
+ *
+ * `dropRe` est ANCRÉ sur le `;` terminal (+ `cascade`/`restrict` optionnel) :
+ * `allMigrationsSql()` concatène les commentaires `--` et littéraux
+ * `COMMENT ON` (lowercased). Sans cette ancre, une PROSE de header WHY type
+ * « we drop index rpps_geog_gist someday » dé-trackerait silencieusement un
+ * index VIVANT perf-critique → faux négatif (le garde-fou cesse de l'exiger
+ * en staging) = exactement la classe de bug que ce fichier combat. `createRe`
+ * est auto-protégé (exige `on <table> (cols)`), pas `dropRe` → ancre requise.
+ * LIMITE ASSUMÉE : forme multi-noms `DROP INDEX a, b;` non gérée (seul `a`
+ * est capturé, `b` resterait tracké) — aucune migration ne l'utilise ; si un
+ * jour oui, ce commentaire signale qu'il faut étendre le parsing.
+ */
+function liveIndexColumnLists(sql: string, table: string): Set<string> {
+  const createRe = `create\\s+(?:unique\\s+)?index\\s+(?:concurrently\\s+)?(?:if\\s+not\\s+exists\\s+)?([a-z_][a-z0-9_]*)\\s+on\\s+(?:public\\.)?${table}\\b[^(;]*?\\(((?:[^()]|\\([^()]*\\))*)\\)`;
+  const dropRe =
+    "drop\\s+index\\s+(?:concurrently\\s+)?(?:if\\s+exists\\s+)?([a-z_][a-z0-9_]*)\\s*(?:cascade|restrict)?\\s*;";
+  const re = new RegExp(`(?:${createRe})|(?:${dropRe})`, "g");
+  // name → liste de colonnes normalisée (dernier CREATE gagne ; DROP retire).
+  const live = new Map<string, string>();
+  for (const m of sql.matchAll(re)) {
+    const createName = m[1];
+    const createCols = m[2];
+    const dropName = m[3];
+    if (createName !== undefined && createCols !== undefined) {
+      live.set(createName, createCols.replace(/\s+/g, " ").trim());
+    } else if (dropName !== undefined) {
+      live.delete(dropName);
+    }
+  }
+  return new Set(live.values());
+}
+
 describe("staging-create est un superset des index prod (annuaire_ameli)", () => {
   it("chaque liste de colonnes d'index prod existe à l'identique dans la staging-create", () => {
     const stagingBody = latestFunctionBody("ingest_create_annuaire_ameli_staging");
     expect(stagingBody.length).toBeGreaterThan(0);
 
-    const prodCols = indexColumnLists(allMigrationsSql(), "annuaire_ameli");
+    const prodCols = liveIndexColumnLists(allMigrationsSql(), "annuaire_ameli");
     const stagingCols = indexColumnLists(stagingBody, "annuaire_ameli_staging");
 
     // Sanity : geog + 5 base + 2 composites + covering => au moins 6 distincts.
@@ -112,9 +163,12 @@ describe("staging-create est un superset des index prod (rpps)", () => {
     // Généralisation V0.10.2 du garde-fou à la table RPPS (2,23 M lignes).
     // Même classe de bug que annuaire_ameli : un index perf-critique ajouté
     // sur `rpps` mais non répliqué dans `ingest_create_rpps_staging()` est
-    // PERDU au swap mensuel → ex. perte de `rpps_insee_idx` =
-    // re-régression P0 `rpps_in_radius` (le LATERAL early-stop V0.10.2 en
-    // dépend) ou de `rpps_geog_gist` = timeout sur les autres RPC géo.
+    // PERDU au swap mensuel → ex. perte de `rpps_insee_id_idx (code_insee, id)`
+    // = re-régression P0 `rpps_in_radius` (le LATERAL early-stop V0.10.2 en
+    // dépend) ou de `rpps_geog_gist` = timeout sur les autres RPC géo. Le
+    // garde-fou compare le set prod VIVANT (DROP honoré) — un index
+    // sciemment supprimé (ex. `rpps_insee_idx` mono-colonne, dette #3) n'est
+    // donc plus exigé dans la staging-create.
     //
     // Limite connue & ACCEPTÉE (différente du bloc annuaire_ameli) : `rpps`
     // a des index couvrants (INCLUDE) et partiels (WHERE) légitimes
@@ -126,7 +180,7 @@ describe("staging-create est un superset des index prod (rpps)", () => {
     const stagingBody = latestFunctionBody("ingest_create_rpps_staging");
     expect(stagingBody.length).toBeGreaterThan(0);
 
-    const prodCols = indexColumnLists(allMigrationsSql(), "rpps");
+    const prodCols = liveIndexColumnLists(allMigrationsSql(), "rpps");
     const stagingCols = indexColumnLists(stagingBody, "rpps_staging");
 
     // Sanity : geog gist + rpps_id + dept + profession + mode + num_finess
@@ -137,8 +191,58 @@ describe("staging-create est un superset des index prod (rpps)", () => {
     const missing = [...prodCols].filter((c) => !stagingCols.has(c));
     expect(
       missing,
-      `Index prod sur rpps absents (par liste de colonnes clé) de ingest_create_rpps_staging() — seront PERDUS au prochain swap mensuel → re-régression timeout 57014 (rpps_in_radius dépend de rpps_insee_idx) : ${JSON.stringify(missing)}`,
+      `Index prod sur rpps absents (par liste de colonnes clé) de ingest_create_rpps_staging() — seront PERDUS au prochain swap mensuel → re-régression timeout 57014 (rpps_in_radius dépend de rpps_insee_id_idx) : ${JSON.stringify(missing)}`,
     ).toEqual([]);
+  });
+});
+
+describe("liveIndexColumnLists honore DROP INDEX (dette #3)", () => {
+  it("rpps_insee_idx (code_insee) droppé → 'code_insee' seul SORT du set prod vivant", () => {
+    const sql = allMigrationsSql();
+    const live = liveIndexColumnLists(sql, "rpps");
+    // L'index mono-colonne a bien été créé puis droppé : il ne doit plus
+    // être réclamé par le garde-fou (sinon il bloque un DROP légitime).
+    expect(sql).toContain("drop index if exists rpps_insee_idx");
+    expect(live.has("code_insee")).toBe(false);
+    // Le composite qui le remplace, lui, reste vivant (jamais droppé).
+    expect(live.has("code_insee, id")).toBe(true);
+  });
+
+  it("naive (sans DROP) verrait encore 'code_insee' — preuve que la correction est nécessaire", () => {
+    const naive = indexColumnLists(allMigrationsSql(), "rpps");
+    expect(naive.has("code_insee")).toBe(true);
+  });
+
+  it("un index créé puis recréé garde sa DERNIÈRE liste de colonnes", () => {
+    const sql = [
+      "CREATE INDEX foo_idx ON rpps (a);",
+      "DROP INDEX IF EXISTS foo_idx;",
+      "CREATE INDEX foo_idx ON rpps (a, b);",
+    ]
+      .join("\n")
+      .toLowerCase();
+    const live = liveIndexColumnLists(sql, "rpps");
+    expect(live.has("a, b")).toBe(true);
+    expect(live.has("a")).toBe(false);
+  });
+
+  it("une PROSE de commentaire 'drop index X someday' ne dé-tracke PAS un index vivant", () => {
+    const sql = [
+      "CREATE INDEX rpps_geog_gist ON rpps USING gist (geog);",
+      "-- on pourrait drop index rpps_geog_gist someday mais pas maintenant",
+      "-- le DROP de rpps_geog_gist serait catastrophique",
+    ]
+      .join("\n")
+      .toLowerCase();
+    const live = liveIndexColumnLists(sql, "rpps");
+    expect(live.has("geog")).toBe(true);
+  });
+
+  it("DROP INDEX réel (avec ;) dé-tracke même suivi de CASCADE", () => {
+    const sql = ["CREATE INDEX bar_idx ON rpps (z);", "DROP INDEX IF EXISTS bar_idx CASCADE;"]
+      .join("\n")
+      .toLowerCase();
+    expect(liveIndexColumnLists(sql, "rpps").has("z")).toBe(false);
   });
 });
 

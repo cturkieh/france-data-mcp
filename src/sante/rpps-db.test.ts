@@ -19,6 +19,7 @@ import {
   CATEGORIE_CODE_AGENT_PUBLIC,
   CATEGORIE_CODE_CIVIL,
   CATEGORIE_CODE_ETUDIANT,
+  assertKnownRppsCodes,
   buildCategorieCodes,
   countRppsByCommune,
   getRppsById,
@@ -453,5 +454,82 @@ describe("getRppsInRadius — geo_precision par PS (B5)", () => {
     const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
     expect(out.results[0]?.coords).toBeNull();
     expect(out.results[0]?.geo_precision).toBeUndefined();
+  });
+});
+
+describe("assertKnownRppsCodes (dette #1 — garde-fou nomenclature ANS)", () => {
+  beforeEach(() => {
+    mockRpc.mockReset();
+  });
+
+  it("no-op (aucun appel RPC) quand ni profession ni savoir_faire fournis", async () => {
+    await expect(assertKnownRppsCodes({})).resolves.toBeUndefined();
+    await expect(
+      assertKnownRppsCodes({ professionCode: null, savoirFaireCode: null }),
+    ).resolves.toBeUndefined();
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  it("appelle rpps_nomenclature_exists avec les codes fournis", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [{ profession_known: true, savoir_faire_known: true }],
+      error: null,
+    });
+    await assertKnownRppsCodes({ professionCode: "10", savoirFaireCode: "SM04" });
+    expect(mockRpc).toHaveBeenCalledWith("rpps_nomenclature_exists", {
+      p_profession_code: "10",
+      p_savoir_faire_code: "SM04",
+    });
+  });
+
+  it("résout sans erreur quand les codes sont connus", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [{ profession_known: true, savoir_faire_known: true }],
+      error: null,
+    });
+    await expect(
+      assertKnownRppsCodes({ professionCode: "10", savoirFaireCode: "SM04" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("RangeError si profession_code inconnu (mappe JSON-RPC -32602)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [{ profession_known: false, savoir_faire_known: true }],
+      error: null,
+    });
+    await expect(assertKnownRppsCodes({ professionCode: "999" })).rejects.toBeInstanceOf(
+      RangeError,
+    );
+  });
+
+  it("RangeError si savoir_faire_code inconnu (code Ameli homographe)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [{ profession_known: true, savoir_faire_known: false }],
+      error: null,
+    });
+    await expect(assertKnownRppsCodes({ savoirFaireCode: "10" })).rejects.toThrow(
+      /savoir_faire_code '10'/,
+    );
+  });
+
+  it("ne signale PAS un code non fourni même si la RPC le dit false", async () => {
+    // profession non fournie → profession_known:false ignoré (rien à valider).
+    mockRpc.mockResolvedValueOnce({
+      data: [{ profession_known: false, savoir_faire_known: true }],
+      error: null,
+    });
+    await expect(assertKnownRppsCodes({ savoirFaireCode: "SM04" })).resolves.toBeUndefined();
+  });
+
+  it("Error (pas RangeError) si la RPC échoue — distinct d'un input invalide", async () => {
+    mockRpc.mockResolvedValueOnce({ data: null, error: { message: "boom" } });
+    const err = await assertKnownRppsCodes({ professionCode: "10" }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(RangeError);
+  });
+
+  it("Error si la RPC ne retourne aucune ligne (invariant violé, pas swallow)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    await expect(assertKnownRppsCodes({ professionCode: "10" })).rejects.toThrow(/invariant/i);
   });
 });

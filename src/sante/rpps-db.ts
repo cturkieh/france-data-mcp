@@ -317,6 +317,74 @@ export async function listSavoirFaireRpps(
   return out;
 }
 
+export interface AssertKnownRppsCodesInput {
+  /** Code profession ANS fourni par le caller (null/absent → non validé). */
+  professionCode?: string | null;
+  /** Code savoir_faire ANS fourni par le caller (null/absent → non validé). */
+  savoirFaireCode?: string | null;
+}
+
+/**
+ * Garde-fou nomenclature ANS (dette #1) : valide `professionCode` /
+ * `savoirFaireCode` contre la nomenclature RPPS réellement présente en base
+ * (matview `rpps_count_stats`, non filtrée = source réelle de `count_rpps`,
+ * via RPC `rpps_nomenclature_exists`).
+ *
+ * Pourquoi : sans ce garde-fou, un code inexistant ou un code Ameli
+ * homographe (`specialite_code`/`type_ps_code` — nomenclature DISTINCTE)
+ * passé à un paramètre ANS fait retourner `countPs=0` → densité 0 →
+ * faux « désert médical » plausible et INDISTINGUABLE d'un vrai zéro. La
+ * description MCP (audit B3) prévient le LLM mais ne protège pas un caller
+ * programmatique npm. Asymétrie corrigée : `densiteProfessionnelsSante`
+ * throw déjà si la population est introuvable, jamais si le code est inconnu.
+ *
+ * `RangeError` → mappe JSON-RPC `-32602 Invalid params` au boundary MCP.
+ * No-op (zéro I/O) si aucun code fourni : le happy-path défaut (médecin,
+ * pas de spécialité) n'est pas pénalisé d'un aller-retour RPC.
+ *
+ * Garde-fou matview ENTIÈREMENT vide géré côté SQL (renvoie `known=true`
+ * plutôt que de bloquer un code valide) — la table `rpps` réellement vide
+ * est attrapée en aval par `count_rpps*` (RAISE P0002). LIMITE : une matview
+ * STALE / à demi rafraîchie (non vide, code manquant) n'est PAS couverte ici
+ * NI par P0002 — c'est la responsabilité du refresh post-swap + audit trail
+ * ingest (refresh raté → run `failed`/`partial`, jamais noop silencieux).
+ */
+export async function assertKnownRppsCodes(input: AssertKnownRppsCodesInput): Promise<void> {
+  const professionCode = input.professionCode ?? null;
+  const savoirFaireCode = input.savoirFaireCode ?? null;
+  if (professionCode === null && savoirFaireCode === null) return;
+
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("rpps_nomenclature_exists", {
+    p_profession_code: professionCode,
+    p_savoir_faire_code: savoirFaireCode,
+  });
+  if (error) throw new Error(formatRpcError("rpps_nomenclature_exists", error));
+  const rows = expectRpcRows<{ profession_known: boolean; savoir_faire_known: boolean }>(
+    "rpps_nomenclature_exists",
+    data,
+  );
+  const row = rows[0];
+  if (!row) {
+    // La RPC retourne TOUJOURS exactement 1 ligne. 0 ligne = RPC remplacée /
+    // mockée incorrectement / drift schéma — fail loud, ne pas swallow (sinon
+    // le garde-fou serait silencieusement désactivé, pire que pas de garde-fou).
+    throw new Error("rpps_nomenclature_exists n'a retourné aucune ligne (invariant RPC violé)");
+  }
+  const unknown: string[] = [];
+  if (professionCode !== null && !row.profession_known) {
+    unknown.push(`profession_code '${professionCode}'`);
+  }
+  if (savoirFaireCode !== null && !row.savoir_faire_known) {
+    unknown.push(`savoir_faire_code '${savoirFaireCode}'`);
+  }
+  if (unknown.length > 0) {
+    throw new RangeError(
+      `Code(s) ANS inconnu(s) dans la nomenclature RPPS : ${unknown.join(", ")}. Rappel : les codes Ameli (specialite_code / type_ps_code) sont une nomenclature DISTINCTE des codes ANS (profession_code / savoir_faire_code) — un même nombre y désigne des choses différentes. Découvrir les codes ANS valides via le tool lister_specialites_medicales (savoir_faire) ou la nomenclature publique ANS (https://annuaire.sante.fr/web/site-pro/extractions-publiques).`,
+    );
+  }
+}
+
 /**
  * Compte les PS RPPS matching les filtres (RPC `count_rpps` V0.8). Sert de
  * brique pour `densiteProfessionnelsSante` (cross-source RPPS+Melodi).

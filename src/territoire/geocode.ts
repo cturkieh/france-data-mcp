@@ -10,6 +10,7 @@
  * Doc : https://geoservices.ign.fr/documentation/services/services-geoplateforme/geocodage
  */
 
+import { parseCoordinates } from "../core/coords.js";
 import { fetchJson } from "../core/http.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
@@ -130,7 +131,24 @@ export async function geocodeMany(
   const url = `${BASE_URL}/search/?${params.toString()}`;
   const data = await fetchJson<ApiResponse>(url, { signal });
 
-  return data.features.map(toGeocodeResult);
+  return usableGeocodeResults(data.features, `q="${address}"`);
+}
+
+/**
+ * Mappe les features IGN en résultats exploitables (coords valides). Émet un
+ * warn AGRÉGÉ si l'IGN a renvoyé des features mais qu'AUCUNE n'est exploitable
+ * : sans ça un retour vide serait indistinguable côté caller de « adresse
+ * introuvable », alors que c'est une anomalie payload IGN à remonter (le
+ * caller — ex. coverage.ts — attribuerait à tort le vide aux coordonnées).
+ */
+function usableGeocodeResults(features: ApiFeature[], context: string): GeocodeResult[] {
+  const results = features.map(toGeocodeResult).filter((r): r is GeocodeResult => r !== null);
+  if (features.length > 0 && results.length === 0) {
+    console.warn(
+      `[france-data-mcp] geocode (${context}): IGN a renvoyé ${features.length} feature(s) mais toutes inexploitables — résultat vide ≠ « adresse introuvable », anomalie payload IGN.`,
+    );
+  }
+  return results;
 }
 
 /**
@@ -146,12 +164,33 @@ export async function reverseGeocode(
   });
   const url = `${BASE_URL}/reverse/?${params.toString()}`;
   const data = await fetchJson<ApiResponse>(url, { signal });
-  const feature = data.features[0];
-  return feature ? toGeocodeResult(feature) : null;
+  // Premier résultat exploitable : une 1re feature au payload dégradé
+  // (coords absentes) ne doit pas masquer un candidat valide en position 2+.
+  const results = usableGeocodeResults(data.features, `reverse ${point.lon},${point.lat}`);
+  return results[0] ?? null;
 }
 
-function toGeocodeResult(feature: ApiFeature): GeocodeResult {
-  const [lon, lat] = feature.geometry.coordinates;
+/**
+ * Convertit une feature IGN en `GeocodeResult`, ou `null` si la feature est
+ * inexploitable. `fetchJson` ne valide pas le payload (pas de Zod) : une
+ * feature dégradée peut ne pas porter de `coordinates` numériques finies.
+ * Sans ce garde-fou, `const [lon, lat] = coordinates` propagerait `undefined`
+ * dans `point` silencieusement (même anti-pattern que le score, fix B1). Une
+ * feature sans coords n'est pas "pas de résultat" : on warn + on l'écarte.
+ */
+function toGeocodeResult(feature: ApiFeature): GeocodeResult | null {
+  const coords = feature.geometry?.coordinates;
+  // `parseCoordinates` (helper partagé FINESS/DINUM/IGN) rejette
+  // null/undefined/NaN/non-finite → undefined. Le check `Array` en amont
+  // garde contre un `coordinates` primitif non-indexable (ex. number) sur
+  // lequel `coords[0]` serait silencieusement undefined.
+  const point = Array.isArray(coords) ? parseCoordinates(coords[0], coords[1]) : undefined;
+  if (!point) {
+    console.warn(
+      `[france-data-mcp] geocode: feature sans coordonnées exploitables (label: "${feature.properties?.label ?? "<absent>"}", type: "${feature.properties?.type ?? "<absent>"}") — feature ignorée.`,
+    );
+    return null;
+  }
   const rawScore = feature.properties.score;
   const scoreValid = typeof rawScore === "number" && Number.isFinite(rawScore);
   if (!scoreValid) {
@@ -163,7 +202,7 @@ function toGeocodeResult(feature: ApiFeature): GeocodeResult {
     );
   }
   return {
-    point: { lon, lat },
+    point,
     label: feature.properties.label,
     score: scoreValid ? rawScore : 0,
     confidence_low: scoreValid ? rawScore < LOW_SCORE_THRESHOLD : true,

@@ -31,6 +31,7 @@ import { type CountFinessInput, countFiness } from "./finess-db.js";
 import {
   type CountRppsByCommuneInput,
   type CountRppsInput,
+  assertKnownRppsCodes,
   countRpps,
   countRppsByCommune,
   resolveCategorieCodes,
@@ -270,6 +271,14 @@ export async function densiteProfessionnelsSante(
   input: DensiteProfessionnelsSanteInput,
 ): Promise<DensiteProfessionnelsSanteResult> {
   const zoneSpec = resolveZone(input);
+  // Garde-fou nomenclature ANS AVANT les counts (dette #1) : un code
+  // profession/savoir_faire inconnu — ou un code Ameli homographe — ferait
+  // sinon countPs=0 → densité 0 → faux « désert médical » indistinguable
+  // d'un vrai zéro. No-op (zéro I/O) si le caller n'a fourni aucun code.
+  await assertKnownRppsCodes({
+    professionCode: input.professionCode,
+    savoirFaireCode: input.savoirFaireCode,
+  });
   const modeExerciceCodes = resolveModeExercice(input);
   const filters = buildRppsFilters(input, modeExerciceCodes);
 

@@ -4,6 +4,59 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+**Backlog Robustesse : 2 garde-fous anti-panne-silencieuse + nettoyage index
+prod + bump CI Node 24. Non released npm (maintainer-only).**
+
+### Added
+
+- **Dette #1 — validation nomenclature ANS au boundary.**
+  `densite_professionnels_sante` avec un `profession_code` / `savoir_faire_code`
+  inexistant — ou un code Ameli homographe (`specialite_code`/`type_ps_code`,
+  nomenclature DISTINCTE) passé à un paramètre ANS — renvoyait `countPs:0` →
+  densité 0 **silencieuse et indistinguable d'un vrai zéro** (faux « désert
+  médical » plausible). La description MCP (audit B3) prévenait le LLM mais ne
+  protégeait pas un caller programmatique npm. Nouveau garde-fou exécutable :
+  RPC `rpps_nomenclature_exists` (valide les 2 codes contre la matview
+  **non filtrée** `rpps_count_stats` = source réelle de `count_rpps` ;
+  matview vide → `known=true` pour ne jamais bloquer un code valide) + helper
+  lib `assertKnownRppsCodes` appelé dans `densiteProfessionnelsSante` AVANT
+  les counts, **no-op (zéro I/O) si aucun code explicite fourni**. Code
+  inconnu → `RangeError` (JSON-RPC `-32602`) orientant vers
+  `lister_specialites_medicales`. Lève l'asymétrie historique (la densité
+  throw déjà si population introuvable, jamais si code inconnu).
+
+### Fixed
+
+- **Dette #2 — `geocode` : coordonnées IGN dégradées propagées
+  silencieusement.** `toGeocodeResult` déstructurait `feature.geometry
+  .coordinates` sans validation → `lon/lat` `undefined` poussés dans `point`
+  (même anti-pattern que le score, fix B1). Désormais validé via le helper
+  partagé `parseCoordinates` ; une feature inexploitable est écartée
+  (`toGeocodeResult` → `null`, `geocodeMany` filtre, `reverseGeocode` itère
+  jusqu'au 1er candidat valide au lieu de prendre aveuglément `features[0]`).
+  Warn `[france-data-mcp]` par feature + warn **agrégé** quand l'IGN renvoie
+  des features mais qu'AUCUNE n'est exploitable (un résultat vide n'est alors
+  PAS « adresse introuvable » : anomalie payload remontée, plus de
+  mauvaise attribution côté caller type `coverage.ts`).
+
+### Changed
+
+- **Dette #3 (ops) — suppression de l'index `rpps_insee_idx (code_insee)`**
+  rendu redondant par le composite `rpps_insee_id_idx (code_insee, id)`
+  (V0.10.2). `DROP INDEX` prod + `ingest_create_rpps_staging` recréée en
+  superset strict MOINS l'index mono-colonne (parité staging conservée :
+  sans ça le swap mensuel le ré-introduisait). Garde-fou
+  `scripts/ingest/staging-parity.test.ts` généralisé : `liveIndexColumnLists`
+  honore désormais `DROP INDEX` PAR NOM (set prod *vivant* = creates − drops),
+  regex de drop ancrée sur le `;` terminal pour qu'une prose de commentaire
+  (« drop index X someday ») ne dé-tracke pas silencieusement un index vivant.
+- **Dette #4 (infra) — bump GitHub Actions vers des runtimes Node 24.**
+  `actions/checkout@v6`, `actions/setup-node@v6`, `pnpm/action-setup@v6`,
+  `actions/github-script@v9`, `supabase/setup-cli@v2` sur les 6 workflows
+  (le runtime Node 20 des actions était déprécié pour juin 2026).
+
 ## [0.10.5] — 2026-05-16
 
 **2e vague audit qualité claude.ai (P1→P4, re-test post-0.10.4) : garde-fou

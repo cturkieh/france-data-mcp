@@ -11,6 +11,10 @@ const countFinessSpy = vi.spyOn(finessDb, "countFiness");
 const popByDeptSpy = vi.spyOn(melodi, "getPopulationByDept");
 const popByCommuneSpy = vi.spyOn(melodi, "getPopulationByCommune");
 const popFranceSpy = vi.spyOn(melodi, "getPopulationFrance");
+// Garde-fou nomenclature (dette #1) : mocké no-op par défaut — sans ça, la
+// vraie RPC appellerait getUntypedAnonClient (throw en env test, pas de
+// SUPABASE_URL) et ferait passer les cas avec code par tautologie.
+const assertKnownRppsCodesSpy = vi.spyOn(rppsDb, "assertKnownRppsCodes");
 
 beforeEach(() => {
   countRppsSpy.mockReset();
@@ -19,6 +23,8 @@ beforeEach(() => {
   popByDeptSpy.mockReset();
   popByCommuneSpy.mockReset();
   popFranceSpy.mockReset();
+  assertKnownRppsCodesSpy.mockReset();
+  assertKnownRppsCodesSpy.mockResolvedValue(undefined);
 });
 
 function popFound(
@@ -140,6 +146,29 @@ describe("densiteProfessionnelsSante", () => {
       savoirFaireCode: "SM04", // Cardiologie (SM02 = Anesthésie-réanimation)
     });
     expect(countRppsSpy.mock.calls[1]?.[0]?.savoirFaireCode).toBe("SM04");
+  });
+
+  it("valide la nomenclature ANS avec les codes du caller AVANT le count (dette #1)", async () => {
+    countRppsSpy.mockResolvedValue(120);
+    popByDeptSpy.mockResolvedValue(popFound(2103778));
+    await densiteProfessionnelsSante({
+      departement: "75",
+      professionCode: "10",
+      savoirFaireCode: "SM04",
+    });
+    expect(assertKnownRppsCodesSpy).toHaveBeenCalledWith({
+      professionCode: "10",
+      savoirFaireCode: "SM04",
+    });
+  });
+
+  it("propage la RangeError nomenclature et n'appelle PAS countRpps (faux désert évité)", async () => {
+    assertKnownRppsCodesSpy.mockRejectedValue(new RangeError("Code(s) ANS inconnu(s)"));
+    popByDeptSpy.mockResolvedValue(popFound(2103778));
+    await expect(
+      densiteProfessionnelsSante({ departement: "75", savoirFaireCode: "10" }),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(countRppsSpy).not.toHaveBeenCalled();
   });
 
   it("modeExerciceCodes=null → désactive le filtre (tous statuts)", async () => {

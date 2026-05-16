@@ -153,3 +153,89 @@ describe("confidence_low (B1)", () => {
     expect(result?.confidence_low).toBe(true);
   });
 });
+
+describe("coordonnées invalides (symétrie B1 — payload IGN dégradé)", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  const valid = {
+    geometry: { type: "Point", coordinates: [2.35, 48.85] },
+    properties: { label: "Valide 75001 Paris", score: 0.9, type: "street" },
+  };
+
+  it("geocodeMany ignore une feature sans geometry et garde les valides", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([
+        { properties: { label: "Sans geometry", score: 0.9, type: "street" } },
+        valid,
+      ]),
+    );
+    const results = await geocodeMany("x");
+    expect(results).toHaveLength(1);
+    expect(results[0]?.label).toBe("Valide 75001 Paris");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[france-data-mcp] geocode: feature sans coordonnées exploitables"),
+    );
+  });
+
+  it("geocodeMany ignore coordinates non-array / longueur invalide", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([
+        { geometry: { type: "Point", coordinates: "2.35,48.85" }, properties: { label: "A" } },
+        { geometry: { type: "Point", coordinates: [] }, properties: { label: "B" } },
+        valid,
+      ]),
+    );
+    const results = await geocodeMany("x");
+    expect(results.map((r) => r.label)).toEqual(["Valide 75001 Paris"]);
+  });
+
+  it("geocodeMany ignore lon/lat non finis (null, NaN)", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([
+        { geometry: { type: "Point", coordinates: [null, 48.85] }, properties: { label: "A" } },
+        {
+          geometry: { type: "Point", coordinates: [2.35, Number.NaN] },
+          properties: { label: "B" },
+        },
+        valid,
+      ]),
+    );
+    const results = await geocodeMany("x");
+    expect(results.map((r) => r.label)).toEqual(["Valide 75001 Paris"]);
+  });
+
+  it("geocode renvoie null si la seule feature a des coords inexploitables", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([
+        { geometry: { type: "Point", coordinates: [undefined, undefined] }, properties: {} },
+      ]),
+    );
+    const result = await geocode("adresse coords cassées");
+    expect(result).toBeNull();
+  });
+
+  it("reverseGeocode saute une 1re feature inexploitable et retourne la suivante valide", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([
+        { geometry: { coordinates: [999] }, properties: { label: "Cassée" } },
+        valid,
+      ]),
+    );
+    const result = await reverseGeocode({ lon: 2.35, lat: 48.85 });
+    expect(result?.label).toBe("Valide 75001 Paris");
+  });
+
+  it("reverseGeocode renvoie null si toutes les features sont inexploitables", async () => {
+    fetchMock.mockResolvedValue(
+      geocodeResponse([{ geometry: {}, properties: { label: "Cassée" } }]),
+    );
+    const result = await reverseGeocode({ lon: 2.35, lat: 48.85 });
+    expect(result).toBeNull();
+  });
+});
