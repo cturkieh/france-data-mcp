@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.10.5] — 2026-05-16
 
 **2e vague audit qualité claude.ai (P1→P4, re-test post-0.10.4) : garde-fou
 PLM, endpoint DINUM proximité, primitive divergence d'adresse CDS. 933 tests.**
