@@ -79,16 +79,16 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.10.5 — in production.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 933 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
+✅ **v0.10.6 — in production.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 954 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
 
 Full history: [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-> Shipped versions in the [CHANGELOG](CHANGELOG.md) (quality audits B1→B10 then P1→P4 handled through v0.10.5).
+> Shipped versions in the [CHANGELOG](CHANGELOG.md) (quality audits B1→B10 then P1→P4 handled, Robustness backlog closed in v0.10.6).
 
-- **Robustness** — drop redundant `rpps_insee_idx`, validate `savoir_faire_code` at boundary, validate IGN coords
-- **v1.0+** — DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics)
+- [x] **Robustness** — drop redundant `rpps_insee_idx`, validate ANS nomenclature at boundary, validate IGN coords _(shipped v0.10.6)_
+- [ ] **v1.0+** — DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics)
 
 ---
 

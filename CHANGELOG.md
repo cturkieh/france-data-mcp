@@ -4,10 +4,10 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.10.6] — 2026-05-16
 
 **Backlog Robustesse : 2 garde-fous anti-panne-silencieuse + nettoyage index
-prod + bump CI Node 24. Non released npm (maintainer-only).**
+prod + bump CI Node 24.**
 
 ### Added
 
