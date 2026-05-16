@@ -76,8 +76,8 @@ Séquence (voir `scripts/release.sh` qui automatise) :
 5. ☐ Attendre CI vert (`gh run watch --exit-status`)
 6. ☐ `pnpm build && pnpm publish --no-git-checks` (entrer OTP 2FA)
 7. ☐ `mcp-publisher login github` (device code) → `mcp-publisher publish`
-8. ☐ `gh release create vX.Y.Z --notes ...` (extrait du CHANGELOG)
-9. ☐ Vérifier : `npm view france-data-mcp version`, registry MCP, `/healthz`, Vercel auto-deploy
+8. ☐ GitHub Release : **auto-créée par `release.yml` sur le push du tag** (étape 4) avec les notes du CHANGELOG. NE PAS lancer `gh release create` (422 `tag_name already exists`). Vérifier : `gh release view vX.Y.Z`
+9. ☐ Vérifier : `npm view france-data-mcp version`, `/healthz`, et registry MCP via `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp' | jq -r '[.servers[]|select(.server.name=="io.github.cturkieh/france-data-mcp")]|sort_by(._meta."io.modelcontextprotocol.registry/official".updatedAt)|last|.server.version'` (PAS `.servers[0]` = plus ancienne entrée, fausse alerte)
 
 ## Contribuer
 

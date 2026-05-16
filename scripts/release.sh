@@ -129,18 +129,25 @@ echo "       Puis appuie sur ENTER ici une fois fait..."
 read -r _
 echo "$OK"
 
-# 9. GitHub Release avec notes du CHANGELOG
-echo "$STEP 9/9 — GitHub Release v$VERSION"
-RELEASE_NOTES=$(awk "/^## \[$VERSION\]/,/^## \[/{ if(/^## \[/ && !/^## \[$VERSION\]/) exit; print }" CHANGELOG.md | sed '$d')
-if [[ -z "$RELEASE_NOTES" ]]; then
-  echo "$FAIL Impossible d'extraire les notes du CHANGELOG. Crée la release manuellement."
+# 9. GitHub Release — créée AUTOMATIQUEMENT par release.yml sur le push du
+#    tag (étape 6). On NE relance PAS `gh release create` (422 tag_name
+#    already exists) : on attend/vérifie qu'elle existe avec son body.
+echo "$STEP 9/9 — Vérif GitHub Release v$VERSION (auto-créée par release.yml)"
+for _ in $(seq 1 20); do
+  if gh release view "v$VERSION" --json body --jq '.body' 2>/dev/null | grep -q .; then
+    echo "$OK Release auto-créée : https://github.com/cturkieh/france-data-mcp/releases/tag/v$VERSION"
+    break
+  fi
+  echo "$WAIT release.yml pas encore terminé, nouvel essai dans 15 s..."
+  sleep 15
+done
+if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+  echo "$FAIL Release v$VERSION introuvable après attente — vérifier le run release.yml (gh run list --workflow release.yml)."
   exit 1
 fi
-gh release create "v$VERSION" --title "v$VERSION" --notes "$RELEASE_NOTES"
-echo "$OK Release créée : https://github.com/cturkieh/france-data-mcp/releases/tag/v$VERSION"
 
 echo ""
 echo "$OK Release v$VERSION terminée. Vérifications finales :"
 echo "   - npm view france-data-mcp version"
-echo "   - curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp' | jq '.servers[0].server.version'"
+echo "   - curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp' | jq -r '[.servers[]|select(.server.name==\"io.github.cturkieh/france-data-mcp\")]|sort_by(._meta.\"io.modelcontextprotocol.registry/official\".updatedAt)|last|.server.version'  # PAS .servers[0] (plus ancienne entrée)"
 echo "   - curl -s https://france-data-mcp.vercel.app/healthz | jq .version"
