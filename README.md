@@ -112,13 +112,14 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.10.3 — en production.** 34 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 880 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`.
+✅ **V0.10.4 — en production.** 34 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 913 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`.
 
 Historique complet : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-- [ ] **V0.10.3** — seeds canary CDS réels (post 1ère ingest), DROP `rpps_insee_idx` redondant
+- [x] **V0.10.4** — audit qualité claude.ai (B1→B10) : fiabilité données + transparence géo + verbosité réduite
+- [ ] **Backlog** — DROP `rpps_insee_idx` redondant, validation codes spécialité au boundary, validation coords IGN
 - [ ] **V1.0+** — DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 
 ---

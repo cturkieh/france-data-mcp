@@ -79,13 +79,14 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.10.3 — in production.** 34 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 880 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
+✅ **v0.10.4 — in production.** 34 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 913 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
 
 Full history: [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-- **v0.10.3** — Real CDS canary seeds (post first ingest), drop redundant `rpps_insee_idx`
+- **v0.10.4** ✅ — claude.ai quality audit (B1→B10): data accuracy + geo transparency + reduced verbosity
+- **Backlog** — drop redundant `rpps_insee_idx`, validate specialty codes at boundary, validate IGN coords
 - **v1.0+** — DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics)
 
 ---

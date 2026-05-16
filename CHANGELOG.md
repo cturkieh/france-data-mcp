@@ -4,10 +4,11 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.10.4] — 2026-05-16
 
-**Patch — corrections audit qualité externe (B1/B3/B4/B5) : code spécialité
-ANS faux, transparence géo, collision de nomenclatures.**
+**Patch — corrections audit qualité externe claude.ai (B1→B10, 34 tools
+testés) : code spécialité ANS faux, transparence géo, collision de
+nomenclatures, verbosité, méthodologie, doc. 913 tests verts.**
 
 ### Fixed
 
