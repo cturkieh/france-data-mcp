@@ -3,6 +3,7 @@ import {
   AMELI_SPECIALITES_FREQUENTES,
   AMELI_TYPE_PS_NOMENCLATURE,
   AMELI_TYPE_PS_QUERYABLE,
+  clarifySecteurLibelle,
   clarifyTypePsLibelle,
 } from "./ameli-nomenclature.js";
 
@@ -35,6 +36,32 @@ describe("clarifyTypePsLibelle", () => {
     expect(clarifyTypePsLibelle("99", null)).toBeNull();
     expect(clarifyTypePsLibelle(null, "x")).toBe("x");
     expect(clarifyTypePsLibelle(null, null)).toBeNull();
+  });
+});
+
+describe("clarifySecteurLibelle (A8)", () => {
+  it("code 3 + libellé CNAM 'Secteur 2' → clarifié S2+DP (cas trompeur de l'audit)", () => {
+    expect(clarifySecteurLibelle("3", "Secteur 2")).toBe(
+      "Secteur 2 + droit permanent à dépassement (S2+DP)",
+    );
+  });
+
+  it("codes 1 et 2 inchangés (déjà exacts côté CNAM)", () => {
+    expect(clarifySecteurLibelle("1", "Secteur 1")).toBe("Secteur 1");
+    expect(clarifySecteurLibelle("2", "Secteur 2")).toBe("Secteur 2");
+  });
+
+  it("drift CNAM (libellé source ≠ référence) → garde la source, n'invente pas", () => {
+    expect(clarifySecteurLibelle("3", "Conventionné S2 DP")).toBe("Conventionné S2 DP");
+  });
+
+  it("code inconnu / null → source inchangée", () => {
+    expect(clarifySecteurLibelle("9", "Non conventionné")).toBe("Non conventionné");
+    expect(clarifySecteurLibelle(null, "x")).toBe("x");
+    expect(clarifySecteurLibelle("3", null)).toBe(
+      "Secteur 2 + droit permanent à dépassement (S2+DP)",
+    );
+    expect(clarifySecteurLibelle(null, null)).toBeNull();
   });
 });
 

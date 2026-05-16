@@ -332,12 +332,58 @@ export interface AdresseDiff {
   /**
    * Statut brut (primitive de réconciliation, aucune interprétation métier).
    * - `match` : égalité stricte après normalisation.
-   * - `divergent_after_normalization` : adresses différentes (ex: déménagement
-   *   propagé côté CNAM mais pas encore côté DREES, ou inverse).
+   * - `match_after_abbreviation_normalization` : égales seulement après
+   *   expansion des abréviations de voie FR (ex: "3 R THENARD" vs "3 RUE
+   *   THENARD"). C'est la MÊME adresse — sans ce statut, une simple
+   *   abréviation DREES vs CNAM produisait un faux `divergent` qui défait le
+   *   but du tool (détecter de vrais déménagements).
+   * - `divergent_after_normalization` : adresses réellement différentes (ex:
+   *   déménagement propagé côté CNAM mais pas encore côté DREES, ou inverse).
    * - `finess_absent` : CDS connu CNAM mais num_finess absent de FINESS DREES.
    * `num_finess` absent de la base CDS → `lookupNotFound` (pas un statut).
    */
-  statut: "match" | "divergent_after_normalization" | "finess_absent";
+  statut:
+    | "match"
+    | "match_after_abbreviation_normalization"
+    | "divergent_after_normalization"
+    | "finess_absent";
+}
+
+/**
+ * Expansion des abréviations de type de voie FR, LOCALE à ce tool (ne PAS
+ * remonter dans `core/text-match.ts` : `normalizeForCompare`/`diceCoefficient`
+ * sont partagés par cross-source raison-sociale, siret-resolver, coverage et
+ * geocode `match_partial` — y injecter des règles d'adresse fausserait leur
+ * scoring sur des libellés non-adresse). Appliquée token-par-token sur une
+ * chaîne DÉJÀ normalisée (minuscule, sans ponctuation).
+ */
+const VOIE_ABBREVIATIONS: Record<string, string> = {
+  r: "rue",
+  av: "avenue",
+  ave: "avenue",
+  bd: "boulevard",
+  bvd: "boulevard",
+  boul: "boulevard",
+  pl: "place",
+  all: "allee",
+  che: "chemin",
+  chem: "chemin",
+  rte: "route",
+  imp: "impasse",
+  sq: "square",
+  qu: "quai",
+  crs: "cours",
+  pas: "passage",
+  fbg: "faubourg",
+  st: "saint",
+  ste: "sainte",
+};
+
+function expandVoieAbbreviations(normalized: string): string {
+  return normalized
+    .split(" ")
+    .map((tok) => VOIE_ABBREVIATIONS[tok] ?? tok)
+    .join(" ");
 }
 
 /**
@@ -372,12 +418,22 @@ export async function compareAdresseCnamVsFiness(
   const finessAdresse = buildFinessAdresseLibelle(finess);
   const cnamNorm = normalizeForCompare(cnamAdresse);
   const finessNorm = normalizeForCompare(finessAdresse);
+  let statut: AdresseDiff["statut"];
+  if (cnamNorm === finessNorm) {
+    statut = "match";
+  } else if (expandVoieAbbreviations(cnamNorm) === expandVoieAbbreviations(finessNorm)) {
+    statut = "match_after_abbreviation_normalization";
+  } else {
+    statut = "divergent_after_normalization";
+  }
   return lookupFound<AdresseDiff>({
     num_finess: trimmed,
     cnam_adresse: cnamAdresse,
     finess_adresse: finessAdresse,
+    // Dice sur la normalisation de BASE (non-expansée) : reste un signal brut
+    // comparable historiquement ; le statut porte l'info d'équivalence-abrév.
     score_dice: diceCoefficient(cnamNorm, finessNorm),
-    statut: cnamNorm === finessNorm ? "match" : "divergent_after_normalization",
+    statut,
   });
 }
 

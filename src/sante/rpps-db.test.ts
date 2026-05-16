@@ -288,6 +288,29 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
     expect(mockRpc).toHaveBeenCalled();
   });
 
+  it("timeout SQL 57014 → RangeError actionnable (A1), PAS une Error opaque", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    });
+    await expect(getRppsByName({ nom: "DUPONT" })).rejects.toThrow(RangeError);
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    });
+    await expect(getRppsByName({ nom: "DUPONT" })).rejects.toThrow(/trop large|departement|prenom/);
+  });
+
+  it("autre erreur RPC reste une Error (formatRpcError), pas un RangeError", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: null,
+      error: { code: "42P01", message: "relation does not exist" },
+    });
+    const err = await getRppsByName({ nom: "Martin" }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(RangeError);
+  });
+
   it("DOM/COM 3-chiffres accepté (974, 988, 971…)", async () => {
     await getRppsByName({ nom: "Martin", departement: "974" });
     expect(mockRpc).toHaveBeenCalled();

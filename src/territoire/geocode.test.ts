@@ -97,6 +97,15 @@ describe("reverseGeocode", () => {
     expect(result?.label).toContain("Charleville");
     expect(fetchMock.mock.calls[0]?.[0]).toContain("/reverse/");
   });
+
+  it("hors couverture IGN (0 feature, ex. NYC) → null + warn observabilité (A10)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValue(geocodeResponse([]));
+    const result = await reverseGeocode({ lon: -74.006, lat: 40.7128 });
+    expect(result).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("hors couverture"));
+    warnSpy.mockRestore();
+  });
 });
 
 describe("confidence_low (B1)", () => {

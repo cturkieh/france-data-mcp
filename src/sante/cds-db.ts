@@ -137,7 +137,7 @@ export async function getCdsInRadius(input: CdsInRadiusInput): Promise<CdsQueryR
     "centres_sante_in_radius",
     data,
     limit,
-    cdsRadiusMetadata(),
+    cdsRadiusMetadata(input.radiusKm),
     toCdsResult,
   );
 }

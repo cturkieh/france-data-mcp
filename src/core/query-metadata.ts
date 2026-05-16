@@ -75,22 +75,61 @@ const HAVERSINE_NOTE =
   "Distance calculée en vol d'oiseau (haversine PostGIS). Pour la distance routière, croiser avec un service externe (OSRM, ORS).";
 
 /**
+ * Résolution effective d'une coordonnée au centroïde commune (~3 km moyenne
+ * pour une commune FR). En deçà de ce rayon, un filtre `radius_km` est
+ * inopérant : le filtre s'applique au centroïde unique partagé par tous les
+ * PS d'une commune, donc soit la commune entière passe (tous `distance_km`
+ * quasi égaux, non classables), soit rien ne passe — un résultat vide peut
+ * être un FAUX négatif (centroïde hors rayon ≠ désert médical). Pas de
+ * constante de ce type ailleurs ; `RADIUS_MIN_KM` (db-helpers) est une borne
+ * d'input, pas une résolution géographique.
+ */
+export const CENTROIDE_COMMUNE_RESOLUTION_KM = 3;
+
+const CENTROID_PRECISIONS = new Set<GeoPrecision>([
+  "centroide_commune_ameli",
+  "centroide_commune_ans",
+  "centroide_commune_cds",
+]);
+
+function isSubCommuneRadius(
+  precision: GeoPrecision,
+  radiusKm: number | undefined,
+): radiusKm is number {
+  return (
+    radiusKm !== undefined &&
+    radiusKm < CENTROIDE_COMMUNE_RESOLUTION_KM &&
+    CENTROID_PRECISIONS.has(precision)
+  );
+}
+
+const subCommuneRadiusNote = (radiusKm: number): string =>
+  `radius_km=${radiusKm} < ${CENTROIDE_COMMUNE_RESOLUTION_KM} km : incompatible avec une précision au centroïde commune. Le filtre rayon s'applique au centroïde unique de chaque commune, pas aux adresses réelles — TOUS les PS d'une commune sont inclus ou exclus en bloc, et \`distance_km\` ne discrimine pas les PS d'une même commune. Un résultat vide peut être un FAUX négatif (centroïde hors rayon), pas un désert médical. Pour une vraie géolocalisation adresse, pivoter via FINESS (etablissement_by_finess) ou élargir radius_km ≥ ${CENTROIDE_COMMUNE_RESOLUTION_KM}.`;
+
+/**
  * Builder unique pour les 4 cas (Ameli/FINESS × radius/list). Factorise les
  * 4 helpers historiques. Si une nouvelle source spatiale arrive (IRIS, RPPS),
  * ajouter une entrée à `SOURCE_NOTE` et un alias à la fin du fichier.
  */
-function buildMetadata(precision: GeoPrecision, withDistance: boolean): QueryMetadata {
+function buildMetadata(
+  precision: GeoPrecision,
+  withDistance: boolean,
+  radiusKm?: number,
+): QueryMetadata {
   const notes = [SOURCE_NOTE[precision]];
   const result: QueryMetadata = { geo_precision: precision, notes };
   if (withDistance) {
     result.distance_type = "haversine_postgis";
     notes.push(HAVERSINE_NOTE);
   }
+  if (isSubCommuneRadius(precision, radiusKm)) {
+    notes.push(subCommuneRadiusNote(radiusKm));
+  }
   return result;
 }
 
-export const ameliRadiusMetadata = (): QueryMetadata =>
-  buildMetadata("centroide_commune_ameli", true);
+export const ameliRadiusMetadata = (radiusKm?: number): QueryMetadata =>
+  buildMetadata("centroide_commune_ameli", true, radiusKm);
 
 export const ameliDeptMetadata = (): QueryMetadata =>
   buildMetadata("centroide_commune_ameli", false);
@@ -101,14 +140,16 @@ export const finessRadiusMetadata = (): QueryMetadata =>
 export const finessByCategorieMetadata = (): QueryMetadata =>
   buildMetadata("lambert93_natif_finess", false);
 
-export const rppsRadiusMetadata = (): QueryMetadata => buildMetadata("centroide_commune_ans", true);
+export const rppsRadiusMetadata = (radiusKm?: number): QueryMetadata =>
+  buildMetadata("centroide_commune_ans", true, radiusKm);
 
 export const rppsDeptMetadata = (): QueryMetadata => buildMetadata("centroide_commune_ans", false);
 
 export const rppsEtablissementMetadata = (): QueryMetadata =>
   buildMetadata("structure_finess", false);
 
-export const cdsRadiusMetadata = (): QueryMetadata => buildMetadata("centroide_commune_cds", true);
+export const cdsRadiusMetadata = (radiusKm?: number): QueryMetadata =>
+  buildMetadata("centroide_commune_cds", true, radiusKm);
 
 /**
  * Métadonnées pour `rpps_search_by_name` : recherche fuzzy par identité. La
@@ -121,6 +162,7 @@ export const rppsSearchByNameMetadata = (): QueryMetadata => {
   const md = buildMetadata("centroide_commune_ans", false);
   md.notes.push(
     "Résultats triés par similarité trigram (pg_trgm) sur nom + prénom. Le champ `match_score` (0..1) indique la pertinence — un score < 0.5 = homonymie partielle, à confirmer côté caller.",
+    "Sur un nom TRÈS commun sans `departement` ni `prenom`, les candidats sont plafonnés (cap interne) AVANT le tri de pertinence : le résultat est alors un ÉCHANTILLON non exhaustif (et non strictement les plus pertinents au niveau national). Préciser `departement=` ou `prenom=` pour un résultat exhaustif et stable.",
   );
   return md;
 };

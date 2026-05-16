@@ -174,3 +174,41 @@ export function clarifyTypePsLibelle(
   if (sourceLibelle && sourceLibelle !== entry.libelleSource) return sourceLibelle;
   return entry.libelleClarified;
 }
+
+/**
+ * Nomenclature secteur conventionnel CNAM (Annuaire santé Ameli).
+ *
+ * Le CSV CNAM porte le code ET un libellé, mais le libellé regroupe le code
+ * "3" (Secteur 2 + droit permanent à dépassement) sous le même intitulé
+ * "Secteur 2" que le code "2" — factuellement trompeur pour l'utilisateur
+ * (le S2+DP autorise des dépassements permanents, info tarifaire sensible).
+ * Le CODE (3) reste discriminant ; on clarifie le libellé restitué SANS
+ * réécrire la donnée source (même discipline que `clarifyTypePsLibelle` :
+ * drift detection — si le libellé CNAM diverge de notre référence, on garde
+ * la source pour ne jamais inventer). Seul le code "3" est ambigu côté CNAM ;
+ * "1"/"2" sont déjà exacts et traités en identité pour homogénéité.
+ */
+const AMELI_SECTEUR_NOMENCLATURE: Record<string, { source: string; clarified: string }> = {
+  "1": { source: "Secteur 1", clarified: "Secteur 1" },
+  "2": { source: "Secteur 2", clarified: "Secteur 2" },
+  "3": {
+    source: "Secteur 2",
+    clarified: "Secteur 2 + droit permanent à dépassement (S2+DP)",
+  },
+};
+
+/**
+ * Clarifie le libellé secteur conventionnel à partir du code CNAM. Renvoie le
+ * libellé source inchangé si le code est inconnu ou si la source a drifté
+ * (honnêteté > clarification). Voir {@link AMELI_SECTEUR_NOMENCLATURE}.
+ */
+export function clarifySecteurLibelle(
+  code: string | null | undefined,
+  sourceLibelle: string | null | undefined,
+): string | null {
+  if (!code) return sourceLibelle ?? null;
+  const entry = AMELI_SECTEUR_NOMENCLATURE[code];
+  if (!entry) return sourceLibelle ?? null;
+  if (sourceLibelle && sourceLibelle !== entry.source) return sourceLibelle;
+  return entry.clarified;
+}

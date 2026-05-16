@@ -18,7 +18,11 @@ import {
 } from "../core/query-metadata.js";
 import { getAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";
-import { AMELI_TYPE_PS_QUERYABLE, clarifyTypePsLibelle } from "./ameli-nomenclature.js";
+import {
+  AMELI_TYPE_PS_QUERYABLE,
+  clarifySecteurLibelle,
+  clarifyTypePsLibelle,
+} from "./ameli-nomenclature.js";
 import {
   buildListQueryResult,
   clampLimit,
@@ -211,7 +215,7 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   });
 
   if (error) throw new Error(formatRpcError("ameli_in_radius", error));
-  return buildAmeliQueryResult("ameli_in_radius", data, limit, ameliRadiusMetadata());
+  return buildAmeliQueryResult("ameli_in_radius", data, limit, ameliRadiusMetadata(input.radiusKm));
 }
 
 /** List PS by department (+ optional specialty / type filter, optional offset). */
@@ -311,7 +315,10 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
     telephone: trimOrNull(row.telephone),
     conventions: {
       secteur_code: row.secteur_conventionnel_code,
-      secteur_libelle: row.secteur_conventionnel_libelle,
+      secteur_libelle: clarifySecteurLibelle(
+        row.secteur_conventionnel_code,
+        row.secteur_conventionnel_libelle,
+      ),
       nature_exercice_code: row.nature_exercice_code,
       nature_exercice_libelle: row.nature_exercice_libelle,
       option_tarifaire_code: row.option_tarifaire_code,

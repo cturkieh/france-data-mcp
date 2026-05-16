@@ -126,6 +126,26 @@ describe("getPopulationByCommune", () => {
     await getPopulationByCommune("75056");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
+
+  it("arrondissement PLM (75101) → lookupNotFound vers commune-mère, AUCUN appel Melodi (A3)", async () => {
+    const result = await getPopulationByCommune("75101");
+    expect(result.found).toBe(false);
+    if (result.found) throw new Error("expected not found");
+    expect(result.message).toContain("75056");
+    expect(result.message).toContain("PLM");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("Lyon 69383 et Marseille 13201 aussi gardés (commune-mère 69123/13055)", async () => {
+    const lyon = await getPopulationByCommune("69383");
+    const mrs = await getPopulationByCommune("13201");
+    expect(lyon.found).toBe(false);
+    expect(mrs.found).toBe(false);
+    if (lyon.found || mrs.found) throw new Error("expected not found");
+    expect(lyon.message).toContain("69123");
+    expect(mrs.message).toContain("13055");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe("getPopulationByDept", () => {
@@ -157,6 +177,19 @@ describe("getPopulationByDept", () => {
     await expect(getPopulationByDept("XX")).rejects.toThrow(RangeError);
     await expect(getPopulationByDept("9999")).rejects.toThrow(RangeError);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("Mayotte 976 (404 Melodi, absent du dataset) → lookupNotFound, PAS un throw (A9)", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response("Series not found", {
+        status: 404,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    const result = await getPopulationByDept("976");
+    expect(result.found).toBe(false);
+    if (result.found) throw new Error("expected not found");
+    expect(result.message).toContain("Mayotte");
   });
 
   it("hit le cache in-memory séparément du cache commune", async () => {

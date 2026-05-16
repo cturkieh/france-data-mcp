@@ -22,6 +22,7 @@
 
 import { HttpError, fetchJson } from "../core/http.js";
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
+import { parentCommuneInsee, plmDept } from "./commune-index.js";
 import { isValidDept } from "./dept-codes.js";
 
 const MELODI_BASE_URL = "https://api.insee.fr/melodi";
@@ -197,6 +198,20 @@ export async function getPopulationByCommune(
       `Code INSEE de commune invalide: "${codeInsee}" (attendu : 5 caractères, ex "75056" ou "2A004")`,
     );
   }
+  // Garde-fou PLM AVANT l'appel Melodi : un code ARRONDISSEMENT (75101-75120,
+  // 69381-69389, 13201-13216) passe la regex mais Melodi le rejette en 400
+  // (COG ≠ commune entière) → message générique inutile. La commune-mère
+  // (75056/69123/13055) est elle un code Melodi VALIDE : ne pas la bloquer.
+  // `parentCommuneInsee` ne replie QUE les arrondissements (la commune-mère
+  // se replie sur elle-même) → `parent !== codeInsee` ⟺ c'est un
+  // arrondissement. Source unique de détection PLM du repo.
+  const communeMere = parentCommuneInsee(codeInsee);
+  if (communeMere !== codeInsee) {
+    return lookupNotFound(
+      codeInsee,
+      `Arrondissement PLM ${codeInsee} — INSEE Melodi n'expose la population qu'à la commune entière. Utiliser le code commune-mère "${communeMere}" (population_par_commune) ou code_dept="${plmDept(codeInsee)}" (population_par_departement).`,
+    );
+  }
   try {
     const data = await fetchPopulation(`COM-${codeInsee}`, codeInsee, "COM", options.signal);
     if (!data) {
@@ -246,13 +261,17 @@ export async function getPopulationByDept(
     }
     return lookupFound(data);
   } catch (err) {
-    if (err instanceof HttpError && err.status === 400) {
+    // 400 = code rejeté (format), 404 = série absente du dataset. Mayotte
+    // (976) est un dept valide mais ABSENT de DS_POPULATIONS_REFERENCE →
+    // Melodi répond 404 : c'est "pas de donnée" (lookupNotFound), pas une
+    // erreur API à propager (discipline : distinguer absence vs panne).
+    if (err instanceof HttpError && (err.status === 400 || err.status === 404)) {
       console.warn(
-        `[france-data-mcp] INSEE Melodi 400 on dept ${codeDept} — body: ${err.body ?? "<empty>"}`,
+        `[france-data-mcp] INSEE Melodi ${err.status} on dept ${codeDept} — body: ${err.body ?? "<empty>"}`,
       );
       return lookupNotFound(
         codeDept,
-        `Code INSEE ${codeDept} rejeté par INSEE Melodi (${err.body ?? "format invalide"}).`,
+        `Département ${codeDept} non couvert par INSEE Melodi (DS_POPULATIONS_REFERENCE) — ex: Mayotte (976) absente du dataset.`,
       );
     }
     console.error(

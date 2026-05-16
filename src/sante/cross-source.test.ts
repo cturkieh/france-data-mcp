@@ -520,6 +520,46 @@ describe("compareAdresseCnamVsFiness (P4)", () => {
       expect(r.score_dice).toBeLessThan(1);
     }
   });
+
+  it("statut 'match_after_abbreviation_normalization' sur abréviation de voie (A5 : '3 R THENARD' vs '3 RUE THENARD')", async () => {
+    vi.spyOn(cdsDb, "getCdsByFiness").mockResolvedValue(fakeCdsFound("3 R THENARD"));
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        adresse: {
+          voie: "3 RUE THENARD",
+          code_postal: "71400",
+          ville: "AUTUN",
+          code_departement: "71",
+          code_insee: "71014",
+        },
+      }),
+    );
+    const r = await compareAdresseCnamVsFiness(VALID_FINESS);
+    expect(r.found).toBe(true);
+    if (r.found) {
+      // PAS divergent : c'est la même adresse, juste abrégée DREES vs CNAM.
+      expect(r.statut).toBe("match_after_abbreviation_normalization");
+      expect(r.score_dice).toBeGreaterThan(0.8);
+    }
+  });
+
+  it("une vraie divergence reste 'divergent' même si un token est une abréviation", async () => {
+    vi.spyOn(cdsDb, "getCdsByFiness").mockResolvedValue(fakeCdsFound("3 R THENARD"));
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        adresse: {
+          voie: "90 RUE LECOURBE",
+          code_postal: "71400",
+          ville: "AUTUN",
+          code_departement: "71",
+          code_insee: "71014",
+        },
+      }),
+    );
+    const r = await compareAdresseCnamVsFiness(VALID_FINESS);
+    expect(r.found).toBe(true);
+    if (r.found) expect(r.statut).toBe("divergent_after_normalization");
+  });
 });
 
 describe("historiqueEtablissement (V0.6.2)", () => {

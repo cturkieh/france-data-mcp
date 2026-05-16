@@ -859,7 +859,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "reverse_geocode",
     description:
-      "Géocodage inverse : à partir de coordonnées GPS, retrouve l'adresse la plus proche. Source : IGN Géoplateforme.",
+      "Géocodage inverse : à partir de coordonnées GPS, retrouve l'adresse la plus proche. Source : IGN Géoplateforme. Couverture France métropolitaine + DOM uniquement : des coordonnées hors zone (ex. New York) ou en pleine mer renvoient `null` (pas une erreur — c'est l'absence de résultat, pas une panne).",
     inputSchema: {
       type: "object",
       properties: {
@@ -908,7 +908,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "population_par_departement",
     description:
-      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'un département français par son code INSEE (2-3 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN recommandée pour calculs de densité (méthodo DREES). Supporte la Corse (2A, 2B) et les DOM (971-976).\n\nAlias acceptés : `code_dept`/`dept`/`departement`/`code_departement` → `code`.",
+      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'un département français par son code INSEE (2-3 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN recommandée pour calculs de densité (méthodo DREES). Supporte la Corse (2A, 2B) et les DOM 971-974 ; Mayotte (976) est ABSENTE de DS_POPULATIONS_REFERENCE INSEE Melodi → retour `lookupNotFound` (pas une erreur).\n\nAlias acceptés : `code_dept`/`dept`/`departement`/`code_departement` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1051,7 +1051,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "compare_adresse_cnam_vs_finess",
     description:
-      "Compare l'adresse d'un centre de santé côté CNAM (Annuaire santé Ameli) vs FINESS DREES pour un même num_finess. Primitive brute SANS interprétation métier — retourne les deux adresses, un `score_dice` (0..1, informatif ; `null` si non comparable car `finess_absent`) et un `statut`. Le caller décide quoi faire de la divergence.\n\nUtilité : signaler un déménagement propagé par une source mais pas (encore) par l'autre (ex: CNAM '5 RUE DE L'ARQUEBUSE AUTUN' vs FINESS '15 BD BERNARD GIBERSTEIN AUTUN' pour le même FINESS). Équivalent côté centre de santé de `compare_raison_sociale_finess_vs_rpps`.\n\n**Statut** (présent uniquement sur `found: true`) :\n- `match` : adresses strictement égales après normalisation\n- `divergent_after_normalization` : adresses différentes (déménagement non synchronisé entre sources)\n- `finess_absent` : le CDS existe côté CNAM mais le num_finess est absent de FINESS DREES (latence sync bimensuelle)\n\nFormat : objet `LookupResult` discriminé par `found`. Si le num_finess n'est PAS un centre de santé CNAM, le tool retourne `{found: false, lookupStatus: 'not_found', message}` (utiliser `etablissement_by_finess` pour un établissement non-CDS).",
+      "Compare l'adresse d'un centre de santé côté CNAM (Annuaire santé Ameli) vs FINESS DREES pour un même num_finess. Primitive brute SANS interprétation métier — retourne les deux adresses, un `score_dice` (0..1, informatif ; `null` si non comparable car `finess_absent`) et un `statut`. Le caller décide quoi faire de la divergence.\n\nUtilité : signaler un déménagement propagé par une source mais pas (encore) par l'autre (ex: CNAM '5 RUE DE L'ARQUEBUSE AUTUN' vs FINESS '15 BD BERNARD GIBERSTEIN AUTUN' pour le même FINESS). Équivalent côté centre de santé de `compare_raison_sociale_finess_vs_rpps`.\n\n**Statut** (présent uniquement sur `found: true`) :\n- `match` : adresses strictement égales après normalisation\n- `match_after_abbreviation_normalization` : égales après expansion des abréviations de voie FR (R/RUE, BD/BOULEVARD, AV/AVENUE…) — MÊME adresse, simple abréviation DREES vs CNAM, PAS un déménagement\n- `divergent_after_normalization` : adresses réellement différentes (déménagement non synchronisé entre sources)\n- `finess_absent` : le CDS existe côté CNAM mais le num_finess est absent de FINESS DREES (latence sync bimensuelle)\n\nFormat : objet `LookupResult` discriminé par `found`. Si le num_finess n'est PAS un centre de santé CNAM, le tool retourne `{found: false, lookupStatus: 'not_found', message}` (utiliser `etablissement_by_finess` pour un établissement non-CDS).",
     inputSchema: {
       type: "object",
       properties: {

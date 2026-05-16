@@ -32,6 +32,7 @@ import {
 import { getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.js";
 import {
+  PG_STATEMENT_TIMEOUT,
   RPPS_ID_PATTERN,
   assertValidNumFiness,
   buildListQueryResult,
@@ -461,7 +462,7 @@ export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQue
   });
 
   if (error) throw new Error(formatRpcError("rpps_in_radius", error));
-  return buildQueryResult("rpps_in_radius", data, limit, rppsRadiusMetadata());
+  return buildQueryResult("rpps_in_radius", data, limit, rppsRadiusMetadata(input.radiusKm));
 }
 
 export async function getRppsParSpecialiteDept(
@@ -554,7 +555,27 @@ export async function getRppsByName(input: RppsSearchByNameInput): Promise<RppsQ
     p_limit: limit + 1,
   });
 
-  if (error) throw new Error(formatRpcError("rpps_search_by_name", error));
+  if (error) {
+    // 57014 = statement timeout Postgres. Malgré le cap candidats + timeout
+    // 10s côté RPC (migration 20260516T030000), un nom ultra-commun sans
+    // aucun filtre peut rester trop large. Le mapper en RangeError →
+    // JSON-RPC -32602 (faute caller actionnable) plutôt qu'un -32603 opaque
+    // ("panne serveur") : le LLM appelant doit affiner, pas réessayer.
+    if (error.code === PG_STATEMENT_TIMEOUT) {
+      // Logguer AVANT de transformer en RangeError : le cap candidats + 10s
+      // rendent "recherche trop large" probable, mais un 57014 peut aussi
+      // venir d'une charge DB réelle (pool saturé, lock, lag replica). Sans
+      // ce log, cette panne serait invisible (présentée au caller comme
+      // "affine ta recherche") et non grep-able en observabilité.
+      console.warn(
+        `[france-data-mcp] rpps_search_by_name: 57014 timeout nom="${nom}" dept=${input.departement ?? "<none>"} — présumé recherche trop large ; si récurrent sur des noms RARES, suspecter une charge DB.`,
+      );
+      throw new RangeError(
+        `[france-data-mcp] rpps_search_by_name: recherche trop large pour "${nom}" (nom très commun). Affiner avec departement= ou prenom= pour cibler.`,
+      );
+    }
+    throw new Error(formatRpcError("rpps_search_by_name", error));
+  }
   return buildListQueryResult<RawRppsSearchRow, RppsResult, QueryMetadata>(
     "rpps_search_by_name",
     data,

@@ -96,6 +96,13 @@ export function validateCoords(lat: number, lon: number): void {
  * `error.code` so the operator can grep PgError tables (PGRST205 / 42703 /
  * etc.) directly in logs.
  */
+/**
+ * SQLSTATE Postgres `57014` = `query_canceled` (statement timeout). Surface
+ * tel quel par PostgREST dans `error.code`. Constante nommée pour éviter le
+ * littéral magique dispersé (boundary lib + tests).
+ */
+export const PG_STATEMENT_TIMEOUT = "57014";
+
 export function formatRpcError(
   rpc: string,
   error: { code?: string; message: string; hint?: string; details?: string },

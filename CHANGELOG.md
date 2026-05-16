@@ -4,6 +4,81 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.10.8] — 2026-05-16
+
+**4e vague audit qualité claude.ai (stress test des 35 tools) : 7 corrections
+de bugs réels (3 anomalies écartées : faux positifs / limites amont).**
+
+### Fixed
+
+- **A1 — `rpps_search_by_name` timeout (SQLSTATE 57014) sur nom commun sans
+  `departement`.** Root cause : la RPC n'avait aucun `SET statement_timeout`
+  (héritait du défaut bas du rôle `anon` ~3 s) ET le `LIMIT` s'appliquait
+  APRÈS le calcul `similarity()` + top-N heapsort sur l'intégralité du
+  candidate set trigram (des dizaines de milliers de lignes pour DUPONT/
+  MARTIN sur 2,2 M). Le diagnostic externe « seq scan » était faux (l'index
+  GIN est bien utilisé). Fix : migration `20260516T030000` — CTE qui cape le
+  candidate set (`LIMIT 2000`) AVANT similarity/tri + `SET statement_timeout
+  = '10s'` explicite (pattern canonique repo, cf. `rpps_in_radius`). Le
+  wrapper TS mappe un 57014 résiduel en `RangeError` actionnable (JSON-RPC
+  `-32602` « affiner avec departement=/prenom= » au lieu d'un `-32603`
+  opaque), loggé avant le throw (panne DB réelle restant grep-able). Note
+  metadata : sur nom très commun sans filtre, résultat = échantillon
+  plafonné non exhaustif (à affiner).
+- **A2/A4 — filtre `radius_km` silencieusement inopérant sous la résolution
+  centroïde commune.** `professionnels_in_radius` / `professionnels_rpps_in
+  _radius` / `centres_sante_in_radius` ont des coordonnées au centroïde
+  commune : un `radius_km` < ~3 km soit retourne TOUTE la commune
+  (`distance_km≈0` non discriminant), soit 0 résultat (centroïde hors rayon
+  = FAUX négatif, pas un désert médical), sans aucun avertissement. Ajout
+  d'une note `query_metadata` conditionnelle (`radius_km <
+  CENTROIDE_COMMUNE_RESOLUTION_KM`) explicitant le piège dans les deux sens.
+  Pas de clamp silencieux du rayon (principe repo).
+- **A3 — `population_par_commune` sur arrondissement PLM (75101…) : message
+  générique inutile.** Le garde-fou PLM (`parentCommuneInsee`/`plmDept`,
+  source unique `commune-index`) existait mais n'était pas branché ici.
+  Désormais un code arrondissement renvoie un `lookupNotFound` explicite
+  orientant vers la commune-mère (75056/69123/13055) ou
+  `population_par_departement`. La commune-mère reste un code valide.
+- **A5 — `compare_adresse_cnam_vs_finess` : faux `divergent_after_
+  normalization` sur simple abréviation de voie** (« 3 R THENARD » vs « 3
+  RUE THENARD » = même adresse). Nouveau statut
+  `match_after_abbreviation_normalization` via une expansion d'abréviations
+  FR (R/RUE, BD/BOULEVARD, AV/AVENUE…) LOCALE au tool — `normalizeForCompare`
+  partagé (cross-source/siret/coverage/geocode) n'est volontairement PAS
+  modifié (blast radius scoring).
+- **A8 — libellé secteur conventionnel Ameli trompeur** : le CSV CNAM
+  étiquette le code « 3 » (Secteur 2 + droit permanent à dépassement) sous
+  le même libellé « Secteur 2 » que le code « 2 ». Helper
+  `clarifySecteurLibelle` (même discipline drift-detection que
+  `clarifyTypePsLibelle` : ne réécrit pas une source qui a drifté) appliqué
+  à la restitution → « Secteur 2 + droit permanent à dépassement (S2+DP) ».
+- **A9 — doc `population_par_departement` mensongère sur Mayotte (976)** :
+  la docstring annonçait « DOM 971-976 » mais 976 est absent de
+  DS_POPULATIONS_REFERENCE → 404 INSEE Melodi non géré (le catch ne traitait
+  que 400 → `throw` brut). Docstring corrigée + catch étendu `400 || 404` →
+  `lookupNotFound` (absence de donnée, pas une panne).
+- **A10 — `reverse_geocode` hors couverture (ex. New York) → `null`
+  silencieux.** Description du tool documentée (couverture France
+  métropolitaine + DOM, `null` = absence, pas erreur) + `console.warn`
+  agrégé serveur quand l'IGN ne renvoie aucune feature (parallèle au warn
+  `usableGeocodeResults`). Pas de migration vers `LookupResult` (breaking,
+  la famille géo a sa propre convention `confidence_low`/`match_partial`).
+
+### Internal
+
+- Constante `PG_STATEMENT_TIMEOUT` (`db-helpers`) — fin du littéral SQLSTATE
+  « 57014 » dispersé (boundary lib + tests).
+- `isSubCommuneRadius` type guard (`query-metadata`) — prédicat nommé pour
+  la note radius sous-commune.
+
+**Anomalies écartées (pas des bugs réels)** : A6
+(`entreprise_by_siren("999999999")` payload creux — SIREN synthétique de
+test ; les SIREN diffusion-partielle sont absents de DINUM, jamais
+`found:true` creux) ; A7 (PS RPPS `coords:null` non flaggés — donnée amont
+légitime, visible par site, pas un bug) ; A11 (libellés FINESS tronqués —
+déjà documenté, code fidèle à DREES amont).
+
 ## [0.10.7] — 2026-05-16
 
 **3e vague audit qualité claude.ai (test des 35 tools) : 3 corrections +

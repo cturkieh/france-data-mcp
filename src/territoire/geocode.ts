@@ -205,7 +205,10 @@ function usableGeocodeResults(
 }
 
 /**
- * Géocodage inverse : à partir de coordonnées GPS, retrouve l'adresse la plus proche.
+ * Géocodage inverse : à partir de coordonnées GPS, retrouve l'adresse la plus
+ * proche. Renvoie `null` si aucune adresse (couverture IGN = France
+ * métropolitaine + DOM uniquement ; des coordonnées hors zone — ex. New York —
+ * ou en pleine mer renvoient `null`, pas une erreur).
  */
 export async function reverseGeocode(
   point: Coordinates,
@@ -217,6 +220,16 @@ export async function reverseGeocode(
   });
   const url = `${BASE_URL}/reverse/?${params.toString()}`;
   const data = await fetchJson<ApiResponse>(url, { signal });
+  // 0 feature en reverse = coordonnées hors couverture IGN (hors France) ou
+  // en pleine mer. On warn pour l'observabilité serveur (parallèle au warn
+  // agrégé de `usableGeocodeResults` pour les features inexploitables) :
+  // sans ça, un `null` hors-zone est indistinguable côté logs d'un échec.
+  if (data.features.length === 0) {
+    console.warn(
+      `[france-data-mcp] reverseGeocode(${point.lon},${point.lat}): 0 résultat IGN — coordonnées hors couverture (France métropolitaine + DOM) ou en mer. Retour null.`,
+    );
+    return null;
+  }
   // Premier résultat exploitable : une 1re feature au payload dégradé
   // (coords absentes) ne doit pas masquer un candidat valide en position 2+.
   const results = usableGeocodeResults(data.features, `reverse ${point.lon},${point.lat}`);
