@@ -19,6 +19,7 @@
  */
 
 import { round2 } from "../core/numbers.js";
+import { plmDept } from "../territoire/commune-index.js";
 import {
   type PopulationData,
   getPopulationByCommune,
@@ -243,6 +244,28 @@ function resolveZone(
     : { kind: "departement", code: input.departement as string };
 }
 
+/**
+ * Garde-fou Paris/Lyon/Marseille (audit P1+P2). La densité par commune y est
+ * structurellement impossible : les praticiens RPPS sont rattachés aux
+ * arrondissements (75101-75120…) tandis qu'INSEE Melodi n'expose la population
+ * qu'au niveau commune entière (75056…). Sans ce garde-fou :
+ *  - commune-mère 75056 → countPs=0 + population 2,1M → densité 0 (faux
+ *    "désert médical" SILENCIEUX) ;
+ *  - arrondissement 75108 → Melodi 404 → RangeError au message trompeur
+ *    ("commune fusionnée").
+ * On lève une RangeError explicite orientant vers `code_dept` (mappe
+ * JSON-RPC -32602), AVANT tout appel DB/Melodi. Détection PLM = source
+ * unique `plmDept` (territoire/commune-index, autorité PLM du repo).
+ */
+function assertNotPlmCommune(codeInsee: string): void {
+  const dept = plmDept(codeInsee);
+  if (dept) {
+    throw new RangeError(
+      `densiteProfessionnelsSante: la densité par commune n'est pas disponible pour Paris/Lyon/Marseille (code ${codeInsee}). Les praticiens RPPS sont rattachés aux arrondissements alors qu'INSEE n'expose la population qu'à la commune entière. Utiliser code_dept='${dept}' pour la densité ville entière.`,
+    );
+  }
+}
+
 export async function densiteProfessionnelsSante(
   input: DensiteProfessionnelsSanteInput,
 ): Promise<DensiteProfessionnelsSanteResult> {
@@ -254,6 +277,7 @@ export async function densiteProfessionnelsSante(
   let populationLookup: PopulationData;
 
   if (zoneSpec.kind === "commune") {
+    assertNotPlmCommune(zoneSpec.code);
     const countInput = buildCountByCommuneInput(input, zoneSpec.code, modeExerciceCodes);
     const [count, popLookup] = await Promise.all([
       countRppsByCommune(countInput),

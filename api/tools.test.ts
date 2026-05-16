@@ -655,111 +655,45 @@ describe("dedupe_by_ps", () => {
   });
 });
 
-describe("entreprises_in_radius — perPage propagation (B5 fix)", () => {
+describe("entreprises_in_radius — délégation proximité native (P3)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  /**
-   * Forge un mini Entreprise avec un seul établissement géolocalisé près du
-   * centre testé (Charleville-Mézières, ~49.7672/4.7192). Toutes les entreprises
-   * forgées passent le filtre Haversine 5 km par construction (lat/lon ≈ centre).
-   */
-  function makeEntreprise(siren: string): dinum.Entreprise {
-    return {
-      siren,
-      nomComplet: `LABO ${siren}`,
-      finances: [],
-      dirigeants: [],
-      actif: true,
-      etablissements: [
-        {
-          siret: `${siren}00010`,
-          adresse: "10 Rue Foch 08000 Charleville-Mézières",
-          actif: true,
-          point: { lon: 4.7192, lat: 49.7672 },
-        },
-      ],
-    };
-  }
+  const emptyResult = { total: 0, page: 1, perPage: 10, totalPages: 0, entreprises: [] };
 
-  it("propage perPage:3 et tronque la sortie à 3 résultats malgré 8 matches Haversine", async () => {
-    vi.spyOn(geocode, "reverseGeocode").mockResolvedValue({
-      point: { lon: 4.7192, lat: 49.7672 },
-      label: "10 Rue Foch 08000 Charleville-Mézières",
-      score: 0.95,
-      confidence_low: false,
-      codeCommune: "08105",
-      type: "housenumber",
-    });
-    const eight: dinum.Entreprise[] = Array.from({ length: 8 }, (_, i) =>
-      makeEntreprise(String(100000000 + i).padStart(9, "0")),
-    );
-    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
-      total: 8,
-      page: 1,
-      perPage: 25,
-      totalPages: 1,
-      entreprises: eight,
-    });
-
+  it("naf + lon/lat/radiusKm → délègue à searchEntreprises avec center (pas de reverseGeocode/Haversine)", async () => {
+    const spy = vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(emptyResult);
+    const reverseSpy = vi.spyOn(geocode, "reverseGeocode");
     const tool = findTool("entreprises_in_radius");
-    const result = (await tool?.handler({
-      naf: "8690B",
-      lon: 4.7192,
-      lat: 49.7672,
-      radiusKm: 5,
-      perPage: 3,
-    })) as {
-      total: number;
-      perPage: number;
-      entreprises: unknown[];
-      truncated_by_per_page?: boolean;
-    };
+    await tool?.handler({ naf: "8690B", lon: 4.7192, lat: 49.7672, radiusKm: 5, perPage: 3 });
 
-    expect(result.entreprises).toHaveLength(3);
-    expect(result.total).toBe(8); // post-Haversine, AVANT troncature perPage
-    expect(result.perPage).toBe(3);
-    expect(result.truncated_by_per_page).toBe(true);
+    expect(reverseSpy).not.toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        naf: "8690B",
+        center: { lon: 4.7192, lat: 49.7672 },
+        radiusKm: 5,
+        perPage: 3,
+      }),
+    );
   });
 
-  it("perPage omis → défaut 10 (cohérent avec le schéma MCP)", async () => {
-    vi.spyOn(geocode, "reverseGeocode").mockResolvedValue({
-      point: { lon: 4.7192, lat: 49.7672 },
-      label: "10 Rue Foch 08000 Charleville-Mézières",
-      score: 0.95,
-      confidence_low: false,
-      codeCommune: "08105",
-      type: "housenumber",
-    });
-    const five = Array.from({ length: 5 }, (_, i) =>
-      makeEntreprise(String(200000000 + i).padStart(9, "0")),
+  it("q + lon/lat/radiusKm → propage la RangeError de searchEntreprises (proximité ≠ q)", async () => {
+    vi.spyOn(dinum, "searchEntreprises").mockRejectedValue(
+      new RangeError("/near_point ne supporte pas `q`"),
     );
-    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
-      total: 5,
-      page: 1,
-      perPage: 25,
-      totalPages: 1,
-      entreprises: five,
-    });
-
     const tool = findTool("entreprises_in_radius");
-    const result = (await tool?.handler({
-      naf: "8690B",
-      lon: 4.7192,
-      lat: 49.7672,
-      radiusKm: 5,
-    })) as {
-      total: number;
-      perPage: number;
-      entreprises: unknown[];
-      truncated_by_per_page?: boolean;
-    };
+    await expect(
+      tool?.handler({ q: "biogroup", lon: 4.7192, lat: 49.7672, radiusKm: 5 }),
+    ).rejects.toThrow(RangeError);
+  });
 
-    // 5 résultats < défaut 10 → pas de troncature
-    expect(result.entreprises).toHaveLength(5);
-    expect(result.perPage).toBe(10);
-    expect(result.truncated_by_per_page).toBeUndefined();
+  it("recherche administrative (naf + departement) inchangée", async () => {
+    const spy = vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(emptyResult);
+    const tool = findTool("entreprises_in_radius");
+    await tool?.handler({ naf: "8690B", departement: "08" });
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ naf: "8690B", departement: "08" }));
   });
 });
 
@@ -1083,6 +1017,38 @@ describe("compare_raison_sociale_finess_vs_rpps (MCP tool — V0.6.2)", () => {
   });
 });
 
+describe("compare_adresse_cnam_vs_finess (MCP tool — P4)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("est enregistré avec num_finess requis", () => {
+    const tool = findTool("compare_adresse_cnam_vs_finess");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["num_finess"]);
+  });
+
+  it("rejette num_finess absent", async () => {
+    const tool = findTool("compare_adresse_cnam_vs_finess");
+    await expect(tool?.handler({})).rejects.toThrow(/num_finess/);
+  });
+
+  it("forward au wrapper TS", async () => {
+    const spy = vi.spyOn(crossSource, "compareAdresseCnamVsFiness").mockResolvedValue({
+      found: true,
+      lookupStatus: "found",
+      num_finess: "710015710",
+      cnam_adresse: "5 RUE DE L'ARQUEBUSE 71400 AUTUN",
+      finess_adresse: "15 BD BERNARD GIBERSTEIN 71400 AUTUN",
+      score_dice: 0.42,
+      statut: "divergent_after_normalization",
+    });
+    const tool = findTool("compare_adresse_cnam_vs_finess");
+    await tool?.handler({ num_finess: "710015710" });
+    expect(spy).toHaveBeenCalledWith("710015710");
+  });
+});
+
 describe("historique_etablissement (MCP tool — V0.6.2)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -1133,14 +1099,14 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
 });
 
 describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
-  it("expose un outputSchema sur les tools object-root (27 tools attendus)", () => {
+  it("expose un outputSchema sur les tools object-root (28 tools attendus)", () => {
     const withOutput = TOOLS.filter((t) => t.outputSchema !== undefined);
-    // 33 tools après V0.10 (+ inspect_site, centres_sante_in_radius, centres_sante_by_finess)
+    // 34 tools après V0.10.4 (+ compare_adresse_cnam_vs_finess, audit P4)
     // - 3 spec-violating (autocomplete_commune array-root, geocode_adresse / reverse_geocode nullable)
     // - 3 V0.8 sans outputSchema (densite_professionnels_sante, densite_etablissements_sante,
     //   lister_specialites_medicales — objets riches imbriqués, schema détaillé reporté en V0.8.1)
-    // = 27.
-    expect(withOutput).toHaveLength(27);
+    // = 28.
+    expect(withOutput).toHaveLength(28);
   });
 
   it("omet volontairement l'outputSchema pour les tools array-root ou nullable", () => {
@@ -1268,4 +1234,39 @@ describe("geocode_adresse — interprétation du score (régression B1)", () => 
     expect(tool?.description).toMatch(/confidence_low/);
     expect(tool?.description).toMatch(/0\.5|douteux|incertain/i);
   });
+});
+
+describe("exemples code_insee PLM corrigés (régression P2)", () => {
+  function descAndParam(name: string): string {
+    const tool = findTool(name);
+    const props = tool?.inputSchema.properties as
+      | Record<string, { description?: string }>
+      | undefined;
+    return `${tool?.description ?? ""} ${props?.code_insee?.description ?? ""} ${props?.code?.description ?? ""}`;
+  }
+
+  for (const name of [
+    "densite_professionnels_sante",
+    "panorama_sante_territoire",
+    "population_par_commune",
+  ]) {
+    it(`${name} : aucun code arrondissement PLM présenté comme exemple positif`, () => {
+      const txt = descAndParam(name);
+      // Un code arrondissement entre guillemets accolé à un nom de ville =
+      // exemple d'usage trompeur (ex: "75108" Paris 8e). Les mentions de
+      // plages dans un avertissement ("75101-75120") restent autorisées.
+      expect(txt).not.toMatch(/"751(0[1-9]|1[0-9]|20)"/);
+      expect(txt).not.toMatch(/"132(0[1-9]|1[0-6])"/);
+      expect(txt).not.toMatch(/"693(8[1-9])"/);
+    });
+  }
+
+  for (const name of ["densite_professionnels_sante", "panorama_sante_territoire"]) {
+    it(`${name} : signale PLM non supporté + oriente code_dept`, () => {
+      const d = findTool(name)?.description ?? "";
+      expect(d).toMatch(/Paris|Lyon|Marseille/);
+      expect(d).toMatch(/code_dept|département/i);
+      expect(d).toMatch(/indisponible|non supporté|RangeError/i);
+    });
+  }
 });

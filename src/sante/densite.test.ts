@@ -278,6 +278,42 @@ describe("densiteProfessionnelsSante", () => {
     expect(countRppsByCommuneSpy).not.toHaveBeenCalled();
   });
 
+  // --- Lot A (P1+P2) : garde-fou codes PLM Paris/Lyon/Marseille -----------
+
+  it("P1 — commune-mère PLM (75056) → RangeError oriente code_dept (pas densité 0 silencieuse)", async () => {
+    await expect(densiteProfessionnelsSante({ codeInsee: "75056" })).rejects.toThrow(
+      /code_dept|arrondissement/i,
+    );
+    // Garde-fou AVANT tout appel : pas de count=0 silencieux ni d'appel Melodi.
+    expect(countRppsByCommuneSpy).not.toHaveBeenCalled();
+    expect(popByCommuneSpy).not.toHaveBeenCalled();
+  });
+
+  it("P2 — arrondissement PLM (75108) → RangeError claire (pas 'commune fusionnée')", async () => {
+    let msg = "";
+    try {
+      await densiteProfessionnelsSante({ codeInsee: "75108" });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/code_dept|arrondissement/i);
+    expect(msg).not.toMatch(/fusionnée/i);
+    expect(countRppsByCommuneSpy).not.toHaveBeenCalled();
+  });
+
+  it("P2 — Marseille 1er (13201) et Lyon 3e (69383) également gardés", async () => {
+    await expect(densiteProfessionnelsSante({ codeInsee: "13201" })).rejects.toThrow(RangeError);
+    await expect(densiteProfessionnelsSante({ codeInsee: "69383" })).rejects.toThrow(RangeError);
+  });
+
+  it("commune non-PLM (59009) reste calculable (pas de faux positif garde-fou)", async () => {
+    countRppsByCommuneSpy.mockResolvedValue(85);
+    popByCommuneSpy.mockResolvedValue(popCommuneFound(62868, 2023, "59009"));
+    const result = await densiteProfessionnelsSante({ codeInsee: "59009" });
+    expect(result.zone.zone).toBe("59009");
+    expect(result.zone.densitePour100k).toBeGreaterThan(0);
+  });
+
   it("V0.9 — aucun des deux fournis → RangeError", async () => {
     await expect(densiteProfessionnelsSante({})).rejects.toThrow(RangeError);
   });

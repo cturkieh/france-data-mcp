@@ -115,6 +115,28 @@ export function parentCommuneInsee(codeInsee: string): string {
   return codeInsee;
 }
 
+/** Codes INSEE des communes-mères Paris / Lyon / Marseille → leur département. */
+const PLM_COMMUNE_MERE_DEPT: Record<string, string> = {
+  "75056": "75",
+  "69123": "69",
+  "13055": "13",
+};
+
+/**
+ * Renvoie le code département (75/69/13) si `codeInsee` est une commune PLM —
+ * commune-mère OU arrondissement municipal — sinon `null`. Source unique de
+ * détection PLM du repo (autorité = ce module, cf. `parentCommuneInsee`).
+ * Utilisé pour court-circuiter les calculs impossibles à la maille commune
+ * sur Paris/Lyon/Marseille (INSEE n'expose la population qu'à la commune
+ * entière alors que FINESS/RPPS portent l'arrondissement).
+ */
+export function plmDept(codeInsee: string): string | null {
+  // `parentCommuneInsee` ne replie un arrondissement que vers 75056/69123/13055
+  // (toutes clés de PLM_COMMUNE_MERE_DEPT) → une seule source pour le dept,
+  // que l'entrée soit un arrondissement ou directement la commune-mère.
+  return PLM_COMMUNE_MERE_DEPT[parentCommuneInsee(codeInsee)] ?? null;
+}
+
 /**
  * Bornes WGS84 enveloppant France métropole + DOM-TOM (Polynésie côté ouest,
  * Mayotte/Réunion côté est, Manche côté nord, Polynésie côté sud). Tout

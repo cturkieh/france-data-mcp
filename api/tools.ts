@@ -20,6 +20,7 @@ import { lookupPractitionerByRpps } from "../src/sante/ans-fhir.js";
 import { getCdsByFiness, getCdsInRadius } from "../src/sante/cds-db.js";
 import { type CoverageInput, getCoverageFinessVsSireneInRadius } from "../src/sante/coverage.js";
 import {
+  compareAdresseCnamVsFiness,
   compareRaisonSocialeFinessVsRpps,
   historiqueEtablissement,
   reconcilierFinessSirene,
@@ -39,12 +40,7 @@ import {
   getFinessByNumFiness,
   getFinessInRadius,
 } from "../src/sante/finess-db.js";
-import { haversineDistance } from "../src/sante/finess.js";
-import {
-  type SearchEntreprisesResult,
-  getEntrepriseBySiren,
-  searchEntreprises,
-} from "../src/sante/index.js";
+import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { inspectSite } from "../src/sante/inspect-site.js";
 import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
@@ -284,7 +280,7 @@ const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
 const DINUM_QUERY_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
   description:
-    "Résultat de recherche DINUM avec pagination native (total, page, perPage, totalPages, entreprises). `fallback` présent si le serveur a fait un reverseGeocode + filtrage Haversine quand l'API DINUM ne supporte pas la combinaison `naf + lat/lon`.",
+    "Résultat de recherche DINUM avec pagination native (total, page, perPage, totalPages, entreprises).",
   properties: {
     total: { type: "number", description: "Total d'entreprises matchant la query côté DINUM." },
     page: { type: "number" },
@@ -294,15 +290,6 @@ const DINUM_QUERY_OUTPUT_SCHEMA: Record<string, unknown> = {
       type: "array",
       items: { type: "object" },
       description: "Entreprises retournées (SIREN, nomComplet, NAF, finances, etablissements).",
-    },
-    fallback: {
-      type: "object",
-      description:
-        "Présent uniquement si le serveur a appliqué le fallback reverseGeocode + Haversine.",
-    },
-    truncated_by_per_page: {
-      type: "boolean",
-      description: "true si le post-filtre Haversine a tronqué pour respecter `perPage`.",
     },
   },
   required: ["total", "page", "perPage", "totalPages", "entreprises"],
@@ -656,35 +643,6 @@ const NOMENCLATURE_COLLISION_WARNING =
   "ATTENTION nomenclatures : les codes ANS (`profession_code`, `savoir_faire_code`) sont une nomenclature DISTINCTE des codes Ameli (`specialite_code`, `type_ps_code`) — un même nombre désigne des choses différentes (ex: '10' = Médecin côté ANS, Neurochirurgien côté Ameli). Ne JAMAIS passer un code Ameli à un paramètre ANS : le filtre renverrait vide sans erreur. Découvrir les codes ANS via `lister_specialites_medicales`.";
 
 /**
- * Réponse enrichie du fallback `naf + center+radiusKm` (limite API DINUM).
- *
- * Le champ `fallback` documente la stratégie ET signale honnêtement quand la
- * réponse peut être incomplète (`truncated: true` quand l'API a renvoyé plus
- * d'entreprises NAF dans le département qu'on n'a pu en évaluer).
- *
- * - `total` : nombre d'entreprises dans le rayon (post-filtrage Haversine, AVANT
- *   troncature `perPage`). Le caller voit le décompte réel, pas l'estimation
- *   tronquée — important pour ne pas sous-estimer une zone à la prospection.
- * - `truncated_by_per_page` : true quand `total > perPage` et que la liste
- *   `entreprises` est tronquée à `perPage`. Signal explicite, pas implicite.
- * - `fallback.totalInDepartement` : nombre total NAF dans le département (avant Haversine).
- * - `fallback.evaluees` : nombre d'entreprises effectivement évaluées (max 25).
- * - `fallback.truncated` : true si on a évalué moins que `totalInDepartement`.
- * - `fallback.warning` : message actionnable pour le caller, présent uniquement quand truncated.
- */
-type EntreprisesInRadiusFallbackResult = SearchEntreprisesResult & {
-  truncated_by_per_page?: boolean;
-  fallback: {
-    strategy: string;
-    departementUtilise: string;
-    evaluees: number;
-    totalInDepartement: number;
-    truncated: boolean;
-    warning?: string;
-  };
-};
-
-/**
  * Extrait le code département d'un code commune INSEE.
  * Alias historique conservé pour la compat des callers — la logique vit
  * dans `src/territoire/dept-codes.ts` (consolidation V0.4).
@@ -783,105 +741,6 @@ function dedupeAmeliByPs(result: AmeliQueryResult): AmeliDedupedResult {
     results,
   };
   if (result.truncated) out.warning = DEDUPE_TRUNCATED_WARNING;
-  return out;
-}
-
-/**
- * Contourne la limitation API DINUM : `activite_principale + lat/long/radius`
- * n'est pas supporté nativement (les coords requièrent un `q` textuel).
- *
- * Stratégie : reverseGeocode du centre → département → searchEntreprises filtré
- * → filtre Haversine côté serveur sur les sièges des établissements.
- *
- * Limitation : seules les 25 premières entreprises NAF du département sont
- * évaluées (cap `perPage` API DINUM).
- */
-async function searchByNafInRadius(params: {
-  naf: string;
-  center: { lon: number; lat: number };
-  radiusKm: number;
-  /**
-   * Troncature finale appliquée APRÈS le filtre Haversine. Défaut 10 (cohérent
-   * avec le schéma MCP). L'API DINUM amont fixe son `per_page` à 25 (max) pour
-   * maximiser la couverture du département avant filtrage géo — `perPage` ici
-   * ne contrôle QUE la troncature de la sortie au caller MCP.
-   */
-  perPage?: number;
-}): Promise<EntreprisesInRadiusFallbackResult> {
-  const { naf, center, radiusKm } = params;
-  // Défaut 10 aligné sur le schéma `perPage` du tool MCP. Sans cette troncature
-  // finale, un caller demandant `perPage: 3` recevait silencieusement le post-
-  // filtre Haversine entier (jusqu'à 25). Validation explicite : entier dans
-  // [1, 25]. Throw plutôt qu'un clamp silencieux — règle "afficher le critère
-  // manquant" plutôt que masquer une saisie invalide (CLAUDE.md error handling).
-  const perPage = params.perPage ?? 10;
-  if (!Number.isInteger(perPage) || perPage < 1 || perPage > 25) {
-    throw new RangeError(
-      `entreprises_in_radius: perPage doit être un entier entre 1 et 25 (reçu: ${perPage}).`,
-    );
-  }
-
-  let reverse: Awaited<ReturnType<typeof reverseGeocode>>;
-  try {
-    reverse = await reverseGeocode(center);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[france-data-mcp] entreprises_in_radius fallback: reverseGeocode failed for lon=${center.lon} lat=${center.lat}: ${msg}`,
-    );
-    throw new Error(
-      `entreprises_in_radius: reverseGeocode IGN a échoué (${msg}). Fournir 'departement' ou 'codePostal' explicitement pour contourner.`,
-    );
-  }
-
-  const fallbackDept = deptFromCommune(reverse?.codeCommune);
-  if (!fallbackDept) {
-    // RangeError → caller a fourni un point hors zone administrative française
-    // (typique : coords océan, étranger, ou code postal sans rattachement INSEE).
-    // Faute caller → -32602, pas internal_error.
-    throw new RangeError(
-      `entreprises_in_radius: impossible de déduire le département du point lon=${center.lon} lat=${center.lat} via reverseGeocode (codeCommune="${reverse?.codeCommune ?? "absent"}"). Fournir 'departement' ou 'codePostal' explicitement.`,
-    );
-  }
-
-  const result = await searchEntreprises({
-    naf,
-    departement: fallbackDept,
-    perPage: 25,
-    page: 1,
-  });
-  const radiusMeters = radiusKm * 1000;
-  const filtered = result.entreprises.filter((e) =>
-    e.etablissements.some((et) => et.point && haversineDistance(center, et.point) <= radiusMeters),
-  );
-
-  const evaluees = result.entreprises.length;
-  const totalInDepartement = result.total;
-  const truncated = totalInDepartement > evaluees;
-  const fallback: EntreprisesInRadiusFallbackResult["fallback"] = {
-    strategy: "reverseGeocode + departement + Haversine client-side filter",
-    departementUtilise: fallbackDept,
-    evaluees,
-    totalInDepartement,
-    truncated,
-  };
-  if (truncated) {
-    fallback.warning = `Seules ${evaluees}/${totalInDepartement} entreprises NAF ${naf} du département ${fallbackDept} ont été évaluées (limite API DINUM 25 par page). Le résultat peut sous-estimer le nombre réel d'entreprises dans le rayon. Pour exhaustivité, restreindre par 'codePostal' précis ou utiliser un 'q' textuel avec center+radiusKm.`;
-  }
-
-  // total annoncé = filtered.length (décompte réel post-Haversine, AVANT
-  // troncature `perPage`). La troncature est explicite via `truncated_by_per_page`
-  // pour qu'un caller voyant `entreprises.length < total` comprenne pourquoi.
-  const truncatedByPerPage = filtered.length > perPage;
-  const out: EntreprisesInRadiusFallbackResult = {
-    ...result,
-    entreprises: truncatedByPerPage ? filtered.slice(0, perPage) : filtered,
-    total: filtered.length,
-    perPage,
-    totalPages: Math.max(1, Math.ceil(filtered.length / perPage)),
-    fallback,
-  };
-  if (truncatedByPerPage) out.truncated_by_per_page = true;
   return out;
 }
 
@@ -1028,7 +887,7 @@ export const TOOLS: McpTool[] = [
         code: {
           type: "string",
           description:
-            'Code INSEE de la commune (5 caractères). Ex: "75056" Paris, "13201" Marseille 1er, "59009" Villeneuve-d\'Ascq, "2A004" Ajaccio.',
+            'Code INSEE de la commune (5 caractères). Ex: "75056" Paris, "13055" Marseille, "59009" Villeneuve-d\'Ascq, "2A004" Ajaccio. INSEE n\'expose PAS la population des arrondissements PLM (75101-75120, 13201-13216, 69381-69389) : utiliser la commune-mère (75056/13055/69123).',
         },
       },
       required: ["code"],
@@ -1076,7 +935,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "entreprises_in_radius",
     description:
-      "Recherche d'entreprises françaises avec filtres NAF, code postal, département ou rayon géographique. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.\n\nLimitation API DINUM : la combinaison `naf + lat/lon/radiusKm` n'est pas supportée nativement (lat/lon nécessitent un `q` textuel). Le serveur applique alors un fallback : reverseGeocode du point → recherche par département → filtrage Haversine côté serveur. Les résultats sont limités aux 25 premières entreprises du NAF dans le département (limite API).",
+      "Recherche d'entreprises françaises avec filtres NAF, code postal, département ou rayon géographique. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.\n\nDeux modes EXCLUSIFs (endpoints DINUM distincts) : (1) proximité — `lat`+`lon`+`radiusKm` (optionnellement + `naf`), résolu nativement via `/near_point` ; (2) administratif — `q` (texte libre) et/ou `naf` + `codePostal`/`departement`, via `/search`. La recherche de proximité ne supporte PAS `q` ni `codePostal`/`departement` (combinaison rejetée avec une erreur explicite : choisir un seul mode). `radiusKm` borné à 50 km.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1119,21 +978,6 @@ export const TOOLS: McpTool[] = [
       const lat = coerceNumber(args.lat, "lat");
       const radiusKm = coerceNumber(args.radiusKm, "radiusKm");
       const hasCoords = lon !== undefined && lat !== undefined && radiusKm !== undefined;
-
-      // Cas qui pose problème côté API DINUM : `naf + lat/long/radius`. L'API
-      // exige que les coords soient accompagnées d'un `q` textuel. On contourne
-      // via reverseGeocode + filtrage Haversine, géré dans `searchByNafInRadius`.
-      // `perPage` propagé pour que la troncature finale honore le contrat MCP —
-      // sans propagation, le filtre Haversine peut retourner > perPage matches.
-      if (naf && hasCoords && !q && !departement && !codePostal) {
-        const fallbackParams: Parameters<typeof searchByNafInRadius>[0] = {
-          naf,
-          center: { lon, lat },
-          radiusKm,
-        };
-        if (perPage !== undefined) fallbackParams.perPage = perPage;
-        return searchByNafInRadius(fallbackParams);
-      }
 
       const opts: Parameters<typeof searchEntreprises>[0] = {};
       if (naf) opts.naf = naf;
@@ -1201,6 +1045,24 @@ export const TOOLS: McpTool[] = [
     handler: async (args) => {
       const numFiness = requireFinessId(args);
       return compareRaisonSocialeFinessVsRpps(numFiness);
+    },
+  },
+  {
+    name: "compare_adresse_cnam_vs_finess",
+    description:
+      "Compare l'adresse d'un centre de santé côté CNAM (Annuaire santé Ameli) vs FINESS DREES pour un même num_finess. Primitive brute SANS interprétation métier — retourne les deux adresses, un `score_dice` (0..1, informatif ; `null` si non comparable car `finess_absent`) et un `statut`. Le caller décide quoi faire de la divergence.\n\nUtilité : signaler un déménagement propagé par une source mais pas (encore) par l'autre (ex: CNAM '5 RUE DE L'ARQUEBUSE AUTUN' vs FINESS '15 BD BERNARD GIBERSTEIN AUTUN' pour le même FINESS). Équivalent côté centre de santé de `compare_raison_sociale_finess_vs_rpps`.\n\n**Statut** (présent uniquement sur `found: true`) :\n- `match` : adresses strictement égales après normalisation\n- `divergent_after_normalization` : adresses différentes (déménagement non synchronisé entre sources)\n- `finess_absent` : le CDS existe côté CNAM mais le num_finess est absent de FINESS DREES (latence sync bimensuelle)\n\nFormat : objet `LookupResult` discriminé par `found`. Si le num_finess n'est PAS un centre de santé CNAM, le tool retourne `{found: false, lookupStatus: 'not_found', message}` (utiliser `etablissement_by_finess` pour un établissement non-CDS).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        num_finess: { type: "string", description: "Numéro FINESS exact (9 chiffres)." },
+      },
+      required: ["num_finess"],
+    },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      const numFiness = requireFinessId(args);
+      return compareAdresseCnamVsFiness(numFiness);
     },
   },
   {
@@ -1867,7 +1729,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "densite_professionnels_sante",
-    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9). Exactement un des deux requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nLimitation Paris/Marseille/Lyon : au niveau commune (\`code_insee\`), les rows RPPS portent l'arrondissement (75108, 13201, 69383). Pour la métropole entière, utiliser \`code_dept\` (75, 13, 69).\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${NOMENCLATURE_COLLISION_WARNING}\n\n${RPPS_CGU_NOTICE}`,
+    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9). Exactement un des deux requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nParis/Marseille/Lyon : la densité par \`code_insee\` est INDISPONIBLE (les praticiens RPPS sont rattachés aux arrondissements alors qu'INSEE n'expose la population qu'à la commune entière) — passer un code commune-mère (75056) ou arrondissement (75108) lève une RangeError explicite. Utiliser \`code_dept\` (75, 13, 69) pour la densité ville entière.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${NOMENCLATURE_COLLISION_WARNING}\n\n${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1879,7 +1741,7 @@ export const TOOLS: McpTool[] = [
         code_insee: {
           type: "string",
           description:
-            'Code INSEE de la commune 5 caractères (V0.9). Ex: "59009" Villeneuve-d\'Ascq, "75108" Paris 8e, "2A004" Ajaccio. Exclusif avec code_dept.',
+            'Code INSEE de la commune 5 caractères (V0.9). Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté au niveau commune (densité indisponible — voir description) : utiliser code_dept. Exclusif avec code_dept.',
         },
         profession_code: {
           type: "string",
@@ -1994,14 +1856,14 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "panorama_sante_territoire",
-    description: `Panorama santé d'une commune française en 1 appel (V0.9). Agrège en parallèle : population (INSEE Melodi), densités médecins + infirmiers + pharmaciens avec comparaison nationale (méthodo DREES), et nombre d'établissements FINESS par famille (default ${JSON.stringify(DEFAULT_FAMILLES)}).\n\nRemplace 7-10 appels MCP individuels par 1 seul. Ne renvoie AUCUNE interprétation métier (pas de qualification automatique 'désert médical') — le caller LLM applique sa grille.\n\n**Granularité mixte** : les densités professionnels et la population sont calculées au niveau **commune** ; le décompte FINESS est agrégé au niveau **département** dérivé du code INSEE (limitation V0.9 — pas de RPC count_finess_by_commune encore). Le champ \`niveauEtablissements\` du résultat indique \`"departement"\` (succès), \`"indisponible"\` (dept indérivable, ex code DOM tronqué) — utiliser cette information pour ne pas confondre ratios commune et dept.\n\nLimitation Paris/Marseille/Lyon : le code INSEE correspond à un arrondissement (ex 75108 Paris 8e, 13206 Marseille 6e, 69383 Lyon 3e). Pour la métropole entière, appeler \`densite_professionnels_sante\` au niveau département.\n\nAlias acceptés : \`codeInsee\`/\`insee\`/\`code\` → \`code_insee\`.\n\nSources : RPPS / Annuaire Santé ANS (mensuel), FINESS DREES (bimensuel), INSEE Melodi (PMUN 2023).`,
+    description: `Panorama santé d'une commune française en 1 appel (V0.9). Agrège en parallèle : population (INSEE Melodi), densités médecins + infirmiers + pharmaciens avec comparaison nationale (méthodo DREES), et nombre d'établissements FINESS par famille (default ${JSON.stringify(DEFAULT_FAMILLES)}).\n\nRemplace 7-10 appels MCP individuels par 1 seul. Ne renvoie AUCUNE interprétation métier (pas de qualification automatique 'désert médical') — le caller LLM applique sa grille.\n\n**Granularité mixte** : les densités professionnels et la population sont calculées au niveau **commune** ; le décompte FINESS est agrégé au niveau **département** dérivé du code INSEE (limitation V0.9 — pas de RPC count_finess_by_commune encore). Le champ \`niveauEtablissements\` du résultat indique \`"departement"\` (succès), \`"indisponible"\` (dept indérivable, ex code DOM tronqué) — utiliser cette information pour ne pas confondre ratios commune et dept.\n\nParis/Marseille/Lyon NON supporté : le panorama par commune dépend de la densité par commune, indisponible pour ces villes (INSEE n'expose la population qu'à la commune entière, les praticiens RPPS aux arrondissements). Un code PLM (commune-mère 75056 ou arrondissement) lève une RangeError. Pour ces villes, interroger les tools individuels au niveau \`code_dept\` (75/69/13).\n\nAlias acceptés : \`codeInsee\`/\`insee\`/\`code\` → \`code_insee\`.\n\nSources : RPPS / Annuaire Santé ANS (mensuel), FINESS DREES (bimensuel), INSEE Melodi (PMUN 2023).`,
     inputSchema: {
       type: "object",
       properties: {
         code_insee: {
           type: "string",
           description:
-            'Code INSEE de la commune 5 caractères. Ex: "59009" Villeneuve-d\'Ascq, "75108" Paris 8e, "2A004" Ajaccio.',
+            'Code INSEE de la commune 5 caractères. Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté (voir description).',
         },
         finess_familles: {
           type: "array",

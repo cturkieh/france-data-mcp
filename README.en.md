@@ -54,7 +54,7 @@ Brings together the most useful French government data sources under a uniform t
 
 ---
 
-## Tools (31)
+## Tools (35)
 
 - **Territory (4)**: `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
 - **Companies (3)**: `entreprises_in_radius`, `entreprise_by_siren` (+ INSEE SIRENE V3.11 fallback), `etablissement_by_siret`
@@ -79,13 +79,14 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.10.4 — in production.** 34 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 913 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
+✅ **v0.10.4 in production (npm/registry) — 0.10.5 in preparation.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 933 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
 
 Full history: [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
 - **v0.10.4** ✅ — claude.ai quality audit (B1→B10): data accuracy + geo transparency + reduced verbosity
+- **0.10.5 (prepared)** ✅ — audit P1→P4: PLM guard, DINUM `/near_point` endpoint, `compare_adresse_cnam_vs_finess`
 - **Backlog** — drop redundant `rpps_insee_idx`, validate specialty codes at boundary, validate IGN coords
 - **v1.0+** — DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics)
 

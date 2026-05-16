@@ -41,14 +41,25 @@ export function normalizeForCompare(value: string): string {
 }
 
 /**
- * Concatène voie + CP + ville côté FINESS pour comparer à une adresse libellée
- * SIRENE / DINUM. Champs `null`/vides ignorés (DREES omet régulièrement la
- * voie sur les structures émergentes).
+ * Concatène voie + CP + ville en un libellé comparable. Champs `null`/vides
+ * ignorés (DREES/CNAM omettent régulièrement la voie). Source unique du
+ * format pour que les deux côtés d'une comparaison (FINESS vs SIRENE/CNAM)
+ * soient normalisés strictement à l'identique — sinon `diceCoefficient`
+ * serait faussé par un format divergent.
  */
-export function buildFinessAdresseLibelle(f: FinessResult): string {
-  return [f.adresse.voie, f.adresse.code_postal, f.adresse.ville]
+export function buildAdresseLibelle(parts: {
+  voie: string | null;
+  code_postal: string | null;
+  ville: string | null;
+}): string {
+  return [parts.voie, parts.code_postal, parts.ville]
     .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
     .join(" ");
+}
+
+/** Variante FINESS de {@link buildAdresseLibelle}. */
+export function buildFinessAdresseLibelle(f: FinessResult): string {
+  return buildAdresseLibelle(f.adresse);
 }
 
 /**

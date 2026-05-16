@@ -4,6 +4,48 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+**2e vague audit qualité claude.ai (P1→P4, re-test post-0.10.4) : garde-fou
+PLM, endpoint DINUM proximité, primitive divergence d'adresse CDS. 933 tests.**
+
+### Changed
+
+- **BREAKING (mineur, OSS pré-1.0) — P3 : `entreprises_in_radius` recherche
+  de proximité.** La recherche géographique (`lat`+`lon`+`radiusKm`) utilise
+  désormais l'endpoint DINUM dédié `/near_point` au lieu de `/search`
+  (qui rejetait `lat/long/radius` en HTTP 400 — `q + lat/lon` était cassé).
+  Conséquences : `naf + lat/lon` fonctionne **nativement** (plus de fallback
+  reverseGeocode + Haversine + plafond 25/département) ; la sortie ne porte
+  plus `fallback` ni `truncated_by_per_page` (pagination native DINUM) ;
+  `q + lat/lon` et `codePostal|departement + lat/lon` lèvent une `RangeError`
+  explicite (modes exclusifs, endpoints DINUM distincts) au lieu d'un 400
+  opaque ou d'un résultat non géolocalisé silencieux. `searchByNafInRadius`
+  (workaround désormais sans objet) supprimé.
+
+### Fixed
+
+- **P1+P2 — Paris/Lyon/Marseille : densité/panorama par commune.**
+  `densite_professionnels_sante` et `panorama_sante_territoire` avec un code
+  PLM (commune-mère 75056/69123/13055 OU arrondissement 75101-75120 etc.)
+  renvoyaient soit une densité 0 silencieuse trompeuse (faux « désert
+  médical »), soit une `RangeError` au message faux (« commune fusionnée »).
+  Garde-fou `assertNotPlmCommune` (avant tout appel DB/Melodi) → `RangeError`
+  explicite orientant vers `code_dept`. Détection PLM centralisée dans
+  `plmDept` (territoire/commune-index, source unique). Exemples `code_insee`
+  trompeurs (`"75108" Paris 8e`…) retirés des descriptions de
+  `densite_professionnels_sante`, `panorama_sante_territoire`,
+  `population_par_commune`.
+
+### Added
+
+- **P4 — `compare_adresse_cnam_vs_finess`** (tool + `compareAdresseCnamVsFiness`).
+  Parallèle à `compare_raison_sociale_finess_vs_rpps` : compare l'adresse CNAM
+  (centre de santé) vs FINESS DREES pour un même `num_finess`. Primitive
+  brute, statut tri-état (`match` / `divergent_after_normalization` /
+  `finess_absent`) + `score_dice` (`null` si non comparable, jamais `0`
+  trompeur). Helper `buildAdresseLibelle` factorisé (address-match.ts).
+
 ## [0.10.4] — 2026-05-16
 
 **Patch — corrections audit qualité externe claude.ai (B1→B10, 34 tools

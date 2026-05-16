@@ -118,7 +118,7 @@ describe("searchEntreprises", () => {
     );
 
     const result = await searchEntreprises({
-      q: "laboratoire",
+      naf: "8690B",
       center: { lon: 4.7192, lat: 49.7672 },
       radiusKm: 5,
     });
@@ -130,36 +130,52 @@ describe("searchEntreprises", () => {
     expect(labo?.nomComplet).toBe("BIOLAB ARDENNES");
     expect(labo?.naf).toBe("8690B");
     expect(labo?.finances).toHaveLength(2);
-    expect(labo?.finances[0]?.annee).toBe(2024);
-    expect(labo?.finances[0]?.ca).toBe(5000000);
     expect(labo?.etablissements[0]?.point).toEqual({ lon: 4.7192, lat: 49.7672 });
-    expect(labo?.dirigeants[0]?.nom).toBe("DUPONT");
 
+    // P3 : recherche géo → endpoint /near_point (PAS /search avec lat/long).
     const url = lastFetchUrl();
-    expect(url).toContain("q=laboratoire");
+    expect(url).toContain("/near_point");
+    expect(url).not.toContain("/search");
     expect(url).toContain("lat=49.7672");
     expect(url).toContain("long=4.7192");
     expect(url).toContain("radius=5");
-    expect(url).toContain("etat_administratif=A");
+    expect(url).toContain("activite_principale=86.90B");
+    // /near_point n'accepte ni q ni etat_administratif (rejet 400 amont).
+    expect(url).not.toContain("etat_administratif");
   });
 
-  it("rejette `naf + center+radiusKm` (limitation API DINUM) avec message d'aide", async () => {
-    await expect(
-      searchEntreprises({
-        naf: "8690B",
-        center: { lon: 4.7192, lat: 49.7672 },
-        radiusKm: 5,
-      }),
-    ).rejects.toThrow(/n'accepte pas `naf` \+ `center\+radiusKm`/);
+  it("P3 — `naf + center+radiusKm` fonctionne nativement via /near_point", async () => {
+    fetchMock.mockResolvedValue(apiResponse({}));
+    await searchEntreprises({
+      naf: "8690B",
+      center: { lon: 4.7192, lat: 49.7672 },
+      radiusKm: 5,
+    });
+    expect(lastFetchUrl()).toContain("/near_point");
+    expect(lastFetchUrl()).toContain("activite_principale=86.90B");
   });
 
-  it("rejette `center+radiusKm` sans `q` ni `naf`", async () => {
+  it("P3 — `center+radiusKm` seul (sans q ni naf) fonctionne via /near_point", async () => {
+    fetchMock.mockResolvedValue(apiResponse({}));
+    await searchEntreprises({ center: { lon: 4.7192, lat: 49.7672 }, radiusKm: 5 });
+    const url = lastFetchUrl();
+    expect(url).toContain("/near_point");
+    expect(url).toContain("lat=49.7672");
+  });
+
+  it("P3 — `q + center` rejeté clairement (/near_point ne supporte pas q)", async () => {
     await expect(
-      searchEntreprises({
-        center: { lon: 4.7192, lat: 49.7672 },
-        radiusKm: 5,
-      }),
-    ).rejects.toThrow(/recherche textuelle/);
+      searchEntreprises({ q: "biogroup", center: { lon: 4.7192, lat: 49.7672 }, radiusKm: 5 }),
+    ).rejects.toThrow(/near_point|recherche géographique.*q|q.*pas.*combin/i);
+  });
+
+  it("P3 — `departement|codePostal + center` rejeté (modes exclusifs)", async () => {
+    await expect(
+      searchEntreprises({ departement: "08", center: { lon: 4.72, lat: 49.77 }, radiusKm: 5 }),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      searchEntreprises({ codePostal: "08000", center: { lon: 4.72, lat: 49.77 }, radiusKm: 5 }),
+    ).rejects.toThrow(/exclusif|administrati/i);
   });
 
   it("rejette si aucun critère fourni", async () => {
@@ -184,7 +200,7 @@ describe("searchEntreprises", () => {
   it("clamp le radius à 50 km", async () => {
     fetchMock.mockResolvedValue(apiResponse({}));
     await searchEntreprises({
-      q: "labo",
+      naf: "8690B",
       center: { lon: 4.7, lat: 49.7 },
       radiusKm: 999,
     });

@@ -16,10 +16,12 @@
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
 import {
+  buildAdresseLibelle,
   buildFinessAdresseLibelle,
   diceCoefficient,
   normalizeForCompare,
 } from "./address-match.js";
+import { getCdsByFiness } from "./cds-db.js";
 import { assertValidNumFiness } from "./db-helpers.js";
 import { getFinessByNumFiness } from "./finess-db.js";
 import {
@@ -311,6 +313,71 @@ export async function compareRaisonSocialeFinessVsRpps(
     finess_raison_sociale: finess.raison_sociale,
     rpps_raisons_sociales: rppsLibelles,
     statut: hasExact ? "exact_match" : "divergent_after_normalization",
+  });
+}
+
+export interface AdresseDiff {
+  num_finess: string;
+  /** Adresse "voie CP ville" reconstruite depuis le dump CNAM (CDS). */
+  cnam_adresse: string;
+  /** Idem côté FINESS DREES. `null` si le FINESS n'a pas (encore) ce site. */
+  finess_adresse: string | null;
+  /**
+   * Sørensen-Dice 0..1 sur les libellés normalisés. Signal informatif, PAS un
+   * verdict. `null` (et non `0`) quand non comparable (`finess_absent`) : un
+   * `0` connoterait "très différent" alors que le sens est "pas d'adresse
+   * FINESS à comparer".
+   */
+  score_dice: number | null;
+  /**
+   * Statut brut (primitive de réconciliation, aucune interprétation métier).
+   * - `match` : égalité stricte après normalisation.
+   * - `divergent_after_normalization` : adresses différentes (ex: déménagement
+   *   propagé côté CNAM mais pas encore côté DREES, ou inverse).
+   * - `finess_absent` : CDS connu CNAM mais num_finess absent de FINESS DREES.
+   * `num_finess` absent de la base CDS → `lookupNotFound` (pas un statut).
+   */
+  statut: "match" | "divergent_after_normalization" | "finess_absent";
+}
+
+/**
+ * Compare l'adresse CNAM (centre de santé) vs FINESS DREES pour un même
+ * `num_finess`. Parallèle à `compareRaisonSocialeFinessVsRpps` : primitive
+ * brute, le caller décide quoi faire de la divergence. Aucune connaissance
+ * propriétaire — réconciliation factuelle de deux sources publiques.
+ */
+export async function compareAdresseCnamVsFiness(
+  numFiness: string,
+): Promise<LookupResult<AdresseDiff>> {
+  const trimmed = assertValidNumFiness(numFiness);
+  // Parallèle assumé (≠ séquentiel de compareRaisonSocialeFinessVsRpps) : les
+  // 2 lookups servent dans le cas nominal `found` — ne PAS uniformiser.
+  const [cds, finess] = await Promise.all([getCdsByFiness(trimmed), getFinessByNumFiness(trimmed)]);
+  if (!cds.found) {
+    return lookupNotFound(
+      trimmed,
+      `num_finess "${trimmed}" n'est pas un centre de santé CNAM — comparaison d'adresse CNAM impossible (${cds.message})`,
+    );
+  }
+  const cnamAdresse = buildAdresseLibelle(cds.adresse);
+  if (!finess.found) {
+    return lookupFound<AdresseDiff>({
+      num_finess: trimmed,
+      cnam_adresse: cnamAdresse,
+      finess_adresse: null,
+      score_dice: null,
+      statut: "finess_absent",
+    });
+  }
+  const finessAdresse = buildFinessAdresseLibelle(finess);
+  const cnamNorm = normalizeForCompare(cnamAdresse);
+  const finessNorm = normalizeForCompare(finessAdresse);
+  return lookupFound<AdresseDiff>({
+    num_finess: trimmed,
+    cnam_adresse: cnamAdresse,
+    finess_adresse: finessAdresse,
+    score_dice: diceCoefficient(cnamNorm, finessNorm),
+    statut: cnamNorm === finessNorm ? "match" : "divergent_after_normalization",
   });
 }
 

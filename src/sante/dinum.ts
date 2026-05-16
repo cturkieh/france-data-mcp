@@ -24,6 +24,15 @@ import type { Coordinates } from "../core/types.js";
 import { getInseeApiKey, lookupSirenViaInsee } from "./insee-sirene.js";
 
 const BASE_URL = "https://recherche-entreprises.api.gouv.fr/search";
+/**
+ * Endpoint DINUM dédié à la recherche de proximité (audit P3). `/search`
+ * (full-text + filtres administratifs) NE supporte PAS `lat/long/radius` →
+ * envoyer des coords sur `/search` provoque un HTTP 400. La proximité a son
+ * endpoint propre, mutuellement exclusif avec `q`/`code_postal`/`departement`/
+ * `etat_administratif`. `/near_point` accepte : lat, long, radius (≤50),
+ * activite_principale (NAF), page, per_page.
+ */
+const NEAR_POINT_URL = "https://recherche-entreprises.api.gouv.fr/near_point";
 
 export type Etablissement = {
   /** SIRET 14 chiffres */
@@ -278,41 +287,45 @@ export async function searchEntreprises(
     throw new RangeError("searchEntreprises: radiusKm > 0 requis quand center est fourni");
   }
 
-  // L'API DINUM exige que `lat/long/radius` soient accompagnés d'un `q` (recherche
-  // textuelle). On ne peut pas combiner `activite_principale` + lat/long/radius
-  // directement. Si le caller fournit center+radiusKm sans q, on en injecte un
-  // par défaut via le NAF si présent, sinon on signale l'incompatibilité.
-  if (center && !q) {
-    if (naf) {
+  const params = new URLSearchParams();
+  let endpoint: string;
+
+  if (center && radiusKm !== undefined) {
+    // Recherche de proximité → endpoint `/near_point` dédié (audit P3). Il
+    // n'accepte QUE lat/long/radius + activite_principale (+ pagination).
+    // `q`, filtres administratifs et `etat_administratif` y sont rejetés
+    // (HTTP 400) — ce sont des paramètres de `/search`, endpoint distinct.
+    if (q) {
       throw new RangeError(
-        "searchEntreprises: l'API DINUM n'accepte pas `naf` + `center+radiusKm` directement. " +
-          "Options : (1) `q='<terme>'` + center+radiusKm (recherche textuelle géolocalisée), " +
-          "(2) `naf` + `codePostal`/`departement`/`codeCommune` (filtrage administratif), " +
-          "(3) faire un reverseGeocode du center pour obtenir codeCommune puis filtrer.",
+        "searchEntreprises: la recherche de proximité DINUM (/near_point) ne supporte pas `q`. " +
+          "Options : (1) `naf` + center+radiusKm (filtrage activité géolocalisé, supporté nativement), " +
+          "(2) `q` + `codePostal`/`departement` (recherche textuelle administrative, sans rayon).",
       );
     }
-    throw new RangeError(
-      "searchEntreprises: `center+radiusKm` requiert un paramètre `q` (recherche textuelle). " +
-        "L'API DINUM ne supporte pas la recherche géographique pure.",
-    );
-  }
-
-  const params = new URLSearchParams();
-  if (q) params.set("q", q);
-  if (naf) params.set("activite_principale", normalizeNafCode(naf));
-  if (codePostal) params.set("code_postal", codePostal);
-  if (departement) params.set("departement", departement);
-  if (codeCommune) params.set("code_commune", codeCommune);
-  if (center && radiusKm !== undefined) {
+    if (codePostal || departement || codeCommune) {
+      throw new RangeError(
+        "searchEntreprises: center+radiusKm (proximité) est exclusif avec codePostal/departement/codeCommune " +
+          "(filtres administratifs). Choisir un seul mode de recherche.",
+      );
+    }
+    endpoint = NEAR_POINT_URL;
     params.set("lat", String(center.lat));
     params.set("long", String(center.lon));
     params.set("radius", String(Math.min(radiusKm, 50)));
+    if (naf) params.set("activite_principale", normalizeNafCode(naf));
+  } else {
+    endpoint = BASE_URL;
+    if (q) params.set("q", q);
+    if (naf) params.set("activite_principale", normalizeNafCode(naf));
+    if (codePostal) params.set("code_postal", codePostal);
+    if (departement) params.set("departement", departement);
+    if (codeCommune) params.set("code_commune", codeCommune);
+    if (onlyActive) params.set("etat_administratif", "A");
   }
-  if (onlyActive) params.set("etat_administratif", "A");
   params.set("page", String(Math.max(1, page)));
   params.set("per_page", String(clamp(perPage, 1, 25)));
 
-  const url = `${BASE_URL}?${params.toString()}`;
+  const url = `${endpoint}?${params.toString()}`;
   const data = await fetchJson<ApiResponse>(url, { signal });
 
   return {

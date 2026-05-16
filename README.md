@@ -61,7 +61,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 ---
 
-## Outils MCP (34 tools)
+## Outils MCP (35 tools)
 
 ### 🗺️ Territoire (4)
 `autocomplete_commune` · `get_commune_by_code` · `geocode_adresse` · `reverse_geocode`
@@ -112,13 +112,14 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.10.4 — en production.** 34 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 913 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`.
+✅ **V0.10.4 en production (npm/registry) — 0.10.5 en préparation.** 35 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 933 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`.
 
 Historique complet : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
 - [x] **V0.10.4** — audit qualité claude.ai (B1→B10) : fiabilité données + transparence géo + verbosité réduite
+- [x] **0.10.5 (préparée)** — audit P1→P4 : garde-fou PLM, endpoint DINUM `/near_point`, `compare_adresse_cnam_vs_finess`
 - [ ] **Backlog** — DROP `rpps_insee_idx` redondant, validation codes spécialité au boundary, validation coords IGN
 - [ ] **V1.0+** — DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
 

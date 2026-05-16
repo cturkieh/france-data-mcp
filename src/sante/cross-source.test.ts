@@ -19,7 +19,9 @@ vi.mock("../storage/supabase.js", () => ({
 }));
 
 import { diceCoefficient } from "./address-match.js";
+import * as cdsDb from "./cds-db.js";
 import {
+  compareAdresseCnamVsFiness,
   compareRaisonSocialeFinessVsRpps,
   historiqueEtablissement,
   reconcilierFinessSirene,
@@ -424,6 +426,99 @@ describe("compareRaisonSocialeFinessVsRpps (V0.6.2)", () => {
 
   it("rejette num_finess malformé", async () => {
     await expect(compareRaisonSocialeFinessVsRpps("abc")).rejects.toThrow(RangeError);
+  });
+});
+
+describe("compareAdresseCnamVsFiness (P4)", () => {
+  function fakeCdsFound(voie: string): cdsDb.CdsResult & { found: true; lookupStatus: "found" } {
+    return {
+      found: true,
+      lookupStatus: "found",
+      etab_finess: VALID_FINESS,
+      raison_sociale: "CMS AUTUN",
+      accepte_carte_vitale: true,
+      accepte_apcv: false,
+      specialites: { codes: [], libelles: [] },
+      type_etab: { code: "124", libelle: "CDS" },
+      adresse: {
+        voie,
+        complement_voie: null,
+        lieu_dit: null,
+        code_postal: "71400",
+        ville: "AUTUN",
+        code_departement: "71",
+        code_insee: "71014",
+      },
+      coords: null,
+      distance_km: null,
+      telephone: null,
+    };
+  }
+
+  it("rejette num_finess malformé", async () => {
+    await expect(compareAdresseCnamVsFiness("abc")).rejects.toThrow(RangeError);
+  });
+
+  it("lookupNotFound quand le FINESS n'est pas un CDS CNAM", async () => {
+    vi.spyOn(cdsDb, "getCdsByFiness").mockResolvedValue(fakeFinessLookupNotFound());
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    const r = await compareAdresseCnamVsFiness(VALID_FINESS);
+    expect(r.found).toBe(false);
+  });
+
+  it("statut 'finess_absent' quand le CDS existe mais pas le FINESS DREES", async () => {
+    vi.spyOn(cdsDb, "getCdsByFiness").mockResolvedValue(fakeCdsFound("5 RUE DE L'ARQUEBUSE"));
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupNotFound());
+    const r = await compareAdresseCnamVsFiness(VALID_FINESS);
+    expect(r.found).toBe(true);
+    if (r.found) {
+      expect(r.statut).toBe("finess_absent");
+      expect(r.finess_adresse).toBeNull();
+      expect(r.score_dice).toBeNull(); // non comparable ≠ 0 (régression MEDIUM P4)
+      expect(r.cnam_adresse).toContain("ARQUEBUSE");
+    }
+  });
+
+  it("statut 'match' quand adresses équivalentes après normalisation", async () => {
+    vi.spyOn(cdsDb, "getCdsByFiness").mockResolvedValue(fakeCdsFound("27 BD BIZET"));
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        adresse: {
+          voie: "27 BD BIZET",
+          code_postal: "71400",
+          ville: "AUTUN",
+          code_departement: "71",
+          code_insee: "71014",
+        },
+      }),
+    );
+    const r = await compareAdresseCnamVsFiness(VALID_FINESS);
+    expect(r.found).toBe(true);
+    if (r.found) {
+      expect(r.statut).toBe("match");
+      expect(r.score_dice).toBe(1);
+    }
+  });
+
+  it("statut 'divergent_after_normalization' quand les adresses diffèrent (déménagement non sync)", async () => {
+    vi.spyOn(cdsDb, "getCdsByFiness").mockResolvedValue(fakeCdsFound("5 RUE DE L'ARQUEBUSE"));
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        adresse: {
+          voie: "15 BD BERNARD GIBERSTEIN",
+          code_postal: "71400",
+          ville: "AUTUN",
+          code_departement: "71",
+          code_insee: "71014",
+        },
+      }),
+    );
+    const r = await compareAdresseCnamVsFiness(VALID_FINESS);
+    expect(r.found).toBe(true);
+    if (r.found) {
+      expect(r.statut).toBe("divergent_after_normalization");
+      expect(r.score_dice).toBeLessThan(1);
+    }
   });
 });
 
