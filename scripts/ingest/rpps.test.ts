@@ -222,6 +222,32 @@ describe("parseRppsRecord", () => {
     if (!result.row) throw new Error("expected row");
     expect(result.row.raw).toEqual({});
   });
+
+  // --- Invariant geom ⟹ code_insee (filet de sécurité) ---------------------
+  // `rpps_in_radius` (matview centroïdes communaux + LATERAL early-stop)
+  // suppose qu'AUCUNE row n'a `geom NOT NULL AND code_insee NULL` : sans
+  // code_insee, une row géolocalisée serait invisible au CROSS JOIN LATERAL
+  // sur `code_insee` → trou silencieux dans la recherche par rayon. Vrai à
+  // 100 % en prod mais non contraint en base : ce test verrouille la
+  // garantie au point de construction (un futur refactor posant `geom` sans
+  // `code_insee` casse CI ici, pas en prod six semaines plus tard).
+  it("INVARIANT : une row avec geom a TOUJOURS code_insee (jamais geom sans code_insee)", () => {
+    const cases: Array<Record<string, string>> = [
+      row(), // match commune métropole
+      row({ [COL.CODE_POSTAL]: "75008", [COL.LIBELLE_COMMUNE]: "PARIS 8E" }), // match Paris
+      row({ [COL.CODE_POSTAL]: "08999", [COL.LIBELLE_COMMUNE]: "VILLE INCONNUE" }), // unmatched métro
+      row({ [COL.CODE_POSTAL]: "97400", [COL.LIBELLE_COMMUNE]: "INCONNUE" }), // unmatched DOM
+      row({ [COL.CODE_POSTAL]: "", [COL.LIBELLE_COMMUNE]: "" }), // ni CP ni ville
+      row({ [COL.NUM_VOIE]: "", [COL.TYPE_VOIE_LIBELLE]: "", [COL.VOIE]: "" }), // sans adresse
+    ];
+    for (const rec of cases) {
+      const { row: r } = parseRppsRecord(rec, idx);
+      if (!r) continue;
+      if (r.geom !== null) {
+        expect(r.code_insee, `geom="${r.geom}" sans code_insee viole l'invariant`).not.toBeNull();
+      }
+    }
+  });
 });
 
 // --- refreshRppsMatviews (V0.9) -----------------------------------------------
@@ -275,6 +301,32 @@ describe("refreshRppsMatviews", () => {
     expect(log.status).toBe("partial");
     expect(log.error_message).toContain("rpps_count_stats");
     expect(log.error_message).toContain("57014");
+  });
+
+  it("INVARIANT alerting : un échec de rpps_commune_centroids surface partial + le NOMME (pas un rayon figé silencieux)", async () => {
+    // Si le refresh de `rpps_commune_centroids` échoue au cron mensuel,
+    // `rpps_in_radius` résout les communes sur une matview figée
+    // (rayon silencieusement périmé). Ce n'est PAS silencieux UNIQUEMENT si
+    // le statut bascule `partial` ET que le nom de la matview est dans
+    // `error_message` — sinon un opérateur lisant `data_freshness`
+    // (last_attempt_status) ne peut pas savoir que c'est la recherche par
+    // rayon qui est dégradée (vs un autre agrégat). Verrouille ce contrat.
+    const supabase = makeSupabaseStub((_name, args) => {
+      const params = args as { p_matview: string };
+      if (params.p_matview === "rpps_commune_centroids") {
+        return { error: { code: "55P03", message: "lock not available" } };
+      }
+      return { error: null };
+    });
+    const log = makeLog();
+
+    await refreshRppsMatviews(supabase, log);
+
+    // staleness_days seul ne bougerait pas (le swap RPPS a réussi) → c'est
+    // last_attempt_status='partial' qui doit porter l'alerte.
+    expect(log.status).toBe("partial");
+    expect(log.error_message).toContain("rpps_commune_centroids");
+    expect(log.error_message).toContain("55P03");
   });
 
   it("préserve un error_message préexistant et concatène", async () => {

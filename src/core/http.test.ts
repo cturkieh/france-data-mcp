@@ -79,6 +79,38 @@ describe("fetchJson", () => {
     expect(data).toEqual({ ok: true });
   });
 
+  it("retry sur réponse non-JSON transitoire (HTML 200) puis réussit (P3)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response("<html>503 maintenance</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+      )
+      .mockResolvedValueOnce(jsonOk({ ok: true }));
+    const data = await fetchJson<{ ok: boolean }>("https://example.test/api", { baseDelayMs: 10 });
+    expect(data).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("réponse non-JSON persistante → throw SyntaxError après épuisement des retries (P3)", async () => {
+    // Response fraîche par appel : un body ne se lit qu'une fois (en prod
+    // chaque fetch renvoie une nouvelle Response — le mock doit le simuler).
+    fetchMock.mockImplementation(async () =>
+      Promise.resolve(
+        new Response("<html>down</html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+    await expect(
+      fetchJson("https://example.test/api", { maxRetries: 2, baseDelayMs: 10 }),
+    ).rejects.toBeInstanceOf(SyntaxError);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(console.error).toHaveBeenCalled();
+  });
+
   it("loggue les erreurs réseau et bascule en console.error sur dernière tentative", async () => {
     fetchMock.mockRejectedValue(new TypeError("network down"));
 

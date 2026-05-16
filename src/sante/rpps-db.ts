@@ -34,6 +34,7 @@ import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.
 import {
   RPPS_ID_PATTERN,
   assertValidNumFiness,
+  buildListQueryResult,
   clampLimit,
   clampOffset,
   expectRpcRows,
@@ -508,15 +509,13 @@ export async function getRppsDansEtablissement(
   });
 
   if (error) throw new Error(formatRpcError("rpps_dans_etablissement", error));
-  const rows = expectRpcRows<RawRppsCompactRow>("rpps_dans_etablissement", data);
-  const truncated = rows.length > limit;
-  const sliced = truncated ? rows.slice(0, limit) : rows;
-  return {
-    count: sliced.length,
-    truncated,
-    results: sliced.map(toCompactResult),
-    query_metadata: rppsEtablissementMetadata(),
-  };
+  return buildListQueryResult<RawRppsCompactRow, RppsResult, QueryMetadata>(
+    "rpps_dans_etablissement",
+    data,
+    limit,
+    rppsEtablissementMetadata(),
+    toCompactResult,
+  );
 }
 
 /**
@@ -556,15 +555,13 @@ export async function getRppsByName(input: RppsSearchByNameInput): Promise<RppsQ
   });
 
   if (error) throw new Error(formatRpcError("rpps_search_by_name", error));
-  const rows = expectRpcRows<RawRppsSearchRow>("rpps_search_by_name", data);
-  const truncated = rows.length > limit;
-  const sliced = truncated ? rows.slice(0, limit) : rows;
-  return {
-    count: sliced.length,
-    truncated,
-    results: sliced.map(toSearchResult),
-    query_metadata: rppsSearchByNameMetadata(),
-  };
+  return buildListQueryResult<RawRppsSearchRow, RppsResult, QueryMetadata>(
+    "rpps_search_by_name",
+    data,
+    limit,
+    rppsSearchByNameMetadata(),
+    toSearchResult,
+  );
 }
 
 /**
@@ -595,15 +592,13 @@ function buildQueryResult(
   limit: number,
   metadata: QueryMetadata,
 ): RppsQueryResult {
-  const rows = expectRpcRows<RawRppsRow>(rpc, data);
-  const truncated = rows.length > limit;
-  const sliced = truncated ? rows.slice(0, limit) : rows;
-  return {
-    count: sliced.length,
-    truncated,
-    results: sliced.map(toResult),
-    query_metadata: metadata,
-  };
+  return buildListQueryResult<RawRppsRow, RppsResult, QueryMetadata>(
+    rpc,
+    data,
+    limit,
+    metadata,
+    toResult,
+  );
 }
 
 interface RawRppsRow {

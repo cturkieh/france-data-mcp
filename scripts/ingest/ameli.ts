@@ -17,6 +17,7 @@ import {
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
+  insertStagingBatchWithRetry,
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
@@ -375,44 +376,13 @@ async function streamCsvToStaging(
   const unmatchedSampleCounts = new Map<string, number>();
   let firstBatch = true;
 
-  // PGRST205 = PostgREST canonical "table not in schema cache" code. Typed
-  // contract beats regex-against-localizable-message (FINESS V0.2 lesson).
-  const isSchemaCacheMiss = (err: { code?: string } | null): boolean => err?.code === "PGRST205";
-
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
-    // Retry only on the first batch and only on schema-cache miss — the
-    // 2s post-RPC sleep should already cover it, but PostgREST can be slow
-    // under load. Subsequent batches don't retry.
-    const maxAttempts = firstBatch ? 4 : 1;
-    let lastErr: { message: string; code?: string } | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) {
-        const wait = 2000 * attempt;
-        console.warn(`[ameli] schema cache miss, retry ${attempt}/3 in ${wait}ms`);
-        await new Promise((r) => setTimeout(r, wait));
-      }
-      const { error } = await supabase.from("annuaire_ameli_staging").insert(batch);
-      if (!error) {
-        lastErr = null;
-        break;
-      }
-      lastErr = error;
-      if (!isSchemaCacheMiss(error)) break;
-    }
+    await insertStagingBatchWithRetry(supabase, "annuaire_ameli_staging", batch, {
+      logPrefix: "ameli",
+      isFirstBatch: firstBatch,
+    });
     firstBatch = false;
-    if (lastErr) {
-      // Preserve the full Supabase error (code, hint, details) by passing
-      // it as `cause`. Without it, post-mortem on a non-PGRST205 retry
-      // failure (RLS, schema drift, trigger violation) loses every
-      // diagnostic clue and the operator only sees `lastErr.message`.
-      console.error("[ameli] insert into annuaire_ameli_staging failed:", lastErr);
-      throw new IngestError(
-        "copy",
-        `Insert into annuaire_ameli_staging failed [code=${lastErr.code ?? "none"}]: ${lastErr.message}`,
-        lastErr,
-      );
-    }
     inserted += batch.length;
     batch = [];
   };

@@ -12,6 +12,7 @@ import {
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
+  insertStagingBatchWithRetry,
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
@@ -380,38 +381,13 @@ async function streamCsvToStaging(
   const unknownCategorieCounts = new Map<string, number>();
   let firstBatch = true;
 
-  // PGRST205 = PostgREST's canonical code for "Could not find the table in
-  // the schema cache" — typed contract beats regex against a localizable
-  // human message.
-  const isSchemaCacheMiss = (err: { code?: string } | null): boolean => err?.code === "PGRST205";
-
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
-    // The first batch can race with PostgREST's schema-cache reload after the
-    // RPC created `finess_staging`. Retry with linear backoff (2s/4s/6s)
-    // ONLY on the first batch and ONLY on the schema-cache error. After the
-    // first successful insert the cache is warm; subsequent batches don't
-    // retry (failure there is a real problem, not a transient race).
-    const maxAttempts = firstBatch ? 4 : 1; // 1 initial + 3 retries on cold cache
-    let lastErr: { message: string; code?: string } | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) {
-        const wait = 2000 * attempt;
-        console.warn(`[finess] schema cache miss, retry ${attempt}/3 in ${wait}ms`);
-        await new Promise((r) => setTimeout(r, wait));
-      }
-      const { error } = await supabase.from("finess_staging").insert(batch);
-      if (!error) {
-        lastErr = null;
-        break;
-      }
-      lastErr = error;
-      if (!isSchemaCacheMiss(error)) break; // non-cache errors fail immediately
-    }
+    await insertStagingBatchWithRetry(supabase, "finess_staging", batch, {
+      logPrefix: "finess",
+      isFirstBatch: firstBatch,
+    });
     firstBatch = false;
-    if (lastErr) {
-      throw new IngestError("copy", `Insert into finess_staging failed: ${lastErr.message}`);
-    }
     inserted += batch.length;
     batch = [];
   };

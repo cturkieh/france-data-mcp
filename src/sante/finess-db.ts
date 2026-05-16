@@ -9,6 +9,7 @@ import { getAnonClient, getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";
 import {
   assertValidNumFiness,
+  buildListQueryResult,
   clampLimit,
   expectRpcRows,
   formatRpcError,
@@ -223,15 +224,13 @@ function buildFinessQueryResult(
   limit: number,
   metadata: QueryMetadata,
 ): FinessQueryResult {
-  const rows = expectRpcRows<RawFinessRow>(rpc, data);
-  const truncated = rows.length > limit;
-  const sliced = truncated ? rows.slice(0, limit) : rows;
-  return {
-    count: sliced.length,
-    truncated,
-    results: sliced.map(toFinessResult),
-    query_metadata: metadata,
-  };
+  return buildListQueryResult<RawFinessRow, FinessResult, QueryMetadata>(
+    rpc,
+    data,
+    limit,
+    metadata,
+    toFinessResult,
+  );
 }
 
 interface RawFinessRow {

@@ -508,6 +508,7 @@ describe("dedupe_by_ps", () => {
       civilite: string;
       specCode: string;
       voie: string;
+      raisonSociale: string | null;
     }>,
   ) {
     const o = {
@@ -517,10 +518,11 @@ describe("dedupe_by_ps", () => {
       civilite: overrides.civilite ?? "M",
       specCode: overrides.specCode ?? "01",
       voie: overrides.voie ?? "RUE 1",
+      raisonSociale: "raisonSociale" in overrides ? (overrides.raisonSociale ?? null) : null,
     };
     return {
       id: o.id,
-      identite: { nom: o.nom, prenom: o.prenom, civilite: o.civilite, raison_sociale: null },
+      identite: { nom: o.nom, prenom: o.prenom, civilite: o.civilite },
       specialite: { code: o.specCode, libelle: "Médecin généraliste" },
       type_ps: { code: "1", libelle: "Médecin" },
       adresse: {
@@ -529,6 +531,7 @@ describe("dedupe_by_ps", () => {
         ville: "CHARLEVILLE",
         code_departement: "08",
         code_insee: "08105",
+        raison_sociale: o.raisonSociale,
       },
       coords: { lat: 49.77, lon: 4.72 },
       distance_km: null,
@@ -563,6 +566,32 @@ describe("dedupe_by_ps", () => {
     expect(result.count).toBe(2); // DUPONT JEAN + MARTIN PAUL
     expect(result.results[0]?.sites).toHaveLength(2); // 2 adresses pour DUPONT
     expect(result.results[1]?.sites).toHaveLength(1); // 1 adresse pour MARTIN
+  });
+
+  it("regroupe un même PS exerçant sous deux raisons sociales distinctes (régression post-V0.10.6)", async () => {
+    vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValueOnce({
+      count: 2,
+      truncated: false,
+      results: [
+        makePs({ id: 1, voie: "RUE 1", raisonSociale: "SELARL CABINET A" }),
+        makePs({ id: 2, voie: "RUE 2", raisonSociale: "SCM CENTRE B" }),
+      ],
+    });
+    const tool = findTool("professionnels_in_radius");
+    const result = (await tool?.handler({
+      lon: 4.72,
+      lat: 49.77,
+      dedupe_by_ps: true,
+    })) as {
+      count: number;
+      results: { sites: { adresse: { raison_sociale: string | null } }[] }[];
+    };
+    // Une SEULE personne (raison sociale exclue de la clé d'identité)…
+    expect(result.count).toBe(1);
+    expect(result.results[0]?.sites).toHaveLength(2);
+    // …mais chaque site conserve sa propre raison sociale (pas de perte).
+    const raisons = result.results[0]?.sites.map((s) => s.adresse.raison_sociale).sort();
+    expect(raisons).toEqual(["SCM CENTRE B", "SELARL CABINET A"]);
   });
 
   it("différencie deux PS à même nom/prenom mais civilités distinctes", async () => {

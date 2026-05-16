@@ -14,6 +14,7 @@ import { parseCoordinates } from "../core/coords.js";
 import { fetchJson } from "../core/http.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
+import { diceCoefficient, normalizeForCompare } from "../core/text-match.js";
 import type { Coordinates } from "../core/types.js";
 
 const BASE_URL = "https://data.geopf.fr/geocodage";
@@ -26,11 +27,29 @@ export type GeocodeResult = {
   /** Score de confiance (0-1). >= 0.8 = bon match, < 0.5 = douteux. */
   score: number;
   /**
-   * `true` si `score < 0.5` : match très incertain (souvent un fallback
-   * rue/commune sans rapport avec l'adresse demandée). Le caller ne doit PAS
-   * utiliser `point` pour une décision quand ce flag est `true`.
+   * `true` si `score` est sous le seuil PROPRE AU TYPE de match (housenumber
+   * 0.7, street/locality 0.6, municipality/inconnu 0.5). Un seuil global
+   * unique (0.5) laissait passer des faux `housenumber` plausibles : l'IGN
+   * substitue une autre voie avec un score ~0.55-0.65 qui paraissait fiable.
+   * Le caller ne doit PAS utiliser `point` pour une décision quand `true`.
    */
   confidence_low: boolean;
+  /**
+   * `true` si le libellé IGN retourné diverge significativement de l'adresse
+   * demandée (Dice < 0.7 sur libellés normalisés). Signal complémentaire et
+   * transparent à `confidence_low` : capte le cas « score correct mais l'IGN
+   * a répondu une AUTRE adresse » (ex. demandé "rue du Pré aux Bœufs",
+   * retourné "Pavé Bleu"). Absent en géocodage inverse (pas d'adresse
+   * demandée à comparer).
+   *
+   * CONSERVATEUR par construction : la comparaison est query brute vs label
+   * IGN complet (voie+CP+ville). Un caller passant une adresse partielle
+   * ("8 rue X" sans CP/ville) contre un label complet aura un Dice
+   * mécaniquement bas → `match_partial:true` possiblement faux-positif. Le
+   * sur-flag est volontaire (sur-prudence > faux match santé silencieux) :
+   * traiter ce flag comme « à re-vérifier », pas comme « erreur certaine ».
+   */
+  match_partial?: boolean;
   /** Code postal */
   codePostal?: string;
   /** Code INSEE de la commune */
@@ -81,16 +100,38 @@ type ApiResponse = {
   features: ApiFeature[];
 };
 
-/** Seuil sous lequel on considère qu'un match géocodage est très incertain. */
-const LOW_SCORE_THRESHOLD = 0.5;
+/**
+ * Seuil `confidence_low` PAR TYPE de match IGN. Un `housenumber` à 0.6 est
+ * douteux (l'IGN a souvent substitué une autre voie au même numéro), alors
+ * qu'une `municipality` à 0.55 est un fallback commune normal et acceptable.
+ * Un seuil global unique (ancien 0.5) ne pouvait pas exprimer ça → faux
+ * `housenumber` plausibles présentés comme fiables (audit P2).
+ */
+const LOW_SCORE_THRESHOLD_BY_TYPE: Record<string, number> = {
+  housenumber: 0.7,
+  street: 0.6,
+  locality: 0.6,
+  municipality: 0.5,
+};
+
+/** Défaut prudent pour tout `type` IGN inattendu (jamais < garde commune). */
+const DEFAULT_LOW_SCORE_THRESHOLD = 0.5;
+
+function lowScoreThreshold(type: string): number {
+  return LOW_SCORE_THRESHOLD_BY_TYPE[type] ?? DEFAULT_LOW_SCORE_THRESHOLD;
+}
+
+/** Sous ce Dice (libellé demandé vs retourné, normalisés), match partiel. */
+const PARTIAL_MATCH_DICE_THRESHOLD = 0.7;
 
 /**
  * Géocode une adresse en coordonnées GPS.
  * Renvoie `null` si aucun résultat n'est trouvé.
  *
- * Si le meilleur match a un score < 0.5, on émet un `console.warn` parce qu'un
- * faux match plausible est plus dangereux qu'un null (le caller risque
- * d'utiliser des coordonnées qui pointent vers une autre commune).
+ * Si le meilleur match est sous le seuil propre à son type (ou diverge du
+ * libellé demandé), on émet un `console.warn` : un faux match plausible est
+ * plus dangereux qu'un null (le caller risque d'utiliser des coordonnées qui
+ * pointent vers une autre voie/commune).
  *
  * @example
  * ```ts
@@ -105,9 +146,15 @@ export async function geocode(
   const results = await geocodeMany(address, { ...options, limit: 1 });
   const top = results[0];
   if (!top) return null;
-  if (top.score < LOW_SCORE_THRESHOLD) {
+  if (top.confidence_low || top.match_partial) {
+    // Motif explicite : ne PAS afficher le seuil si l'alerte vient SEULEMENT
+    // de match_partial (score au-dessus du seuil, mais libellé divergent) —
+    // sinon le log suggère faussement un problème de scoring à l'opérateur.
+    const reason = top.confidence_low
+      ? `score ${top.score.toFixed(2)} < seuil ${lowScoreThreshold(top.type)} (type "${top.type}")`
+      : `libellé IGN divergent de l'adresse demandée (match_partial)`;
     console.warn(
-      `[france-data-mcp] geocode("${address}"): score ${top.score.toFixed(2)} < ${LOW_SCORE_THRESHOLD} — résultat très incertain (label retourné: "${top.label}").`,
+      `[france-data-mcp] geocode("${address}"): ${reason} — résultat incertain (label retourné: "${top.label}").`,
     );
   }
   return top;
@@ -131,7 +178,7 @@ export async function geocodeMany(
   const url = `${BASE_URL}/search/?${params.toString()}`;
   const data = await fetchJson<ApiResponse>(url, { signal });
 
-  return usableGeocodeResults(data.features, `q="${address}"`);
+  return usableGeocodeResults(data.features, `q="${address}"`, address);
 }
 
 /**
@@ -141,8 +188,14 @@ export async function geocodeMany(
  * introuvable », alors que c'est une anomalie payload IGN à remonter (le
  * caller — ex. coverage.ts — attribuerait à tort le vide aux coordonnées).
  */
-function usableGeocodeResults(features: ApiFeature[], context: string): GeocodeResult[] {
-  const results = features.map(toGeocodeResult).filter((r): r is GeocodeResult => r !== null);
+function usableGeocodeResults(
+  features: ApiFeature[],
+  context: string,
+  requestedAddress?: string,
+): GeocodeResult[] {
+  const results = features
+    .map((f) => toGeocodeResult(f, requestedAddress))
+    .filter((r): r is GeocodeResult => r !== null);
   if (features.length > 0 && results.length === 0) {
     console.warn(
       `[france-data-mcp] geocode (${context}): IGN a renvoyé ${features.length} feature(s) mais toutes inexploitables — résultat vide ≠ « adresse introuvable », anomalie payload IGN.`,
@@ -177,8 +230,12 @@ export async function reverseGeocode(
  * Sans ce garde-fou, `const [lon, lat] = coordinates` propagerait `undefined`
  * dans `point` silencieusement (même anti-pattern que le score, fix B1). Une
  * feature sans coords n'est pas "pas de résultat" : on warn + on l'écarte.
+ *
+ * `requestedAddress` (absent en géocodage inverse) alimente `match_partial`
+ * via Dice sur libellés normalisés : capte le « score correct mais l'IGN a
+ * répondu une autre adresse » que le seul seuil de score ne voit pas.
  */
-function toGeocodeResult(feature: ApiFeature): GeocodeResult | null {
+function toGeocodeResult(feature: ApiFeature, requestedAddress?: string): GeocodeResult | null {
   const coords = feature.geometry?.coordinates;
   // `parseCoordinates` (helper partagé FINESS/DINUM/IGN) rejette
   // null/undefined/NaN/non-finite → undefined. Le check `Array` en amont
@@ -201,12 +258,26 @@ function toGeocodeResult(feature: ApiFeature): GeocodeResult | null {
       `[france-data-mcp] geocode: feature sans score numérique exploitable (label: "${feature.properties.label}", type: "${feature.properties.type}") — confidence_low forcé à true par prudence.`,
     );
   }
+  const type = feature.properties.type;
+  const label = feature.properties.label;
+  // Dice uniquement si une adresse a été demandée (forward geocode). En
+  // inverse, le label EST la réponse — rien à comparer → match_partial omis.
+  const matchPartial =
+    requestedAddress !== undefined
+      ? diceCoefficient(normalizeForCompare(requestedAddress), normalizeForCompare(label)) <
+        PARTIAL_MATCH_DICE_THRESHOLD
+      : undefined;
   return {
     point,
-    label: feature.properties.label,
+    label,
     score: scoreValid ? rawScore : 0,
-    confidence_low: scoreValid ? rawScore < LOW_SCORE_THRESHOLD : true,
-    type: feature.properties.type,
+    confidence_low: scoreValid ? rawScore < lowScoreThreshold(type) : true,
+    type,
+    // Spread conditionnel (pas `pickDefined`, typé string-only) : on expose
+    // `match_partial:false` quand une adresse a été demandée ET matche bien
+    // — l'absence du champ signifie "non évalué" (géocodage inverse), pas
+    // "bon match". Distinction utile au caller.
+    ...(matchPartial !== undefined ? { match_partial: matchPartial } : {}),
     ...pickDefined({
       codePostal: feature.properties.postcode,
       codeCommune: feature.properties.citycode,

@@ -21,6 +21,7 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { HttpError, isTransientHttpStatus } from "../src/core/http.js";
 import { VERSION } from "../src/core/version.js";
 import {
   type LogLevel,
@@ -399,6 +400,32 @@ async function handleRpc(
  * Retourne le message normalisé pour que le caller puisse l'embarquer dans
  * la réponse JSON-RPC sans le re-calculer.
  */
+/**
+ * Message caller-facing actionnable pour une panne de DÉPENDANCE AMONT.
+ *
+ * Sans ça, une `HttpError` (geo.api.gouv.fr 502, INSEE 503…) remontait en
+ * `-32603` avec un `err.message` opaque (`HTTP 502 on https://…?q=<adresse>`)
+ * : le caller ne pouvait pas distinguer « bug serveur, n'insiste pas » de
+ * « dépendance amont transitoire, réessaie » (post-mortem P3). On expose le
+ * STATUT + le HOST amont (infrastructure publique, non sensible) sans la
+ * query (= input du caller, hors du message). Le détail complet (URL+body)
+ * reste capturé côté Sentry/console via {@link captureMcpError}.
+ */
+export function describeUpstreamFailure(err: unknown): string | null {
+  if (!(err instanceof HttpError)) return null;
+  let host = "amont";
+  try {
+    host = new URL(err.url).host;
+  } catch {
+    // err.url non parsable (ne devrait pas arriver — toujours une URL fetch
+    // complète) : on reste sur le placeholder plutôt que de fuiter l'URL brute.
+  }
+  const hint = isTransientHttpStatus(err.status)
+    ? "panne transitoire — réessayer après un court délai"
+    : "réponse inattendue de la dépendance amont";
+  return `Dépendance amont ${host} a renvoyé HTTP ${err.status} (${hint}).`;
+}
+
 function reportInternalError(
   err: unknown,
   ctx: RequestContext,
@@ -406,7 +433,8 @@ function reportInternalError(
   method: string,
   opts: { layer: string; tool?: string; logPrefix?: string },
 ): string {
-  const message = err instanceof Error ? err.message : String(err);
+  const message =
+    describeUpstreamFailure(err) ?? (err instanceof Error ? err.message : String(err));
   console.error(`[france-data-mcp] ${opts.logPrefix ?? `handler ${method}`}: ${message}`);
   emit(ctx, start, method, {
     tool: opts.tool,

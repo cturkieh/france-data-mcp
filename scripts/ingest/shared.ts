@@ -571,3 +571,72 @@ export async function runBatchedRpc(
     if (data === 0) return { totalUpdated, iterations: iter };
   }
 }
+
+/**
+ * Codes PostgREST de schema-cache miss (typed contract > regex sur message
+ * localisable). `PGRST205` = table absente du cache (post-CREATE staging),
+ * `PGRST204` = colonne absente (post-ALTER, ex RPPS `geom_source`). Le NOTIFY
+ * 'reload schema' posté par la RPC SECURITY DEFINER n'est pas encore propagé :
+ * phénomène transitoire, le retry couvre les deux.
+ */
+export const PGRST_TABLE_CACHE_MISS = "PGRST205";
+export const PGRST_COLUMN_CACHE_MISS = "PGRST204";
+
+/**
+ * Insère UN batch dans une table de staging avec retry sur schema-cache miss
+ * PostgREST (PGRST205 table absente du cache, +PGRST204 colonne pour RPPS).
+ *
+ * Pourquoi factorisé : cette boucle d'insert+retry était dupliquée à
+ * l'identique dans `finess.ts`, `ameli.ts`, `rpps.ts` et `cds.ts` (4×) — la
+ * seule divergence légitime étant les codes cache-miss RPPS. Une copie
+ * dérivait déjà (compteur de retry affiché). Le caller garde sa propre
+ * stratégie de batching (flush() streaming vs slice de tableau pré-construit)
+ * et ne délègue ici QUE l'insert d'un batch + le retry + le wrapping
+ * `IngestError("copy", …)` qui préserve l'erreur Supabase complète en `cause`
+ * (sinon post-mortem aveugle sur un échec non-PGRST205 : RLS, trigger, drift).
+ *
+ * `isFirstBatch` : seul le 1er batch retry (le sleep post-RPC de création
+ * staging couvre le cas courant, le retry est le 2e filet sous charge ; une
+ * fois le 1er batch passé la table est forcément en cache).
+ */
+export async function insertStagingBatchWithRetry<TRow extends object>(
+  supabase: Pick<SupabaseClient, "from">,
+  table: string,
+  batch: readonly TRow[],
+  opts: { logPrefix: string; isFirstBatch: boolean; extraCacheMissCodes?: readonly string[] },
+): Promise<void> {
+  if (batch.length === 0) return;
+  const cacheMissCodes = new Set<string>([
+    PGRST_TABLE_CACHE_MISS,
+    ...(opts.extraCacheMissCodes ?? []),
+  ]);
+  const isSchemaCacheMiss = (err: { code?: string } | null): boolean =>
+    err?.code !== undefined && cacheMissCodes.has(err.code);
+  const maxAttempts = opts.isFirstBatch ? 4 : 1;
+  let lastErr: { message: string; code?: string } | null = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      const wait = 2000 * attempt;
+      console.warn(
+        `[${opts.logPrefix}] schema cache miss, retry ${attempt}/${maxAttempts - 1} in ${wait}ms`,
+      );
+      await new Promise((r) => setTimeout(r, wait));
+    }
+    // L'INSERT PostgREST sur table de staging non typée (client `untyped`)
+    // attend `never[]` côté types Supabase générés : cast borné au call,
+    // identique à ce que faisaient les 4 callers historiques.
+    const { error } = await supabase.from(table).insert(batch as never[]);
+    if (!error) return;
+    lastErr = error;
+    if (!isSchemaCacheMiss(error)) break;
+  }
+  // Préserver l'erreur Supabase complète (code, hint, details) via `cause` :
+  // sans ça un échec non-cache (RLS, schema drift, trigger) ne laisse que
+  // `lastErr.message` à l'opérateur pour le post-mortem.
+  console.error(`[${opts.logPrefix}] insert into ${table} failed:`, lastErr);
+  throw new IngestError(
+    "copy",
+    `Insert into ${table} failed [code=${lastErr?.code ?? "none"}]: ${lastErr?.message ?? "unknown"}`,
+    lastErr,
+  );
+}

@@ -4,6 +4,69 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.10.7] — 2026-05-16
+
+**3e vague audit qualité claude.ai (test des 35 tools) : 3 corrections +
+solde des dettes techniques backlog.**
+
+### Changed
+
+- **BREAKING (mineur, OSS pré-1.0) — P1 : `raison_sociale` déplacé de
+  `AmeliResult.identite` vers `AmeliResult.adresse`.** La raison sociale est
+  un attribut de SITE (la structure d'exercice), pas d'identité : un
+  praticien exerçant sous deux raisons sociales était scindé en deux entrées
+  par `dedupe_by_ps` (`professionnels_par_specialite_dept`,
+  `professionnels_in_radius`) au lieu d'être regroupé en une personne avec
+  `sites[]`. `raison_sociale` est désormais sous `adresse` (donc présent par
+  site dans chaque entrée de `sites[]`) et retiré de la clé de déduplication
+  (clé = nom + prénom + civilité + spécialité + type PS). La sortie des tools
+  Ameli porte donc `adresse.raison_sociale` au lieu de `identite.raison_sociale`.
+  La suggestion d'exposer un `rpps_id` joignable n'est PAS retenue : la source
+  Annuaire Ameli ne porte aucun identifiant PS pérenne (cross-référencer ANS
+  RPPS côté caller).
+
+### Fixed
+
+- **P2 : `geocode_adresse` — seuil `confidence_low` par type de match IGN
+  + flag `match_partial`.** Un seuil global unique (0,5) laissait passer des
+  faux `housenumber` plausibles (l'IGN substitue une autre voie au même
+  numéro avec un score ~0,55-0,65 présenté comme fiable). Seuils désormais
+  propres au type : `housenumber` 0,7, `street`/`locality` 0,6,
+  `municipality`/inconnu 0,5. Nouveau champ `match_partial` (Dice < 0,7 entre
+  l'adresse demandée normalisée et le libellé IGN) : capte le « score
+  correct mais l'IGN a répondu une AUTRE adresse ». Conservateur par
+  construction (query brute vs label complet) — à traiter comme « re-vérifier »,
+  pas « erreur certaine ». Absent en géocodage inverse.
+- **P3 : message d'erreur amont actionnable + retry des réponses non-JSON
+  transitoires.** Une `HttpError` (502/503 geo.api.gouv.fr, INSEE…) remontait
+  en `-32603` avec un message opaque : le caller ne pouvait pas distinguer
+  « bug serveur » de « dépendance amont transitoire, réessaie ». Le message
+  caller-facing expose désormais le HOST + le STATUT amont (infrastructure
+  publique, ni la query — input du caller — ni le body ne fuient ; détail
+  complet préservé côté Sentry). Une `SyntaxError` JSON (page HTML d'erreur
+  amont) est désormais RETRYÉE comme un 5xx (transitoire, bornée par
+  `maxRetries`) au lieu d'échouer immédiatement.
+
+### Internal (dette technique soldée, sans impact API)
+
+- 5 call-sites manuels `expectRpcRows → slice → map` (`finess-db`,
+  `ameli-db`, `rpps-db` ×3) migrés vers le helper partagé
+  `buildListQueryResult` (source unique du contrat `QueryResult`).
+- Boucle insert-staging + retry schema-cache miss (dupliquée à l'identique
+  dans `finess.ts`/`ameli.ts`/`rpps.ts`/`cds.ts`) factorisée en
+  `insertStagingBatchWithRetry` (`scripts/ingest/shared.ts`) — préserve la
+  `cause` Supabase complète (FINESS la perdait), codes PGRST205/204 nommés.
+- `normalizeForCompare`/`diceCoefficient` extraits vers `core/text-match.ts`
+  (consommés par `sante/` ET `territoire/` — résout l'inversion de couche ;
+  `address-match.ts` les ré-exporte, consommateurs historiques inchangés).
+- Prédicat `isTransientHttpStatus` (`core/http.ts`) : source unique de la
+  sémantique « 429/5xx = transitoire » (était dupliquée 3×).
+- Filets de sécurité : test verrouillant l'invariant RPPS « geom NOT NULL
+  ⟹ code_insee NOT NULL » (dont dépend le LATERAL early-stop de
+  `rpps_in_radius`) ; test verrouillant qu'un échec de refresh
+  `rpps_commune_centroids` bascule `last_attempt_status='partial'` en le
+  nommant (pas de rayon figé silencieux).
+
 ## [0.10.6] — 2026-05-16
 
 **Backlog Robustesse : 2 garde-fous anti-panne-silencieuse + nettoyage index

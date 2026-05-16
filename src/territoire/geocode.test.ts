@@ -154,6 +154,53 @@ describe("confidence_low (B1)", () => {
   });
 });
 
+describe("confidence_low seuil par type + match_partial (P2)", () => {
+  function feature(score: number, type: string, label: string) {
+    return geocodeResponse([
+      { geometry: { type: "Point", coordinates: [4.7, 49.7] }, properties: { label, score, type } },
+    ]);
+  }
+
+  it("housenumber score 0.58 → confidence_low=true (symptôme P2 : faux housenumber)", async () => {
+    fetchMock.mockResolvedValue(feature(0.58, "housenumber", "8 Pave Bleu 21000 Dijon"));
+    const result = await geocode("8 rue du Pré aux Bœufs 21000 Dijon");
+    // Ancien seuil global 0.5 → 0.58 passait en confidence_low=false (bug).
+    expect(result?.confidence_low).toBe(true);
+  });
+
+  it("municipality score 0.55 → confidence_low=false (fallback commune acceptable)", async () => {
+    fetchMock.mockResolvedValue(feature(0.55, "municipality", "Dijon 21000"));
+    const result = await geocode("Dijon");
+    expect(result?.confidence_low).toBe(false);
+  });
+
+  it("type IGN inconnu → seuil défaut prudent 0.5", async () => {
+    fetchMock.mockResolvedValue(feature(0.45, "poi", "Quelque chose"));
+    const result = await geocode("X");
+    expect(result?.confidence_low).toBe(true);
+  });
+
+  it("match_partial=true quand le label IGN diverge fortement de l'adresse demandée", async () => {
+    fetchMock.mockResolvedValue(feature(0.72, "housenumber", "8 Pave Bleu 21000 Dijon"));
+    const result = await geocode("8 rue du Pré aux Bœufs 21000 Dijon");
+    expect(result?.match_partial).toBe(true);
+  });
+
+  it("match_partial=false quand le label IGN correspond à l'adresse demandée", async () => {
+    const label = "64 Cours Aristide Briand 08000 Charleville-Mézières";
+    fetchMock.mockResolvedValue(feature(0.97, "housenumber", label));
+    const result = await geocode(label);
+    expect(result?.match_partial).toBe(false);
+  });
+
+  it("match_partial absent en géocodage inverse (pas d'adresse demandée)", async () => {
+    fetchMock.mockResolvedValue(feature(0.9, "housenumber", "1 Rue Test 75001 Paris"));
+    const result = await reverseGeocode({ lon: 2.35, lat: 48.85 });
+    expect(result).not.toBeNull();
+    expect(result && "match_partial" in result).toBe(false);
+  });
+});
+
 describe("coordonnées invalides (symétrie B1 — payload IGN dégradé)", () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {

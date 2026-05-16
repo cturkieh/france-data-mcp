@@ -694,34 +694,35 @@ const DEDUPE_TRUNCATED_WARNING =
 
 /**
  * Regroupe les entrées Ameli par praticien (clé : nom + prenom + civilite +
- * specialite_code + type_ps_code + raison_sociale). Les sites multiples du
- * même PS sont listés dans `sites[]` au lieu d'occuper N entrées séparées.
+ * specialite_code + type_ps_code). Les sites multiples du même PS sont listés
+ * dans `sites[]` (chacun avec sa propre `adresse.raison_sociale`) au lieu
+ * d'occuper N entrées séparées.
+ *
+ * `raison_sociale` est volontairement EXCLU de la clé : c'est un attribut de
+ * site (la structure d'exercice), pas d'identité — un PS exerçant sous deux
+ * raisons sociales est UNE personne sur deux sites, pas deux personnes. Elle
+ * voyage dans `adresse` donc chaque entrée de `sites[]` conserve la sienne.
  *
  * Pourquoi cette clé : (nom, prenom) seuls collisionnent (3 "DUPONT JEAN" en
- * France). Ajouter civilité + spécialité + raison sociale réduit à un taux de
+ * France). Ajouter civilité + spécialité + type PS réduit à un taux de
  * collision négligeable. La source publique n'expose pas RPPS/ADELI (commentaire
  * de la migration `20260508000016`), donc on ne peut pas faire mieux côté
  * serveur ; un caller voulant une dédup parfaite doit cross-référencer avec
  * un autre référentiel (ANS RPPS).
- *
- * Note `Array.prototype.join` : null/undefined dans les éléments du tableau
- * sont coerced en chaîne vide automatiquement (ES1 spec) — pas besoin de
- * `?? ""` défensif.
  */
 function dedupeAmeliByPs(result: AmeliQueryResult): AmeliDedupedResult {
   const grouped = new Map<string, AmeliPsDedup>();
   // Iteration order = input order, which is already sorted by distance/name
   // upstream — preserve it to keep the output deterministic.
   for (const row of result.results) {
-    // JSON.stringify plutôt que `[...].join("|")` : la raison sociale peut
-    // contenir un pipe ("SELARL X | Y") qui collisionnerait sinon avec un
-    // praticien différent post-split. Garantit l'unicité de la clé sans
-    // séparateur fragile.
+    // JSON.stringify plutôt que `[...].join("|")` : un libellé peut contenir
+    // un pipe qui collisionnerait sinon avec un praticien différent
+    // post-split. Garantit l'unicité de la clé sans séparateur fragile, et
+    // distingue null (JSON `null`) d'une chaîne vide.
     const key = JSON.stringify([
       row.identite.nom,
       row.identite.prenom,
       row.identite.civilite,
-      row.identite.raison_sociale,
       row.specialite.code,
       row.type_ps.code,
     ]);

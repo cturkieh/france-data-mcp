@@ -20,6 +20,7 @@ import { getAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";
 import { AMELI_TYPE_PS_QUERYABLE, clarifyTypePsLibelle } from "./ameli-nomenclature.js";
 import {
+  buildListQueryResult,
   clampLimit,
   clampOffset,
   expectRpcRows,
@@ -35,7 +36,6 @@ export interface AmeliResult {
     nom: string;
     prenom: string;
     civilite: string | null;
-    raison_sociale: string | null;
   };
   specialite: { code: string | null; libelle: string | null };
   type_ps: { code: string | null; libelle: string | null };
@@ -45,6 +45,13 @@ export interface AmeliResult {
     ville: string | null;
     code_departement: string | null;
     code_insee: string | null;
+    /**
+     * Raison sociale de la STRUCTURE d'exercice à cette adresse — attribut de
+     * site, pas de personne (un PS exerçant sur 2 sites a 2 raisons sociales).
+     * Sous `adresse` (et non `identite`) pour que le regroupement par identité
+     * (`dedupe_by_ps`) conserve la raison sociale propre à chaque site.
+     */
+    raison_sociale: string | null;
   };
   coords: { lat: number; lon: number } | null;
   distance_km: number | null;
@@ -237,15 +244,13 @@ function buildAmeliQueryResult(
   limit: number,
   metadata: QueryMetadata,
 ): AmeliQueryResult {
-  const rows = expectRpcRows<RawAmeliRow>(rpc, data);
-  const truncated = rows.length > limit;
-  const sliced = truncated ? rows.slice(0, limit) : rows;
-  return {
-    count: sliced.length,
-    truncated,
-    results: sliced.map(toAmeliResult),
-    query_metadata: metadata,
-  };
+  return buildListQueryResult<RawAmeliRow, AmeliResult, QueryMetadata>(
+    rpc,
+    data,
+    limit,
+    metadata,
+    toAmeliResult,
+  );
 }
 
 interface RawAmeliRow {
@@ -289,7 +294,6 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
       nom: row.nom,
       prenom: row.prenom,
       civilite: row.civilite,
-      raison_sociale: row.raison_sociale,
     },
     specialite: { code: row.specialite_code, libelle: row.specialite_libelle },
     type_ps: { code: row.type_ps_code, libelle: row.type_ps_libelle },
@@ -299,6 +303,7 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
       ville: row.ville,
       code_departement: trimOrNull(row.code_departement),
       code_insee: trimOrNull(row.code_insee),
+      raison_sociale: row.raison_sociale,
     },
     coords,
     distance_km: distance,

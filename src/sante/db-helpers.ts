@@ -202,10 +202,9 @@ export interface ListQueryResult<TOut, TMeta> {
 /**
  * Factorise le pattern `expectRpcRows` → détection truncation (`rows.length >
  * limit`) → slice → map → `{ count, truncated, results, query_metadata }`.
- * Introduit en V0.10 et adopté par `cds-db.ts`. Les 5 occurrences manuelles
- * pré-existantes (`finess-db.ts`, `ameli-db.ts`, `rpps-db.ts` ×3) restent à
- * migrer ici : refactor sur code stable+testé suivi en backlog (PR dédiée
- * avec tests de non-régression, hors scope feature V0.10).
+ * Source unique de cette logique : `cds-db.ts`, `finess-db.ts`, `ameli-db.ts`
+ * et `rpps-db.ts` (×3) délèguent tous ici (les 5 occurrences manuelles
+ * pré-existantes ont été migrées, backlog dette technique soldé).
  *
  * Le caller passe le `mapRow` qui transforme `TRaw` (row PostgREST brute) en
  * `TOut` (shape métier). Le `limit` est la borne logique (le RPC est appelé

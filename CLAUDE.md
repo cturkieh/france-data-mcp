@@ -25,6 +25,8 @@ CI GitHub Actions vérifie typecheck (2 tsconfigs) + biome + tests + Supabase lo
 - `RangeError` pour input invalide au boundary public (mappe JSON-RPC `-32602`).
 - `LookupResult<T>` discriminé pour distinguer "pas trouvé" vs "erreur API".
 - Tests `_resetXForTesting()` pour tout module avec état partagé.
+- **Clé de déduplication d'identité = attributs de PERSONNE uniquement**, jamais d'attribut de SITE (`raison_sociale`, adresse). Un PS multi-sites partage une identité ; mettre un attribut de site dans la clé le scinde en faux doublons (régression P1). L'attribut de site voyage dans `adresse`/`sites[]`.
+- **Primitives génériques (texte, maths) → `core/`**, jamais `sante/`. `sante/` importe déjà `territoire/` : une primitive dans `sante/` consommée par `territoire/` crée une inversion de couche / cycle. Ré-export depuis l'ancien emplacement pour ne pas casser les consommateurs.
 
 **Endpoint (`api/`) — Sentry + observabilité.**
 - `captureMcpError` / `captureMcpConfigWarning` avec fingerprint stable (`api/_lib/sentry.ts`).

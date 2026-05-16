@@ -13,11 +13,13 @@ import { deriveDeptFromCp } from "../../src/territoire/dept-codes.js";
 import {
   IngestError,
   type IngestLogEntry,
+  PGRST_COLUMN_CACHE_MISS,
   atomicSwapTables,
   downloadCsv,
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
+  insertStagingBatchWithRetry,
   preValidateFile,
   runAndRecordCanary,
   runBatchedRpc,
@@ -458,40 +460,16 @@ async function streamCsvToStaging(
   let skippedNoIdentity = 0;
   let firstBatch = true;
 
-  // PGRST204 = column not found in schema cache (ex: `geom_source` ajouté
-  // récemment), PGRST205 = table not found. Les deux signalent le même
-  // phénomène — PostgREST n'a pas encore propagé le NOTIFY 'reload schema'
-  // posté par la RPC SECURITY DEFINER. Retry exponentiel couvre les 2.
-  const isSchemaCacheMiss = (err: { code?: string } | null): boolean =>
-    err?.code === "PGRST204" || err?.code === "PGRST205";
-
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
-    const maxAttempts = firstBatch ? 4 : 1;
-    let lastErr: { message: string; code?: string } | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) {
-        const wait = 2000 * attempt;
-        console.warn(`[rpps] schema cache miss, retry ${attempt}/3 in ${wait}ms`);
-        await new Promise((r) => setTimeout(r, wait));
-      }
-      const { error } = await supabase.from("rpps_staging").insert(batch);
-      if (!error) {
-        lastErr = null;
-        break;
-      }
-      lastErr = error;
-      if (!isSchemaCacheMiss(error)) break;
-    }
+    // RPPS ajoute le cache-miss COLONNE (ex `geom_source` post-ALTER) au
+    // cache-miss TABLE géré par défaut — voir PGRST_COLUMN_CACHE_MISS.
+    await insertStagingBatchWithRetry(supabase, "rpps_staging", batch, {
+      logPrefix: "rpps",
+      isFirstBatch: firstBatch,
+      extraCacheMissCodes: [PGRST_COLUMN_CACHE_MISS],
+    });
     firstBatch = false;
-    if (lastErr) {
-      console.error("[rpps] insert into rpps_staging failed:", lastErr);
-      throw new IngestError(
-        "copy",
-        `Insert into rpps_staging failed [code=${lastErr.code ?? "none"}]: ${lastErr.message}`,
-        lastErr,
-      );
-    }
     inserted += batch.length;
     batch = [];
   };

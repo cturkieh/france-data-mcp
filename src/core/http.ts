@@ -31,6 +31,16 @@ export class RateLimitExceededError extends HttpError {
   }
 }
 
+/**
+ * Sémantique « statut HTTP amont transitoire = réessayer a du sens » :
+ * 429 (rate limit, respecte retry-after) + 5xx (panne serveur passagère).
+ * Source unique consommée par le retry de `fetchJson` ET par le message
+ * d'erreur caller-facing (`api/mcp.ts`) — sinon 3 copies à garder synchrones.
+ */
+export function isTransientHttpStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status < 600);
+}
+
 type FetchJsonOptions = RateLimitOptions & {
   headers?: Record<string, string>;
   signal?: AbortSignal;
@@ -99,11 +109,22 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
     } catch (err) {
       if (err instanceof HttpError) throw err;
       lastError = err as Error;
-      // Une SyntaxError du JSON parser veut dire que l'API a renvoyé un body non-JSON
-      // (HTML d'erreur, page de maintenance…). Le retry ne servira à rien — on échoue vite.
+      // Une SyntaxError du JSON parser = l'API a renvoyé un body non-JSON
+      // (HTML d'erreur, page de maintenance, 502 proxy intermédiaire…). C'est
+      // le plus souvent TRANSITOIRE côté amont (geo.api.gouv.fr renvoie une
+      // page d'erreur HTML lors d'un pic puis re-sert du JSON) : on retry comme
+      // un 5xx au lieu d'échouer vite (post-mortem P3 — l'ancien "le retry ne
+      // servira à rien" était faux et masquait des pannes transitoires
+      // récupérables). Borné par maxRetries comme tout le reste.
       if (lastError instanceof SyntaxError) {
-        console.error(`[france-data-mcp] invalid JSON response from ${url}: ${lastError.message}`);
-        throw lastError;
+        const isFinalAttempt = attempt === maxRetries;
+        const log = isFinalAttempt ? console.error : console.warn;
+        log(
+          `[france-data-mcp] invalid JSON response from ${url} (attempt ${attempt + 1}/${maxRetries + 1}): ${lastError.message}`,
+        );
+        if (isFinalAttempt) break;
+        await sleep(baseDelayMs * 2 ** attempt + jitter());
+        continue;
       }
       // Si le caller a annulé via AbortSignal, ne pas tenter de retry — un
       // signal déjà aborté ne peut plus être ré-utilisé. Sans ce shortcircuit,

@@ -1,14 +1,30 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   IngestError,
   type PreValidateConfig,
   getNonEmpty,
+  insertStagingBatchWithRetry,
   parseDropStalePreviousOutcome,
   preValidateFile,
 } from "./shared.js";
+
+/**
+ * Faux client Supabase minimal : `from(table).insert(rows)` renvoie l'erreur
+ * programmée pour le n-ième appel (ou null = succès).
+ */
+function fakeSupabase(errorsByAttempt: Array<{ code?: string; message: string } | null>) {
+  const insert = vi.fn(async () => {
+    const err = errorsByAttempt.shift() ?? null;
+    return { error: err };
+  });
+  return {
+    client: { from: vi.fn(() => ({ insert })) } as never,
+    insert,
+  };
+}
 
 function tempFileWith(content: string): string {
   const file = path.join(
@@ -129,5 +145,83 @@ describe("parseDropStalePreviousOutcome", () => {
     expect(() => parseDropStalePreviousOutcome("")).toThrow(IngestError);
     expect(() => parseDropStalePreviousOutcome("dropped:no_age")).toThrow(IngestError);
     expect(() => parseDropStalePreviousOutcome("dropped:table:nan_d")).toThrow(IngestError);
+  });
+});
+
+describe("insertStagingBatchWithRetry", () => {
+  const row = [{ a: 1 }];
+
+  it("batch vide → aucun appel insert, pas d'erreur", async () => {
+    const { client, insert } = fakeSupabase([]);
+    await insertStagingBatchWithRetry(client, "t_staging", [], {
+      logPrefix: "t",
+      isFirstBatch: true,
+    });
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("succès au 1er essai → 1 seul insert, pas de throw", async () => {
+    const { client, insert } = fakeSupabase([null]);
+    await insertStagingBatchWithRetry(client, "t_staging", row, {
+      logPrefix: "t",
+      isFirstBatch: true,
+    });
+    expect(insert).toHaveBeenCalledTimes(1);
+  });
+
+  it("erreur non-cache-miss → throw IngestError immédiat (1 essai, cause préservée)", async () => {
+    const supaErr = { code: "23505", message: "duplicate key" };
+    const { client, insert } = fakeSupabase([supaErr]);
+    await expect(
+      insertStagingBatchWithRetry(client, "t_staging", row, {
+        logPrefix: "t",
+        isFirstBatch: true,
+      }),
+    ).rejects.toMatchObject({ name: "IngestError", phase: "copy", cause: supaErr });
+    expect(insert).toHaveBeenCalledTimes(1);
+  });
+
+  it("non-1er-batch ne retry pas, même sur cache-miss (maxAttempts=1)", async () => {
+    const { client, insert } = fakeSupabase([{ code: "PGRST205", message: "no cache" }]);
+    await expect(
+      insertStagingBatchWithRetry(client, "t_staging", row, {
+        logPrefix: "t",
+        isFirstBatch: false,
+      }),
+    ).rejects.toThrow(IngestError);
+    expect(insert).toHaveBeenCalledTimes(1);
+  });
+
+  it("1er batch : retry sur cache-miss PGRST205 puis succès", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, insert } = fakeSupabase([{ code: "PGRST205", message: "no cache" }, null]);
+      const p = insertStagingBatchWithRetry(client, "t_staging", row, {
+        logPrefix: "t",
+        isFirstBatch: true,
+      });
+      await vi.runAllTimersAsync();
+      await p;
+      expect(insert).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("extraCacheMissCodes : PGRST204 (colonne) retryé comme PGRST205 (RPPS)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, insert } = fakeSupabase([{ code: "PGRST204", message: "no col" }, null]);
+      const p = insertStagingBatchWithRetry(client, "rpps_staging", row, {
+        logPrefix: "rpps",
+        isFirstBatch: true,
+        extraCacheMissCodes: ["PGRST204"],
+      });
+      await vi.runAllTimersAsync();
+      await p;
+      expect(insert).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

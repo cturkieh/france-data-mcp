@@ -19,6 +19,7 @@ import {
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
+  insertStagingBatchWithRetry,
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
@@ -660,39 +661,15 @@ async function streamCsvAndInsert(
     });
   }
 
-  // Insert batched. Aligné sur ameli.ts : seul le 1er batch retry sur
-  // schema-cache miss PostgREST (PGRST205) — le 2s sleep amont couvre le cas
-  // courant, le retry est le 2e filet sous load. Les batchs suivants ne
-  // retry pas (la table est forcément en cache une fois le 1er passé).
-  const isSchemaCacheMiss = (err: { code?: string } | null): boolean => err?.code === "PGRST205";
+  // Insert batched : retry schema-cache miss factorisé dans shared.ts
+  // (`insertStagingBatchWithRetry`) — seul le 1er batch retry.
   let inserted = 0;
   for (let i = 0; i < rows.length; i += BATCH_SIZE) {
     const batch = rows.slice(i, i + BATCH_SIZE);
-    const isFirstBatch = i === 0;
-    const maxAttempts = isFirstBatch ? 4 : 1;
-    let lastErr: { message: string; code?: string } | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) {
-        const wait = 2000 * attempt;
-        console.warn(`[cds] schema cache miss, retry ${attempt}/${maxAttempts - 1} in ${wait}ms`);
-        await new Promise((r) => setTimeout(r, wait));
-      }
-      const { error } = await supabase.from("centres_sante_staging").insert(batch);
-      if (!error) {
-        lastErr = null;
-        break;
-      }
-      lastErr = error;
-      if (!isSchemaCacheMiss(error)) break;
-    }
-    if (lastErr) {
-      console.error("[cds] insert into centres_sante_staging failed:", lastErr);
-      throw new IngestError(
-        "copy",
-        `Insert into centres_sante_staging failed [code=${lastErr.code ?? "none"}]: ${lastErr.message}`,
-        lastErr,
-      );
-    }
+    await insertStagingBatchWithRetry(supabase, "centres_sante_staging", batch, {
+      logPrefix: "cds",
+      isFirstBatch: i === 0,
+    });
     inserted += batch.length;
   }
 
