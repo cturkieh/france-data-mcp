@@ -276,14 +276,15 @@ describe("matviews refresh par les scripts d'ingest sont whitelistées", () => {
 
     // Ancres explicites : si un refactor renommait/interpolait un nom de
     // matview en échappant à la regex de découverte, `referenced` se
-    // viderait et le filtre n'assurerait plus rien (faux négatif). On
-    // épingle les 3 matviews du contrat (Ameli V0.10.1 + RPPS V0.8/V0.9).
-    for (const anchor of [
-      "ameli_nomenclature_stats",
-      "rpps_savoir_faire_stats",
-      "rpps_count_stats",
-      "rpps_commune_centroids",
-    ]) {
+    // viderait et le filtre n'assurerait plus rien (faux négatif). On épingle
+    // la matview encore REFRESH par un script ingest (Ameli). Depuis
+    // 2026-05-18 les 3 matviews RPPS ne sont plus REFRESH via
+    // `ingest_refresh_matview` mais RECONSTRUITES post-swap par
+    // `ingest_rebuild_rpps_matviews` (fix matview/swap : une matview FROM rpps
+    // suit l'OID → désync + destruction CASCADE au cron). Leur invariant est
+    // gardé par `scripts/ingest/rpps-matview-rebuild.test.ts`. Ameli reste
+    // ici (toujours refresh-only ; bombe symétrique latente = backlog P1).
+    for (const anchor of ["ameli_nomenclature_stats"]) {
       expect(referenced.has(anchor), `matview ${anchor} non détectée dans les scripts ingest`).toBe(
         true,
       );

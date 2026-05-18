@@ -4,6 +4,56 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.10.9] — 2026-05-18
+
+**Remédiation crise cron RPPS mensuel : désamorçage d'un double défaut de
+panne silencieuse prouvé prod (timeout 57014 + matviews détruites au swap).
+Les 2 correctifs s'appliquent CONJOINTEMENT (jamais l'un sans l'autre :
+désamorcer le 57014 refait réussir le cron, ce qui armerait le 2e défaut).**
+
+### Fixed
+
+- **Désamorçage timeout 57014 du cron RPPS mensuel.** Le GATE de la feature
+  BAN (branche non mergée) avait, en s'appliquant manuellement en prod,
+  remplacé `ingest_create_rpps_staging` par un superset créant 2 index
+  fonctionnels BAN Unicode-lourds (`rpps_staging_ban_eligible_normkey_idx`
+  / `..._id_idx`). L'UPDATE de masse `ingest_apply_rpps_finess_enrichment_
+  batch` recalcule alors la normalisation Unicode par ligne updatée × ~1,8 M
+  → `statement_timeout` (SQLSTATE 57014) en phase `validate`, AVANT le swap
+  atomique (données `rpps` intactes mais cron mensuel cassé « tout seul »
+  chaque mois). Prouvé : run GitHub Actions #26029698016. Fix : migration
+  `20260518T140000` = `CREATE OR REPLACE ingest_create_rpps_staging`,
+  recopie VERBATIM de la dernière définition `main` (`20260516T020000`,
+  dette #3), sans les 2 index BAN. + `DROP INDEX CONCURRENTLY` des 2 index
+  BAN sur la table `rpps` (hors migration, non transactionnel).
+- **Robustesse matviews RPPS au swap atomique (défaut OID).** Les 3 matviews
+  `rpps_savoir_faire_stats` / `rpps_count_stats` / `rpps_commune_centroids`,
+  définies `FROM rpps`, suivent l'**OID** de la table. La rotation par
+  RENAME de `ingest_atomic_swap` + un post-swap REFRESH-only
+  (`ingest_refresh_matview`) ⇒ 1er cron réussi : matviews désynchronisées
+  silencieusement (données périmées servies par `rpps_in_radius` /
+  `densite_professionnels_sante` / `lister_specialites_medicales`,
+  status `success`) ; 2e cron : `DROP ... _previous_OLD CASCADE` les
+  DÉTRUIT → `42P01` avalé en `partial`, tools santé DOWN. Jamais exercé
+  (0 cron RPPS réussi depuis le 9 mai), réveillé par le désamorçage
+  ci-dessus. Fix : migration `20260518T150000` = `ingest_rebuild_rpps_
+  matviews` qui RECONSTRUIT les 3 matviews post-swap (build-new
+  `<m>_rebuild` peuplée + index + `GRANT` puis `DROP <m>` + `RENAME`
+  atomique, 1 transaction PL/pgSQL → MVCC, fenêtre nulle pour les
+  lecteurs) ; `CREATE ... FROM rpps` résout la table PAR NOM (= la
+  nouvelle) → corrige À LA FOIS la désync (1er cron) et la destruction
+  (2e cron), et répare un état déjà dégradé (`DROP ... IF EXISTS`).
+  `scripts/ingest/rpps.ts` : `refreshRppsMatviews` → `rebuildRppsMatviews`,
+  contrat d'erreur DURCI (transitoire {55P03, 40P01, 57014, 53300} →
+  `partial` sans throw, l'ancienne matview survit par rollback ;
+  structurel / 42P01 / code absent → throw `IngestError` → `failed` +
+  `process.exit(1)`, fin de l'avalement silencieux). Garde-fous : nouveau
+  `scripts/ingest/rpps-matview-rebuild.test.ts` (reconstruction + parité
+  DDL anti-drift) ; helpers de parsing migrations extraits dans
+  `scripts/ingest/migration-sql.ts`. Défaut SYMÉTRIQUE
+  `ameli_nomenclature_stats` identifié (masqué fortuitement par
+  `shortCircuitIfSameChecksum`) → **backlog P1**, NON corrigé ici.
+
 ## [0.10.8] — 2026-05-16
 
 **4e vague audit qualité claude.ai (stress test des 35 tools) : 7 corrections
