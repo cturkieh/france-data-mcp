@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { allMigrationsSql, ingestDir, latestFunctionBody } from "./migration-sql.js";
+import {
+  allMigrationsSql,
+  ingestDir,
+  latestFunctionBodyLoose as latestFunctionBody,
+} from "./migration-sql.js";
 
 // Garde-fou structurel — sans DB, lit les migrations + le pipeline ingest.
 //

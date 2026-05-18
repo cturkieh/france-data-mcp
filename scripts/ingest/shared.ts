@@ -8,6 +8,7 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { DEFAULT_USER_AGENT } from "../../src/core/http.js";
+import { withTimeout } from "../../src/core/with-timeout.js";
 import { getServiceClient, requireEnv } from "../../src/storage/supabase.js";
 
 export type IngestPhase = "download" | "pre_validate" | "copy" | "validate" | "swap";
@@ -546,6 +547,15 @@ export async function runBatchedRpc(
   params: Record<string, unknown>,
   expectedTotal: number,
   batchSize: number,
+  // Borne ANTI-HANG optionnelle par appel. `undefined` (défaut) = aucun
+  // timeout (comportement inchangé pour les ingesters FINESS/Ameli). Posé par
+  // le step BAN du cron RPPS non surveillé : un `supabase.rpc()` brut sur un
+  // socket figé pendrait indéfiniment jusqu'au kill GitHub Actions, SANS
+  // `partial` ni trace `ingest_log` (la classe de hang silencieux que
+  // `RPC_READ_TIMEOUT_MS` ferme déjà sur les lectures — laissée ouverte ici
+  // sinon). Le `TimeoutError` est converti en `IngestError` fail-loud → le
+  // caller best-effort le rabat en `partial` + message persisté.
+  perCallTimeoutMs?: number,
 ): Promise<{ totalUpdated: number; iterations: number }> {
   const maxIterations = Math.ceil(Math.max(expectedTotal, 1) / batchSize) + 5;
   let totalUpdated = 0;
@@ -557,7 +567,29 @@ export async function runBatchedRpc(
         `${rpcName} did not converge after ${maxIterations} batches — likely RPC contract regression (rows updated but WHERE predicate not narrowing)`,
       );
     }
-    const { data, error } = await supabase.rpc(rpcName, params);
+    const call = supabase.rpc(rpcName, params);
+    let result: Awaited<typeof call>;
+    try {
+      result =
+        perCallTimeoutMs === undefined
+          ? await call
+          : await withTimeout(call, perCallTimeoutMs, `${rpcName} (batch ${iter})`);
+    } catch (e) {
+      if (e instanceof Error && e.name === "TimeoutError") {
+        console.error(
+          `[france-data-mcp][ingest] ${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — anti-silent-hang bound tripped, failing loud`,
+        );
+        throw new IngestError(
+          "validate",
+          `${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — possible hung apply RPC (anti-silent-hang bound)`,
+        );
+      }
+      console.error(
+        `[france-data-mcp][ingest] ${rpcName} (batch ${iter}) threw a non-timeout error, re-raising`,
+      );
+      throw e;
+    }
+    const { data, error } = result;
     if (error) {
       throw new IngestError("validate", `${rpcName} failed: ${error.message}`);
     }

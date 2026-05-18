@@ -4,6 +4,57 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.11.0] — 2026-05-18
+
+**Ré-armement du géocodage BAN sur le socle stabilisé (fix A+B+C `0.10.9`).
+Les 2 index BAN ne sont plus créés dans `ingest_create_rpps_staging` (cause
+du rallongement du run) ni post-swap sur la table servie, mais par une RPC
+dédiée `ingest_build_rpps_staging_ban_indexes()` exécutée APRÈS l'enrichment
+FINESS et AVANT le swap, sur `rpps_staging` (qui ne sert aucune lecture prod
+→ `CREATE INDEX` bloquant classique sans impact). Les index voyagent dans
+`rpps` via le RENAME du swap ; reconstruits à chaque cron. Doctrine
+PostgreSQL « Populating a Database » (indexer APRÈS le chargement). Branche
+`feat/rpps-ban-rearm` (re-port chirurgical depuis `main`, PAS un merge de la
+branche bombée). Cache `geocoded_addresses` (266 049 adresses) réutilisé,
+jamais re-géocodé.**
+
+### Added
+
+- **RPC `ingest_build_rpps_staging_ban_indexes()`** (`SECURITY DEFINER`,
+  `SET statement_timeout='10min'`, migration `20260519T100000`) : crée les 2
+  index fonctionnels partiels BAN (`rpps_staging_ban_eligible_normkey_idx`
+  clé-seule + `..._id_idx` composite) sur `rpps_staging`, expression
+  `rpps_address_key_for_index(adresse, code_postal, code_insee)` + prédicat
+  d'éligibilité byte-identiques à la RPC skip-scan / au count / à
+  `ingest_apply_rpps_ban_geocoding_batch` (parité gardée). JAMAIS
+  `CONCURRENTLY` (table non servie ; interdit en plpgsql).
+- **Étape BAN ré-injectée dans le cron RPPS** (`scripts/ingest/rpps.ts`) :
+  séquence `analyze → enrichment → build_ban_indexes (fail-loud) →
+  re-analyze → runBanGeocodeStep('rpps_staging') (best-effort) → swap →
+  rebuildMatviews`. Les positions précises (`geom_source='ban_address'`)
+  voyagent dans `rpps` au swap et sont capturées par la reconstruction des
+  matviews.
+
+### Changed
+
+- **`ingest_create_rpps_staging` ne crée plus AUCUN index BAN** dans les
+  migrations `20260517T120000` / `20260517T130000` (corps remplacé par la
+  def canonique BAN-free `main`, byte-identique à `20260518T140000`) :
+  ré-appliquer ces migrations ne peut plus ré-introduire la bombe 57014.
+  Formes `CREATE INDEX … ON rpps` autonomes « CI/local » retirées.
+- `scripts/ingest/migration-sql.ts` : module union (familles BAN stricte +
+  ingestion lâche) ; `latestFunctionBody` de `main` renommé
+  `latestFunctionBodyLoose` (les deux contrats coexistent volontairement).
+- **Bornes anti-hang sur le cron RPPS non surveillé** (durcissement /review) :
+  les RPC fail-loud 5a/5c/5d (`ingest_analyze_rpps_staging`,
+  `ingest_build_rpps_staging_ban_indexes`) et l'application batch step 7
+  (`runBatchedRpc`/`ingest_apply_rpps_ban_geocoding_batch`) sont désormais
+  bornées par `withTimeout` (un socket figé pendait sinon jusqu'au kill
+  GitHub Actions, sans `partial` ni `ingest_log`). Un dépassement →
+  `IngestError` fail-loud (5a/5c/5d, tue le run avec trace) ou `partial`
+  best-effort (step 7). Helpers partagés `src/core/with-timeout.ts` +
+  `src/core/parse-rpc-count.ts` (dédup des jumeaux `rpps.ts`↔`ban-backfill.mjs`).
+
 ## [0.10.9] — 2026-05-18
 
 **Remédiation crise cron RPPS mensuel : 3 correctifs CONJOINTS (A+B+C)
