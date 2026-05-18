@@ -8,7 +8,9 @@
       ".vercel",
       "supabase/.temp",
       "supabase/.branches",
-      "src/storage/supabase-types.ts"
+      "src/storage/supabase-types.ts",
+      ".claude",
+      ".phase2-case4-baseline.json"
     ]
   },
   "formatter": {

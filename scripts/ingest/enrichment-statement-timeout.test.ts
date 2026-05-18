@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   functionBodyInFile,
   ingestDir,
-  latestFunctionBody,
+  latestFunctionBodyLoose as latestFunctionBody,
   latestFunctionDef,
 } from "./migration-sql.js";
 

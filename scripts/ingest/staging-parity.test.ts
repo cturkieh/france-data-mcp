@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { allMigrationsSql, ingestDir } from "./migration-sql.js";
 
 // Garde-fou structurel V0.10.1 — sans DB, lit les migrations SQL.
 //
@@ -21,18 +21,14 @@ import { describe, expect, it } from "vitest";
 // garde-fou alors que l'index est réellement perdu : faux négatif silencieux,
 // exactement le mode d'échec que ce test doit empêcher).
 
-const migrationsDir = fileURLToPath(new URL("../../supabase/migrations", import.meta.url));
-const ingestDir = fileURLToPath(new URL(".", import.meta.url));
-
-/** Toutes les migrations SQL concaténées dans l'ordre d'application (tri nom), lowercased. */
-function allMigrationsSql(): string {
-  return readdirSync(migrationsDir)
-    .filter((f) => f.endsWith(".sql"))
-    .sort()
-    .map((n) => readFileSync(`${migrationsDir}/${n}`, "utf8"))
-    .join("\n")
-    .toLowerCase();
-}
+// `allMigrationsSql` + `ingestDir` importés du module union `migration-sql.ts`
+// (lecteur disque UNIQUE partagé). `latestFunctionBody` ci-dessous reste
+// VOLONTAIREMENT local et à regex lâche : fonctions d'ingestion anciennes
+// (`ingest_create_annuaire_ameli_staging`, `ingest_refresh_matview`) en `$$`
+// sans tag — la forme stricte ancrée du module (`latestFunctionBody`) ne les
+// matcherait pas (≡ `latestFunctionBodyLoose` du module, gardé séparé ici par
+// prudence : ce guard est le filet anti-perte d'index au swap, ne pas le
+// coupler naïvement — cf. CLAUDE.md gotchas).
 
 /**
  * Corps `$$...$$` de la DERNIÈRE définition d'une fonction (ordre = tri nom de

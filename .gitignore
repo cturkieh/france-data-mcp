@@ -14,3 +14,4 @@ coverage
 docs/backlog.md
 docs/superpowers/
 .env*.local
+.phase2-case4-baseline.json

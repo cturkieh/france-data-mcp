@@ -9,6 +9,7 @@ import {
   insertStagingBatchWithRetry,
   parseDropStalePreviousOutcome,
   preValidateFile,
+  runBatchedRpc,
 } from "./shared.js";
 
 /**
@@ -223,5 +224,52 @@ describe("insertStagingBatchWithRetry", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("runBatchedRpc — borne anti-hang (perCallTimeoutMs)", () => {
+  type RbrArgs = Parameters<typeof runBatchedRpc>;
+
+  it("perCallTimeoutMs posé + RPC qui ne résout jamais ⇒ IngestError fail-loud (PAS un hang muet)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const supabase = {
+      rpc: vi.fn(() => new Promise(() => {})),
+    } as unknown as RbrArgs[0];
+
+    await expect(
+      runBatchedRpc(supabase, "ingest_apply_rpps_ban_geocoding_batch", {}, 1, 1, 20),
+    ).rejects.toMatchObject({
+      name: "IngestError",
+      phase: "validate",
+      message: expect.stringContaining("anti-silent-hang bound"),
+    });
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("[france-data-mcp][ingest]"));
+    errSpy.mockRestore();
+  });
+
+  it("erreur NON-timeout ⇒ re-raise telle quelle (pas de masquage), log [france-data-mcp][ingest]", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const boom = new Error("network exploded");
+    const supabase = {
+      rpc: vi.fn(() => Promise.reject(boom)),
+    } as unknown as RbrArgs[0];
+
+    await expect(
+      runBatchedRpc(supabase, "ingest_apply_rpps_ban_geocoding_batch", {}, 1, 1, 5000),
+    ).rejects.toBe(boom);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("threw a non-timeout error, re-raising"),
+    );
+    errSpy.mockRestore();
+  });
+
+  it("perCallTimeoutMs ABSENT (FINESS/Ameli) ⇒ comportement inchangé (aucun timeout, convergence normale)", async () => {
+    const supabase = {
+      rpc: vi.fn(() => Promise.resolve({ data: 0, error: null })),
+    } as unknown as RbrArgs[0];
+
+    await expect(
+      runBatchedRpc(supabase, "ingest_apply_rpps_finess_enrichment_batch", {}, 100, 50),
+    ).resolves.toEqual({ totalUpdated: 0, iterations: 1 });
   });
 });
