@@ -367,19 +367,18 @@ async function main(): Promise<void> {
     // 6. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "rpps" });
 
-    // 6b. REFRESH MATERIALIZED VIEWS post-swap. Les matviews `rpps_count_stats`
-    // (V0.8.3) et `rpps_savoir_faire_stats` (V0.8.2) pré-agrègent les comptages
-    // RPPS pour servir `densite_professionnels_sante` (compare_national) et
-    // `lister_specialites_medicales` en <50 ms. Sans REFRESH après l'ingest
-    // mensuel, elles dérivent silencieusement vs la prod (= les tools retournent
-    // des stats du mois précédent). CONCURRENTLY car les deux ont un UNIQUE
-    // INDEX et sont consultées par des requêtes anon en parallèle — un REFRESH
-    // non-concurrent poserait un AccessExclusiveLock bloquant.
-    //
-    // Erreur ici ne bloque PAS la prod (le swap est déjà commit), on log et on
-    // capture en ingest_log pour observabilité. Sentry côté MCP attrapera la
-    // matview vide (sentinelle SQLSTATE P0002 dans count_rpps).
-    await refreshRppsMatviews(supabase, log);
+    // 6b. RECONSTRUCTION MATERIALIZED VIEWS post-swap. Les 3 matviews RPPS
+    // (`rpps_savoir_faire_stats` → `lister_specialites_medicales`,
+    // `rpps_count_stats` → `densite_professionnels_sante`,
+    // `rpps_commune_centroids` → `rpps_in_radius`) sont définies `FROM rpps`.
+    // Un simple REFRESH les laisse suivre l'OID de l'ancienne table : le swap
+    // RENAME les désynchronise (1er cron) puis les détruit par CASCADE (2e
+    // cron) — défaut prouvé prod (/review). `rebuildRppsMatviews` les
+    // RECONSTRUIT (`CREATE ... FROM rpps` résolu par nom = la NOUVELLE table),
+    // bascule atomique sans fenêtre. Échec transitoire = "partial" non
+    // bloquant (ancienne matview préservée par rollback) ; échec structurel =
+    // throw → "failed" + exit(1) (LOUD, fin de l'avalement silencieux).
+    await rebuildRppsMatviews(supabase, log);
 
     // 6c. CANARY POST-SWAP. Cibles seedées dans la migration `_canary_seed_rpps`
     // (placeholders à valider post 1er run prod — log warn non-bloquant si
@@ -388,10 +387,12 @@ async function main(): Promise<void> {
     await runAndRecordCanary(supabase, "rpps", log, "rpps");
 
     // IMPORTANT : préserver un éventuel `status: "partial"` posé par
-    // `refreshRppsMatviews` (V0.9). `runAndRecordCanary` actuel ne pose pas
-    // "partial" — il remplit seulement `canary_failures`. Si un futur change
-    // y ajoute "partial", ce check le préserve aussi. Écraser inconditionnel-
-    // lement masquerait un incident d'observabilité (régression V0.9 Passe 1).
+    // `rebuildRppsMatviews` (échec TRANSITOIRE de reconstruction matview ;
+    // un échec STRUCTUREL aurait throw → on ne serait pas ici).
+    // `runAndRecordCanary` actuel ne pose pas "partial" — il remplit seulement
+    // `canary_failures`. Si un futur change y ajoute "partial", ce check le
+    // préserve aussi. Écraser inconditionnellement masquerait un incident
+    // d'observabilité (régression V0.9 Passe 1).
     if (log.status !== "partial") {
       log.status = "success";
     }
@@ -581,65 +582,73 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
 }
 
 /**
- * Refresh des matviews dépendantes de la table `rpps` après swap atomique.
+ * Reconstruit (build-new + RENAME atomique) les matviews dépendantes de
+ * `rpps` après le swap atomique, via le RPC `ingest_rebuild_rpps_matviews`
+ * (1 transaction SQL pour les 3 : `rpps_savoir_faire_stats`,
+ * `rpps_count_stats`, `rpps_commune_centroids`).
  *
- * Trois matviews à refresh :
- *   - `rpps_savoir_faire_stats` (V0.8.2) → `lister_specialites_medicales`
- *   - `rpps_count_stats` (V0.8.3) → `densite_professionnels_sante` (compare_national)
- *   - `rpps_commune_centroids` (V0.10.2) → `rpps_in_radius` (pré-résolution
- *     rayon ; sans refresh, les centroïdes restent figés au mois précédent
- *     → un PS d'une commune nouvellement peuplée serait invisible au rayon)
+ * Remplace l'ancien refresh-only : une matview `FROM rpps` suit l'OID de la
+ * table. Le swap RENAME (`rpps`→`rpps_previous`→`rpps_previous_OLD`→
+ * `DROP CASCADE`) la désynchronisait silencieusement (1er cron) puis la
+ * DÉTRUISAIT (2e cron) → `rpps_in_radius` / `densite_professionnels_sante` /
+ * `lister_specialites_medicales` down, avalé en "partial" (défaut prouvé
+ * prod, /review). `CREATE ... FROM rpps` post-swap résout la table PAR NOM
+ * (= la nouvelle) → matviews re-liées au bon OID à CHAQUE cron.
  *
- * Best-effort : le swap est déjà commit, on n'annule pas la prod si REFRESH
- * échoue. Cas de fail attendus :
- *   - statement_timeout : ne devrait pas arriver côté service_role (timeout
- *     bien plus élevé que côté anon), mais on log au cas où.
- *   - lock conflict : query anon massive en cours sur la matview pendant
- *     REFRESH CONCURRENTLY → retry possible, ici on accepte l'échec.
- *   - relation does not exist : env dev sans matview (migration pas appliquée).
+ * Contrat d'erreur (la fonction SQL est transactionnelle = tout-ou-rien) :
+ *   - transitoire (lock/timeout/connexions) → rollback → ancienne matview
+ *     intacte (juste périmée) : `status="partial"` + reconstruction nommée
+ *     dans `error_message`, PAS de throw (retry au prochain cron, aucun
+ *     tool down) ;
+ *   - structurel (42P01, code SQL inattendu) → throw `IngestError` → catch
+ *     de `main` → `status="failed"` + `exit(1)` (LOUD ; fin de l'avalement
+ *     silencieux qui masquait une matview cassée).
  *
- * Tous les fails sont console.error + marquent le log entry "partial" pour
- * surfacer côté dashboard. La sentinelle SQLSTATE P0002 dans `count_rpps`
- * (matview vide) catchera de toute façon une matview cassée côté MCP via Sentry.
+ * Défaut symétrique Ameli (`ameli_nomenclature_stats`) = backlog P1, masqué
+ * fortuitement par `shortCircuitIfSameChecksum` (ancrage :
+ * `rpps-matview-rebuild.test.ts`).
  *
  * Exporté pour testabilité unitaire.
  */
-export async function refreshRppsMatviews(
+const TRANSIENT_REBUILD_CODES = new Set(["55P03", "40P01", "57014", "53300"]);
+
+export async function rebuildRppsMatviews(
   supabase: SupabaseClient,
   log: IngestLogEntry,
 ): Promise<void> {
-  const matviews = [
-    "rpps_savoir_faire_stats",
-    "rpps_count_stats",
-    "rpps_commune_centroids",
-  ] as const;
-  const failures: string[] = [];
+  const start = Date.now();
+  const { error } = await supabase.rpc("ingest_rebuild_rpps_matviews");
+  const elapsedMs = Date.now() - start;
 
-  for (const matview of matviews) {
-    const start = Date.now();
-    const { error } = await supabase.rpc("ingest_refresh_matview", {
-      p_matview: matview,
-    });
-    const elapsedMs = Date.now() - start;
-
-    if (error) {
-      console.error(
-        `[rpps] REFRESH MATERIALIZED VIEW ${matview} failed [code=${error.code ?? "none"}] after ${elapsedMs}ms: ${error.message}`,
-      );
-      failures.push(`${matview} (${error.code ?? "no_code"}: ${error.message})`);
-      continue;
-    }
-
-    console.log(`[rpps] REFRESH MATERIALIZED VIEW ${matview} CONCURRENTLY OK in ${elapsedMs}ms`);
+  if (!error) {
+    console.log(`[rpps] ingest_rebuild_rpps_matviews OK in ${elapsedMs}ms`);
+    return;
   }
 
-  if (failures.length > 0) {
+  const code = (error as { code?: string }).code;
+  const message = (error as { message?: string }).message ?? String(error);
+  const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
+
+  if (code !== undefined && TRANSIENT_REBUILD_CODES.has(code)) {
+    // Transitoire : `ingest_rebuild_rpps_matviews` est transactionnelle →
+    // rollback intégral → AUCUNE matview détruite, l'ancienne (peuplée,
+    // juste périmée) reste en place. Dégradation bénigne, retry au prochain
+    // cron. On NOMME la reconstruction (le statut seul ne dit pas QUOI est
+    // dégradé — contrat alerting).
+    console.error(`[rpps] ${detail} — transitoire, ancienne matview préservée (rollback)`);
     log.status = "partial";
     const previousMsg = log.error_message ? `${log.error_message}; ` : "";
-    log.error_message = `${previousMsg}post-swap matview refresh failed: ${failures.join(", ")}`;
+    log.error_message = `${previousMsg}post-swap matview rebuild (transient ${code}): ${message}`;
+    return;
   }
+
+  // Structurel : NE PAS avaler en "partial" (trou prouvé /review : matview
+  // cassée → `rpps_in_radius` down, masqué non bloquant). Throw → catch de
+  // `main` → status "failed" + exit(1) = LOUD.
+  console.error(`[rpps] ${detail} — STRUCTUREL, échec dur`);
+  throw new IngestError("validate", detail, error);
 }
 
-export const __TESTING__ = { parseRppsRecord, COL, refreshRppsMatviews };
+export const __TESTING__ = { parseRppsRecord, COL, rebuildRppsMatviews };
 
 await runIfMain(import.meta.url, main);

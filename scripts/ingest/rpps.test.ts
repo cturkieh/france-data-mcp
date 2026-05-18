@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { buildCommuneIndex } from "../../src/territoire/commune-index.js";
 import type { Commune } from "../../src/territoire/communes.js";
 import { __TESTING__ } from "./rpps.js";
-import type { IngestLogEntry } from "./shared.js";
+import { IngestError, type IngestLogEntry } from "./shared.js";
 
-const { parseRppsRecord, COL, refreshRppsMatviews } = __TESTING__;
+const { parseRppsRecord, COL, rebuildRppsMatviews } = __TESTING__;
 
 const fixtures: Commune[] = [
   {
@@ -250,7 +250,7 @@ describe("parseRppsRecord", () => {
   });
 });
 
-// --- refreshRppsMatviews (V0.9) -----------------------------------------------
+// --- rebuildRppsMatviews (robustesse matview/swap 2026-05-18) ----------------
 
 function makeLog(): IngestLogEntry {
   return {
@@ -261,108 +261,87 @@ function makeLog(): IngestLogEntry {
 }
 
 function makeSupabaseStub(rpcImpl: (name: string, args: unknown) => { error: unknown }) {
-  return { rpc: vi.fn(rpcImpl) } as unknown as Parameters<typeof refreshRppsMatviews>[0];
+  return { rpc: vi.fn(rpcImpl) } as unknown as Parameters<typeof rebuildRppsMatviews>[0];
 }
 
-describe("refreshRppsMatviews", () => {
-  it("appelle ingest_refresh_matview pour chaque matview connue", async () => {
-    const calls: string[] = [];
-    const supabase = makeSupabaseStub((name, args) => {
-      expect(name).toBe("ingest_refresh_matview");
-      const params = args as { p_matview: string };
-      calls.push(params.p_matview);
+// Contrat d'erreur de `rebuildRppsMatviews` (source de vérité = son JSDoc
+// dans rpps.ts) : transitoire → "partial" sans throw (rollback préserve
+// l'ancienne matview) ; structurel → throw IngestError → failed+exit(1).
+// Durcissement vs l'ancien refresh-only qui avalait 42P01 (trou /review).
+describe("rebuildRppsMatviews", () => {
+  it("appelle ingest_rebuild_rpps_matviews UNE fois (reconstruction atomique des 3, pas une boucle REFRESH)", async () => {
+    const names: string[] = [];
+    const supabase = makeSupabaseStub((name) => {
+      names.push(name);
       return { error: null };
     });
     const log = makeLog();
 
-    await refreshRppsMatviews(supabase, log);
+    await rebuildRppsMatviews(supabase, log);
 
-    expect(calls).toEqual([
-      "rpps_savoir_faire_stats",
-      "rpps_count_stats",
-      "rpps_commune_centroids",
-    ]);
+    expect(names).toEqual(["ingest_rebuild_rpps_matviews"]);
     expect(log.status).toBe("success");
     expect(log.error_message).toBeUndefined();
   });
 
-  it("marque status=partial et concatène l'erreur si une matview échoue", async () => {
-    const supabase = makeSupabaseStub((_name, args) => {
-      const params = args as { p_matview: string };
-      if (params.p_matview === "rpps_count_stats") {
-        return { error: { code: "57014", message: "canceling statement due to timeout" } };
-      }
-      return { error: null };
-    });
+  it("lock transitoire (55P03) → partial + nomme la reconstruction, SANS throw (rollback préserve l'ancienne matview, retry au prochain cron)", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "55P03", message: "lock not available" },
+    }));
     const log = makeLog();
 
-    await refreshRppsMatviews(supabase, log);
+    await expect(rebuildRppsMatviews(supabase, log)).resolves.toBeUndefined();
 
     expect(log.status).toBe("partial");
-    expect(log.error_message).toContain("rpps_count_stats");
-    expect(log.error_message).toContain("57014");
-  });
-
-  it("INVARIANT alerting : un échec de rpps_commune_centroids surface partial + le NOMME (pas un rayon figé silencieux)", async () => {
-    // Si le refresh de `rpps_commune_centroids` échoue au cron mensuel,
-    // `rpps_in_radius` résout les communes sur une matview figée
-    // (rayon silencieusement périmé). Ce n'est PAS silencieux UNIQUEMENT si
-    // le statut bascule `partial` ET que le nom de la matview est dans
-    // `error_message` — sinon un opérateur lisant `data_freshness`
-    // (last_attempt_status) ne peut pas savoir que c'est la recherche par
-    // rayon qui est dégradée (vs un autre agrégat). Verrouille ce contrat.
-    const supabase = makeSupabaseStub((_name, args) => {
-      const params = args as { p_matview: string };
-      if (params.p_matview === "rpps_commune_centroids") {
-        return { error: { code: "55P03", message: "lock not available" } };
-      }
-      return { error: null };
-    });
-    const log = makeLog();
-
-    await refreshRppsMatviews(supabase, log);
-
-    // staleness_days seul ne bougerait pas (le swap RPPS a réussi) → c'est
-    // last_attempt_status='partial' qui doit porter l'alerte.
-    expect(log.status).toBe("partial");
-    expect(log.error_message).toContain("rpps_commune_centroids");
+    expect(log.error_message).toContain("rebuild");
     expect(log.error_message).toContain("55P03");
   });
 
-  it("préserve un error_message préexistant et concatène", async () => {
+  it("timeout (57014) → partial sans throw (transaction rollback = aucune matview détruite, pas de tool down)", async () => {
     const supabase = makeSupabaseStub(() => ({
-      error: { code: "42P01", message: "relation does not exist" },
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    }));
+    const log = makeLog();
+
+    await expect(rebuildRppsMatviews(supabase, log)).resolves.toBeUndefined();
+
+    expect(log.status).toBe("partial");
+    expect(log.error_message).toContain("57014");
+  });
+
+  it("DURCISSEMENT : erreur structurelle (42P01) → throw IngestError (LOUD), ne dégrade PAS en partial silencieux", async () => {
+    // L'ancien refreshRppsMatviews posait status=partial et avalait 42P01
+    // (trou prouvé par /review silent-failure-hunter : matview détruite =
+    // rpps_in_radius down, masqué en "partial" non bloquant). Le nouveau
+    // contrat FAIL LOUD : throw → catch de main → status "failed" + exit(1).
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "42P01", message: 'relation "rpps" does not exist' },
+    }));
+    const log = makeLog();
+
+    await expect(rebuildRppsMatviews(supabase, log)).rejects.toBeInstanceOf(IngestError);
+    expect(log.status).not.toBe("partial");
+  });
+
+  it("erreur SQL inattendue (code absent) → traitée comme structurelle → throw IngestError", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { message: "unexpected failure without code" },
+    }));
+    const log = makeLog();
+
+    await expect(rebuildRppsMatviews(supabase, log)).rejects.toBeInstanceOf(IngestError);
+  });
+
+  it("préserve un error_message préexistant et concatène (cas transitoire)", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "53300", message: "too many connections" },
     }));
     const log = makeLog();
     log.error_message = "earlier non-fatal warning";
 
-    await refreshRppsMatviews(supabase, log);
+    await rebuildRppsMatviews(supabase, log);
 
     expect(log.status).toBe("partial");
     expect(log.error_message?.startsWith("earlier non-fatal warning;")).toBe(true);
-  });
-
-  it("continue les autres matviews même si la première échoue", async () => {
-    const visited: string[] = [];
-    const supabase = makeSupabaseStub((_name, args) => {
-      const params = args as { p_matview: string };
-      visited.push(params.p_matview);
-      if (params.p_matview === "rpps_savoir_faire_stats") {
-        return { error: { code: "53300", message: "too many connections" } };
-      }
-      return { error: null };
-    });
-    const log = makeLog();
-
-    await refreshRppsMatviews(supabase, log);
-
-    expect(visited).toEqual([
-      "rpps_savoir_faire_stats",
-      "rpps_count_stats",
-      "rpps_commune_centroids",
-    ]);
-    expect(log.status).toBe("partial");
-    expect(log.error_message).toContain("rpps_savoir_faire_stats");
-    expect(log.error_message).not.toContain("rpps_count_stats (");
   });
 });
