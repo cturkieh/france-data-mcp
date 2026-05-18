@@ -6,10 +6,13 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [0.10.9] — 2026-05-18
 
-**Remédiation crise cron RPPS mensuel : désamorçage d'un double défaut de
-panne silencieuse prouvé prod (timeout 57014 + matviews détruites au swap).
-Les 2 correctifs s'appliquent CONJOINTEMENT (jamais l'un sans l'autre :
-désamorcer le 57014 refait réussir le cron, ce qui armerait le 2e défaut).**
+**Remédiation crise cron RPPS mensuel : 3 correctifs CONJOINTS (A+B+C)
+prouvés prod. A (désamorçage index BAN) + B (robustesse matview/swap) +
+C (statement_timeout fonction + ANALYZE post-COPY). Le cron de validation
+A+B (run #26046475566) a RÉFUTÉ l'hypothèse « index BAN = cause du 57014 » :
+même échec, prouvant une cause-racine distincte (budget 8s hérité +
+absence d'ANALYZE). Les 3 s'appliquent ensemble (jamais l'un sans les
+autres : désamorcer un défaut refait réussir le cron et arme les suivants).**
 
 ### Fixed
 
@@ -53,6 +56,34 @@ désamorcer le 57014 refait réussir le cron, ce qui armerait le 2e défaut).**
   `scripts/ingest/migration-sql.ts`. Défaut SYMÉTRIQUE
   `ameli_nomenclature_stats` identifié (masqué fortuitement par
   `shortCircuitIfSameChecksum`) → **backlog P1**, NON corrigé ici.
+- **Cause-racine RÉELLE du timeout 57014 enrichment (le fix A seul s'est
+  révélé insuffisant — prouvé prod).** Le cron de validation A+B
+  (run #26046475566) a re-échoué EXACTEMENT pareil
+  (`ingest_apply_rpps_finess_enrichment_batch` 57014, phase `validate`),
+  réfutant l'inférence « index BAN = cause ». Cause prouvée par
+  convergence (doc Supabase + `pg_roles` prod + `EXPLAIN ANALYZE`) :
+  (1) le cron appelle l'enrichment via clé SERVICE_ROLE → PostgREST →
+  rôle `service_role` dont `rolconfig` est NULL → il hérite du
+  `statement_timeout` de `authenticator` = **8 s** ; or
+  `ingest_apply_rpps_finess_enrichment_batch` (def `20260509T210000`,
+  inchangée) **n'avait AUCUN `SET statement_timeout` fonction** — seule
+  RPC longue du projet sans ; (2) **aucun `ANALYZE rpps_staging`** entre
+  le bulk COPY (~2,24 M lignes, table fraîchement créée) et le 1er batch
+  d'enrichment → planner sans statistiques → plan dégradé → un batch de
+  10 K dépasse 8 s → 57014 déterministe. Les index BAN n'étaient qu'un
+  **aggravant** (INSERT ralenti). Fix C (migration `20260518T160000`,
+  CONJOINT avec A+B) : (C1) `CREATE OR REPLACE
+  ingest_apply_rpps_finess_enrichment_batch`, corps **VERBATIM** de
+  `20260509T210000` + `SET statement_timeout = '55s'` au niveau fonction
+  (best practice Supabase ; `55s` < cap passerelle PostgREST ~60 s → un
+  dérapage donne un 57014 propre/diagnosticable, pas un timeout
+  passerelle opaque) ; (C2) RPC `ingest_analyze_rpps_staging`
+  (`ANALYZE rpps_staging` + son propre `SET statement_timeout = '55s'`
+  pour ne pas ré-hériter du 8 s racine), appelée par
+  `scripts/ingest/rpps.ts` APRÈS le COPY et AVANT l'enrichment (échec →
+  `IngestError` LOUD → `failed` + `exit(1)`). Garde-fou statique :
+  `scripts/ingest/enrichment-statement-timeout.test.ts` (présence + valeur
+  ≤ 55 s sur les 2 fonctions, corps verbatim anti-drift, ordre d'appel).
 
 ## [0.10.8] — 2026-05-16
 

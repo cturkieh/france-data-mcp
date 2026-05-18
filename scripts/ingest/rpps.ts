@@ -300,6 +300,20 @@ async function main(): Promise<void> {
       }
     }
 
+    // 5a. ANALYZE STAGING — stats fraîches après le bulk COPY (~2,24M lignes
+    // dans une table fraîchement CREATE). Sans ça le planner attaque le 1er
+    // batch d'enrichment aveugle → plan dégradé → batch ≫ budget
+    // statement_timeout → 57014 déterministe en `validate`, avant le swap
+    // (cause-racine prouvée prod 2026-05-18, run #26046475566). Pratique
+    // Postgres canonique « bulk COPY puis ANALYZE avant de requêter ».
+    const { error: analyzeErr } = await supabase.rpc("ingest_analyze_rpps_staging");
+    if (analyzeErr) {
+      throw new IngestError(
+        "validate",
+        `Failed to ANALYZE rpps_staging before enrichment: ${analyzeErr.message}`,
+      );
+    }
+
     // 5b. ENRICH FROM FINESS — la RPC fait un LEFT JOIN finess + CASE WHEN
     // qui pose 'finess_join' (avec coords) ou 'finess_unmatched' (sentinelle
     // qui sort la row du predicate du prochain scan). Le retour = total rows

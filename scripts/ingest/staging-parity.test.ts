@@ -46,7 +46,7 @@ function latestFunctionBody(fnName: string): string {
     "g",
   );
   let body = "";
-  for (const m of allMigrationsSql().matchAll(re)) body = m[1];
+  for (const m of allMigrationsSql().matchAll(re)) body = m[1] ?? "";
   return body;
 }
 
