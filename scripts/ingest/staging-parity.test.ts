@@ -1,6 +1,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { allMigrationsSql, ingestDir } from "./migration-sql.js";
+import {
+  allMigrationsSql,
+  ingestDir,
+  latestFunctionBody as latestFunctionBodyStrict,
+} from "./migration-sql.js";
 
 // Garde-fou structurel V0.10.1 — sans DB, lit les migrations SQL.
 //
@@ -189,6 +193,87 @@ describe("staging-create est un superset des index prod (rpps)", () => {
       missing,
       `Index prod sur rpps absents (par liste de colonnes clé) de ingest_create_rpps_staging() — seront PERDUS au prochain swap mensuel → re-régression timeout 57014 (rpps_in_radius dépend de rpps_insee_id_idx) : ${JSON.stringify(missing)}`,
     ).toEqual([]);
+  });
+
+  it("tout GiST rpps_staging(geog) de staging-create porte le prédicat partiel precise", () => {
+    // Post-mortem 2026-05-19 (prouvé prod, RÉFUTE la « limite assumée » du
+    // bloc « superset rpps » ci-dessus : une divergence WHERE sur CE GiST
+    // EST catastrophique, pas seulement perf). La prod vivante a
+    // `rpps_geog_precise_gist` (partiel, `WHERE geom_source IN
+    // ('finess_join','ban_address')`) : la migration `20260516T050000` DROP
+    // le global `rpps_geog_gist` et CREATE le partiel. La branche `precise`
+    // de `rpps_in_radius` (hybride) DOIT passer par ce partiel — sinon le
+    // GiST GLOBAL ramène le cluster co-localisé `commune_centroid` (76 940
+    // lignes au centroïde Paris, prouvé : 77 381 lignes dans le bbox 1 km
+    // dont 76 940 jetées en Filter) → 57014.
+    //
+    // Le guard `indexColumnLists` ci-dessus est AVEUGLE à cette divergence
+    // (global `(geog)` et partiel `(geog) WHERE …` normalisent à la même
+    // liste de colonnes `geog`, la clause WHERE étant hors du 1er groupe de
+    // parenthèses) — assertion dédiée requise, comme le bloc annuaire_ameli
+    // l'exige via `richIndex` pour sa propre classe de collision silencieuse.
+    //
+    // Forme POSITIVE (capturer TOUT GiST `(geog)` et exiger le prédicat sur
+    // CHACUN), et non « chercher la forme négative exacte du global » : une
+    // regex négative ratait `IF NOT EXISTS` / `public.` / `WITH (...)` /
+    // coexistence partiel+global → test vert alors que le global est
+    // réintroduit = exactement la classe de faux négatif silencieux qui a
+    // causé la régression d'origine (revue silent-failure-hunter P1/P4).
+    //
+    // Lecteur = `latestFunctionBody` STRICT du module (PAS le local lâche) :
+    //  - `stripComments:true` retire les `-- …` AVANT match → ferme le faux
+    //    VERT « prédicat en commentaire inline avant le `;` » (sfh Passe 2 R1) ;
+    //  - délimiteur tag-aware (back-ref `\1`, `$$` OU `$body$`) → ferme le
+    //    faux VERT « def future en dollar-quote taggé → corps mort capturé »
+    //    pour staging-create ET rpps_in_radius (sfh Passe 2 R2/R3). Rend la
+    //    rustine regex `taggedStagingDef` inutile (supprimée). Le local lâche
+    //    reste pour les `it()` legacy (fonctions anciennes non taggées).
+    const stagingBody = latestFunctionBodyStrict(allMigrationsSql(), "ingest_create_rpps_staging", {
+      stripComments: true,
+    });
+    expect(
+      stagingBody.length,
+      "def ingest_create_rpps_staging introuvable/vide via le lecteur STRICT — garde-fou anti-régression-57014 muet : investiguer AVANT de merger.",
+    ).toBeGreaterThan(0);
+
+    const partialPredicate =
+      /where\s+geom_source\s+in\s*\(\s*'finess_join'\s*,\s*'ban_address'\s*\)/;
+    // `[^;]*` borne le tail au `;` du statement : tolère `if not exists`,
+    // `public.`, un nom quelconque, et une clause `with (...)` éventuelle.
+    const geogGistOnStaging =
+      /create\s+index\s+(?:if\s+not\s+exists\s+)?\w+\s+on\s+(?:public\.)?rpps_staging\s+using\s+gist\s*\(\s*geog\s*\)([^;]*);/g;
+    const geogGists = [...stagingBody.matchAll(geogGistOnStaging)];
+
+    expect(
+      geogGists.length,
+      "ingest_create_rpps_staging() ne crée AUCUN GiST sur rpps_staging(geog) → la branche `precise` de rpps_in_radius n'a aucun index spatial → seq scan / 57014 en commune dense.",
+    ).toBeGreaterThanOrEqual(1);
+
+    for (const m of geogGists) {
+      expect(
+        partialPredicate.test(m[1]),
+        `Un GiST sur rpps_staging(geog) SANS le prédicat partiel \`WHERE geom_source IN ('finess_join','ban_address')\` → au swap il devient un GiST GLOBAL \`rpps_geog_gist\` → re-régression 57014 de rpps_in_radius en commune dense (cluster co-localisé non élagué) : ${m[0].replace(/\s+/g, " ").trim()}`,
+      ).toBe(true);
+    }
+
+    // Parité CONSOMMATEUR (revue silent-failure-hunter P2) : le prédicat du
+    // GiST partiel n'est utile au planner que s'il matche EXACTEMENT le WHERE
+    // de la CTE `precise` de `rpps_in_radius`. Sans cette assertion croisée,
+    // la « byte-identité » revendiquée n'est qu'une affirmation en commentaire
+    // (tautologie verte) : si le prédicat de rpps_in_radius dérive, staging
+    // et guard restent cohérents entre eux mais divergent silencieusement de
+    // la fonction qui consomme l'index → planner ignore le partiel → 57014.
+    const rppsInRadiusBody = latestFunctionBodyStrict(allMigrationsSql(), "rpps_in_radius", {
+      stripComments: true,
+    });
+    expect(
+      rppsInRadiusBody.length,
+      "def rpps_in_radius introuvable/vide via le lecteur STRICT — parité prédicat NON vérifiable, garde-fou muet : investiguer AVANT de merger.",
+    ).toBeGreaterThan(0);
+    expect(
+      /geom_source\s+in\s*\(\s*'finess_join'\s*,\s*'ban_address'\s*\)/.test(rppsInRadiusBody),
+      "La CTE `precise` de rpps_in_radius n'utilise plus exactement `geom_source IN ('finess_join','ban_address')` : le prédicat du GiST partiel staging-create ne le matche plus → planner juge le partiel inutilisable → 57014. Re-synchroniser staging-create + index 20260516T050000 + rpps_in_radius ENSEMBLE.",
+    ).toBe(true);
   });
 });
 
