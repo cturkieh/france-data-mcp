@@ -266,15 +266,17 @@ async function main(): Promise<void> {
     // 6. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "annuaire_ameli" });
 
-    // 6b. REFRESH MATERIALIZED VIEW post-swap. `ameli_nomenclature_stats`
-    // (V0.10.1) pré-agrège la nomenclature Ameli pour servir
-    // `ameli_lister_specialites` + `ameli_lister_types_ps` en <5 ms. Sans
-    // REFRESH après l'ingest hebdo, elle dérive silencieusement vs la prod
-    // (= les tools renvoient la nomenclature de la semaine précédente).
-    // CONCURRENTLY car la matview a un UNIQUE INDEX et est consultée par des
-    // requêtes anon en parallèle. Erreur ici ne bloque PAS la prod (le swap
-    // est déjà commit) : on log et on marque le log "partial".
-    await refreshAmeliMatviews(supabase, log);
+    // 6b. RECONSTRUCTION MATERIALIZED VIEW post-swap (PAS un REFRESH).
+    // `ameli_nomenclature_stats` est définie `FROM annuaire_ameli` : un
+    // simple REFRESH la laisse suivre l'OID de l'ancienne table (désync 1er
+    // cron) puis la fait détruire par le `DROP CASCADE` du 2e swap — même
+    // bombe OID que RPPS (cf. migration 20260519T200000). `rebuildAmeliMatviews`
+    // la RECONSTRUIT (`CREATE ... FROM annuaire_ameli` résolu PAR NOM = la
+    // NOUVELLE table), bascule atomique RENAME. Échec transitoire = "partial"
+    // non bloquant (ancienne matview préservée par rollback) ; échec
+    // structurel = throw → "failed" + exit(1) (LOUD). Symétrique exact de
+    // `rebuildRppsMatviews`.
+    await rebuildAmeliMatviews(supabase, log);
 
     // 6c. CANARY POST-SWAP — non-bloquant. La table `ingest_canary_targets`
     // n'a pas encore de cibles seedées pour `ameli_ps` ; tant qu'elle est vide
@@ -283,11 +285,10 @@ async function main(): Promise<void> {
     await runAndRecordCanary(supabase, "ameli_ps", log, "ameli");
 
     // SUCCESS — préserver un éventuel `status: "partial"` posé par
-    // `refreshAmeliMatviews` (V0.10.1) : un REFRESH matview échoué (timeout
-    // 57014, lock CONCURRENTLY, matview absente) doit rester visible en
-    // ingest_log, pas être masqué en "success". Symétrique du garde RPPS
-    // (rpps.ts) — sans ça le scénario même que ce refresh rend observable
-    // serait silencieusement écrasé.
+    // `rebuildAmeliMatviews` : un rebuild matview en échec TRANSITOIRE (lock,
+    // 57014, deadlock) doit rester visible en ingest_log, pas masqué en
+    // "success" (un échec STRUCTUREL aurait throw → on ne serait pas ici).
+    // Symétrique du garde RPPS (rpps.ts).
     if (log.status !== "partial") {
       log.status = "success";
     }
@@ -537,51 +538,64 @@ export function parseAmeliRecord(rec: Record<string, string>, index: CommuneInde
   };
 }
 
+// Codes SQLSTATE transitoires d'un rebuild matview (lock indisponible,
+// deadlock, statement_timeout, out-of-memory) : `ingest_rebuild_ameli_matviews`
+// est transactionnelle → un rollback intégral préserve l'ANCIENNE matview
+// (peuplée, juste périmée) ⇒ dégradation bénigne, retry au prochain cron.
+// Tout autre code = structurel (matview cassée) → fail-loud. Dupliqué de
+// `rpps.ts:TRANSIENT_REBUILD_CODES` à dessein : ne PAS modifier `rpps.ts`
+// (mergé/prouvé-prod, code critique stabilisé) pour factoriser un Set de 4
+// constantes ; factorisation = dette mineure si /simplify la juge nécessaire.
+const AMELI_TRANSIENT_REBUILD_CODES = new Set(["55P03", "40P01", "57014", "53300"]);
+
 /**
- * Refresh des matviews dépendantes de `annuaire_ameli` après swap atomique.
+ * Reconstruction post-swap de la matview `ameli_nomenclature_stats`
+ * (`FROM annuaire_ameli` → sert `ameli_lister_specialites` /
+ * `ameli_lister_types_ps`). RECONSTRUIT (build-new + RENAME atomique) au
+ * lieu de REFRESH : un REFRESH suit l'OID de l'ancienne table (désync 1er
+ * cron) puis subit le `DROP CASCADE` du 2e swap (bombe OID, cf. migration
+ * 20260519T200000). Symétrique exact de `rebuildRppsMatviews`.
  *
- * Une matview à refresh : `ameli_nomenclature_stats` (V0.10.1) →
- * `ameli_lister_specialites` + `ameli_lister_types_ps`.
+ * Échec TRANSITOIRE (lock/deadlock/57014/OOM) : la fonction SQL étant
+ * transactionnelle, le rollback préserve l'ancienne matview (peuplée, juste
+ * périmée) → `status="partial"` non bloquant, retry au prochain cron, on
+ * NOMME la reconstruction (le statut seul ne dit pas QUOI est dégradé).
+ * Échec STRUCTUREL : throw `IngestError` → catch de `main` → `failed` +
+ * exit(1) LOUD (ne PAS avaler en "partial" : matviews cassées =
+ * `lister_specialites_ameli`/`lister_types_ps_ameli` down masqué).
  *
- * Best-effort : le swap est déjà commit, on n'annule pas la prod si REFRESH
- * échoue. Cas de fail attendus, alignés sur `refreshRppsMatviews` :
- *   - statement_timeout : improbable côté service_role (timeout 10min via
- *     ingest_refresh_matview), mais on log au cas où.
- *   - lock conflict : query anon massive en cours pendant REFRESH
- *     CONCURRENTLY → on accepte l'échec (matview garde l'ancien snapshot).
- *   - relation does not exist : env dev sans matview (migration pas appliquée).
- *
- * Tout fail est console.error + marque le log entry "partial" pour surfacer
- * côté dashboard. La matview garde alors la nomenclature de l'ingest
- * précédent (dégradation silencieuse acceptable vs blocage prod).
- *
- * Exporté pour testabilité unitaire (miroir de refreshRppsMatviews).
+ * Exporté pour testabilité unitaire (miroir de `rebuildRppsMatviews`).
  */
-export async function refreshAmeliMatviews(
+export async function rebuildAmeliMatviews(
   supabase: SupabaseClient,
   log: IngestLogEntry,
 ): Promise<void> {
-  const matview = "ameli_nomenclature_stats";
   const start = Date.now();
-  const { error } = await supabase.rpc("ingest_refresh_matview", {
-    p_matview: matview,
-  });
+  const { error } = await supabase.rpc("ingest_rebuild_ameli_matviews");
   const elapsedMs = Date.now() - start;
 
-  if (error) {
-    console.error(
-      `[ameli] REFRESH MATERIALIZED VIEW ${matview} failed [code=${error.code ?? "none"}] after ${elapsedMs}ms: ${error.message}`,
-    );
-    log.status = "partial";
-    const previousMsg = log.error_message ? `${log.error_message}; ` : "";
-    log.error_message = `${previousMsg}post-swap matview refresh failed: ${matview} (${error.code ?? "no_code"}: ${error.message})`;
+  if (!error) {
+    console.log(`[ameli] ingest_rebuild_ameli_matviews OK in ${elapsedMs}ms`);
     return;
   }
 
-  console.log(`[ameli] REFRESH MATERIALIZED VIEW ${matview} CONCURRENTLY OK in ${elapsedMs}ms`);
+  const code = (error as { code?: string }).code;
+  const message = (error as { message?: string }).message ?? String(error);
+  const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
+
+  if (code !== undefined && AMELI_TRANSIENT_REBUILD_CODES.has(code)) {
+    console.error(`[ameli] ${detail} — transitoire, ancienne matview préservée (rollback)`);
+    log.status = "partial";
+    const previousMsg = log.error_message ? `${log.error_message}; ` : "";
+    log.error_message = `${previousMsg}post-swap matview rebuild (transient ${code}): ${message}`;
+    return;
+  }
+
+  console.error(`[ameli] ${detail} — STRUCTUREL, échec dur`);
+  throw new IngestError("validate", detail, error);
 }
 
-export const __TESTING__ = { parseAmeliRecord, refreshAmeliMatviews };
+export const __TESTING__ = { parseAmeliRecord, rebuildAmeliMatviews };
 
 // Only run main() when this file is executed as a script. Without this guard,
 // vitest pulls in the module to test the pure helpers and immediately tries

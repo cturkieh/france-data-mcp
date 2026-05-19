@@ -355,22 +355,20 @@ describe("matviews refresh par les scripts d'ingest sont whitelistées", () => {
         referenced.add(mm[1]);
     }
 
-    // Ancres explicites : si un refactor renommait/interpolait un nom de
-    // matview en échappant à la regex de découverte, `referenced` se
-    // viderait et le filtre n'assurerait plus rien (faux négatif). On épingle
-    // la matview encore REFRESH par un script ingest (Ameli). Depuis
-    // 2026-05-18 les 3 matviews RPPS ne sont plus REFRESH via
-    // `ingest_refresh_matview` mais RECONSTRUITES post-swap par
-    // `ingest_rebuild_rpps_matviews` (fix matview/swap : une matview FROM rpps
-    // suit l'OID → désync + destruction CASCADE au cron). Leur invariant est
-    // gardé par `scripts/ingest/rpps-matview-rebuild.test.ts`. Ameli reste
-    // ici (toujours refresh-only ; bombe symétrique latente = backlog P1).
-    for (const anchor of ["ameli_nomenclature_stats"]) {
-      expect(referenced.has(anchor), `matview ${anchor} non détectée dans les scripts ingest`).toBe(
-        true,
-      );
-    }
-
+    // PLUS AUCUNE ancre refresh-only : les 2 dettes « bombe OID » sont closes.
+    // RPPS (2026-05-18, ingest_rebuild_rpps_matviews) PUIS Ameli (2026-05-19,
+    // ingest_rebuild_ameli_matviews) sont passées de REFRESH-only à
+    // RECONSTRUCTION post-swap (une matview FROM table swappée suit l'OID →
+    // désync 1er cron + destruction CASCADE 2e cron). Ces invariants rebuild
+    // sont gardés par `rpps-matview-rebuild.test.ts` +
+    // `ameli-matview-rebuild.test.ts` (chacun asserte que son script
+    // n'utilise plus `ingest_refresh_matview`). `referenced` est donc
+    // LÉGITIMEMENT vide aujourd'hui : ce test conserve la protection
+    // whitelist GÉNÉRIQUE — si une FUTURE matview refresh-only (non FROM
+    // table swappée, donc sans bombe OID) est wirée dans un script ingest,
+    // elle DEVRA être dans le tuple `not in (...)` de `ingest_refresh_matview`
+    // (sinon 22023 à chaque ingest). `notWhitelisted` reste l'assertion
+    // load-bearing ; vide ⊆ whitelist = vert tant qu'aucun refresh-only.
     const notWhitelisted = [...referenced].filter((mv) => !whitelist.has(mv));
     expect(
       notWhitelisted,

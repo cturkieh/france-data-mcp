@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { buildCommuneIndex } from "../../src/territoire/commune-index.js";
 import type { Commune } from "../../src/territoire/communes.js";
 import { __TESTING__ } from "./ameli.js";
-import type { IngestLogEntry } from "./shared.js";
+import { IngestError, type IngestLogEntry } from "./shared.js";
 
-const { parseAmeliRecord, refreshAmeliMatviews } = __TESTING__;
+const { parseAmeliRecord, rebuildAmeliMatviews } = __TESTING__;
 
 const fixtures: Commune[] = [
   {
@@ -173,7 +173,7 @@ describe("parseAmeliRecord", () => {
   });
 });
 
-// --- refreshAmeliMatviews (V0.10.1) ------------------------------------------
+// --- rebuildAmeliMatviews (robustesse matview/swap 2026-05-19) ---------------
 
 function makeLog(): IngestLogEntry {
   return {
@@ -184,60 +184,95 @@ function makeLog(): IngestLogEntry {
 }
 
 function makeSupabaseStub(rpcImpl: (name: string, args: unknown) => { error: unknown }) {
-  return { rpc: vi.fn(rpcImpl) } as unknown as Parameters<typeof refreshAmeliMatviews>[0];
+  return { rpc: vi.fn(rpcImpl) } as unknown as Parameters<typeof rebuildAmeliMatviews>[0];
 }
 
-describe("refreshAmeliMatviews", () => {
-  it("appelle ingest_refresh_matview pour ameli_nomenclature_stats", async () => {
-    const calls: string[] = [];
-    const supabase = makeSupabaseStub((name, args) => {
-      expect(name).toBe("ingest_refresh_matview");
-      calls.push((args as { p_matview: string }).p_matview);
+// Contrat d'erreur de `rebuildAmeliMatviews` (source de vérité = son JSDoc
+// dans ameli.ts) : transitoire → "partial" sans throw (rollback préserve
+// l'ancienne matview) ; structurel → throw IngestError → failed+exit(1).
+// Durcissement vs l'ancien refresh-only qui avalait 42P01 (bombe OID P1).
+describe("rebuildAmeliMatviews", () => {
+  it("appelle ingest_rebuild_ameli_matviews UNE fois (reconstruction atomique, pas un REFRESH)", async () => {
+    const names: string[] = [];
+    const supabase = makeSupabaseStub((name) => {
+      names.push(name);
       return { error: null };
     });
     const log = makeLog();
 
-    await refreshAmeliMatviews(supabase, log);
+    await rebuildAmeliMatviews(supabase, log);
 
-    expect(calls).toEqual(["ameli_nomenclature_stats"]);
+    expect(names).toEqual(["ingest_rebuild_ameli_matviews"]);
     expect(log.status).toBe("success");
     expect(log.error_message).toBeUndefined();
   });
 
-  it("marque status=partial et inclut le code sur échec REFRESH", async () => {
+  it("lock transitoire (55P03) → partial + nomme la reconstruction, SANS throw", async () => {
     const supabase = makeSupabaseStub(() => ({
-      error: { code: "57014", message: "canceling statement due to timeout" },
+      error: { code: "55P03", message: "lock not available" },
     }));
     const log = makeLog();
 
-    await refreshAmeliMatviews(supabase, log);
+    await expect(rebuildAmeliMatviews(supabase, log)).resolves.toBeUndefined();
 
     expect(log.status).toBe("partial");
-    expect(log.error_message).toContain("ameli_nomenclature_stats");
+    expect(log.error_message).toContain("rebuild");
+    expect(log.error_message).toContain("55P03");
+  });
+
+  it("timeout (57014) → partial sans throw (rollback = aucune matview détruite)", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    }));
+    const log = makeLog();
+
+    await expect(rebuildAmeliMatviews(supabase, log)).resolves.toBeUndefined();
+
+    expect(log.status).toBe("partial");
     expect(log.error_message).toContain("57014");
   });
 
-  it("préserve un error_message préexistant et concatène", async () => {
+  it("DURCISSEMENT : erreur structurelle (42P01) → throw IngestError (LOUD), pas partial silencieux", async () => {
+    // L'ancien refreshAmeliMatviews posait status=partial et avalait 42P01
+    // (bombe OID P1 : matview détruite = lister_specialites_ameli /
+    // lister_types_ps_ameli down, masqué en "partial" non bloquant). Le
+    // nouveau contrat FAIL LOUD : throw → catch de main → failed + exit(1).
     const supabase = makeSupabaseStub(() => ({
-      error: { code: "42P01", message: "relation does not exist" },
+      error: { code: "42P01", message: 'relation "annuaire_ameli" does not exist' },
+    }));
+    const log = makeLog();
+
+    await expect(rebuildAmeliMatviews(supabase, log)).rejects.toBeInstanceOf(IngestError);
+    expect(log.status).not.toBe("partial");
+  });
+
+  it("erreur SQL inattendue (code absent) → traitée comme structurelle → throw IngestError", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { message: "unexpected failure without code" },
+    }));
+    const log = makeLog();
+
+    await expect(rebuildAmeliMatviews(supabase, log)).rejects.toBeInstanceOf(IngestError);
+  });
+
+  it("préserve un error_message préexistant et concatène (cas transitoire)", async () => {
+    const supabase = makeSupabaseStub(() => ({
+      error: { code: "53300", message: "too many connections" },
     }));
     const log = makeLog();
     log.error_message = "earlier non-fatal warning";
 
-    await refreshAmeliMatviews(supabase, log);
+    await rebuildAmeliMatviews(supabase, log);
 
     expect(log.status).toBe("partial");
     expect(log.error_message?.startsWith("earlier non-fatal warning;")).toBe(true);
   });
 
   it("ne mute PAS le status sur succès (best-effort : laisse main() décider)", async () => {
-    // Seed un status NON-success : si refreshAmeliMatviews le forçait à
-    // "success" sur le happy path, ce serait un bug (c'est le rôle de
-    // main()). Le contrat est : ne toucher au log QUE sur erreur.
     const supabase = makeSupabaseStub(() => ({ error: null }));
     const log: IngestLogEntry = { ...makeLog(), status: "failed" };
 
-    await refreshAmeliMatviews(supabase, log);
+    await rebuildAmeliMatviews(supabase, log);
 
     expect(log.status).toBe("failed");
     expect(log.error_message).toBeUndefined();
