@@ -15,3 +15,6 @@ docs/backlog.md
 docs/superpowers/
 .env*.local
 .phase2-case4-baseline.json
+
+# Config locale Claude Code (contient le pattern accès prod — NE JAMAIS committer)
+.claude/settings.local.json
