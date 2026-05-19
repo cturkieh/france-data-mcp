@@ -146,6 +146,7 @@ function eligibilityPredicates(rawSql: string): {
   distinctRepresentative: string;
   stagingIndexJump: string;
   stagingIndexComposite: string;
+  banJoin: string;
 } {
   const sql = rawSql.toLowerCase();
 
@@ -156,6 +157,12 @@ function eligibilityPredicates(rawSql: string): {
   // concatene (corps de fonction inclus) donc les capture par nom.
   const stagingJump = indexStatement(sql, "rpps_staging_ban_eligible_normkey_idx");
   const stagingComposite = indexStatement(sql, "rpps_staging_ban_eligible_normkey_id_idx");
+  // REFONTE ban_join (2026-05-19) : ingest_apply_rpps_ban_join_batch est la
+  // RPC d'application cron (UPDATE keyset cache->staging). Son CTE `batch`
+  // porte le MEME predicat d'eligibilite -- s'il derive du count, le cron
+  // POSE un set != de celui compte (banApplied incoherent, sentinelle 0-posed
+  // potentiellement faussee). 6e site VIVANT du perimetre de parite.
+  const banJoinBody = latestFunctionBody(sql, "ingest_apply_rpps_ban_join_batch");
 
   return {
     count: countBody
@@ -173,6 +180,9 @@ function eligibilityPredicates(rawSql: string): {
     stagingIndexComposite: stagingComposite
       ? normalizePredicate(extractPredicate(stagingComposite, "where"))
       : "<statement rpps_staging_ban_eligible_normkey_id_idx introuvable>",
+    banJoin: banJoinBody
+      ? normalizePredicate(extractPredicate(banJoinBody, "paren", 1))
+      : "<corps ingest_apply_rpps_ban_join_batch introuvable>",
   };
 }
 
@@ -191,15 +201,17 @@ describe("rpps_ban_eligible : parite du PREDICAT count <-> skip-scan <-> index s
     preds.distinctRepresentative,
     preds.stagingIndexJump,
     preds.stagingIndexComposite,
+    preds.banJoin,
   ];
 
-  it("1. chacun des 5 sites expose un predicat NON vide ET contenant geom_source (regions executables isolees)", () => {
+  it("1. chacun des 6 sites expose un predicat NON vide ET contenant geom_source (regions executables isolees)", () => {
     const sites: Array<[string, string]> = [
       ["count", preds.count],
       ["query de SAUT", preds.distinctJump],
       ["REPRESENTANT", preds.distinctRepresentative],
       ["index staging (saut)", preds.stagingIndexJump],
       ["index staging (composite)", preds.stagingIndexComposite],
+      ["ban_join apply", preds.banJoin],
     ];
     // TROIS echecs distincts qui DOIVENT tous rougir : (a) marqueur d'absence
     // `<... introuvable>` (corps/statement non trouve) ; (b) extraction VIDE
@@ -243,10 +255,17 @@ describe("rpps_ban_eligible : parite du PREDICAT count <-> skip-scan <-> index s
     ).toBe(preds.stagingIndexComposite);
   });
 
-  it("5. les 5 sites normalisent vers la MEME chaine canonique attendue", () => {
+  it("6. count == ban_join apply (le cron POSE exactement le set qu'il a compte)", () => {
+    expect(
+      preds.banJoin,
+      `predicat ban_join apply != count -- ingest_apply_rpps_ban_join_batch poserait un set DIFFERENT de celui compte par rpps_count_ban_eligible_rows : banApplied incoherent, sentinelle "0 posed" potentiellement faussee -- ${FAIL_WHY}`,
+    ).toBe(preds.count);
+  });
+
+  it("7. les 6 sites normalisent vers la MEME chaine canonique attendue", () => {
     expect(
       new Set(all).size,
-      `les 5 predicats DOIVENT etre identiques -- ${FAIL_WHY} -- vu : ${JSON.stringify(all)}`,
+      `les 6 predicats DOIVENT etre identiques -- ${FAIL_WHY} -- vu : ${JSON.stringify(all)}`,
     ).toBe(1);
     // Locke aussi la FORME : si tous derivaient ENSEMBLE, l'egalite mutuelle
     // resterait verte mais la forme attendue changerait -> ce garde mord aussi.
@@ -312,6 +331,27 @@ BEGIN
   ) INTO c;
   RETURN c;
 END;
+$$;
+CREATE OR REPLACE FUNCTION ingest_apply_rpps_ban_join_batch(p_after BIGINT, p_limit INT)
+RETURNS TABLE(last_id BIGINT, applied INT) LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  WITH batch AS (
+    SELECT id, rpps_address_key_for_index(adresse, code_postal, code_insee) AS akey
+    FROM rpps_staging
+    WHERE id > p_after
+      AND (geom_source = 'commune_centroid'
+           OR (geom IS NULL AND adresse IS NOT NULL))
+    ORDER BY id LIMIT p_limit
+  ),
+  upd AS (
+    UPDATE rpps_staging r SET geom = ST_SetSRID(ST_MakePoint(g.lon, g.lat), 4326),
+      geom_source = 'ban_address'
+    FROM batch b JOIN geocoded_addresses g ON g.address_key = b.akey AND g.accepted = true
+    WHERE r.id = b.id RETURNING 1
+  )
+  SELECT max(b.id)::BIGINT, (SELECT count(*)::INT FROM upd) FROM batch b;
+END;
 $$;`;
 
   // Echantillon NEGATIF : SEUL le count est narrow (gagne `AND adresse <> ''`)
@@ -335,9 +375,10 @@ $$;`;
     WHERE geom_source = 'commune_centroid';`,
   );
 
-  it("echantillon POSITIF (5 sites identiques) -> 1 seul predicat canonique", () => {
+  it("echantillon POSITIF (6 sites identiques) -> 1 seul predicat canonique", () => {
     const p = eligibilityPredicates(GOOD);
     expect(p.count).toBe(EXPECTED_CANONICAL);
+    expect(p.banJoin).toBe(EXPECTED_CANONICAL);
     expect(
       new Set([
         p.count,
@@ -345,6 +386,7 @@ $$;`;
         p.distinctRepresentative,
         p.stagingIndexJump,
         p.stagingIndexComposite,
+        p.banJoin,
       ]).size,
     ).toBe(1);
   });
@@ -353,11 +395,13 @@ $$;`;
     const p = eligibilityPredicates(BAD);
     expect(p.count).not.toBe(p.distinctJump);
     expect(p.count).not.toBe(p.stagingIndexJump);
-    // ... mais enumeration + index staging restent coherents (seul le count a
-    // ete altere -> pas de faux positif ailleurs).
+    expect(p.count).not.toBe(p.banJoin);
+    // ... mais enumeration + index staging + ban_join restent coherents (seul
+    // le count a ete altere -> pas de faux positif ailleurs).
     expect(p.distinctJump).toBe(p.distinctRepresentative);
     expect(p.distinctJump).toBe(p.stagingIndexJump);
     expect(p.stagingIndexJump).toBe(p.stagingIndexComposite);
+    expect(p.stagingIndexComposite).toBe(p.banJoin);
     expect(p.distinctJump).toBe(EXPECTED_CANONICAL);
   });
 
@@ -368,9 +412,10 @@ $$;`;
     expect(p.stagingIndexComposite).not.toBe(p.stagingIndexJump);
     expect(p.stagingIndexComposite).not.toBe(p.count);
     expect(p.stagingIndexComposite).not.toBe(p.distinctRepresentative);
-    // ... les autres sites restent coherents.
+    // ... les autres sites restent coherents (count/distinct/ban_join).
     expect(p.count).toBe(p.distinctJump);
     expect(p.distinctJump).toBe(p.stagingIndexJump);
+    expect(p.count).toBe(p.banJoin);
   });
 
   it("le detecteur NE confond PAS la prose WHY/COMMENT (predicat cite) avec du code", () => {
@@ -382,6 +427,7 @@ COMMENT ON FUNCTION rpps_count_ban_eligible_rows(TEXT) IS 'predicat: geom_source
 COMMENT ON FUNCTION ingest_build_rpps_staging_ban_indexes() IS 'WHERE geom_source = ''finess_join'' (prose trompeuse, hors statement)';`;
     const p = eligibilityPredicates(withProse);
     expect(p.count).toBe(EXPECTED_CANONICAL);
+    expect(p.banJoin).toBe(EXPECTED_CANONICAL);
     expect(
       new Set([
         p.count,
@@ -389,6 +435,7 @@ COMMENT ON FUNCTION ingest_build_rpps_staging_ban_indexes() IS 'WHERE geom_sourc
         p.distinctRepresentative,
         p.stagingIndexJump,
         p.stagingIndexComposite,
+        p.banJoin,
       ]).size,
     ).toBe(1);
   });

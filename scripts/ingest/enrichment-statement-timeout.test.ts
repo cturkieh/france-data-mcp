@@ -148,3 +148,36 @@ describe("fix C : enrichment FINESS — statement_timeout fonction + ANALYZE sta
     ).toBeLessThan(iEnrich);
   });
 });
+
+// Refonte ban_join (2026-05-19, cf. docs/plans/2026-05-19-ban-join-design.md) :
+// `ingest_apply_rpps_ban_join_batch` est la RPC d'application cache→staging du
+// cron (appelée via supabase-js clé SERVICE_ROLE → PostgREST → rôle
+// `service_role` rolconfig=NULL → hérite `authenticator` 8s). MÊME classe de
+// bug que l'enrichment FINESS : sans `SET statement_timeout` fonction, un lot
+// sur ~1,29M lignes éligibles dépasse 8s → 57014 déterministe en validate
+// (cron cassé). Même invariant que C1, étendu à ban_join.
+const BANJOIN = "ingest_apply_rpps_ban_join_batch";
+
+describe("ban_join — statement_timeout fonction ≤ 55s (parité invariant fix C)", () => {
+  it("ingest_apply_rpps_ban_join_batch a un SET statement_timeout fonction", () => {
+    const def = latestFunctionDef(BANJOIN);
+    expect(def.length, `def ${BANJOIN} introuvable dans les migrations`).toBeGreaterThan(0);
+    expect(
+      def,
+      `${BANJOIN} n'a pas de SET statement_timeout fonction → hérite du budget service_role→authenticator 8s → 57014 déterministe en validate (cron RPPS cassé)`,
+    ).toMatch(/set\s+statement_timeout/i);
+  });
+
+  it("la valeur de statement_timeout est ≤ 55s (sous le cap passerelle PostgREST ~60s)", () => {
+    const secs = timeoutSeconds(latestFunctionDef(BANJOIN));
+    expect(
+      secs,
+      `SET statement_timeout absent/illisible dans ${BANJOIN} (attendu '<n>s' | '<n>min' | …)`,
+    ).not.toBeNull();
+    expect(
+      secs as number,
+      `statement_timeout=${secs}s : doit être >0 et ≤55s (>60s = coupé par la passerelle PostgREST en timeout opaque avant le 57014 propre)`,
+    ).toBeGreaterThan(0);
+    expect(secs as number).toBeLessThanOrEqual(55);
+  });
+});
