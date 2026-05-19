@@ -181,3 +181,35 @@ describe("ban_join — statement_timeout fonction ≤ 55s (parité invariant fix
     expect(secs as number).toBeLessThanOrEqual(55);
   });
 });
+
+// Phase 1 mesure (2026-05-20) : rpps_measure_ban_to_geocode est appelée par
+// le cron via supabase-js → PostgREST → service_role (rolconfig=NULL, hérite
+// authenticator 8s). Même profil que ban_join → MÊME garde-fou ≤55s aligné
+// sur le pattern projet. Best-effort caller (Phase 1 = observabilité, pas
+// gating), mais la garde-anti-drift reste pour éviter qu'un futur refactor
+// retire le SET sans qu'une mesure dégradée passe inaperçue.
+const MEASURE = "rpps_measure_ban_to_geocode";
+
+describe("rpps_measure_ban_to_geocode — statement_timeout fonction ≤ 55s (parité invariant fix C)", () => {
+  it("rpps_measure_ban_to_geocode a un SET statement_timeout fonction", () => {
+    const def = latestFunctionDef(MEASURE);
+    expect(def.length, `def ${MEASURE} introuvable dans les migrations`).toBeGreaterThan(0);
+    expect(
+      def,
+      `${MEASURE} n'a pas de SET statement_timeout fonction → hérite du budget service_role→authenticator 8s → mesure systématiquement dégradée silencieusement (Phase 2 dimensionnée sur des NULL)`,
+    ).toMatch(/set\s+statement_timeout/i);
+  });
+
+  it("la valeur de statement_timeout est ≤ 55s (sous le cap passerelle PostgREST ~60s)", () => {
+    const secs = timeoutSeconds(latestFunctionDef(MEASURE));
+    expect(
+      secs,
+      `SET statement_timeout absent/illisible dans ${MEASURE} (attendu '<n>s' | '<n>min' | …)`,
+    ).not.toBeNull();
+    expect(
+      secs as number,
+      `statement_timeout=${secs}s : doit être >0 et ≤55s (>60s = coupé par la passerelle PostgREST en timeout opaque avant le 57014 propre)`,
+    ).toBeGreaterThan(0);
+    expect(secs as number).toBeLessThanOrEqual(55);
+  });
+});

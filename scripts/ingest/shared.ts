@@ -182,6 +182,22 @@ export interface IngestLogEntry {
    * de rollback.
    */
   canary_failures?: string[];
+  /**
+   * Phase 1 mesure (RPPS uniquement) — nb d'adresses DISTINCTES éligibles
+   * BAN dans `rpps_staging` au moment du cron (post-FINESS, pre-ban_join).
+   * Mesure dimensionne la future Phase 2 (re-géocodage récurrent). NULL si
+   * la mesure n'a pas pu s'exécuter (best-effort : un échec ne casse pas
+   * le cron — distinct d'un "0 mesuré"). Mesuré par
+   * `rpps_measure_ban_to_geocode` (migration 20260520T000000).
+   */
+  ban_eligible_distinct?: number | null;
+  /**
+   * Phase 1 mesure (RPPS uniquement) — sous-ensemble des éligibles
+   * distincts PAS encore résolu/capé dans `geocoded_addresses` (= taille
+   * de la file BAN qu'un re-géocodage automatique aurait à traiter ce
+   * cycle). NULL : idem ci-dessus.
+   */
+  ban_to_geocode_distinct?: number | null;
 }
 
 /**

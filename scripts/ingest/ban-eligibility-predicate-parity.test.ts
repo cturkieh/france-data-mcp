@@ -135,9 +135,10 @@ function extractPredicate(
 
 /**
  * Detecteur reutilisable (prouve positif ET negatif plus bas) : a partir du
- * TEXTE BRUT (toutes migrations), renvoie les predicats NORMALISES des 4+1
+ * TEXTE BRUT (toutes migrations), renvoie les predicats NORMALISES des 7
  * sites VIVANTS (count, distinct-saut, distinct-representant, index staging
- * x2 -- poses par ingest_build_rpps_staging_ban_indexes), ou des marqueurs
+ * saut + composite poses par ingest_build_rpps_staging_ban_indexes, ban_join
+ * apply, mesure Phase 1 rpps_measure_ban_to_geocode), ou des marqueurs
  * d'absence. Tous identiques => pas de derive.
  */
 function eligibilityPredicates(rawSql: string): {
@@ -147,6 +148,7 @@ function eligibilityPredicates(rawSql: string): {
   stagingIndexJump: string;
   stagingIndexComposite: string;
   banJoin: string;
+  measureToGeocode: string;
 } {
   const sql = rawSql.toLowerCase();
 
@@ -163,6 +165,12 @@ function eligibilityPredicates(rawSql: string): {
   // POSE un set != de celui compte (banApplied incoherent, sentinelle 0-posed
   // potentiellement faussee). 6e site VIVANT du perimetre de parite.
   const banJoinBody = latestFunctionBody(sql, "ingest_apply_rpps_ban_join_batch");
+  // PHASE 1 mesure (2026-05-20) : rpps_measure_ban_to_geocode mesure le delta
+  // BAN mensuel (eligible_distinct + to_geocode_distinct loggés dans ingest_log).
+  // Si son predicat derive du count/ban_join, la mesure se desynchronise du
+  // SET reellement traite -> on dimensionne la Phase 2 (automatisation) sur un
+  // chiffre faux. 7e site VIVANT du perimetre de parite.
+  const measureBody = latestFunctionBody(sql, "rpps_measure_ban_to_geocode");
 
   return {
     count: countBody
@@ -183,6 +191,9 @@ function eligibilityPredicates(rawSql: string): {
     banJoin: banJoinBody
       ? normalizePredicate(extractPredicate(banJoinBody, "paren", 1))
       : "<corps ingest_apply_rpps_ban_join_batch introuvable>",
+    measureToGeocode: measureBody
+      ? normalizePredicate(extractPredicate(measureBody, "paren", 1))
+      : "<corps rpps_measure_ban_to_geocode introuvable>",
   };
 }
 
@@ -202,9 +213,10 @@ describe("rpps_ban_eligible : parite du PREDICAT count <-> skip-scan <-> index s
     preds.stagingIndexJump,
     preds.stagingIndexComposite,
     preds.banJoin,
+    preds.measureToGeocode,
   ];
 
-  it("1. chacun des 6 sites expose un predicat NON vide ET contenant geom_source (regions executables isolees)", () => {
+  it("1. chacun des 7 sites expose un predicat NON vide ET contenant geom_source (regions executables isolees)", () => {
     const sites: Array<[string, string]> = [
       ["count", preds.count],
       ["query de SAUT", preds.distinctJump],
@@ -212,6 +224,7 @@ describe("rpps_ban_eligible : parite du PREDICAT count <-> skip-scan <-> index s
       ["index staging (saut)", preds.stagingIndexJump],
       ["index staging (composite)", preds.stagingIndexComposite],
       ["ban_join apply", preds.banJoin],
+      ["measure to_geocode (Phase 1)", preds.measureToGeocode],
     ];
     // TROIS echecs distincts qui DOIVENT tous rougir : (a) marqueur d'absence
     // `<... introuvable>` (corps/statement non trouve) ; (b) extraction VIDE
@@ -262,10 +275,17 @@ describe("rpps_ban_eligible : parite du PREDICAT count <-> skip-scan <-> index s
     ).toBe(preds.count);
   });
 
-  it("7. les 6 sites normalisent vers la MEME chaine canonique attendue", () => {
+  it("6-bis. count == measure to_geocode (Phase 1 : la mesure compte le MEME set que ban_join traite)", () => {
+    expect(
+      preds.measureToGeocode,
+      `predicat rpps_measure_ban_to_geocode != count -- la mesure dimensionne la Phase 2 sur un set DIFFERENT de celui que ban_join pose ce cycle : chiffre faux -> archi Phase 2 mal calibree -- ${FAIL_WHY}`,
+    ).toBe(preds.count);
+  });
+
+  it("7. les 7 sites normalisent vers la MEME chaine canonique attendue", () => {
     expect(
       new Set(all).size,
-      `les 6 predicats DOIVENT etre identiques -- ${FAIL_WHY} -- vu : ${JSON.stringify(all)}`,
+      `les 7 predicats DOIVENT etre identiques -- ${FAIL_WHY} -- vu : ${JSON.stringify(all)}`,
     ).toBe(1);
     // Locke aussi la FORME : si tous derivaient ENSEMBLE, l'egalite mutuelle
     // resterait verte mais la forme attendue changerait -> ce garde mord aussi.
@@ -352,6 +372,23 @@ BEGIN
   )
   SELECT max(b.id)::BIGINT, (SELECT count(*)::INT FROM upd) FROM batch b;
 END;
+$$;
+CREATE OR REPLACE FUNCTION rpps_measure_ban_to_geocode(p_source_table TEXT)
+RETURNS TABLE(eligible_distinct BIGINT, to_geocode_distinct BIGINT) LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY EXECUTE format($q$
+    WITH staging_eligible AS (
+      SELECT DISTINCT rpps_address_key_for_index(t.adresse, t.code_postal, t.code_insee) AS k
+      FROM %I t
+      WHERE (t.geom_source = 'commune_centroid' OR (t.geom IS NULL AND t.adresse IS NOT NULL))
+    )
+    SELECT (SELECT count(*) FROM staging_eligible)::BIGINT,
+           (SELECT count(*) FROM staging_eligible se WHERE NOT EXISTS (
+             SELECT 1 FROM geocoded_addresses g WHERE g.address_key = se.k
+               AND (g.accepted = true OR g.ban_attempt_count >= 3)
+           ))::BIGINT
+  $q$, v_source);
+END;
 $$;`;
 
   // Echantillon NEGATIF : SEUL le count est narrow (gagne `AND adresse <> ''`)
@@ -375,10 +412,11 @@ $$;`;
     WHERE geom_source = 'commune_centroid';`,
   );
 
-  it("echantillon POSITIF (6 sites identiques) -> 1 seul predicat canonique", () => {
+  it("echantillon POSITIF (7 sites identiques) -> 1 seul predicat canonique", () => {
     const p = eligibilityPredicates(GOOD);
     expect(p.count).toBe(EXPECTED_CANONICAL);
     expect(p.banJoin).toBe(EXPECTED_CANONICAL);
+    expect(p.measureToGeocode).toBe(EXPECTED_CANONICAL);
     expect(
       new Set([
         p.count,
@@ -387,6 +425,7 @@ $$;`;
         p.stagingIndexJump,
         p.stagingIndexComposite,
         p.banJoin,
+        p.measureToGeocode,
       ]).size,
     ).toBe(1);
   });
@@ -396,12 +435,14 @@ $$;`;
     expect(p.count).not.toBe(p.distinctJump);
     expect(p.count).not.toBe(p.stagingIndexJump);
     expect(p.count).not.toBe(p.banJoin);
-    // ... mais enumeration + index staging + ban_join restent coherents (seul
-    // le count a ete altere -> pas de faux positif ailleurs).
+    expect(p.count).not.toBe(p.measureToGeocode);
+    // ... mais enumeration + index staging + ban_join + measure restent coherents
+    // (seul le count a ete altere -> pas de faux positif ailleurs).
     expect(p.distinctJump).toBe(p.distinctRepresentative);
     expect(p.distinctJump).toBe(p.stagingIndexJump);
     expect(p.stagingIndexJump).toBe(p.stagingIndexComposite);
     expect(p.stagingIndexComposite).toBe(p.banJoin);
+    expect(p.banJoin).toBe(p.measureToGeocode);
     expect(p.distinctJump).toBe(EXPECTED_CANONICAL);
   });
 
