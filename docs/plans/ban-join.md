@@ -58,8 +58,30 @@ présents sur `rpps` (aujourd'hui absents — swap jamais réussi avec). À rés
 dans une future feature « automatisation backfill » (post-swap bloquant =
 dead-end connu). Le cache `geocoded_addresses` (266 k) ne se touche pas.
 
+## Acceptation par PRÉCISION (fix 2026-05-19, prouvé prod)
+
+Cause-racine vérifiée (code + 500 rejetées re-géocodées + doc BAN) : le gate
+binaire `result_score ≥ 0,7 ET result_type ∈ {housenumber,street}` jetait
+toute géométrie sous 0,7 → ~40k médecins au centroïde commune (~3 km) alors
+que la BAN renvoyait un point rue/bâtiment **correct** (81 % des rejetées ont
+des coords ; ~90 % des `housenumber` 0,5–0,7 = bon bâtiment ; score bas =
+abréviations RPPS `R`/`BD`/`AV` + accents, PAS mauvaise localisation).
+
+**`result_type` = précision géographique ; `result_score` = confiance
+fuzzy-match.** Règle produit : rue/lieu-dit **>** centroïde commune. Fix :
+`BAN_ACCEPT_SCORE` 0,7 → **0,5** + acceptation `type ∈ {housenumber, street,
+locality}` (`municipality` exclu = aucun gain vs centroïde). Recovery
+**cache-only** (jamais `rpps` hors cron : `ingest_apply_rpps_ban_join_batch`
+cible `rpps_staging`) : 66 % d'acceptation prouvée prod sur les rejetées
+(vs 0 % avant), le `ban_join` du cron mensuel posera. L'ancien « JAMAIS 0.5 »
+(audit-P2) valait pour l'accept binaire-précis ; ici sémantique « upgrade vs
+centroïde ». Dette : re-géocodage récurrent encore manuel (cron ne géocode
+plus). Cf. mémoire `ban-acceptance-precision-tier`.
+
 ## Garde-fous
 
 `ban-eligibility-predicate-parity` (6 sites), `ban-eligibility-index-expr-parity`
 (ban_join via WRAPPER), `enrichment-statement-timeout` (ban_join ≤55 s),
-test d'intégration DB locale (HIT/MISS/non-éligible/idempotence).
+test d'intégration DB locale (HIT/MISS/non-éligible/idempotence),
+`ban-bulk-client.test.ts` (acceptation par précision : housenumber|street|
+locality ≥ seuil, `municipality` rejeté).
