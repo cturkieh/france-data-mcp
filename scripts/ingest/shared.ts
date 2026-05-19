@@ -576,6 +576,53 @@ export async function runIfMain(moduleUrl: string, fn: () => Promise<void>): Pro
  *   contrainte fonctionnelle ; le RPC peut traiter moins (et la boucle
  *   terminera plus tôt sur le `rowCount === 0`).
  */
+/**
+ * UN appel RPC borné anti-hang, partagé par `runBatchedRpc` (sentinelle) et
+ * `runKeysetRpc` (curseur). Factorise le bloc try/catch timeout + check
+ * `error` byte-identique des deux pilotes (DRY — la divergence est dans la
+ * terminaison/le contrat de retour, PAS dans l'appel unitaire). Retourne le
+ * `data` brut (forme validée par l'appelant selon son contrat). `TimeoutError`
+ * (socket figé) → `IngestError` fail-loud (cron non surveillé) ; toute autre
+ * exception est re-levée telle quelle ; `{ error }` PostgREST → `IngestError`.
+ * `perCallTimeoutMs` undefined = aucun timeout (rétrocompat FINESS/Ameli de
+ * `runBatchedRpc`).
+ */
+async function callRpcOne(
+  supabase: SupabaseClient,
+  rpcName: string,
+  params: Record<string, unknown>,
+  iter: number,
+  perCallTimeoutMs?: number,
+): Promise<unknown> {
+  const call = supabase.rpc(rpcName, params);
+  let result: Awaited<typeof call>;
+  try {
+    result =
+      perCallTimeoutMs === undefined
+        ? await call
+        : await withTimeout(call, perCallTimeoutMs, `${rpcName} (batch ${iter})`);
+  } catch (e) {
+    if (e instanceof Error && e.name === "TimeoutError") {
+      console.error(
+        `[france-data-mcp][ingest] ${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — anti-silent-hang bound tripped, failing loud`,
+      );
+      throw new IngestError(
+        "validate",
+        `${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — possible hung apply RPC (anti-silent-hang bound)`,
+      );
+    }
+    console.error(
+      `[france-data-mcp][ingest] ${rpcName} (batch ${iter}) threw a non-timeout error, re-raising`,
+    );
+    throw e;
+  }
+  const { data, error } = result;
+  if (error) {
+    throw new IngestError("validate", `${rpcName} failed: ${error.message}`);
+  }
+  return data;
+}
+
 export async function runBatchedRpc(
   supabase: SupabaseClient,
   rpcName: string,
@@ -602,32 +649,7 @@ export async function runBatchedRpc(
         `${rpcName} did not converge after ${maxIterations} batches — likely RPC contract regression (rows updated but WHERE predicate not narrowing)`,
       );
     }
-    const call = supabase.rpc(rpcName, params);
-    let result: Awaited<typeof call>;
-    try {
-      result =
-        perCallTimeoutMs === undefined
-          ? await call
-          : await withTimeout(call, perCallTimeoutMs, `${rpcName} (batch ${iter})`);
-    } catch (e) {
-      if (e instanceof Error && e.name === "TimeoutError") {
-        console.error(
-          `[france-data-mcp][ingest] ${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — anti-silent-hang bound tripped, failing loud`,
-        );
-        throw new IngestError(
-          "validate",
-          `${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — possible hung apply RPC (anti-silent-hang bound)`,
-        );
-      }
-      console.error(
-        `[france-data-mcp][ingest] ${rpcName} (batch ${iter}) threw a non-timeout error, re-raising`,
-      );
-      throw e;
-    }
-    const { data, error } = result;
-    if (error) {
-      throw new IngestError("validate", `${rpcName} failed: ${error.message}`);
-    }
+    const data = await callRpcOne(supabase, rpcName, params, iter, perCallTimeoutMs);
     if (typeof data !== "number") {
       throw new IngestError(
         "validate",
@@ -665,8 +687,18 @@ export async function runKeysetRpc(
   expectedTotal: number,
   perCallTimeoutMs = 120_000,
 ): Promise<{ totalApplied: number; iterations: number }> {
-  const batchSize = Number(params.p_limit) || 1;
-  const maxIterations = Math.ceil(Math.max(expectedTotal, 1) / batchSize) + 5;
+  // FAIL-LOUD : `p_limit` absent/invalide rendrait `maxIterations` aveugle
+  // (`Number(undefined) || 1` → batchSize 1 → garde de convergence ≈ inerte
+  // sur 1,29 M lignes). On REJETTE explicitement plutôt que de masquer une
+  // mauvaise invocation (discipline projet anti-silencieux).
+  const pLimit = params.p_limit;
+  if (typeof pLimit !== "number" || !Number.isInteger(pLimit) || pLimit <= 0) {
+    throw new IngestError(
+      "validate",
+      `runKeysetRpc(${rpcName}): params.p_limit doit être un entier positif (reçu ${JSON.stringify(pLimit)}) — sinon la garde maxIterations est aveugle`,
+    );
+  }
+  const maxIterations = Math.ceil(Math.max(expectedTotal, 1) / pLimit) + 5;
   let after = 0;
   let totalApplied = 0;
   let iter = 0;
@@ -677,28 +709,23 @@ export async function runKeysetRpc(
         `${rpcName} did not converge after ${maxIterations} batches — likely RPC contract regression (cursor not advancing to a NULL terminator)`,
       );
     }
-    const call = supabase.rpc(rpcName, { ...params, p_after: after });
-    let result: Awaited<typeof call>;
-    try {
-      result = await withTimeout(call, perCallTimeoutMs, `${rpcName} (batch ${iter})`);
-    } catch (e) {
-      if (e instanceof Error && e.name === "TimeoutError") {
-        console.error(
-          `[france-data-mcp][ingest] ${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — anti-silent-hang bound tripped, failing loud`,
-        );
-        throw new IngestError(
-          "validate",
-          `${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — possible hung apply RPC (anti-silent-hang bound)`,
-        );
-      }
-      console.error(
-        `[france-data-mcp][ingest] ${rpcName} (batch ${iter}) threw a non-timeout error, re-raising`,
+    const data = await callRpcOne(
+      supabase,
+      rpcName,
+      { ...params, p_after: after },
+      iter,
+      perCallTimeoutMs,
+    );
+    // `RETURNS TABLE(...)` via PostgREST = tableau de lignes ; on attend
+    // EXACTEMENT 1 ligne. Un tableau VIDE n'est PAS une page vide (celle-ci
+    // renvoie 1 ligne `{ last_id: null }`) : c'est une régression de contrat
+    // — fail-loud explicite plutôt que sortie success-shaped silencieuse
+    // (`data[0]` serait `undefined` → `row == null` → faux « fin » muet).
+    if (Array.isArray(data) && data.length === 0) {
+      throw new IngestError(
+        "validate",
+        `${rpcName} returned an empty array — expected exactly one { last_id, applied } row (RPC contract regression)`,
       );
-      throw e;
-    }
-    const { data, error } = result;
-    if (error) {
-      throw new IngestError("validate", `${rpcName} failed: ${error.message}`);
     }
     const row = Array.isArray(data) ? data[0] : data;
     if (

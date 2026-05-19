@@ -191,6 +191,8 @@ const COL = {
 export const GEOM_SOURCES = {
   COMMUNE_CENTROID: "commune_centroid",
   FINESS_JOIN: "finess_join",
+  /** Posé par le step 5c `ban_join` (RPC `ingest_apply_rpps_ban_join_batch`). */
+  BAN_ADDRESS: "ban_address",
 } as const;
 export type GeomSource = (typeof GEOM_SOURCES)[keyof typeof GEOM_SOURCES];
 
@@ -462,26 +464,35 @@ async function main(): Promise<void> {
       console.log(
         `[rpps] ban_join: ${banApplied} posed / ${banEligible} eligible in ${banIterations} batches`,
       );
-      // Sentinelle de cohérence (même esprit que la défense FINESS 5b) : 0 posé
-      // alors que le cache contient des adresses acceptées plausibles ⇒
-      // suspicion de dérive de clé (parité RPC↔cache cassée) → throw loud
-      // (jamais un succès muet sur une régression silencieuse de normalisation
-      // d'adresse — la classe de panne S-1 que tout le pipeline BAN combat).
+      // Sentinelle de cohérence NON BLOQUANTE. BAN est best-effort (CLAUDE.md
+      // « l'ingestion mensuelle n'est JAMAIS bloquée par BAN ») : un `throw`
+      // ici re-bloquerait un run par ailleurs sain — exactement la régression
+      // qu'on fuit. « 0 posé » est AMBIGU et indistinguable sans faux positif :
+      // soit LÉGITIME (toutes les lignes éligibles sont de NOUVELLES adresses
+      // pas encore dans le cache — `ban-backfill.mjs` pas relancé), soit
+      // pathologique (dérive de parité clé RPC↔cache, classe S-1). On NE throw
+      // donc PAS ; on SYNTHÉTISE le signal (console.warn + `ingest_log`
+      // "partial", préservé par le bloc de finalisation plus bas) pour qu'un
+      // humain investigue. Le repli `commune_centroid` reste servi.
       if (banApplied === 0) {
         const { count: cacheAccepted, error: cacheErr } = await supabase
           .from("geocoded_addresses")
-          .select("*", { count: "exact", head: true })
+          .select("address_key", { count: "exact", head: true })
           .eq("accepted", true);
         if (cacheErr) {
-          throw new IngestError(
-            "validate",
-            `ban_join posed 0 rows; cache sanity check failed: ${cacheErr.message}`,
+          console.warn(
+            `[france-data-mcp][rpps][ban_join] 0 posed; cache sanity check failed (non-blocking): ${cacheErr.message}`,
           );
-        }
-        if ((cacheAccepted ?? 0) > 0) {
-          throw new IngestError(
-            "validate",
-            `ban_join posed 0 rows over ${banEligible} eligible while geocoded_addresses has ${cacheAccepted} accepted — suspected address-key parity drift (RPC vs cache)`,
+          log.status = "partial";
+          appendLogMessage(log, `ban_join: 0 posed, cache check failed: ${cacheErr.message}`);
+        } else if ((cacheAccepted ?? 0) > 0) {
+          console.warn(
+            `[france-data-mcp][rpps][ban_join] ⚠️ 0 posed over ${banEligible} eligible while geocoded_addresses has ${cacheAccepted} accepted — either all eligible rows are NEW uncached addresses (ban-backfill not re-run: legitimate) OR address-key parity drift RPC↔cache (S-1: investigate). Non-blocking; commune_centroid fallback served.`,
+          );
+          log.status = "partial";
+          appendLogMessage(
+            log,
+            `ban_join: 0 posed / ${banEligible} eligible while cache has ${cacheAccepted} accepted — investigate parity drift vs new-uncached`,
           );
         }
       }
