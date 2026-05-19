@@ -32,6 +32,7 @@ import {
   getNonEmpty,
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
+  isForceReingestEnv,
   preValidateFile,
   runAndRecordCanary,
   runBatchedRpc,
@@ -331,7 +332,19 @@ async function main(): Promise<void> {
     log.csv_size_bytes = downloaded.sizeBytes;
     log.csv_sha256 = downloaded.sha256;
 
-    if (await shortCircuitIfSameChecksum(log, lastSha, downloaded.sha256, "rpps")) return;
+    // FORCE_REINGEST (input `force` du workflow_dispatch) → bypass du
+    // court-circuit. Cron planifié = env absent → pas de forçage. Sémantique
+    // détaillée + tolérance "1"/"true" : JSDoc de isForceReingestEnv.
+    if (
+      await shortCircuitIfSameChecksum(
+        log,
+        lastSha,
+        downloaded.sha256,
+        "rpps",
+        isForceReingestEnv(process.env.FORCE_REINGEST),
+      )
+    )
+      return;
 
     // 2. PRE-VALIDATE
     await preValidateFile(downloaded.filePath, {

@@ -245,6 +245,13 @@ export async function getLastSuccessChecksum(source: IngestSource): Promise<stri
  * Le caller fait `if (await shortCircuitIfSameChecksum(...)) return;` pour
  * sortir tôt et éviter COPY/VALIDATE/SWAP coûteux.
  *
+ * `force=true` (levier opérationnel, ex. `FORCE_REINGEST` en
+ * `workflow_dispatch`) NEUTRALISE le court-circuit : retourne `false`
+ * immédiatement SANS toucher `log` ni écrire d'entrée skip — la ré-ingestion
+ * complète se déroule et se loggue normalement (audit intact). Sert à
+ * réappliquer un traitement aval (ex. cache BAN jamais posé) quand la source
+ * n'a pas changé. Générique (chokepoint partagé) mais opt-in par caller.
+ *
  * Retourne `true` si le short-circuit s'est déclenché, `false` sinon.
  */
 export async function shortCircuitIfSameChecksum(
@@ -252,7 +259,16 @@ export async function shortCircuitIfSameChecksum(
   lastSha: string | null,
   currentSha: string,
   tag: string,
+  force = false,
 ): Promise<boolean> {
+  if (force) {
+    // Helper générique : message agnostique du caller (ne nomme PAS la var
+    // d'env du caller, ce serait une inversion de couche).
+    console.warn(
+      `[${tag}] court-circuit same-checksum neutralisé (force) — ré-ingestion complète forcée`,
+    );
+    return false;
+  }
   if (!lastSha || lastSha !== currentSha) return false;
   log.status = "success";
   log.skip_reason = "same_checksum";
@@ -263,6 +279,25 @@ export async function shortCircuitIfSameChecksum(
     `[${tag}] same checksum as last success (${currentSha.slice(0, 8)}…) — skipping ingestion`,
   );
   return true;
+}
+
+/**
+ * Décide si la var d'env de forçage active le bypass du court-circuit. Pur
+ * (testable sans `vi.stubEnv`). TOLÉRANT aux formes intuitives : `"1"` ou
+ * `"true"` (insensible à la casse, espaces tolérés). Tout le reste — `"0"`,
+ * `"false"`, `""`, absent — = pas de forçage.
+ *
+ * Pourquoi tolérer `"true"` : un opérateur câblant `FORCE_REINGEST=true`
+ * (valeur intuitive) au lieu de `"1"` ne doit PAS voir son run ignoré
+ * silencieusement (faux négatif opérateur : il coche la case, rien ne se
+ * force, le cache BAN reste non posé, status `success` trompeur). Le
+ * `workflow_dispatch` n'émet que `"1"`/`"0"` mais ce helper protège aussi
+ * l'invocation manuelle/locale.
+ */
+export function isForceReingestEnv(value: string | undefined): boolean {
+  if (value == null) return false;
+  const v = value.trim().toLowerCase();
+  return v === "1" || v === "true";
 }
 
 /**

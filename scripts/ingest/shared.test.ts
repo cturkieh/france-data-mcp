@@ -4,12 +4,15 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   IngestError,
+  type IngestLogEntry,
   type PreValidateConfig,
   getNonEmpty,
   insertStagingBatchWithRetry,
+  isForceReingestEnv,
   parseDropStalePreviousOutcome,
   preValidateFile,
   runBatchedRpc,
+  shortCircuitIfSameChecksum,
 } from "./shared.js";
 
 /**
@@ -271,5 +274,52 @@ describe("runBatchedRpc — borne anti-hang (perCallTimeoutMs)", () => {
     await expect(
       runBatchedRpc(supabase, "ingest_apply_rpps_finess_enrichment_batch", {}, 100, 50),
     ).resolves.toEqual({ totalUpdated: 0, iterations: 1 });
+  });
+});
+
+describe("shortCircuitIfSameChecksum — levier force", () => {
+  const baseLog = (): IngestLogEntry =>
+    ({ source: "rpps", started_at: "t0", status: "failed", csv_url: "u" }) as IngestLogEntry;
+
+  it("force=true : retourne false MÊME si checksums identiques, SANS muter log ni écrire (audit intact)", async () => {
+    const log = baseLog();
+    // force=true sort AVANT writeIngestLog → aucun I/O DB, branche pure.
+    const short = await shortCircuitIfSameChecksum(log, "deadbeef", "deadbeef", "rpps", true);
+    expect(short).toBe(false);
+    // log non touché : pas de bascule en skip success.
+    expect(log.status).toBe("failed");
+    expect(log.skip_reason).toBeUndefined();
+    expect(log.finished_at).toBeUndefined();
+  });
+
+  it("force=false + checksum différent : retourne false (pas de short-circuit, branche pure)", async () => {
+    const log = baseLog();
+    const short = await shortCircuitIfSameChecksum(log, "aaaa", "bbbb", "rpps", false);
+    expect(short).toBe(false);
+    expect(log.skip_reason).toBeUndefined();
+  });
+
+  it("force=false + pas de lastSha : retourne false (1er run, branche pure)", async () => {
+    const log = baseLog();
+    const short = await shortCircuitIfSameChecksum(log, null, "bbbb", "rpps");
+    expect(short).toBe(false);
+    expect(log.skip_reason).toBeUndefined();
+  });
+});
+
+describe("isForceReingestEnv — contrat var d'env (anti faux négatif opérateur)", () => {
+  it.each([
+    ["1", true],
+    ["true", true],
+    ["TRUE", true],
+    ["  1  ", true],
+    [" true ", true],
+    ["0", false],
+    ["false", false],
+    ["yes", false],
+    ["", false],
+    [undefined, false],
+  ])("FORCE_REINGEST=%j → force=%s", (value, expected) => {
+    expect(isForceReingestEnv(value as string | undefined)).toBe(expected);
   });
 });
