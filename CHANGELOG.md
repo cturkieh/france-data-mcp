@@ -27,6 +27,21 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Fixed
 
+- **Bombe OID matview Ameli — dette P1 close (symétrique du fix RPPS).**
+  `ameli_nomenclature_stats` (`FROM annuaire_ameli`) + `REFRESH`-only
+  post-swap suivait l'OID (désync 1er cron) puis subissait le `DROP CASCADE`
+  du 2e swap → `lister_specialites_ameli`/`lister_types_ps_ameli` down
+  masqué en `partial`. Ameli étant HEBDO, le risque était réel (non masqué
+  durablement par `shortCircuitIfSameChecksum`). Réplication 1:1 du patron
+  prouvé prod `ingest_rebuild_rpps_matviews` : nouvelle RPC
+  `ingest_rebuild_ameli_matviews` (migration `20260519T200000`,
+  build-new + RENAME atomique, `FROM annuaire_ameli` résolu PAR NOM ;
+  SELECT + UNIQUE INDEX verbatim de la matview canonique `20260515T020100`).
+  `refreshAmeliMatviews`→`rebuildAmeliMatviews` (transitoire→`partial` sans
+  throw ; structurel→throw LOUD, durcit l'ancien `42P01` avalé). DROP sans
+  CASCADE prouvé prod (les 2 RPC `LANGUAGE sql` ≠ dépendance catalogue).
+  Garde-fou `ameli-matview-rebuild.test.ts` + `staging-parity` adapté.
+  `/simplify` + `/review` P1+P2 = RAS (réplication patron prouvé).
 - **Régression PROUVÉE prod `rpps_in_radius` 57014 en commune dense
   (hotfix + durabilité).** La fonction hybride `rpps_in_radius` (CTE
   `precise` filtrée `geom_source IN ('finess_join','ban_address')`) exige
