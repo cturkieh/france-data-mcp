@@ -1,15 +1,17 @@
 # PASSATION — état réel & suite (2026-05-19)
 
-> ## ✅ RÉSOLU (2026-05-19, même jour) — `ban_join` implémenté
-> Le blocage des 4 jours (§3, §5) est **levé**. Solution `ban_join` (jumeau
-> FINESS + curseur keyset) conçue, prouvée prod, implémentée en 6 tâches TDD,
-> garde-fous parité étendus, test d'intégration vert. Voir :
-> `docs/plans/2026-05-19-ban-join-design.md` (spec + preuves prod) et
-> `docs/plans/2026-05-19-ban-join-implementation-plan.md` (plan exécuté).
-> §5 ci-dessous = contexte historique de la décision ; §3 (cause du blocage)
-> = post-mortem. Reste : application migration prod + run armé `force` +
-> vérif post-swap (Task 8 du plan d'implémentation). Backfill = hors scope
-> (décidé PO), automatisation = feature ultérieure (dette tracée CLAUDE.md).
+> ## ✅ RÉSOLU & DÉPLOYÉ-PROUVÉ-PROD (2026-05-19, même jour)
+> Le blocage des 4 jours (§3, §5) est **levé et prouvé en production**.
+> Run prod **#13** (`ce56dcb`, `success`, ~54 min) :
+> `rpps.geom_source='ban_address'` = **1 065 291** (0 avant) ;
+> `finess_join` non régressé (392 056) ; `commune_centroid` 1,27 M → 208 k ;
+> `ingest_log` success message vide ; canary `rpps_in_radius` Paris 1 km
+> = 147 ms (anti-57014 tient). **PR ouverte : #21**
+> (`feat/rpps-ban-rearm` → `main`). Reste : revue + merge de la PR
+> (décision humaine). Voir `docs/plans/2026-05-19-ban-join-design.md`
+> (spec + preuves prod) + `...-implementation-plan.md` (plan exécuté).
+> §5/§3 ci-dessous = post-mortem historique. Backfill = hors scope (PO),
+> automatisation = feature ultérieure (dette tracée CLAUDE.md).
 
 > **Document de reprise autoportant.** Une nouvelle session Claude Code n'a PAS
 > besoin de relire la conversation précédente. Tout l'essentiel est ici.
