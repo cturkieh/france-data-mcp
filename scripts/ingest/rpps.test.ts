@@ -4,7 +4,7 @@ import type { Commune } from "../../src/territoire/communes.js";
 import { IngestError, type IngestLogEntry } from "./shared.js";
 
 const { __TESTING__ } = await import("./rpps.js");
-const { parseRppsRecord, COL, rebuildRppsMatviews } = __TESTING__;
+const { parseRppsRecord, COL, rebuildRppsMatviews, evaluateBanJoinOutcome } = __TESTING__;
 
 const fixtures: Commune[] = [
   {
@@ -416,5 +416,47 @@ describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→6 (séquence l
     expect(i5bEnrich).toBeLessThan(i5cCount);
     expect(i5cCount).toBeLessThan(i5cBanJoin);
     expect(i5cBanJoin).toBeLessThan(i6Swap);
+  });
+});
+
+describe("evaluateBanJoinOutcome — sentinelle cohérence ban_join (pure, /review P1)", () => {
+  it("banApplied > 0 → aucun signal (succès nominal)", () => {
+    expect(
+      evaluateBanJoinOutcome({ banApplied: 1200, banEligible: 1290, cacheAccepted: 266 }),
+    ).toEqual({
+      partial: false,
+    });
+  });
+
+  it("0 posé + sanity-check cache en échec → partial + warn + logMessage", () => {
+    const o = evaluateBanJoinOutcome({
+      banApplied: 0,
+      banEligible: 1290,
+      cacheAccepted: 0,
+      cacheErrMessage: "boom",
+    });
+    expect(o.partial).toBe(true);
+    expect(o.warn).toMatch(/cache sanity check failed.*boom/i);
+    expect(o.logMessage).toMatch(/0 posed, cache check failed: boom/);
+  });
+
+  it("0 posé + cache accepté > 0 → partial + signal dérive parité / new-uncached", () => {
+    const o = evaluateBanJoinOutcome({ banApplied: 0, banEligible: 1290, cacheAccepted: 266049 });
+    expect(o.partial).toBe(true);
+    expect(o.warn).toMatch(/266049 accepted.*parity drift|new uncached/i);
+    expect(o.logMessage).toMatch(/0 posed \/ 1290 eligible while cache has 266049 accepted/);
+  });
+
+  it("0 posé + cache LISIBLE mais 0 accepté → partial + signal S-1 (3e cas, MEDIUM-1 : plus jamais muet)", () => {
+    const o = evaluateBanJoinOutcome({ banApplied: 0, banEligible: 1290, cacheAccepted: 0 });
+    expect(o.partial).toBe(true);
+    expect(o.warn).toMatch(/0 accepted — cache empty\/wiped or never backfilled \(S-1/i);
+    expect(o.logMessage).toMatch(
+      /0 posed \/ 1290 eligible while cache has 0 accepted — cache empty\/wiped or pre-backfill/,
+    );
+    // INVARIANT anti-MEDIUM-1 : ce sous-cas DOIT émettre warn ET logMessage
+    // (c'était le seul chemin sans aucune trace avant le correctif).
+    expect(o.warn).toBeTruthy();
+    expect(o.logMessage).toBeTruthy();
   });
 });
