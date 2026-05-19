@@ -151,6 +151,30 @@ function indexExprDriftViolations(rawSql: string): string[] {
     }
   }
 
+  // REFONTE ban_join (2026-05-19) : ingest_apply_rpps_ban_join_batch calcule
+  // la clé d'adresse de chaque ligne du lot pour la JOINdre au cache
+  // geocoded_addresses.address_key. Elle DOIT passer par le WRAPPER (même
+  // expression byte-identique que l'index/le count/l'énumération) et JAMAIS
+  // le jumeau nu : sinon les clés calculées divergent de celles du cache →
+  // JOIN sans match → 0 posé SILENCIEUX (classe S-1). Vérifié AVANT l'early
+  // return rpps_distinct_eligible_keys ci-dessous (sinon un corps distinct
+  // introuvable masquerait cette violation).
+  const banJoinBody = latestFunctionBody(sql, "ingest_apply_rpps_ban_join_batch");
+  if (!banJoinBody) {
+    violations.push("corps $$...$$ de ingest_apply_rpps_ban_join_batch introuvable");
+  } else {
+    if (banJoinBody.includes(TWIN)) {
+      violations.push(
+        `ingest_apply_rpps_ban_join_batch : le corps appelle le JUMEAU NU ${TWIN} — DOIT passer par ${WRAPPER} (sinon clés != cache → JOIN sans match → 0 posé silencieux)`,
+      );
+    }
+    if (!banJoinBody.includes(WRAPPER)) {
+      violations.push(
+        `ingest_apply_rpps_ban_join_batch : le corps n'utilise PAS ${WRAPPER} (jointure cache ne matcherait rien)`,
+      );
+    }
+  }
+
   const body = latestFunctionBody(sql, "rpps_distinct_eligible_keys");
   if (!body) {
     violations.push("corps $$...$$ de rpps_distinct_eligible_keys introuvable");
@@ -357,6 +381,22 @@ BEGIN
     WHERE geom_source = 'commune_centroid';
 END;
 $$;
+CREATE OR REPLACE FUNCTION ingest_apply_rpps_ban_join_batch(p_after BIGINT, p_limit INT)
+RETURNS TABLE(last_id BIGINT, applied INT) LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  WITH batch AS (
+    SELECT id, rpps_address_key_for_index(adresse, code_postal, code_insee) AS akey
+    FROM rpps_staging WHERE id > p_after ORDER BY id LIMIT p_limit
+  ),
+  upd AS (
+    UPDATE rpps_staging r SET geom_source = 'ban_address'
+    FROM batch b JOIN geocoded_addresses g ON g.address_key = b.akey
+    WHERE r.id = b.id RETURNING 1
+  )
+  SELECT max(b.id)::BIGINT, (SELECT count(*)::INT FROM upd) FROM batch b;
+END;
+$$;
 CREATE OR REPLACE FUNCTION rpps_distinct_eligible_keys(p TEXT, a TEXT, l INT)
 RETURNS TABLE (k TEXT) LANGUAGE plpgsql AS $$
 DECLARE v_prev TEXT := a; v_key TEXT;
@@ -400,6 +440,22 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ingest_build_rpps_staging_ban_indexes() IS 'délègue à rpps_normalize_address_key';
+CREATE OR REPLACE FUNCTION ingest_apply_rpps_ban_join_batch(p_after BIGINT, p_limit INT)
+RETURNS TABLE(last_id BIGINT, applied INT) LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN QUERY
+  WITH batch AS (
+    SELECT id, rpps_address_key_for_index(adresse, code_postal, code_insee) AS akey
+    FROM rpps_staging WHERE id > p_after ORDER BY id LIMIT p_limit
+  ),
+  upd AS (
+    UPDATE rpps_staging r SET geom_source = 'ban_address'
+    FROM batch b JOIN geocoded_addresses g ON g.address_key = b.akey
+    WHERE r.id = b.id RETURNING 1
+  )
+  SELECT max(b.id)::BIGINT, (SELECT count(*)::INT FROM upd) FROM batch b;
+END;
+$$;
 CREATE OR REPLACE FUNCTION rpps_distinct_eligible_keys(p TEXT, a TEXT, l INT)
 RETURNS TABLE (k TEXT) LANGUAGE plpgsql AS $$
 DECLARE v_prev TEXT := a; v_key TEXT;
