@@ -12,6 +12,7 @@ import {
   parseDropStalePreviousOutcome,
   preValidateFile,
   runBatchedRpc,
+  runKeysetRpc,
   shortCircuitIfSameChecksum,
 } from "./shared.js";
 
@@ -321,5 +322,67 @@ describe("isForceReingestEnv — contrat var d'env (anti faux négatif opérateu
     [undefined, false],
   ])("FORCE_REINGEST=%j → force=%s", (value, expected) => {
     expect(isForceReingestEnv(value as string | undefined)).toBe(expected);
+  });
+});
+
+describe("runKeysetRpc — pilote keyset générique (anti re-scan quadratique)", () => {
+  type RkrArgs = Parameters<typeof runKeysetRpc>;
+
+  it("avance le curseur p_after et s'arrête sur last_id NULL (page vide)", async () => {
+    const calls: number[] = [];
+    const supabase = {
+      rpc: (_n: string, p: { p_after: number; p_limit: number }) => {
+        calls.push(p.p_after);
+        if (p.p_after === 0)
+          return Promise.resolve({ data: [{ last_id: 100, applied: 7 }], error: null });
+        if (p.p_after === 100)
+          return Promise.resolve({ data: [{ last_id: 250, applied: 3 }], error: null });
+        return Promise.resolve({ data: [{ last_id: null, applied: 0 }], error: null });
+      },
+    } as unknown as RkrArgs[0];
+    const res = await runKeysetRpc(supabase, "rpc_x", { p_limit: 100 }, 2000);
+    expect(calls).toEqual([0, 100, 250]);
+    expect(res).toEqual({ totalApplied: 10, iterations: 3 });
+  });
+
+  it("throw IngestError si le curseur ne progresse pas (régression contrat)", async () => {
+    const supabase = {
+      rpc: () => Promise.resolve({ data: [{ last_id: 50, applied: 0 }], error: null }),
+    } as unknown as RkrArgs[0];
+    await expect(runKeysetRpc(supabase, "rpc_x", { p_limit: 100 }, 10)).rejects.toThrow(
+      /did not progress|non-progress/i,
+    );
+  });
+
+  it("throw IngestError sur erreur RPC", async () => {
+    const supabase = {
+      rpc: () => Promise.resolve({ data: null, error: { message: "boom" } }),
+    } as unknown as RkrArgs[0];
+    await expect(runKeysetRpc(supabase, "rpc_x", { p_limit: 100 }, 10)).rejects.toThrow(/boom/);
+  });
+
+  it("throw IngestError si la forme de retour est inattendue (contrat)", async () => {
+    const supabase = {
+      rpc: () => Promise.resolve({ data: 42, error: null }),
+    } as unknown as RkrArgs[0];
+    await expect(runKeysetRpc(supabase, "rpc_x", { p_limit: 100 }, 10)).rejects.toThrow(
+      /contract regression/i,
+    );
+  });
+
+  it("garde de convergence : maxIterations dépassé → IngestError", async () => {
+    // last_id croît toujours (curseur progresse) mais ne renvoie jamais NULL :
+    // la garde maxIterations doit couper (sinon boucle infinie).
+    let cur = 0;
+    const supabase = {
+      rpc: () => {
+        cur += 1;
+        return Promise.resolve({ data: [{ last_id: cur, applied: 1 }], error: null });
+      },
+    } as unknown as RkrArgs[0];
+    // expectedTotal=10, p_limit=100 → maxIterations = ceil(10/100)+5 = 6
+    await expect(runKeysetRpc(supabase, "rpc_x", { p_limit: 100 }, 10)).rejects.toThrow(
+      /did not converge/i,
+    );
   });
 });

@@ -640,6 +640,94 @@ export async function runBatchedRpc(
 }
 
 /**
+ * Pilote keyset générique pour une RPC d'application batchée par CURSEUR
+ * (≠ `runBatchedRpc` qui s'appuie sur un prédicat auto-rétrécissant /
+ * sentinelle). La RPC DOIT accepter `p_after` (curseur) + les `params` fixes
+ * (dont `p_limit`), et renvoyer UNE ligne `{ last_id: bigint|null, applied: int }` :
+ * `last_id` = dernière clé VUE (matchée ou non) du lot ; `null` ⇒ page vide ⇒
+ * fin. Garde de NON-PROGRESSION : si `last_id` n'augmente pas strictement → un
+ * `IngestError` (régression de contrat : rows vues mais curseur figé = boucle
+ * infinie). Pourquoi keyset et NON sentinelle : prouvé prod (cf.
+ * docs/plans/2026-05-19-ban-join-design.md §3.2) — la sentinelle re-scanne le
+ * préfixe déjà traité (quadratique → 57014 en fin de parcours, proxy OFFSET
+ * 1.2M > 120 s) ; le keyset démarre où le lot précédent s'est arrêté
+ * (linéaire, ~4,8 s/lot constant prouvé prod). Borne anti-hang `withTimeout`
+ * par appel (le cron RPPS n'est pas surveillé : un socket figé pendrait
+ * jusqu'au kill GitHub Actions sans `partial` ni trace `ingest_log`).
+ * `perCallTimeoutMs` défaut 120 s (= le `RPC_BATCH_TIMEOUT_MS` que le caller
+ * cron passe explicitement ; littéral ici pour éviter une dépendance croisée
+ * shared↔rpps et garder les tests autonomes).
+ */
+export async function runKeysetRpc(
+  supabase: SupabaseClient,
+  rpcName: string,
+  params: Record<string, unknown>,
+  expectedTotal: number,
+  perCallTimeoutMs = 120_000,
+): Promise<{ totalApplied: number; iterations: number }> {
+  const batchSize = Number(params.p_limit) || 1;
+  const maxIterations = Math.ceil(Math.max(expectedTotal, 1) / batchSize) + 5;
+  let after = 0;
+  let totalApplied = 0;
+  let iter = 0;
+  while (true) {
+    if (++iter > maxIterations) {
+      throw new IngestError(
+        "validate",
+        `${rpcName} did not converge after ${maxIterations} batches — likely RPC contract regression (cursor not advancing to a NULL terminator)`,
+      );
+    }
+    const call = supabase.rpc(rpcName, { ...params, p_after: after });
+    let result: Awaited<typeof call>;
+    try {
+      result = await withTimeout(call, perCallTimeoutMs, `${rpcName} (batch ${iter})`);
+    } catch (e) {
+      if (e instanceof Error && e.name === "TimeoutError") {
+        console.error(
+          `[france-data-mcp][ingest] ${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — anti-silent-hang bound tripped, failing loud`,
+        );
+        throw new IngestError(
+          "validate",
+          `${rpcName} timed out after ${perCallTimeoutMs}ms (batch ${iter}) — possible hung apply RPC (anti-silent-hang bound)`,
+        );
+      }
+      console.error(
+        `[france-data-mcp][ingest] ${rpcName} (batch ${iter}) threw a non-timeout error, re-raising`,
+      );
+      throw e;
+    }
+    const { data, error } = result;
+    if (error) {
+      throw new IngestError("validate", `${rpcName} failed: ${error.message}`);
+    }
+    const row = Array.isArray(data) ? data[0] : data;
+    if (
+      row == null ||
+      typeof row !== "object" ||
+      !("last_id" in row) ||
+      !("applied" in row) ||
+      typeof (row as { applied: unknown }).applied !== "number"
+    ) {
+      throw new IngestError(
+        "validate",
+        `${rpcName} returned an unexpected shape instead of { last_id, applied } — RPC contract regression`,
+      );
+    }
+    const lastId = (row as { last_id: number | null }).last_id;
+    const applied = (row as { applied: number }).applied;
+    totalApplied += applied;
+    if (lastId == null) return { totalApplied, iterations: iter };
+    if (lastId <= after) {
+      throw new IngestError(
+        "validate",
+        `${rpcName} cursor did not progress (after=${after} last_id=${lastId}) — RPC contract regression (rows seen but cursor frozen)`,
+      );
+    }
+    after = lastId;
+  }
+}
+
+/**
  * Codes PostgREST de schema-cache miss (typed contract > regex sur message
  * localisable). `PGRST205` = table absente du cache (post-CREATE staging),
  * `PGRST204` = colonne absente (post-ALTER, ex RPPS `geom_source`). Le NOTIFY
