@@ -4,6 +4,48 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Non publié]
+
+### Fixed
+
+- **Régression PROUVÉE prod `rpps_in_radius` 57014 en commune dense
+  (hotfix + durabilité).** La fonction hybride `rpps_in_radius` (CTE
+  `precise` filtrée `geom_source IN ('finess_join','ban_address')`) exige
+  le GiST PARTIEL `rpps_geog_precise_gist`. Le désamorçage du timeout cron
+  (`20260518T140000`) recopiait verbatim la def `main` de
+  `ingest_create_rpps_staging` créant le GiST **global**
+  `rpps_staging_geog_gist` → au 1er swap, le RENAME revertait
+  `rpps_geog_precise_gist` → `rpps_geog_gist` global, et la CTE `precise`
+  scannait alors tout le cluster co-localisé `commune_centroid` (Paris
+  1 km : 77 381 lignes dont 76 940 jetées en Filter pour 225 résultats)
+  → SQLSTATE 57014. Deux firefights concurrents (BAN-rearm vs
+  désamorçage cron) avaient découplé la fonction hybride de son index
+  compagnon. **Hotfix prod 2026-05-19** : `DROP INDEX rpps_geog_gist` +
+  `CREATE INDEX rpps_geog_precise_gist ... WHERE geom_source IN
+  ('finess_join','ban_address')` (transaction atomique, vérifié : Paris
+  1 km / 10 km sans filtre → OK).
+- **Durabilité : migration `20260519T160000_rpps_staging_geog_precise_gist`**
+  — `ingest_create_rpps_staging` (recopie VERBATIM de `20260518T140000`,
+  SEULE diff intentionnelle) crée désormais `rpps_staging_geog_precise_gist`
+  (GiST partiel, prédicat byte-identique RPC ↔ `20260516T050000` ↔
+  garde-fou) au lieu du GiST global. Au swap, `ingest_atomic_swap` le
+  renomme `rpps_geog_precise_gist` → le fix d'index survit au cron mensuel.
+  À appliquer manuellement en prod (naming `YYYYMMDDThhmmss`, sauté par la
+  CLI Supabase).
+
+### Changed
+
+- **Garde-fou `scripts/ingest/staging-parity.test.ts` durci** (le guard
+  `indexColumnLists` historique était AVEUGLE : global et partiel
+  normalisent à la même liste de colonnes `geog`). Nouvelle assertion
+  forme POSITIVE sur CHAQUE GiST `rpps_staging(geog)` (exige le prédicat
+  partiel) — résiste à `IF NOT EXISTS` / `public.` / `WITH (...)` /
+  coexistence partiel+global ; parité consommateur croisée vs
+  `rpps_in_radius` ; lecteur STRICT tag-aware
+  `latestFunctionBody(..., {stripComments:true})` du module (ferme les
+  faux VERT « prédicat en commentaire inline » et « def future `$tag$` →
+  corps mort »).
+
 ## [0.11.0] — 2026-05-18
 
 **Ré-armement du géocodage BAN sur le socle stabilisé (fix A+B+C `0.10.9`).
