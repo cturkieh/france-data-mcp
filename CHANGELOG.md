@@ -6,6 +6,25 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Non publié]
 
+### Added
+
+- **Levier `force` (Option B) — ré-ingestion RPPS forcée malgré checksum
+  identique.** Input booléen typé `force` du `workflow_dispatch` de
+  `ingest-rpps.yml` → env `FORCE_REINGEST` → helper pur
+  `isForceReingestEnv` (accepte `"1"`/`"true"`, trim, casse-insensible ;
+  tout le reste = pas de forçage, échec sûr) → 5ᵉ param `force` de
+  `shortCircuitIfSameChecksum` (chokepoint partagé ; early-return AVANT
+  tout I/O, audit intact ; opt-in RPPS uniquement, 3 autres sources
+  inchangées). But : réappliquer en prod le cache BAN géocodé (266 049
+  adresses acceptées) jamais posé, le fichier ANS n'ayant pas changé
+  (court-circuit SHA256 sinon permanent). Garde-fou : test `it.each`
+  10 cas verrouillant le contrat de la var d'env ; commentaire YAML
+  durci interdisant `github.event.inputs.force` (stringifie → `"false"`
+  truthy → force à chaque cron). Backlog connu (hors-scope, non
+  bloquant) : pas de marqueur `forced` distinct en `ingest_log` — un run
+  forcé sur source identique se loggue comme un run complet normal ;
+  l'opérateur le voit via le `console.warn` mais pas l'analyste DB.
+
 ### Fixed
 
 - **Régression PROUVÉE prod `rpps_in_radius` 57014 en commune dense
