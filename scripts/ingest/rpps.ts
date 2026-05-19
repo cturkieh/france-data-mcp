@@ -37,6 +37,7 @@ import {
   runAndRecordCanary,
   runBatchedRpc,
   runIfMain,
+  runKeysetRpc,
   safeSerializeIngestLog,
   shortCircuitIfSameChecksum,
   writeIngestLog,
@@ -87,6 +88,14 @@ const BATCH_SIZE = 1_000;
 
 /** Rows par batch d'enrichissement FINESS server-side (PostgREST 60s timeout safe). */
 const ENRICH_BATCH_SIZE = 10_000;
+
+/**
+ * Rows par lot `ban_join` (keyset). Même ordre que l'enrichment FINESS ;
+ * prouvé prod ~4,8 s/lot scan keyset CONSTANT début↔fin (cf.
+ * docs/plans/2026-05-19-ban-join-design.md §3.2), large sous le budget
+ * `statement_timeout='55s'` de `ingest_apply_rpps_ban_join_batch`.
+ */
+const BAN_JOIN_BATCH_SIZE = 10_000;
 
 /**
  * Tolérance fail structurel — ne couvre QUE `no_identity` (rpps_id vide ou
@@ -511,84 +520,68 @@ async function main(): Promise<void> {
       );
     }
 
-    // 5c. BUILD INDEX BAN sur rpps_staging — APRÈS l'enrichment FINESS (données
-    // stabilisées) et AVANT le swap. Décision d'archi (doc PostgreSQL
-    // « Populating a Database ») : construire les 2 index fonctionnels BAN
-    // Unicode-lourds une fois sur données stabilisées, jamais les maintenir
-    // pendant l'INSERT 2,24 M / l'UPDATE d'enrichment (= l'AGGRAVANT prouvé
-    // du 57014). `rpps_staging` ne sert AUCUNE lecture prod → CREATE INDEX
-    // bloquant classique sans impact externe ; les 2 index voyagent dans
-    // `rpps` via le RENAME du swap. FAIL-LOUD : sans ces index la RPC
-    // d'énumération BAN (5e) full-scanne 2,24 M lignes et timeoute à 60 s →
-    // on échoue le run (IngestError) plutôt que de dégrader silencieusement.
-    // Wrappé `retryTransient` : un blip transport supabase-js (cron NON
-    // surveillé) ne doit pas tuer un run par ailleurs sain. Un échec
-    // applicatif revient en `{error}` (pas réessayé) → throw fail-loud.
-    {
-      // `withTimeout` À L'INTÉRIEUR de la tentative retryTransient : un blip
-      // transport est réessayé (exigence G5), mais un socket FIGÉ pendant le
-      // build d'index (10 min serveur) rejette `TimeoutError` — exclu du
-      // retry par `name` (contrat with-timeout/retry-transient) → propagé,
-      // converti ici en IngestError fail-loud (sinon hang muet du cron non
-      // surveillé, /review P2 silent-failure MEDIUM-1).
-      let buildRes: Awaited<ReturnType<typeof supabase.rpc>>;
-      try {
-        buildRes = await retryTransient(
-          () =>
-            withTimeout(
-              supabase.rpc("ingest_build_rpps_staging_ban_indexes"),
-              RPC_BUILD_INDEX_TIMEOUT_MS,
-              "ingest_build_rpps_staging_ban_indexes",
-            ),
-          "ingest_build_rpps_staging_ban_indexes",
-          {
-            isRetryableResult: (r: { error?: unknown } | null) =>
-              isTransientSupabaseError(r?.error),
-          },
-        );
-      } catch (e) {
-        if (e instanceof Error && e.name === "TimeoutError") {
-          console.error(
-            `[france-data-mcp][rpps] ingest_build_rpps_staging_ban_indexes timed out after ${RPC_BUILD_INDEX_TIMEOUT_MS}ms — anti-silent-hang bound, failing loud`,
-          );
+    // 5c. BAN_JOIN — pose ensembliste du cache `geocoded_addresses` (déjà
+    // rempli par `ban-backfill.mjs`, hors cron) dans `rpps_staging`, jumeau de
+    // l'enrichment FINESS (5b) mais piloté CURSEUR KEYSET. Remplace l'ancien
+    // build d'index lourd + géocodage API (timeouté structurellement au cap
+    // passerelle PostgREST 60 s — réfuté prod run #26087010166 ; sentinelle pure
+    // re-scannait le préfixe → quadratique → 57014 fin de parcours, réfuté prod
+    // proxy OFFSET 1.2M > 120 s ; keyset ~4,8 s/lot constant, prouvé prod). Cf.
+    // docs/plans/2026-05-19-ban-join-design.md. Fail-loud : une erreur SQL
+    // réelle → IngestError → run échoué visible, `rpps` + cache intacts (échec
+    // AVANT le swap). Le géocodage des NOUVELLES adresses reste `ban-backfill.mjs`
+    // (manuel, hors scope — décidé PO). `expectedTotal` = nb de lignes éligibles
+    // (count RPC dédié, byte-identique au prédicat de `ban_join`) → borne
+    // `maxIterations` de la garde de convergence de `runKeysetRpc`.
+    const { data: banEligibleData, error: banEligibleErr } = await withTimeout(
+      supabase.rpc("rpps_count_ban_eligible_rows", { p_source_table: "rpps_staging" }),
+      RPC_READ_TIMEOUT_MS,
+      "rpps_count_ban_eligible_rows",
+    );
+    if (banEligibleErr) {
+      throw new IngestError(
+        "validate",
+        `Failed to count BAN-eligible rows: ${banEligibleErr.message}${missingRpcHint(banEligibleErr.message)}`,
+      );
+    }
+    const banEligible = parseRpcCount(banEligibleData, "rpps_count_ban_eligible_rows");
+    if (banEligible > 0) {
+      const { totalApplied: banApplied, iterations: banIterations } = await runKeysetRpc(
+        supabase,
+        "ingest_apply_rpps_ban_join_batch",
+        { p_limit: BAN_JOIN_BATCH_SIZE },
+        banEligible,
+        RPC_BATCH_TIMEOUT_MS,
+      );
+      console.log(
+        `[rpps] ban_join: ${banApplied} posed / ${banEligible} eligible in ${banIterations} batches`,
+      );
+      // Sentinelle de cohérence (même esprit que la défense FINESS 5b) : 0 posé
+      // alors que le cache contient des adresses acceptées plausibles ⇒
+      // suspicion de dérive de clé (parité RPC↔cache cassée) → throw loud
+      // (jamais un succès muet sur une régression silencieuse de normalisation
+      // d'adresse — la classe de panne S-1 que tout le pipeline BAN combat).
+      if (banApplied === 0) {
+        const { count: cacheAccepted, error: cacheErr } = await supabase
+          .from("geocoded_addresses")
+          .select("*", { count: "exact", head: true })
+          .eq("accepted", true);
+        if (cacheErr) {
           throw new IngestError(
             "validate",
-            `Failed to build rpps_staging BAN indexes: timed out after ${RPC_BUILD_INDEX_TIMEOUT_MS}ms (anti-silent-hang bound)`,
+            `ban_join posed 0 rows; cache sanity check failed: ${cacheErr.message}`,
           );
         }
-        throw e;
+        if ((cacheAccepted ?? 0) > 0) {
+          throw new IngestError(
+            "validate",
+            `ban_join posed 0 rows over ${banEligible} eligible while geocoded_addresses has ${cacheAccepted} accepted — suspected address-key parity drift (RPC vs cache)`,
+          );
+        }
       }
-      const { error: buildIdxError } = buildRes;
-      if (buildIdxError) {
-        throw new IngestError(
-          "validate",
-          `Failed to build rpps_staging BAN indexes: ${buildIdxError.message}${missingRpcHint(buildIdxError.message)}`,
-        );
-      }
+    } else {
+      console.log("[rpps] ban_join: 0 eligible rows, skipped");
     }
-
-    // 5d. RE-ANALYZE rpps_staging — le planner DOIT voir les 2 index
-    // fonctionnels BAN neufs (stats fraîches) sinon il les ignore et la RPC
-    // d'énumération (5e) retombe sur un full-scan + timeout 60 s au cron.
-    // fail-loud (même contrat que 5a) : un ANALYZE raté avant l'énumération
-    // est une cause-racine connue du blocker, pas un détail tolérable ici.
-    await callRpcFailLoud(
-      supabase,
-      "ingest_analyze_rpps_staging",
-      RPC_ANALYZE_TIMEOUT_MS,
-      "Failed to re-ANALYZE rpps_staging after BAN index build",
-    );
-
-    // 5e. BAN GEOCODING (best-effort, AVANT le swap : tourne sur rpps_staging
-    // qui disparaît au swap). Géocode les rows restées au centroïde commune ou
-    // sans geom, via le cache persistant `geocoded_addresses`. Compteurs &
-    // seuil DÉDIÉS (disjoints des compteurs FINESS). N'altère JAMAIS
-    // `finess_join`. Toute panne (BAN down, RPC/query KO) → log.status
-    // "partial" + console.error, sans throw : l'ingestion mensuelle n'est
-    // jamais bloquée par BAN. Le step pose éventuellement log.status="partial"
-    // AVANT le bloc de finalisation `if (log.status !== "partial")` plus bas
-    // qui le préserve (P16).
-    await runBanGeocodeStep(supabase, log, "rpps_staging");
 
     // 6. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "rpps" });
