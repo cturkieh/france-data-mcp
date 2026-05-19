@@ -385,4 +385,30 @@ describe("runKeysetRpc — pilote keyset générique (anti re-scan quadratique)"
       /did not converge/i,
     );
   });
+
+  it("fail-loud si p_limit absent/invalide (garde maxIterations sinon aveugle)", async () => {
+    const supabase = {
+      rpc: () => Promise.resolve({ data: [{ last_id: null, applied: 0 }], error: null }),
+    } as unknown as RkrArgs[0];
+    // p_limit absent → throw AVANT toute itération (pas de Number()||1 muet).
+    await expect(runKeysetRpc(supabase, "rpc_x", {}, 100)).rejects.toThrow(
+      /p_limit doit être un entier positif/i,
+    );
+    // p_limit non-entier / ≤0 → idem.
+    await expect(runKeysetRpc(supabase, "rpc_x", { p_limit: 0 }, 100)).rejects.toThrow(
+      /p_limit doit être un entier positif/i,
+    );
+    await expect(runKeysetRpc(supabase, "rpc_x", { p_limit: 1.5 }, 100)).rejects.toThrow(
+      /p_limit doit être un entier positif/i,
+    );
+  });
+
+  it("throw IngestError sur tableau VIDE (≠ page vide qui renvoie 1 ligne last_id=null)", async () => {
+    const supabase = {
+      rpc: () => Promise.resolve({ data: [], error: null }),
+    } as unknown as RkrArgs[0];
+    await expect(runKeysetRpc(supabase, "rpc_x", { p_limit: 100 }, 10)).rejects.toThrow(
+      /empty array.*contract regression/i,
+    );
+  });
 });

@@ -63,10 +63,10 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "test": "vitest run",
+    "test": "vitest run --no-file-parallelism",
     "test:watch": "vitest",
     "test:unit": "vitest run --exclude '**/*.integration.test.ts'",
-    "test:integration": "vitest run '**/*.integration.test.ts' --passWithNoTests",
+    "test:integration": "vitest run '**/*.integration.test.ts' --passWithNoTests --no-file-parallelism",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.api.json --noEmit",

@@ -18,6 +18,14 @@ pnpm release                              # release semi-auto (voir scripts/rele
 
 CI GitHub Actions vérifie typecheck (2 tsconfigs) + biome + tests + Supabase local.
 
+**`test`/`test:integration` portent `--no-file-parallelism`** : plusieurs
+fichiers `*.integration.test.ts` partagent la table mutable `rpps_staging`
+(recréée par `ingest_create_rpps_staging()`) — l'exécution parallèle des
+fichiers les clobbe mutuellement (non déterministe). `test:unit` exclut les
+intégration → reste parallèle/rapide. Tout nouveau test d'intégration touchant
+`rpps_staging` DOIT re-seed en tête de chaque `it` + ré-asserter le peuplement
+(échec bruyant si clobbé) — pattern de `ban-eligibility-skipscan.integration`.
+
 ## Conventions code
 
 **Lib (`src/`) — OSS publiable, pas de Sentry direct.**

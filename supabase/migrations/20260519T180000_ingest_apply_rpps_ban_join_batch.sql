@@ -41,6 +41,10 @@ BEGIN
     ORDER BY id
     LIMIT p_limit
   ),
+  -- wCTE data-modifying : PostgreSQL l'exécute EXACTEMENT UNE FOIS dès qu'il
+  -- est référencé n'importe où dans la requête (ici via le count scalaire
+  -- ci-dessous), même absent du FROM principal. NE PAS le « simplifier » en
+  -- le croyant mort : le retirer supprimerait l'UPDATE silencieusement.
   upd AS (
     UPDATE rpps_staging r
     SET geom = ST_SetSRID(ST_MakePoint(g.lon, g.lat), 4326),
@@ -51,6 +55,8 @@ BEGIN
     WHERE r.id = b.id
     RETURNING 1
   )
+  -- last_id = dernière clé VUE du lot (curseur keyset, matchée ou non) ;
+  -- applied = nb réellement posé (count des RETURNING de `upd`).
   SELECT max(b.id)::BIGINT AS last_id,
          (SELECT count(*)::INT FROM upd) AS applied
   FROM batch b;
