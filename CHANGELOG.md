@@ -6,6 +6,31 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Non publié]
 
+### Added
+
+- **Phase 1 mesure du delta BAN mensuel (brique observabilité pré-automatisation).**
+  Nouvelle RPC `rpps_measure_ban_to_geocode(p_source_table)` retournant 2
+  comptages atomiques (en 1 passe planner via `count(*)` + `count(*) FILTER`) :
+  (a) `eligible_distinct` = adresses distinctes éligibles BAN dans la source
+  whitelistée, (b) `to_geocode_distinct` = sous-ensemble NON encore résolu/capé
+  dans `geocoded_addresses`. Appelée par `scripts/ingest/rpps.ts` entre
+  l'enrichment FINESS (5b) et `ban_join` (5c), **best-effort** : un échec
+  (timeout, RPC absente, contrat cassé) → `console.warn` + log NULL dans
+  `ingest_log` + run continue (Phase 1 = observabilité, JAMAIS gating). 2
+  colonnes `INTEGER` nullable ajoutées à `ingest_log` (`ban_eligible_distinct`,
+  `ban_to_geocode_distinct`). Pattern aligné sur `rpps_count_ban_eligible_rows`
+  (SECURITY DEFINER + REVOKE FROM PUBLIC + whitelist CASE source_table +
+  `SET statement_timeout='55s'` sous cap passerelle PostgREST 60s). Garde-fous
+  étendus : `ban-eligibility-predicate-parity` 7e site (le prédicat de la
+  mesure DOIT rester byte-identique aux 6 autres — sinon la mesure
+  dimensionne Phase 2 sur un set différent de celui que `ban_join` traite),
+  `enrichment-statement-timeout` 2 nouveaux tests anti-drift. Discipline
+  complète : /simplify 3 agents (4 fixes), /review Passe 1 (3 agents, 4
+  corrections), /review Passe 2 (2 agents, GO unanime). 1165 tests verts.
+  But : permettre de dimensionner la future Phase 2 (automatisation du
+  re-géocodage récurrent) sur le **vrai chiffre prod du delta mensuel** au
+  bout d'1-2 cycles, en respectant « prouver par la prod avant de coder ».
+
 ### Fixed
 
 - **Acceptation BAN par PRÉCISION au lieu d'un gate binaire 0,7 —

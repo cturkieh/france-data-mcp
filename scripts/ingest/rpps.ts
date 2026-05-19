@@ -428,6 +428,56 @@ async function main(): Promise<void> {
       );
     }
 
+    // 5b-bis. PHASE 1 MESURE — chiffre le delta BAN mensuel pour dimensionner
+    // la future automatisation (Phase 2). BEST-EFFORT : un échec (timeout, RPC
+    // absente, contrat cassé) → console.warn + log NULL + on continue. Mesuré
+    // post-FINESS / pre-ban_join (état où ban_join verrait l'éligibilité brute).
+    // Locales préservent une mesure partielle : si parseRpcCount #2 throw, #1
+    // reste posé (au lieu d'être écrasé par les assignations en branche `catch`).
+    // Cf. migration 20260520T000000_rpps_measure_ban_to_geocode.
+    let eligibleDistinct: number | null = null;
+    let toGeocodeDistinct: number | null = null;
+    try {
+      const { data: deltaData, error: deltaErr } = await withTimeout(
+        supabase.rpc("rpps_measure_ban_to_geocode", { p_source_table: "rpps_staging" }),
+        RPC_READ_TIMEOUT_MS,
+        "rpps_measure_ban_to_geocode",
+      );
+      if (deltaErr) {
+        console.warn(
+          `[rpps] BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}`,
+        );
+      } else {
+        const row = (
+          deltaData as Array<{
+            eligible_distinct: number | string;
+            to_geocode_distinct: number | string;
+          }> | null
+        )?.[0];
+        // Throw de parseRpcCount → attrapé par le catch outer = best-effort
+        // (Phase 1 = observabilité, pas gating ; cf. JSDoc src/core/parse-rpc-count.ts).
+        eligibleDistinct = parseRpcCount(
+          row?.eligible_distinct,
+          "rpps_measure_ban_to_geocode.eligible_distinct",
+        );
+        toGeocodeDistinct = parseRpcCount(
+          row?.to_geocode_distinct,
+          "rpps_measure_ban_to_geocode.to_geocode_distinct",
+        );
+        console.log(
+          `[rpps] BAN delta measure: ${eligibleDistinct} distinct eligible addresses in staging, ${toGeocodeDistinct} not yet in cache (Phase 2 size)`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[rpps] BAN delta measurement failed (best-effort, run continues): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    log.ban_eligible_distinct = eligibleDistinct;
+    log.ban_to_geocode_distinct = toGeocodeDistinct;
+
     // 5c. BAN_JOIN — pose ensembliste du cache `geocoded_addresses` (déjà
     // rempli par `ban-backfill.mjs`, hors cron) dans `rpps_staging`, jumeau de
     // l'enrichment FINESS (5b) mais piloté CURSEUR KEYSET. Remplace l'ancien
