@@ -1,5 +1,16 @@
 # PASSATION — état réel & suite (2026-05-19)
 
+> ## ✅ RÉSOLU (2026-05-19, même jour) — `ban_join` implémenté
+> Le blocage des 4 jours (§3, §5) est **levé**. Solution `ban_join` (jumeau
+> FINESS + curseur keyset) conçue, prouvée prod, implémentée en 6 tâches TDD,
+> garde-fous parité étendus, test d'intégration vert. Voir :
+> `docs/plans/2026-05-19-ban-join-design.md` (spec + preuves prod) et
+> `docs/plans/2026-05-19-ban-join-implementation-plan.md` (plan exécuté).
+> §5 ci-dessous = contexte historique de la décision ; §3 (cause du blocage)
+> = post-mortem. Reste : application migration prod + run armé `force` +
+> vérif post-swap (Task 8 du plan d'implémentation). Backfill = hors scope
+> (décidé PO), automatisation = feature ultérieure (dette tracée CLAUDE.md).
+
 > **Document de reprise autoportant.** Une nouvelle session Claude Code n'a PAS
 > besoin de relire la conversation précédente. Tout l'essentiel est ici.
 > Lis-le EN ENTIER avant toute action. Discipline projet : **prouver par la

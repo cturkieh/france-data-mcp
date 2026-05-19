@@ -29,8 +29,9 @@ export function normalizeAddressKey(
  * est à 3 arguments / 3 segments. Passer un 4e argument `ville` à
  * `normalizeAddressKey` produit une clé à 4 segments qui ne matche JAMAIS le
  * jumeau SQL → 0 ligne géocodée tout en rapportant un succès (panne totale
- * silencieuse). Les sites d'appel cache (`rpps.ts:runBanGeocodeStep`,
- * `ban-backfill.mjs`) DOIVENT utiliser cette fonction : elle ne déclare
+ * silencieuse). Les sites d'appel cache (`rpps.ts` step `ban_join` via la
+ * RPC `ingest_apply_rpps_ban_join_batch`, `ban-backfill.mjs`) DOIVENT
+ * s'appuyer sur cette clé : la fonction ne déclare
  * EXACTEMENT 3 paramètres, aucun 4e optionnel — une régression 4-arg y est
  * structurellement IMPOSSIBLE (le compilateur la refuse), pas seulement
  * commentée. Byte-identique à `normalizeAddressKey(a, b, c)` (ville omise) ;
