@@ -6,6 +6,33 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Non publié]
 
+### Fixed
+
+- **Acceptation BAN par PRÉCISION au lieu d'un gate binaire 0,7 —
+  ~34k adresses récupérables, prouvé prod.** Cause-racine vérifiée
+  (code + 500 rejetées re-géocodées + doc BAN) : `ban-bulk-client.ts`
+  n'acceptait un géocodage que si `result_score ≥ 0,7` ET
+  `result_type ∈ {housenumber, street}` ; tout le reste → `accepted=false`,
+  coords mises à NULL par `ban-backfill.mjs`, et ~40k médecins retombaient
+  au centroïde commune (~3 km) alors que la BAN renvoyait un point
+  rue/bâtiment CORRECT (81 % des rejetées ont des coords ; ~90 % des
+  `housenumber` 0,5–0,7 sont le bon bâtiment — score bas = abréviations
+  RPPS `R`/`BD`/`AV` + accents, PAS une mauvaise localisation). `result_type`
+  est la garantie de précision géographique ; `result_score` n'est qu'une
+  confiance fuzzy-match. Règle produit : un point rue/lieu-dit est
+  STRICTEMENT meilleur que le centroïde commune. Fix : seuil
+  `BAN_ACCEPT_SCORE` 0,7 → **0,5** (`scripts/ban-backfill.mjs`) +
+  acceptation `type ∈ {housenumber, street, locality}` (`municipality`
+  exclu = aucun gain vs centroïde) dans `src/core/ban-bulk-client.ts`.
+  Recovery cache-only prouvée prod : **66 % d'acceptation** sur les
+  rejetées (vs 0 % avant), cache `geocoded_addresses` re-rempli ; le
+  `ban_join` du cron mensuel posera ces coords (écriture cache-only, hors
+  swap, idempotent — aucune écriture `rpps` hors cron). Garde-fou test
+  `ban-bulk-client.test.ts` (housenumber|street|locality acceptés ≥ seuil,
+  `municipality` rejeté). L'ancien commentaire « JAMAIS 0.5 » (leçon
+  audit-P2) valait pour l'accept binaire-précis ; ici la sémantique est
+  « upgrade vs centroïde », documentée inline.
+
 ### Added
 
 - **Levier `force` (Option B) — ré-ingestion RPPS forcée malgré checksum

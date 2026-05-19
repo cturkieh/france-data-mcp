@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { geocodeAddressesBatch } from "./ban-bulk-client.js";
+import { ACCEPTED_PRECISION_TYPES, geocodeAddressesBatch } from "./ban-bulk-client.js";
 
 // Retour sous forme d'objet (pas bare Map) : P5 exige que apiFailures soit
 // observable même quand results est vide (ex : BAN-down total). Un bare Map
@@ -117,6 +117,100 @@ describe("geocodeAddressesBatch", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  // Helper : 1 résultat BAN simulé, mock fetch, retourne le BanGeocodeResult.
+  async function runOneBanResult(opts: {
+    type: string;
+    score: string;
+    lat?: string;
+    lon?: string;
+  }) {
+    const lat = opts.lat ?? "48.86";
+    const lon = opts.lon ?? "2.35";
+    const csvBody = [
+      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      `k,X,75001,75101,${lat},${lon},${opts.score},${opts.type},X`,
+    ].join("\n");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(csvBody, { status: 200 })));
+    try {
+      const out = await geocodeAddressesBatch(
+        [{ key: "k", adresse: "X", codePostal: "75001", codeInsee: "75101" }],
+        { chunkSize: 10, scoreThreshold: 0.5 },
+      );
+      return out.results.get("k");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  }
+
+  // Matrice exhaustive de la politique d'acceptation par PRÉCISION
+  // (`docs/plans/ban-join.md`). Toute modif intentionnelle de la règle DOIT
+  // toucher cette table → revue forcée. Cas couverts : 3 axes (type × score ×
+  // robustesse forme), incluant les pannes silencieuses traquées en /review P1.
+  it.each([
+    // Acceptés : 3 types plus précis que la commune ≥ seuil
+    { type: "housenumber", score: "0.55", expected: true, why: "housenumber ≥ seuil" },
+    { type: "street", score: "0.55", expected: true, why: "street résolue ≥ seuil" },
+    { type: "locality", score: "0.55", expected: true, why: "locality (lieu-dit) ≥ seuil" },
+    // Rejetés : municipality = aucun gain vs centroïde, peu importe le score
+    { type: "municipality", score: "0.95", expected: false, why: "municipality = niveau commune" },
+    { type: "municipality", score: "0.30", expected: false, why: "municipality + score bas" },
+    // Rejetés : type accepté mais score sous le seuil
+    { type: "housenumber", score: "0.30", expected: false, why: "type ok mais score < seuil" },
+    { type: "street", score: "0.30", expected: false, why: "type ok mais score < seuil" },
+    // Rejetés : type vide / inconnu (ne pas avaler silencieusement)
+    { type: "", score: "0.95", expected: false, why: "type vide" },
+    { type: "unknown_xyz", score: "0.95", expected: false, why: "type inconnu" },
+    // Robustesse normalisation : casse/espaces ne doivent PAS rejeter en silence
+    { type: "Housenumber", score: "0.55", expected: true, why: "casse exotique normalisée" },
+    { type: " street ", score: "0.55", expected: true, why: "espaces normalisés" },
+  ])(
+    "accept matrix: $type @ $score → accepted=$expected ($why)",
+    async ({ type, score, expected }) => {
+      const r = await runOneBanResult({ type, score });
+      expect(r?.accepted).toBe(expected);
+      if (expected) {
+        // Contrat : un accepted=true porte TOUJOURS des coords finies.
+        expect(r?.lat).toBeCloseTo(48.86);
+        expect(r?.lon).toBeCloseTo(2.35);
+        // Contrat : `resultType` persisté est la forme NORMALISÉE (lowercase,
+        // trim). Sinon un `"Housenumber"` accepté ici serait jeté en aval par
+        // tout filtre lowercase = panne silencieuse aval.
+        expect(r?.resultType).toBe(type.trim().toLowerCase());
+      }
+    },
+  );
+
+  it("contrat coords : NaN BAN ⇒ accepted=false (jamais accepted+lat=null)", async () => {
+    // Si BAN renvoie un nombre corrompu (`Number('abc')=NaN`), `Number.isFinite`
+    // doit rejeter : sans ce garde, `accepted=true && lat=null` = rupture de contrat
+    // (le caller `ban-backfill.mjs` la rattrape en aval, mais le client doit déjà l'empêcher).
+    const r = await runOneBanResult({ type: "housenumber", score: "0.95", lat: "not-a-number" });
+    expect(r?.accepted).toBe(false);
+    expect(r?.lat).toBeNull();
+  });
+
+  it.each([
+    { lat: "999", lon: "2.35", axis: "lat" },
+    { lat: "48.86", lon: "400", axis: "lon" },
+    { lat: "-91", lon: "2.35", axis: "lat" },
+    { lat: "48.86", lon: "-181", axis: "lon" },
+  ])(
+    "contrat plage : coords hors [-90,90]×[-180,180] ⇒ accepted=false ($axis)",
+    async ({ lat, lon }) => {
+      // BAN ne devrait jamais sortir hors plage géographique ; le client refuse
+      // pour ne pas polluer le cache (PostGIS aval, KNN…).
+      const r = await runOneBanResult({ type: "housenumber", score: "0.95", lat, lon });
+      expect(r?.accepted).toBe(false);
+    },
+  );
+
+  it("ACCEPTED_PRECISION_TYPES : contenu figé (anti-régression silencieuse)", () => {
+    // Pin direct : tout ajout/retrait force à toucher ce test → revue.
+    // `municipality` doit RESTER absent (= aucun gain vs centroïde commune).
+    expect([...ACCEPTED_PRECISION_TYPES].sort()).toEqual(["housenumber", "locality", "street"]);
+    expect(ACCEPTED_PRECISION_TYPES.has("municipality")).toBe(false);
   });
 
   it("réponse 200 sans colonne `key` → échec dur, pas de perte silencieuse", async () => {

@@ -33,6 +33,16 @@ const BASE_DELAY_MS = 500;
 // adresses peut être lent côté BAN sans être pour autant "hung".
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
+// Types BAN strictement plus précis que le centroïde commune. `municipality`
+// est exclu (= niveau commune, aucun gain vs le repli `commune_centroid`).
+// Exporté pour que les tests pinent directement le contenu (anti-régression
+// silencieuse sur un futur ajout/retrait). Détail : `docs/plans/ban-join.md`.
+export const ACCEPTED_PRECISION_TYPES: ReadonlySet<string> = new Set([
+  "housenumber",
+  "street",
+  "locality",
+]);
+
 /** Erreur sentinelle interne : la requête a été annulée par le caller. */
 class CallerAbortedError extends Error {
   constructor() {
@@ -150,19 +160,32 @@ function parseBanCsvResponse(
     const lon = lonStr !== "" ? Number(lonStr) : null;
     const resultScore = scoreStr !== "" ? Number(scoreStr) : null;
 
-    const accepted =
-      lat !== null &&
-      lon !== null &&
-      resultScore !== null &&
-      resultScore >= scoreThreshold &&
-      (resultType === "housenumber" || resultType === "street");
+    // Acceptation par PRÉCISION (`result_type`) — cf. `ACCEPTED_PRECISION_TYPES`
+    // + `docs/plans/ban-join.md`. `Number.isFinite` rejette NaN/Infinity ; le
+    // range guard rejette une lat/lon hors plage géographique (cache pollué
+    // sinon — BAN ne devrait jamais sortir hors France, le client n'a pas à
+    // l'accepter). Normalisation casse/espaces sur `resultType` : défense
+    // contre une dérive contractuelle BAN ; la forme normalisée est ALSO
+    // celle persistée downstream (sinon un `"Housenumber"` accepté ici serait
+    // jeté par tout filtre aval sur lowercase = panne silencieuse aval).
+    const normalizedType = resultType.trim().toLowerCase();
+    const hasCoords =
+      Number.isFinite(lat) &&
+      Number.isFinite(lon) &&
+      (lat as number) >= -90 &&
+      (lat as number) <= 90 &&
+      (lon as number) >= -180 &&
+      (lon as number) <= 180;
+    const meetsConfidence = resultScore !== null && resultScore >= scoreThreshold;
+    const isMorePreciseThanCommune = ACCEPTED_PRECISION_TYPES.has(normalizedType);
+    const accepted = hasCoords && meetsConfidence && isMorePreciseThanCommune;
 
     results.set(key, {
       accepted,
       lat: Number.isFinite(lat) ? lat : null,
       lon: Number.isFinite(lon) ? lon : null,
       resultScore: Number.isFinite(resultScore) ? resultScore : null,
-      resultType: resultType !== "" ? resultType : null,
+      resultType: normalizedType !== "" ? normalizedType : null,
     });
   }
 

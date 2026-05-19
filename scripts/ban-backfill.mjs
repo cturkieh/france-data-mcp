@@ -57,10 +57,11 @@ const BAN_GEOCODE_BATCH_SIZE = 10_000;
 // 2k adresses (re-tentées au re-run idempotent), pas 10k. Jumeau `rpps.ts`
 // porte la MÊME valeur — ne pas désynchroniser.
 const BAN_BULK_CHUNK = 2_000;
-// F3 / leçon audit-P2 : un seuil global 0.5 laisse passer des substitutions
-// `housenumber` erronées. Aligné sur le seuil du géocodeur de référence
-// (>=0.7). JAMAIS 0.5.
-const BAN_ACCEPT_SCORE = 0.7;
+// Plancher d'acceptation BAN — 0.5 (sémantique « upgrade vs centroïde commune »,
+// la garantie de précision vient du `result_type` côté `ACCEPTED_PRECISION_TYPES`
+// dans `src/core/ban-bulk-client.ts`). Preuve empirique + réfutation de l'ancien
+// « JAMAIS 0.5 » (leçon audit-P2) : `docs/plans/ban-join.md`.
+const BAN_ACCEPT_SCORE = 0.5;
 // F2 : borne par requête chunk passée au client BAN — un socket BAN figé ne
 // doit pas bloquer indéfiniment un job de 339k rows. Le client retry chaque
 // timeout (transitoire) mais CHAQUE tentative est elle-même bornée.
