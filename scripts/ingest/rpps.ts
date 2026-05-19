@@ -464,37 +464,26 @@ async function main(): Promise<void> {
       console.log(
         `[rpps] ban_join: ${banApplied} posed / ${banEligible} eligible in ${banIterations} batches`,
       );
-      // Sentinelle de cohérence NON BLOQUANTE. BAN est best-effort (CLAUDE.md
-      // « l'ingestion mensuelle n'est JAMAIS bloquée par BAN ») : un `throw`
-      // ici re-bloquerait un run par ailleurs sain — exactement la régression
-      // qu'on fuit. « 0 posé » est AMBIGU et indistinguable sans faux positif :
-      // soit LÉGITIME (toutes les lignes éligibles sont de NOUVELLES adresses
-      // pas encore dans le cache — `ban-backfill.mjs` pas relancé), soit
-      // pathologique (dérive de parité clé RPC↔cache, classe S-1). On NE throw
-      // donc PAS ; on SYNTHÉTISE le signal (console.warn + `ingest_log`
-      // "partial", préservé par le bloc de finalisation plus bas) pour qu'un
-      // humain investigue. Le repli `commune_centroid` reste servi.
+      // Sentinelle de cohérence NON BLOQUANTE (décision pure déléguée à
+      // `evaluateBanJoinOutcome`, testée unitairement). `ban_join` best-effort :
+      // jamais de throw (un échec dur re-bloquerait un run sain — CLAUDE.md).
+      // « 0 posé » ⇒ on interroge le cache puis on TRACE le sous-cas (les 3
+      // sont anormaux et désormais tous tracés en `ingest_log`, préservé par
+      // le bloc de finalisation plus bas). Repli `commune_centroid` servi.
       if (banApplied === 0) {
         const { count: cacheAccepted, error: cacheErr } = await supabase
           .from("geocoded_addresses")
           .select("address_key", { count: "exact", head: true })
           .eq("accepted", true);
-        if (cacheErr) {
-          console.warn(
-            `[france-data-mcp][rpps][ban_join] 0 posed; cache sanity check failed (non-blocking): ${cacheErr.message}`,
-          );
-          log.status = "partial";
-          appendLogMessage(log, `ban_join: 0 posed, cache check failed: ${cacheErr.message}`);
-        } else if ((cacheAccepted ?? 0) > 0) {
-          console.warn(
-            `[france-data-mcp][rpps][ban_join] ⚠️ 0 posed over ${banEligible} eligible while geocoded_addresses has ${cacheAccepted} accepted — either all eligible rows are NEW uncached addresses (ban-backfill not re-run: legitimate) OR address-key parity drift RPC↔cache (S-1: investigate). Non-blocking; commune_centroid fallback served.`,
-          );
-          log.status = "partial";
-          appendLogMessage(
-            log,
-            `ban_join: 0 posed / ${banEligible} eligible while cache has ${cacheAccepted} accepted — investigate parity drift vs new-uncached`,
-          );
-        }
+        const outcome = evaluateBanJoinOutcome({
+          banApplied,
+          banEligible,
+          cacheAccepted: cacheAccepted ?? 0,
+          cacheErrMessage: cacheErr ? cacheErr.message : undefined,
+        });
+        if (outcome.warn) console.warn(outcome.warn);
+        if (outcome.partial) log.status = "partial";
+        if (outcome.logMessage) appendLogMessage(log, outcome.logMessage);
       }
     } else {
       console.log("[rpps] ban_join: 0 eligible rows, skipped");
@@ -759,6 +748,54 @@ function appendLogMessage(log: IngestLogEntry, msg: string): void {
 }
 
 /**
+ * Décision PURE du signal de cohérence post-`ban_join` (testable sans DB ni
+ * cron — extraite du bloc 5c pour couverture unitaire). `ban_join` est
+ * best-effort : JAMAIS de throw (un échec dur re-bloquerait un run sain —
+ * CLAUDE.md « l'ingestion mensuelle n'est JAMAIS bloquée par BAN »). « 0 posé »
+ * est AMBIGU : légitime (toutes les lignes éligibles sont de NOUVELLES adresses
+ * pas encore en cache, `ban-backfill.mjs` pas relancé) OU pathologique (dérive
+ * de parité clé RPC↔cache, OU cache `geocoded_addresses` wipé — classe S-1).
+ * Indistinguable sans faux positif → on NE throw pas mais on TRACE TOUJOURS
+ * (audit DB via `appendLogMessage`, pas juste un `console.log` éphémère) sur
+ * CHACUN des 3 sous-cas anormaux — y compris « cache lisible mais 0 accepté »
+ * (le seul qui n'émettait AUCUN signal avant ce correctif /review P1).
+ * `cacheErrMessage` défini ⇒ la requête de sanity-check du cache a elle-même
+ * échoué ; sinon `cacheAccepted` = nb de lignes `accepted=true` en cache.
+ */
+export function evaluateBanJoinOutcome(args: {
+  banApplied: number;
+  banEligible: number;
+  cacheAccepted: number;
+  cacheErrMessage?: string;
+}): { partial: boolean; warn?: string; logMessage?: string } {
+  const { banApplied, banEligible, cacheAccepted, cacheErrMessage } = args;
+  if (banApplied > 0) return { partial: false };
+  if (cacheErrMessage !== undefined) {
+    return {
+      partial: true,
+      warn: `[france-data-mcp][rpps][ban_join] 0 posed; cache sanity check failed (non-blocking): ${cacheErrMessage}`,
+      logMessage: `ban_join: 0 posed, cache check failed: ${cacheErrMessage}`,
+    };
+  }
+  if (cacheAccepted > 0) {
+    return {
+      partial: true,
+      warn: `[france-data-mcp][rpps][ban_join] ⚠️ 0 posed over ${banEligible} eligible while geocoded_addresses has ${cacheAccepted} accepted — either all eligible rows are NEW uncached addresses (ban-backfill not re-run: legitimate) OR address-key parity drift RPC↔cache (S-1: investigate). Non-blocking; commune_centroid fallback served.`,
+      logMessage: `ban_join: 0 posed / ${banEligible} eligible while cache has ${cacheAccepted} accepted — investigate parity drift vs new-uncached`,
+    };
+  }
+  // 3e sous-cas (MEDIUM-1 /review P1) : cache LISIBLE mais 0 accepté ALORS que
+  // des lignes sont éligibles → 1er run pré-backfill (légitime) OU cache
+  // `geocoded_addresses` perdu/wipé/RLS (S-1). C'était le SEUL chemin sans
+  // aucune trace (console.log éphémère uniquement) — désormais tracé.
+  return {
+    partial: true,
+    warn: `[france-data-mcp][rpps][ban_join] ⚠️ 0 posed over ${banEligible} eligible while geocoded_addresses has 0 accepted — cache empty/wiped or never backfilled (S-1: investigate). Non-blocking; commune_centroid fallback served.`,
+    logMessage: `ban_join: 0 posed / ${banEligible} eligible while cache has 0 accepted — cache empty/wiped or pre-backfill`,
+  };
+}
+
+/**
  * RPC fail-loud du cron, BORNÉE anti-hang. Un `supabase.rpc()` brut sur un
  * socket figé pendrait jusqu'au kill GitHub Actions, SANS `partial` ni
  * `ingest_log` ; ces étapes étant fail-loud, un hang y tue TOUT le cron RPPS
@@ -834,6 +871,7 @@ export const __TESTING__ = {
   parseRppsRecord,
   COL,
   rebuildRppsMatviews,
+  evaluateBanJoinOutcome,
 };
 
 await runIfMain(import.meta.url, main);

@@ -151,22 +151,36 @@ Notes load-bearing :
 
 Pilote TS (`scripts/ingest/rpps.ts`) : boucle keyset `p_after=0` → appeler →
 `p_after = retour` → jusqu'à retour `NULL` (page vide). Borne anti-hang
-`withTimeout` + `retryTransient` + garde de non-progression (si le retour
-n'augmente pas → `IngestError`). Réutiliser le pattern keyset existant
-(`rpps_distinct_eligible_keys` / `ban-backfill.mjs`) ; étendre `runBatchedRpc`
-en variante keyset OU petite boucle dédiée (tranché au plan).
+`withTimeout` par lot + garde de non-progression (si le curseur n'augmente
+pas → `IngestError`) + garde `maxIterations`. **Pas de `retryTransient` par
+lot** (corrigé /review P1) : parité STRICTE avec `runBatchedRpc` (jumeau
+FINESS/Ameli prouvé prod, qui n'a JAMAIS eu de retry par lot) — un retry
+asymétrique sur ce seul pilote, chemin critique de cron, créerait une
+divergence non prouvée. Un blip transport ⇒ `IngestError` fail-loud (run
+échoué visible, `rpps`+cache intacts car AVANT le swap) plutôt qu'un retry
+masquant. Helper `callRpcOne` factorisé (boucle keyset dédiée `runKeysetRpc`,
+pas une variante de `runBatchedRpc` — contrats de retour distincts).
 
 ## 5. Robustesse / gestion d'erreurs
 
-- Fail-loud : erreur SQL réelle → `IngestError("validate", …)` (jamais avalée),
-  `rpps` + cache intacts (échec avant swap). Distinguer transitoire (retry) vs
-  structurel (throw).
+- Fail-loud sur erreur SQL/transport réelle de la RPC `ban_join` →
+  `IngestError("validate", …)` (jamais avalée), `rpps` + cache intacts (échec
+  AVANT le swap). Pas de distinction transitoire/structurel par lot (pas de
+  retry — cf. §4, parité `runBatchedRpc`) : toute erreur de lot = échec dur.
 - Classe d'échec « 4 jours » supprimée structurellement : plus d'index lourd ni
   d'API dans le cron.
-- Garde de convergence : curseur non croissant après N lots → `IngestError`
-  (jamais de boucle infinie ; pas de hang silencieux — `withTimeout`).
-- Sentinelles de cohérence (style FINESS) : 0 ligne posée alors que cache
-  contient 266 k éligibles plausibles → suspicion dérive de clé → throw loud.
+- Garde de convergence : curseur non croissant / `maxIterations` dépassé →
+  `IngestError` (jamais de boucle infinie ; pas de hang silencieux —
+  `withTimeout` par lot). `p_limit` absent/invalide → `IngestError` (sinon
+  garde `maxIterations` aveugle). Tableau vide ≠ page vide → `IngestError`.
+- **Sentinelle de cohérence « 0 posé » : NON bloquante** (corrigé /review P1 —
+  fonction pure `evaluateBanJoinOutcome`, testée). « 0 posé » est AMBIGU
+  (légitime : nouvelles adresses non encore cachées ; OU pathologique : dérive
+  de clé / cache wipé S-1) et indistinguable sans faux positif → un `throw`
+  re-bloquerait un cron sain (viole « BAN ne bloque JAMAIS le cron », CLAUDE.md).
+  On NE throw PAS ; les **3** sous-cas anormaux (cache-check KO / cache accepté
+  >0 / cache lisible mais 0 accepté) émettent TOUS `console.warn` +
+  `ingest_log` "partial" (audit DB durable, jamais muet — anti-S-1).
 - Observabilité : log JSON 1 ligne (compteurs vus / posés / non-cachés /
   iterations), audit `ingest_log`.
 

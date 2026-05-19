@@ -728,20 +728,24 @@ export async function runKeysetRpc(
       );
     }
     const row = Array.isArray(data) ? data[0] : data;
-    if (
-      row == null ||
-      typeof row !== "object" ||
-      !("last_id" in row) ||
-      !("applied" in row) ||
-      typeof (row as { applied: unknown }).applied !== "number"
-    ) {
+    if (row == null || typeof row !== "object" || !("last_id" in row) || !("applied" in row)) {
       throw new IngestError(
         "validate",
         `${rpcName} returned an unexpected shape instead of { last_id, applied } — RPC contract regression`,
       );
     }
-    const lastId = (row as { last_id: number | null }).last_id;
-    const applied = (row as { applied: number }).applied;
+    // Un seul cast après narrowing de présence ; les types sont ensuite
+    // validés explicitement. `last_id` DOIT être number|null (le `null` = page
+    // vide terminale ; un string casserait `lastId <= after` en comparaison
+    // lexicographique → garde de non-progression aveugle — asymétrie fermée
+    // /review P1 LOW). `applied` DOIT être un number (compteur de posés).
+    const { last_id: lastId, applied } = row as { last_id: unknown; applied: unknown };
+    if ((lastId !== null && typeof lastId !== "number") || typeof applied !== "number") {
+      throw new IngestError(
+        "validate",
+        `${rpcName} returned an unexpected shape instead of { last_id, applied } — RPC contract regression`,
+      );
+    }
     totalApplied += applied;
     if (lastId == null) return { totalApplied, iterations: iter };
     if (lastId <= after) {
