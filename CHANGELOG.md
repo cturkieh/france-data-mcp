@@ -54,6 +54,26 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Changed
 
+- **Refonte BAN → `ban_join` (pose ensembliste keyset, prouvée prod).** Le
+  step BAN du cron RPPS (build d'index Unicode-lourd via RPC PostgREST +
+  géocodage API) était **structurellement impossible** : Supabase plafonne
+  tout appel Client API à 60 s en dur (réfuté prod run #26087010166). Le
+  cache `geocoded_addresses` (266 049 adresses) étant rempli hors cron
+  (`ban-backfill.mjs`, inchangé), il devient « une table à joindre » comme
+  FINESS. Nouvelle RPC `ingest_apply_rpps_ban_join_batch(p_after, p_limit)`
+  (migration `20260519T180000`, `statement_timeout='55s'`) : `UPDATE
+  rpps_staging ⟕ geocoded_addresses` sur la clé d'adresse normalisée,
+  **piloté curseur keyset** (jamais sentinelle — prouvé prod : sentinelle =
+  re-scan quadratique → 57014 fin de parcours ; keyset = ~4,8 s/lot
+  constant, ~11 min linéaire). Helper générique `runKeysetRpc`
+  (`shared.ts`, garde de non-progression + anti-hang). Steps 5c/5d/5e
+  supprimés du cron ; `runBanGeocodeStep` + 8 constantes/imports BAN
+  supprimés. Garde-fous parité étendus à `ban_join` (6ᵉ site prédicat,
+  expression via WRAPPER, `statement_timeout` ≤55 s) + test d'intégration
+  DB locale (HIT/MISS/non-éligible/idempotence). Hors scope (décidé PO) :
+  `ban-backfill.mjs` inchangé ; automatisation backfill = feature
+  ultérieure (dette tracée : dépend des index BAN sur `rpps`). Spec/plan :
+  `docs/plans/2026-05-19-ban-join-{design,implementation-plan}.md`.
 - **Garde-fou `scripts/ingest/staging-parity.test.ts` durci** (le guard
   `indexColumnLists` historique était AVEUGLE : global et partiel
   normalisent à la même liste de colonnes `geog`). Nouvelle assertion
