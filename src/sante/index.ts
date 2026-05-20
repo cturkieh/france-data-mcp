@@ -65,6 +65,12 @@ export {
 } from "./finess-categories.js";
 
 export {
+  nafsForFamille,
+  isNafCompatibleWithFamille,
+  DELIBERATELY_NO_NAF,
+} from "./naf-finess-mapping.js";
+
+export {
   getFinessInRadius,
   getFinessByCategorie,
   getFinessByNumFiness,
