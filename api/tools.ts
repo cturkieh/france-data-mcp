@@ -456,6 +456,14 @@ function coerceNumber(v: unknown, paramName: string): number | undefined {
  *
  * Reconnu : `true`/`false`, `"true"`/`"false"` (insensible casse), `"1"`/`"0"`,
  * `1`/`0`. Tout autre input est rejeté avec throw — pas de fallback silencieux.
+ *
+ * Convention projet pour `undefined` ET `null` : retourne `undefined` (= param
+ * absent du payload). Le JSON Schema `type:"boolean"` ne tolère pas `null`,
+ * donc cette branche n'est atteinte que par des clients non conformes ; la
+ * traiter comme « absent » est cohérent avec les 8 call sites historiques
+ * (`dedupe_by_ps`, `include_etudiants`, `include_agents_publics`,
+ * `include_specialites`, `compare_national`, `precise_only`…). Ne pas
+ * divergencer pour un seul param = règle uniforme préservée.
  */
 function coerceBoolean(v: unknown, paramName: string): boolean | undefined {
   if (v === undefined || v === null) return undefined;

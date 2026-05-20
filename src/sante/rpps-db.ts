@@ -776,23 +776,33 @@ function toResult(row: RawRppsRow): RppsResult {
     coords,
     distance_km: metersToKm(row.distance_meters),
     // V0.12.0 — contrat `RawRppsRow.geo_precision` documenté l.670 ; throw
-    // bruyant si valeur hors set canonique (drift RPC = contract violation).
-    ...(coords && row.geo_precision ? assertGeoPrecision(row) : warnIfAnomalous(row)),
+    // bruyant si valeur hors set canonique (drift RPC = contract violation),
+    // warn si invariant amont violé (precision sans coords).
+    ...(coords && row.geo_precision ? assertGeoPrecision(row) : warnIfAnomalous(row, coords)),
     telephone: row.telephone,
   };
 }
 
 /**
  * V0.12.0 — branche d'omission : signale (warn, pas throw) l'invariant violé
- * `!coords && row.geo_precision` (la RPC émet une précision géo sur un PS
- * sans coordonnées). Retourne `{}` pour le spread (= omission propre). Sans
- * ce warn, l'anomalie amont serait mangée sans signal observabilité — règle
- * CLAUDE.md projet : zéro catch silencieux côté lib `src/`.
+ * « la RPC émet une précision géo sur un PS sans coordonnées exploitables ».
+ * Retourne `{}` pour le spread (= omission propre). Sans ce warn, l'anomalie
+ * amont serait mangée sans signal observabilité — règle CLAUDE.md projet :
+ * zéro catch silencieux côté lib `src/`.
+ *
+ * Pourquoi recevoir `coords` (déjà calculé) et pas juste `row.geom` : un
+ * `row.geom` présent mais aux `coordinates` malformés produit aussi
+ * `coords=null` et la même anomalie ; on warn sur le RÉSULTAT visible
+ * (`coords=null`), pas sur la cause syntaxique. Couvre les 2 cas avec un
+ * seul check.
  */
-function warnIfAnomalous(row: RawRppsRow): Record<string, never> {
-  if (row.geo_precision && row.geom === null) {
+function warnIfAnomalous(
+  row: RawRppsRow,
+  coords: { lat: number; lon: number } | null,
+): Record<string, never> {
+  if (row.geo_precision && !coords) {
     console.warn(
-      `[france-data-mcp] rpps row id=${row.id} rpps_id=${row.rpps_id} a geo_precision="${row.geo_precision}" mais geom=null — anomalie contrat RPC (un PS sans coords ne devrait pas porter de précision géo). Champ public omis.`,
+      `[france-data-mcp] rpps row id=${row.id} rpps_id=${row.rpps_id} a geo_precision="${row.geo_precision}" mais coords=null (geom=${row.geom === null ? "null" : "malformé"}) — anomalie contrat RPC (un PS sans coords exploitables ne devrait pas porter de précision géo). Champ public omis.`,
     );
   }
   return {};
@@ -810,9 +820,9 @@ function warnIfAnomalous(row: RawRppsRow): Record<string, never> {
  * ferme la porte côté migrations, ce check ferme côté lib npm contre une
  * panne déployée hors guard.
  *
- * Logue aussi l'invariant violé `!coords && row.geo_precision` (M1 silent-
- * failure-hunter) : la RPC ne devrait pas émettre une précision géo sur un PS
- * sans coordonnées — drift amont mangé sans warn devient observable.
+ * Branche jumelle `warnIfAnomalous` (ci-dessus) gère le cas inverse (précision
+ * sans coords exploitables) — invariant amont observable également, mais warn
+ * plutôt que throw (le champ public sera omis cohérent avec coords:null).
  */
 function assertGeoPrecision(row: RawRppsRow): { geo_precision: PerResultGeoPrecision } {
   const value = row.geo_precision;

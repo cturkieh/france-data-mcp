@@ -561,6 +561,35 @@ describe("getRppsInRadius — geo_precision par PS (V0.12.0 — 3 valeurs)", () 
     }
   });
 
+  // /review P2 code-reviewer finding 2 : le warn doit aussi fire si geom est
+  // présent mais coordinates malformé (typeof !== "number"). Avant fix, le
+  // check `row.geom === null` strict laissait passer ce cas silencieux ; le
+  // refactor recevant `coords` (résultat visible côté caller) couvre les 2.
+  it("warn si geom présent mais coordinates malformé (precision sans coords exploitables)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockRpc.mockResolvedValueOnce({
+        data: [
+          {
+            ...baseRow,
+            // Simule une RPC ayant produit un payload corrompu : geom non-null
+            // mais coordinates[0] non-number (drift JSON-RPC, mock fautif…).
+            geom: { type: "Point", coordinates: ["X" as unknown as number, 50] },
+            geo_precision: "adresse",
+          },
+        ],
+        error: null,
+      });
+      const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+      expect(out.results[0]?.coords).toBeNull();
+      expect(out.results[0]?.geo_precision).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[france-data-mcp]"));
+      expect(warnSpy.mock.calls[0]?.[0]).toMatch(/malformé/);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   // M4 silent-failure-hunter : preciseOnly=true + 0 résultat = ambiguïté
   // entre zone désertique et régression GiST partielle (cf. CLAUDE.md
   // gotcha rpps-in-radius-57014-partial-gist-decouple). Note metadata

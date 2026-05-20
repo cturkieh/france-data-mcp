@@ -1235,6 +1235,46 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
     const tool = findTool("professionnel_by_rpps");
     expect(tool?.description).toMatch(/site/);
   });
+
+  // /review P2 S2 silent-failure-hunter — test bout-en-bout boundary MCP :
+  // un caller JSON-RPC envoyant `precise_only: "yes"` (non reconnu par
+  // `coerceBoolean`) doit recevoir une RangeError actionnable au lieu de
+  // retomber silencieusement en mode hybride. Couvre la classe que
+  // `coerceBoolean(args.precise_only, ...)` ferme par construction.
+  it("professionnels_rpps_in_radius : precise_only non reconnu → RangeError au boundary handler (silent failure fermé)", async () => {
+    const tool = findTool("professionnels_rpps_in_radius");
+    await expect(
+      tool?.handler({
+        center: { lat: 48.85, lon: 2.35 },
+        radius_km: 5,
+        precise_only: "yes",
+      }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it("professionnels_rpps_in_radius : precise_only stringifié reconnu (`'true'`/`'1'`) → accepté (compat JSON-RPC)", async () => {
+    // Cohérent avec coerceBoolean : "true"/"1" sont des inputs JSON-RPC
+    // stringifiés courants. Throw une RangeError ici régresserait un usage
+    // légitime. On vérifie juste que le handler n'avale pas — passer un
+    // mock supabase coûteux serait excessif (la lib est testée séparément
+    // dans rpps-db.test.ts). On accepte un échec downstream (env DB absent)
+    // qui prouve que le boundary a passé sans throw RangeError.
+    const tool = findTool("professionnels_rpps_in_radius");
+    let caughtError: unknown;
+    try {
+      await tool?.handler({
+        center: { lat: 48.85, lon: 2.35 },
+        radius_km: 5,
+        precise_only: "true",
+      });
+    } catch (e) {
+      caughtError = e;
+    }
+    // Si erreur, ce n'est PAS une RangeError sur precise_only.
+    if (caughtError instanceof RangeError) {
+      expect(caughtError.message).not.toMatch(/precise_only/);
+    }
+  });
 });
 
 describe("collision nomenclatures Ameli/ANS (régression B3)", () => {
