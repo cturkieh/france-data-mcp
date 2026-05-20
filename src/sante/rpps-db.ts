@@ -113,6 +113,19 @@ export interface RppsInRadiusInput {
    */
   categorieCodes?: string[];
   limit?: number;
+  /**
+   * V0.12.0 — si true, court-circuite entièrement la CTE centroïde commune
+   * (`geom_source='commune_centroid'`) côté RPC. Seuls les PS géolocalisés
+   * précisément (`geo_precision: "adresse"` BAN ou `"etablissement_finess"`
+   * FINESS) sont retournés, triés par `distance_km` exacte au m près.
+   *
+   * Trade-off : ~31,5 % des PS RPPS (V0.12.0, ratio courant) sont invisibles
+   * en mode `preciseOnly=true`. Cas d'usage : rayons courts (<3 km),
+   * classement intra-commune fiable, "médecins à <500 m d'une adresse".
+   *
+   * Défaut false (mode hybride V0.11.0 — précise + centroïde résiduelle).
+   */
+  preciseOnly?: boolean;
 }
 
 export interface RppsParSpecialiteDeptInput {
@@ -459,6 +472,12 @@ export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQue
     p_mode_exercice_codes: input.modeExerciceCodes ?? [],
     p_categorie_codes: input.categorieCodes ?? [],
     p_limit: limit + 1,
+    // V0.12.0 — explicite false (pas undefined silencieux qui laisserait la
+    // valeur DEFAULT de la fonction PG faire foi). Le test unit verrouille
+    // la propagation : un caller npm passant `{ preciseOnly: true }` DOIT
+    // recevoir 100% de précis ; un caller historique sans le flag DOIT
+    // recevoir le mode hybride V0.11.0 inchangé.
+    p_precise_only: input.preciseOnly === true,
   });
 
   if (error) throw new Error(formatRpcError("rpps_in_radius", error));
@@ -648,6 +667,17 @@ interface RawRppsRow {
   telephone: string | null;
   geom: GeoJsonPoint | null;
   distance_meters?: number | null;
+  /**
+   * Précision géo retournée par la RPC (V0.12.0+). Présent sur :
+   * - `rpps_in_radius` (V0.11.0 — déjà émis depuis migration 20260516T050000)
+   * - `rpps_par_specialite_dept`, `rpps_search_by_name`, `rpps_lookup_by_id`
+   *   (V0.12.0 — migrations 20260520T11/12/13)
+   *
+   * Absent / null → mapping `toResult` omet le champ public `geo_precision`
+   * (pas de hardcode silencieux "centroide_commune" qui masquerait une
+   * régression DB ou un mock incomplet ; cohérent avec `coords: null`).
+   */
+  geo_precision?: "adresse" | "etablissement_finess" | "centroide_commune" | null;
 }
 
 interface RawRppsCompactRow {
@@ -716,7 +746,12 @@ function toResult(row: RawRppsRow): RppsResult {
     },
     coords,
     distance_km: metersToKm(row.distance_meters),
-    ...(coords ? { geo_precision: "centroide_commune" as const } : {}),
+    // V0.12.0 : précision lue de la RPC (3 valeurs possibles : adresse,
+    // etablissement_finess, centroide_commune). Si la RPC ne renvoie pas la
+    // colonne (legacy / mock incomplet), on omet le champ — préférer omettre
+    // à hardcoder "centroide_commune" qui masquerait une régression DB ou
+    // un test mock non aligné (cohérent avec `coords: null`).
+    ...(coords && row.geo_precision ? { geo_precision: row.geo_precision } : {}),
     telephone: row.telephone,
   };
 }

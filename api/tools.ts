@@ -1582,7 +1582,16 @@ export const TOOLS: McpTool[] = [
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
   {
     name: "professionnels_rpps_in_radius",
-    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT} Coords au centroïde commune (~3 km moyenne) — pour précision adresse, croiser \`num_finess\` retourné avec \`etablissement_by_finess\`. Chaque PS géolocalisé porte \`geo_precision: "centroide_commune"\` : tous les PS d'une même commune ont la MÊME \`distance_km\` — ne pas l'utiliser pour classer/choisir un PS individuel, uniquement comme filtre de zone. Le filtrage rayon est résolu à la granularité **commune** (une commune est incluse si son centroïde représentatif est dans le rayon), cohérent avec la précision centroïde ci-dessus ; tri par distance commune croissante. Si la commune la plus proche contient plus de \`limit\` PS correspondants, le résultat est intégralement puisé dans cette commune (les communes plus lointaines sont évincées du même \`limit\`) : augmenter \`limit\` ou resserrer les filtres pour couvrir plusieurs communes. ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
+    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT}
+
+**Précision géo HYBRIDE par résultat (V0.12.0)** — chaque PS porte un champ \`geo_precision\` :
+- \`"adresse"\` : coords BAN (rue / lieu-dit / bâtiment) — \`distance_km\` exacte au m près, classement individuel fiable.
+- \`"etablissement_finess"\` : coords du site FINESS joint via \`num_finess\` — \`distance_km\` exacte au site.
+- \`"centroide_commune"\` : centroïde commune (~3 km moyenne) — \`distance_km\` IDENTIQUE pour tous les PS de la même commune, NE PAS utiliser pour classer/choisir un PS individuel (uniquement filtre de zone).
+
+Couverture courante : ~68,5 % des PS sont précis (\`adresse\` + \`etablissement_finess\`), ~31,5 % en \`centroide_commune\` résiduel. Pour FORCER 100 % de résultats précis (rayons courts <3 km, classement intra-commune fiable), passer \`precise_only: true\` — la branche centroïde est entièrement exclue, le tri est strictement par distance exacte BAN/FINESS.
+
+En mode hybride (défaut), les deux branches sont fusionnées et triées globalement par \`distance_km\`. Au sein d'une même commune via la branche centroïde résiduelle, les PS partagent la même \`distance_km\` et sont retournés en bloc (granularité commune pour cette branche uniquement) ; la branche précise est, elle, à granularité adresse. ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1624,6 +1633,12 @@ export const TOOLS: McpTool[] = [
           type: "number",
           description: "Nombre max de résultats retournés (défaut serveur 100).",
         },
+        precise_only: {
+          type: "boolean",
+          description:
+            'V0.12.0 — si true, ne renvoie QUE les PS géolocalisés précisément (`geo_precision` ∈ {`adresse` BAN, `etablissement_finess` FINESS}, `distance_km` exacte au m près). Exclut les ~31,5 % de PS au centroïde commune. Pertinent pour les rayons courts (<3 km), le classement intra-commune fiable, ou les recherches type "médecins à <500 m d\'une adresse". Défaut false (mode hybride : précis + centroïde commune résiduel).',
+          default: false,
+        },
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["center", "radius_km"],
@@ -1645,12 +1660,18 @@ export const TOOLS: McpTool[] = [
       if (modeExerciceCodes) input.modeExerciceCodes = modeExerciceCodes;
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
+      // V0.12.0 — strict `=== true` : un client MCP passant `"true"`/`1`/`{}`
+      // par étourderie NE doit PAS basculer en precise_only silencieusement
+      // (cohérent avec le pattern `args.precise_only === true` ailleurs).
+      if (args.precise_only === true) input.preciseOnly = true;
       return withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]);
     },
   },
   {
     name: "professionnels_rpps_par_dept",
-    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_CATEGORIES_HINT} ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
+    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_CATEGORIES_HINT}
+
+Chaque PS géolocalisé porte un champ \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} (V0.12.0) — lire ce champ pour savoir si \`coords\` est précise (BAN rue/bâtiment ou site FINESS) ou approximative (centroïde commune ~3 km, ne pas l'utiliser pour distinguer 2 PS d'une même commune). ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1971,7 +1992,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "rpps_search_by_name",
-    description: `Recherche fuzzy de professionnels de santé par identité (nom + prénom optionnel + département optionnel). Utilise un matching trigram (pg_trgm) tolérant aux accents, typos et variations d'orthographe. Tri par pertinence décroissante. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).\n\nUsage typique : "trouve-moi le Dr Martin à Paris" (nom obligatoire, prénom et département facultatifs pour affiner). Sans département, recherche nationale : des homonymes exacts (ex. plusieurs « Pierre Martin ») obtiennent TOUS le même \`match_score\` ~1.0 — il ne les départage pas. Pour désambiguïser, filtrer par \`departement\` (ou affiner avec \`prénom\`). \`truncated: true\` signifie que d'autres résultats existent : restreindre la requête plutôt que parcourir.\n\n**Format de retour** : objet \`{ count, truncated, results, query_metadata }\` aligné sur les autres tools RPPS de listing. Chaque résultat porte un champ \`match_score\` ∈ [0..1] (score trigram pg_trgm). Un score < 0.5 indique souvent une homonymie partielle à confirmer côté caller.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
+    description: `Recherche fuzzy de professionnels de santé par identité (nom + prénom optionnel + département optionnel). Utilise un matching trigram (pg_trgm) tolérant aux accents, typos et variations d'orthographe. Tri par pertinence décroissante. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).\n\nUsage typique : "trouve-moi le Dr Martin à Paris" (nom obligatoire, prénom et département facultatifs pour affiner). Sans département, recherche nationale : des homonymes exacts (ex. plusieurs « Pierre Martin ») obtiennent TOUS le même \`match_score\` ~1.0 — il ne les départage pas. Pour désambiguïser, filtrer par \`departement\` (ou affiner avec \`prénom\`). \`truncated: true\` signifie que d'autres résultats existent : restreindre la requête plutôt que parcourir.\n\n**Format de retour** : objet \`{ count, truncated, results, query_metadata }\` aligné sur les autres tools RPPS de listing. Chaque résultat porte un champ \`match_score\` ∈ [0..1] (score trigram pg_trgm). Un score < 0.5 indique souvent une homonymie partielle à confirmer côté caller.\n\nChaque PS géolocalisé porte un champ \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} (V0.12.0) — lire ce champ pour évaluer la fiabilité des \`coords\` (précises BAN/FINESS vs centroïde commune ~3 km).\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2015,7 +2036,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnel_by_rpps",
-    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe "81" qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). \`include_freshness\` n'affecte que les retours \`source: "db"\` (FHIR ANS étant live). ${RPPS_CGU_NOTICE}`,
+    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe "81" qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site, chaque site porte sa propre \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} — V0.12.0 ; un PS peut donc avoir un site précis FINESS et un autre au centroïde commune). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). \`include_freshness\` n'affecte que les retours \`source: "db"\` (FHIR ANS étant live). ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {

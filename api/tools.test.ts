@@ -1174,14 +1174,57 @@ describe("densite_professionnels_sante — exemples savoir_faire_code (régressi
   });
 });
 
-describe("radius PS — distance non discriminante intra-commune (régression B5)", () => {
-  for (const name of ["professionnels_in_radius", "professionnels_rpps_in_radius"]) {
-    it(`${name} : la description explique geo_precision + distance identique par commune`, () => {
-      const tool = findTool(name);
-      expect(tool?.description).toMatch(/geo_precision/);
-      expect(tool?.description).toMatch(/m[êe]me .*commune|ne (pas|discrimine)/i);
-    });
-  }
+describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () => {
+  it("professionnels_in_radius (Ameli) : description rappelle geo_precision centroïde + distance non discriminante", () => {
+    const tool = findTool("professionnels_in_radius");
+    expect(tool?.description).toMatch(/geo_precision/);
+    // Ameli reste 100 % centroïde commune — l'avertissement intra-commune
+    // s'applique à TOUS les PS, c'est le contrat global du tool.
+    expect(tool?.description).toMatch(/m[êe]me .*commune|ne (pas|discrimine)/i);
+  });
+
+  it("professionnels_rpps_in_radius (V0.12.0) : description documente les 3 valeurs geo_precision + precise_only", () => {
+    const tool = findTool("professionnels_rpps_in_radius");
+    expect(tool?.description).toMatch(/geo_precision/);
+    // Les 3 valeurs publiques doivent apparaître pour éclairer le LLM caller.
+    expect(tool?.description).toContain("adresse");
+    expect(tool?.description).toContain("etablissement_finess");
+    expect(tool?.description).toContain("centroide_commune");
+    expect(tool?.description).toContain("precise_only");
+    // L'avertissement intra-commune reste pertinent UNIQUEMENT pour la branche
+    // centroïde résiduelle (mode hybride). Une régression qui retire la
+    // narration "même commune" ferait perdre cette nuance au caller.
+    expect(tool?.description).toMatch(/m[êe]me commune|intra-commune/i);
+  });
+
+  it("professionnels_rpps_in_radius : inputSchema expose precise_only:boolean (default false)", () => {
+    const tool = findTool("professionnels_rpps_in_radius");
+    const props = tool?.inputSchema.properties as
+      | Record<string, { type: string; description: string; default?: boolean }>
+      | undefined;
+    expect(props?.precise_only?.type).toBe("boolean");
+    expect(props?.precise_only?.default).toBe(false);
+    expect(props?.precise_only?.description).toMatch(/adresse|etablissement_finess/);
+  });
+
+  it("professionnels_rpps_par_dept (V0.12.0) : description mentionne geo_precision par-résultat", () => {
+    const tool = findTool("professionnels_rpps_par_dept");
+    expect(tool?.description).toMatch(/geo_precision/);
+    expect(tool?.description).toContain("adresse");
+    expect(tool?.description).toContain("etablissement_finess");
+    expect(tool?.description).toContain("centroide_commune");
+  });
+
+  it("rpps_search_by_name (V0.12.0) : description mentionne geo_precision par-résultat", () => {
+    const tool = findTool("rpps_search_by_name");
+    expect(tool?.description).toMatch(/geo_precision/);
+  });
+
+  it("professionnel_by_rpps (V0.12.0) : description mentionne geo_precision par-site (PS multi-sites)", () => {
+    const tool = findTool("professionnel_by_rpps");
+    expect(tool?.description).toMatch(/geo_precision/);
+    expect(tool?.description).toMatch(/site/);
+  });
 });
 
 describe("collision nomenclatures Ameli/ANS (régression B3)", () => {

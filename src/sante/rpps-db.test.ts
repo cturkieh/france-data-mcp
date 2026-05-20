@@ -366,9 +366,12 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
     expect(result.results[0]).not.toHaveProperty("match_score");
   });
 
-  it("attache rppsSearchByNameMetadata (note trigram dans query_metadata.notes)", async () => {
+  it("attache rppsSearchByNameMetadata (note trigram + alias mixte V0.12.0)", async () => {
     const result = await getRppsByName({ nom: "Martin" });
-    expect(result.query_metadata?.geo_precision).toBe("centroide_commune_ans");
+    // V0.12.0 : RPPS expose désormais 3 valeurs geo_precision par-résultat
+    // (adresse, etablissement_finess, centroide_commune). Le metadata global
+    // change d'alias pour refléter la précision mixte.
+    expect(result.query_metadata?.geo_precision).toBe("centroide_commune_ans_mixte");
     const notesJoined = result.query_metadata?.notes.join(" ") ?? "";
     expect(notesJoined).toContain("similarité trigram");
     expect(notesJoined).toContain("match_score");
@@ -451,8 +454,8 @@ describe("countRppsByCommune (V0.9)", () => {
   });
 });
 
-describe("getRppsInRadius — geo_precision par PS (B5)", () => {
-  const radiusRow = makeRawRppsRow({
+describe("getRppsInRadius — geo_precision par PS (V0.12.0 — 3 valeurs)", () => {
+  const baseRow = makeRawRppsRow({
     id: 7,
     prenom: "PIERRE",
     profession_code: "10",
@@ -466,17 +469,57 @@ describe("getRppsInRadius — geo_precision par PS (B5)", () => {
     distance_meters: 1830,
   });
 
-  it("marque geo_precision=centroide_commune sur chaque PS géolocalisé", async () => {
-    mockRpc.mockResolvedValueOnce({ data: [radiusRow], error: null });
-    const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
-    expect(out.results[0]?.geo_precision).toBe("centroide_commune");
-  });
+  for (const precision of ["adresse", "etablissement_finess", "centroide_commune"] as const) {
+    it(`propage geo_precision="${precision}" tel que renvoyé par la RPC (pas de hardcode)`, async () => {
+      mockRpc.mockResolvedValueOnce({
+        data: [{ ...baseRow, geo_precision: precision }],
+        error: null,
+      });
+      const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+      expect(out.results[0]?.geo_precision).toBe(precision);
+    });
+  }
 
-  it("omet geo_precision quand les coords sont absentes", async () => {
-    mockRpc.mockResolvedValueOnce({ data: [{ ...radiusRow, geom: null }], error: null });
+  it("omet geo_precision quand les coords sont absentes (même si raw renvoie une valeur)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [{ ...baseRow, geom: null, geo_precision: "centroide_commune" }],
+      error: null,
+    });
     const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
     expect(out.results[0]?.coords).toBeNull();
     expect(out.results[0]?.geo_precision).toBeUndefined();
+  });
+
+  it("omet geo_precision quand RPC ne renvoie pas la colonne (legacy / mock incomplet, pas de hardcode silencieux)", async () => {
+    // Régression : avant V0.12.0, `toResult` hardcodait `centroide_commune` ce
+    // qui masquait toute régression DB qui aurait arrêté de renvoyer la
+    // colonne. Désormais on omet — symptôme observable côté caller.
+    mockRpc.mockResolvedValueOnce({ data: [baseRow], error: null });
+    const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+    expect(out.results[0]?.coords).not.toBeNull();
+    expect(out.results[0]?.geo_precision).toBeUndefined();
+  });
+
+  it("propage preciseOnly=true au paramètre RPC p_precise_only", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    await getRppsInRadius({
+      center: { lat: 50.63, lon: 3.06 },
+      radiusKm: 5,
+      preciseOnly: true,
+    });
+    expect(mockRpc).toHaveBeenCalledWith(
+      "rpps_in_radius",
+      expect.objectContaining({ p_precise_only: true }),
+    );
+  });
+
+  it("preciseOnly absent ou false → p_precise_only=false (défaut explicite, pas undefined silencieux)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+    expect(mockRpc).toHaveBeenCalledWith(
+      "rpps_in_radius",
+      expect.objectContaining({ p_precise_only: false }),
+    );
   });
 });
 

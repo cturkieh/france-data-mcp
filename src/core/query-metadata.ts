@@ -27,6 +27,7 @@ export type GeoPrecision =
   | "lambert93_natif_finess"
   | "centroide_commune_ameli"
   | "centroide_commune_ans"
+  | "centroide_commune_ans_mixte"
   | "centroide_commune_cds"
   | "structure_finess";
 
@@ -34,12 +35,24 @@ export type GeoPrecision =
  * Précision géo exposée au niveau de CHAQUE PS (champ `geo_precision` des
  * résultats Ameli/RPPS), volontairement plus générique que `GeoPrecision`
  * (source-spécifique, au niveau global du résultat). Co-localisée avec
- * `coords`/`distance_km` pour rappeler, par PS, que tous les PS d'une même
- * commune partagent ces valeurs (centroïde) et ne peuvent pas être classés
- * entre eux par `distance_km`. Le détail source reste dans
- * `query_metadata.geo_precision`.
+ * `coords`/`distance_km`.
+ *
+ * - `adresse` : coords BAN (rue, lieu-dit ou bâtiment) — `distance_km` exacte
+ *   au m près, classement individuel fiable. Issu de `geom_source='ban_address'`
+ *   en base (table `rpps`).
+ * - `etablissement_finess` : coords FINESS DREES du site joint via `num_finess`
+ *   — `distance_km` exacte au site (bâtiment FINESS). Issu de
+ *   `geom_source='finess_join'` en base.
+ * - `centroide_commune` : centroïde commune (~3 km moyenne) — `distance_km`
+ *   IDENTIQUE pour tous les PS d'une même commune, NON discriminante pour
+ *   classer/choisir un PS individuel (utiliser uniquement comme filtre de
+ *   zone). Issu de `geom_source='commune_centroid'` en base.
+ *
+ * RPPS expose les 3 valeurs depuis V0.12.0 (post-PR #23 FINESS join + ban_join
+ * keyset). Ameli expose uniquement `centroide_commune`. Le détail source
+ * reste dans `query_metadata.geo_precision`.
  */
-export type PerResultGeoPrecision = "centroide_commune";
+export type PerResultGeoPrecision = "adresse" | "etablissement_finess" | "centroide_commune";
 
 /**
  * Méthode de calcul des distances exposées dans `distance_km`.
@@ -65,6 +78,8 @@ const SOURCE_NOTE: Record<GeoPrecision, string> = {
     "FINESS DREES (sync bimestrielle) — référentiel peut avoir 1-2 mois de retard sur le terrain pour les structures émergentes (CPTS récentes, MSP en agrément). Cross-check ARS / Service Public si nécessaire.",
   centroide_commune_ans:
     "Coordonnées RPPS/ANS = centroïde commune (~3 km moyenne). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour une précision adresse, croiser num_finess avec etablissement_by_finess.",
+  centroide_commune_ans_mixte:
+    'Coordonnées RPPS HYBRIDES (V0.12.0) : la précision est MIXTE par résultat — lire `geo_precision` PAR PS. ~68,5 % sont précis (`"adresse"` BAN rue/bâtiment ou `"etablissement_finess"` site FINESS joint via num_finess) avec `distance_km` exacte ; ~31,5 % restent au centroïde commune (`"centroide_commune"`, ~3 km, `distance_km` non discriminante intra-commune). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour FORCER 100 % de résultats précis (rayons courts <3 km, classement individuel), passer `precise_only: true` côté tool radius.',
   structure_finess:
     "Liste rattachée à un FINESS site. Le mode_exercice révèle la nature du lien (libéral / salarié). Couverture RPPS quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts.",
   centroide_commune_cds:
@@ -86,6 +101,15 @@ const HAVERSINE_NOTE =
  */
 export const CENTROIDE_COMMUNE_RESOLUTION_KM = 3;
 
+/**
+ * Précisions purement centroïde (100 % des résultats au centroïde commune).
+ * NB : `centroide_commune_ans_mixte` EST volontairement EXCLU — en mode hybride
+ * RPPS V0.12.0, la branche `precise` (`adresse`+`etablissement_finess`) garde
+ * des distances exactes même à radius_km < 3 km, donc la note générique
+ * `subCommuneRadiusNote` (« TOUS les PS d'une commune sont inclus ou exclus
+ * en bloc ») serait FAUSSE et ferait pivoter à tort le caller vers FINESS.
+ * Une note dédiée nuancée est injectée par `rppsRadiusMetadata` si applicable.
+ */
 const CENTROID_PRECISIONS = new Set<GeoPrecision>([
   "centroide_commune_ameli",
   "centroide_commune_ans",
@@ -140,10 +164,31 @@ export const finessRadiusMetadata = (): QueryMetadata =>
 export const finessByCategorieMetadata = (): QueryMetadata =>
   buildMetadata("lambert93_natif_finess", false);
 
-export const rppsRadiusMetadata = (radiusKm?: number): QueryMetadata =>
-  buildMetadata("centroide_commune_ans", true, radiusKm);
+/**
+ * Metadata pour `rpps_in_radius` : depuis V0.12.0 la précision est MIXTE par
+ * résultat (lire `geo_precision` de chaque PS — 3 valeurs possibles). La note
+ * globale pointe vers cette colonne et explique le filtre `precise_only`.
+ *
+ * À radius_km < CENTROIDE_COMMUNE_RESOLUTION_KM, on ne déclenche PAS la note
+ * générique (la branche précise reste fiable) — on injecte une note nuancée
+ * spécifique au mode hybride RPPS.
+ */
+export const rppsRadiusMetadata = (radiusKm?: number): QueryMetadata => {
+  const md = buildMetadata("centroide_commune_ans_mixte", true, radiusKm);
+  if (radiusKm !== undefined && radiusKm < CENTROIDE_COMMUNE_RESOLUTION_KM) {
+    md.notes.push(
+      `radius_km=${radiusKm} < ${CENTROIDE_COMMUNE_RESOLUTION_KM} km : la branche centroïde commune résiduelle (~31,5 % des PS) reste imprécise (TOUS les PS d'une commune passent ou non en bloc, distance_km non discriminante intra-commune). La branche précise (~68,5 %, geo_precision ∈ {adresse, etablissement_finess}) reste fiable. Pour un résultat strictement classable et 100 % précis à ce rayon, passer precise_only: true (ou élargir radius_km ≥ ${CENTROIDE_COMMUNE_RESOLUTION_KM} pour un mix hybride exploitable).`,
+    );
+  }
+  return md;
+};
 
-export const rppsDeptMetadata = (): QueryMetadata => buildMetadata("centroide_commune_ans", false);
+/**
+ * Listing départemental : pas de spatial — la précision MIXTE PAR RÉSULTAT
+ * reste pertinente (pour les callers qui croisent ensuite `coords`/`num_finess`).
+ */
+export const rppsDeptMetadata = (): QueryMetadata =>
+  buildMetadata("centroide_commune_ans_mixte", false);
 
 export const rppsEtablissementMetadata = (): QueryMetadata =>
   buildMetadata("structure_finess", false);
@@ -159,7 +204,7 @@ export const cdsRadiusMetadata = (radiusKm?: number): QueryMetadata =>
  * indique souvent une homonymie partielle.
  */
 export const rppsSearchByNameMetadata = (): QueryMetadata => {
-  const md = buildMetadata("centroide_commune_ans", false);
+  const md = buildMetadata("centroide_commune_ans_mixte", false);
   md.notes.push(
     "Résultats triés par similarité trigram (pg_trgm) sur nom + prénom. Le champ `match_score` (0..1) indique la pertinence — un score < 0.5 = homonymie partielle, à confirmer côté caller.",
     "Sur un nom TRÈS commun sans `departement` ni `prenom`, les candidats sont plafonnés (cap interne) AVANT le tri de pertinence : le résultat est alors un ÉCHANTILLON non exhaustif (et non strictement les plus pertinents au niveau national). Préciser `departement=` ou `prenom=` pour un résultat exhaustif et stable.",
