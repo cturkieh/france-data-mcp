@@ -368,9 +368,6 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
 
   it("attache rppsSearchByNameMetadata (note trigram + alias mixte V0.12.0)", async () => {
     const result = await getRppsByName({ nom: "Martin" });
-    // V0.12.0 : RPPS expose désormais 3 valeurs geo_precision par-résultat
-    // (adresse, etablissement_finess, centroide_commune). Le metadata global
-    // change d'alias pour refléter la précision mixte.
     expect(result.query_metadata?.geo_precision).toBe("centroide_commune_ans_mixte");
     const notesJoined = result.query_metadata?.notes.join(" ") ?? "";
     expect(notesJoined).toContain("similarité trigram");

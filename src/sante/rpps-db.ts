@@ -676,8 +676,11 @@ interface RawRppsRow {
    * Absent / null → mapping `toResult` omet le champ public `geo_precision`
    * (pas de hardcode silencieux "centroide_commune" qui masquerait une
    * régression DB ou un mock incomplet ; cohérent avec `coords: null`).
+   *
+   * Réutilise `PerResultGeoPrecision` pour éviter une 2e source de vérité
+   * du union des 3 valeurs (ajouter une 4e précision → 1 seul site à patcher).
    */
-  geo_precision?: "adresse" | "etablissement_finess" | "centroide_commune" | null;
+  geo_precision?: PerResultGeoPrecision | null;
 }
 
 interface RawRppsCompactRow {

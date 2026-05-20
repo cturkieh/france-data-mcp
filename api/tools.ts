@@ -1660,10 +1660,15 @@ En mode hybride (défaut), les deux branches sont fusionnées et triées globale
       if (modeExerciceCodes) input.modeExerciceCodes = modeExerciceCodes;
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
-      // V0.12.0 — strict `=== true` : un client MCP passant `"true"`/`1`/`{}`
-      // par étourderie NE doit PAS basculer en precise_only silencieusement
-      // (cohérent avec le pattern `args.precise_only === true` ailleurs).
-      if (args.precise_only === true) input.preciseOnly = true;
+      // V0.12.0 — `coerceBoolean` traite les `"true"`/`1` stringifiés (JSON-RPC
+      // tolérant) en RangeError plutôt que retomber silencieusement en hybride.
+      // Pattern dominant du fichier (dedupe_by_ps, include_etudiants,
+      // compare_national…) ; ne pas remettre `args.precise_only === true` raw
+      // qui rouvrirait la classe de silent failure que coerceBoolean a été
+      // créée pour fermer (cf. son commentaire l.451).
+      if (coerceBoolean(args.precise_only, "precise_only") === true) {
+        input.preciseOnly = true;
+      }
       return withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]);
     },
   },

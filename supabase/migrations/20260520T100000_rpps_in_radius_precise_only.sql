@@ -84,10 +84,13 @@ BEGIN
     LIMIT p_limit
   ),
   -- Branche centroïde RÉSIDUELLE (geom_source='commune_centroid' uniquement).
-  -- Court-circuit V0.12.0 via `NOT p_precise_only` :
-  --   precise_only=true → communes vide → centroid vide → UNION ALL=precise only.
-  -- Le planner peut estimer 0 ligne dès le SELECT communes (constant FALSE +
-  -- ST_DWithin) et éliminer entièrement le sous-arbre LATERAL.
+  -- Court-circuit V0.12.0 via `NOT p_precise_only` : le scan matview reste
+  -- effectué (Postgres n'élimine pas la CTE à la planification sur un param
+  -- BOOL, custom plan ou non), mais le `NOT p_precise_only` court-circuite
+  -- l'évaluation par-ligne avant le ST_DWithin coûteux → 0 ligne produite,
+  -- LATERAL non exécuté en aval. Overhead mesuré ~1-3 ms sur ~36K rangées
+  -- de la matview indexée — négligeable vs un IF/ELSE plpgsql qui ajouterait
+  -- 2 branches RETURN QUERY redondantes pour gagner ~2 ms.
   communes AS (
     SELECT c.code_insee AS cc_insee, ST_Distance(c.geog, v_point) AS cdist
     FROM rpps_commune_centroids c

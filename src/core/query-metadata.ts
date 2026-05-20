@@ -76,6 +76,7 @@ const SOURCE_NOTE: Record<GeoPrecision, string> = {
     "Coordonnées Ameli = centroïde commune (~3 km moyenne). Adapté à l'analyse de densité médicale, pas au géocodage adresse.",
   lambert93_natif_finess:
     "FINESS DREES (sync bimestrielle) — référentiel peut avoir 1-2 mois de retard sur le terrain pour les structures émergentes (CPTS récentes, MSP en agrément). Cross-check ARS / Service Public si nécessaire.",
+  /** @deprecated V0.12.0 — Plus aucune RPC RPPS ne produit cet alias ; toutes ont migré vers `centroide_commune_ans_mixte` (précision hybride par-résultat). Conservé pour rétrocompat de tout client qui aurait caché la string `geo_precision` côté query_metadata (Claude.ai, Cursor, agents loggant). Ne pas réintroduire dans un nouveau call site. */
   centroide_commune_ans:
     "Coordonnées RPPS/ANS = centroïde commune (~3 km moyenne). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour une précision adresse, croiser num_finess avec etablissement_by_finess.",
   centroide_commune_ans_mixte:
@@ -109,6 +110,7 @@ export const CENTROIDE_COMMUNE_RESOLUTION_KM = 3;
  * `subCommuneRadiusNote` (« TOUS les PS d'une commune sont inclus ou exclus
  * en bloc ») serait FAUSSE et ferait pivoter à tort le caller vers FINESS.
  * Une note dédiée nuancée est injectée par `rppsRadiusMetadata` si applicable.
+ * `centroide_commune_ans` y reste pour rétrocompat (deprecated, plus produit).
  */
 const CENTROID_PRECISIONS = new Set<GeoPrecision>([
   "centroide_commune_ameli",
@@ -116,15 +118,22 @@ const CENTROID_PRECISIONS = new Set<GeoPrecision>([
   "centroide_commune_cds",
 ]);
 
+/**
+ * Gate partagée seuil radius_km. Factorisée pour qu'une dérive du seuil
+ * (passage à 2 km après mesure prod, par ex.) ne nécessite qu'un seul patch
+ * au lieu de 2 sites silencieusement désynchronisés (`isSubCommuneRadius`
+ * pour le warning Ameli/CDS générique, `rppsRadiusMetadata` pour le warning
+ * RPPS mixte nuancé — contenu différent, gate identique).
+ */
+function isShortRadius(radiusKm: number | undefined): radiusKm is number {
+  return radiusKm !== undefined && radiusKm < CENTROIDE_COMMUNE_RESOLUTION_KM;
+}
+
 function isSubCommuneRadius(
   precision: GeoPrecision,
   radiusKm: number | undefined,
 ): radiusKm is number {
-  return (
-    radiusKm !== undefined &&
-    radiusKm < CENTROIDE_COMMUNE_RESOLUTION_KM &&
-    CENTROID_PRECISIONS.has(precision)
-  );
+  return isShortRadius(radiusKm) && CENTROID_PRECISIONS.has(precision);
 }
 
 const subCommuneRadiusNote = (radiusKm: number): string =>
@@ -175,7 +184,7 @@ export const finessByCategorieMetadata = (): QueryMetadata =>
  */
 export const rppsRadiusMetadata = (radiusKm?: number): QueryMetadata => {
   const md = buildMetadata("centroide_commune_ans_mixte", true, radiusKm);
-  if (radiusKm !== undefined && radiusKm < CENTROIDE_COMMUNE_RESOLUTION_KM) {
+  if (isShortRadius(radiusKm)) {
     md.notes.push(
       `radius_km=${radiusKm} < ${CENTROIDE_COMMUNE_RESOLUTION_KM} km : la branche centroïde commune résiduelle (~31,5 % des PS) reste imprécise (TOUS les PS d'une commune passent ou non en bloc, distance_km non discriminante intra-commune). La branche précise (~68,5 %, geo_precision ∈ {adresse, etablissement_finess}) reste fiable. Pour un résultat strictement classable et 100 % précis à ce rayon, passer precise_only: true (ou élargir radius_km ≥ ${CENTROIDE_COMMUNE_RESOLUTION_KM} pour un mix hybride exploitable).`,
     );
@@ -197,11 +206,12 @@ export const cdsRadiusMetadata = (radiusKm?: number): QueryMetadata =>
   buildMetadata("centroide_commune_cds", true, radiusKm);
 
 /**
- * Métadonnées pour `rpps_search_by_name` : recherche fuzzy par identité. La
- * géo précision reste celle d'ANS (centroïde commune) ; l'ajout sémantique est
- * la note de scoring trigram qui prévient le caller que les résultats sont
- * triés par pertinence et non par exactitude, et qu'un `match_score < 0.5`
- * indique souvent une homonymie partielle.
+ * Métadonnées pour `rpps_search_by_name` : recherche fuzzy par identité.
+ * Depuis V0.12.0, la géo précision est MIXTE par-résultat (lire `geo_precision`
+ * de chaque PS — `adresse`/`etablissement_finess`/`centroide_commune`). L'ajout
+ * sémantique propre à ce tool reste la note de scoring trigram : résultats
+ * triés par pertinence et non par exactitude, un `match_score < 0.5` signale
+ * souvent une homonymie partielle à confirmer côté caller.
  */
 export const rppsSearchByNameMetadata = (): QueryMetadata => {
   const md = buildMetadata("centroide_commune_ans_mixte", false);
