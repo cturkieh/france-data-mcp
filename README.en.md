@@ -79,21 +79,14 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.12.0 — in production.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 1,189 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`. **68.5% of RPPS practitioners precisely geolocated** (FINESS building or BAN street/building) — **now exposed to MCP clients** through per-result `geo_precision` ∈ {`adresse`, `etablissement_finess`, `centroide_commune`} on 4 RPPS tools, plus a `precise_only: true` filter for short-radius/intra-commune lookups.
+✅ **v0.12.3 — in production.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 1,206 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`. **68.5% of RPPS practitioners precisely geolocated** (FINESS building or BAN street) — exposed via per-result `geo_precision` + `precise_only` filter on 4 RPPS tools.
 
-Full history: [CHANGELOG](CHANGELOG.md).
+Full history: [CHANGELOG](CHANGELOG.md). Project discipline: prove every root cause against production / official docs BEFORE coding the fix.
 
 ### Roadmap
 
-> Shipped versions in the [CHANGELOG](CHANGELOG.md). Project discipline: prove every root cause against production / official docs BEFORE coding the fix.
-
-- [x] **Robustness** — drop redundant `rpps_insee_idx`, validate ANS nomenclature, validate IGN coords _(shipped v0.10.6)_
-- [x] **`ban_join` keyset** — set-based cache→`rpps` placement via keyset cursor (never sentinel), 1,065,291 rows posted on prod run #13 _(shipped v0.11.0)_
-- [x] **BAN acceptance by precision** — gate by `result_type` ∈ {housenumber, street, locality} instead of binary 0.7 score threshold; **+77,000 practitioners** moved from commune centroid (~3 km) to their exact address _(shipped v0.11.0)_
-- [x] **Phase 1 — BAN delta measurement** — `rpps_measure_ban_to_geocode` RPC logged in `ingest_log` at each cron, sizes future Phase 2 _(shipped v0.11.0)_
-- [x] **Expose `geo_precision` to MCP clients** — the precision gained by PR #23 + `ban_join` was previously overwritten to `centroide_commune` by the TS mapping; 4 RPCs now propagate the 3 real values, `precise_only` parameter added, LLM-facing descriptions rewritten, multi-migration mapping parity guard _(shipped v0.12.0)_
-- [ ] **Phase 2 — recurring re-geocoding automation** — bounded BAN step inline in the RPPS cron (diff staging vs old rpps → POST BAN on delta only → upsert cache). Architecture decision pending Phase 1 production numbers (1-2 cycles)
-- [ ] **v1.0+** — DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics), DPC (PS training history)
+- [ ] **Phase 2 — recurring re-geocoding automation**: bounded BAN step inline in the RPPS cron (diff staging → POST BAN on delta → upsert cache). Pending Phase 1 production numbers.
+- [ ] **v1.0+**: DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics), DPC (PS training history).
 
 ---
 
