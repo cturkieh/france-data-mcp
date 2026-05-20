@@ -16,8 +16,12 @@ docs/superpowers/
 .env*.local
 .phase2-case4-baseline.json
 
-# Config locale Claude Code (contient le pattern accès prod — NE JAMAIS committer)
-.claude/settings.local.json
-
-# Scheduled tasks lock (ScheduleWakeup harness)
-.claude/scheduled_tasks.lock
+# Claude Code — config harness locale, jamais committée par défaut.
+# Allowlist explicite : pour versionner un fichier `.claude/<x>` délibéré
+# (hook custom, skill partagée), ajouter une exception `!.claude/<x>` ci-dessous.
+# Sans allowlist, un futur fichier généré par Claude Code (settings.local,
+# scheduled_tasks.lock, cache/, transcripts/…) ne sera plus committé par
+# étourderie. NE JAMAIS retirer ce pattern sans audit du contenu généré.
+.claude/*
+# Pas d'exception aujourd'hui — si tu veux partager un hook avec l'équipe,
+# l'ajouter ici avec `!.claude/hooks/foo.sh` puis vérifier `git check-ignore -v`.

@@ -1210,15 +1210,32 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
     expect(props?.precise_only?.default).toBe(false);
     // V0.12.1 — la description du param décrit l'EFFET du switch sans
     // re-documenter la sémantique complète du tool (anti-drift inter-edits).
-    // La sémantique détaillée (3 valeurs geo_precision, ~31,5 % résiduel,
-    // rayons courts) est dans la description du tool, asserée plus haut.
-    expect(props?.precise_only?.description).toMatch(/centroide commune|distance_km/i);
+    // Le regex précédent `/centroide commune|distance_km/i` était tautologique :
+    // (1) `centroide` sans accent ne matche pas `centroïde` (ï) de la description ;
+    // (2) `distance_km` apparaît partout côté tools.ts. → 4 assertions
+    // structurelles d'intention + borne anti-rebond drift.
+    const desc = props?.precise_only?.description ?? "";
+    expect(desc, "doit nommer l'action d'exclusion").toMatch(/exclut|exclu/i);
+    expect(desc, "doit nommer ce qui est exclu (centroïde commune, ï accentué OK)").toMatch(
+      /centro[iï]de\s+commune/i,
+    );
+    expect(desc, "doit nommer le gain (distance_km exacte)").toMatch(/distance_km/);
+    expect(desc, "doit expliciter le défaut false").toMatch(/d[ée]faut\s+false/i);
+    expect(desc.length, "anti-rebond drift : param ne doit pas re-documenter le tool").toBeLessThan(
+      300,
+    );
   });
 
   // M3 silent-failure-hunter : asymétrie corrigée — les 4 tools RPPS de
   // listing/lookup vérifient TOUS la présence des 3 valeurs canoniques
   // (pas juste le mot `geo_precision` qui laissait passer une description
   // appauvrie à `"NB: champ geo_precision présent."`).
+  //
+  // V0.12.1 : les 3 tools listés consomment désormais TOUS le constant
+  // `RPPS_GEO_PRECISION_HINT` (DRY). Une régression sur la constante
+  // propagerait silencieusement sur les 3 sites — cette boucle est le
+  // garde-fou central, complété par un test direct sur la constante (cf.
+  // « RPPS_GEO_PRECISION_HINT constant »).
   const TOOLS_VERIFYING_3_VALUES = [
     "professionnels_rpps_par_dept",
     "rpps_search_by_name",
@@ -1226,7 +1243,7 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
   ] as const;
 
   for (const name of TOOLS_VERIFYING_3_VALUES) {
-    it(`${name} (V0.12.0) : description mentionne les 3 valeurs canoniques geo_precision`, () => {
+    it(`${name} : description mentionne les 3 valeurs canoniques geo_precision`, () => {
       const tool = findTool(name);
       expect(tool?.description).toMatch(/geo_precision/);
       expect(tool?.description).toContain("adresse");
@@ -1235,9 +1252,46 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
     });
   }
 
-  it("professionnel_by_rpps (V0.12.0) : description précise la sémantique par-site (PS multi-sites)", () => {
+  // V0.12.1 silent-failure-hunter I2 — garde explicite sur la constante
+  // partagée par les 3 tools. Sans ce test, un dev qui modifie la constante
+  // pour retirer/renommer UNE valeur propagerait silencieusement aux 3
+  // consommateurs simultanément (impossible à distinguer d'un edit volontaire).
+  it("RPPS_GEO_PRECISION_HINT : les 3 valeurs canoniques + nuance ~3 km centroïde présentes dans les 3 callsites", () => {
+    const hintConsumers = [
+      "professionnels_rpps_par_dept",
+      "rpps_search_by_name",
+      "professionnel_by_rpps",
+    ];
+    for (const name of hintConsumers) {
+      const desc = findTool(name)?.description ?? "";
+      // Les 3 valeurs canoniques arrivent par le hint partagé.
+      expect(desc, `${name} doit contenir adresse`).toContain("adresse");
+      expect(desc, `${name} doit contenir etablissement_finess`).toContain("etablissement_finess");
+      expect(desc, `${name} doit contenir centroide_commune`).toContain("centroide_commune");
+      // Garde le ~3 km (chiffre stable du contrat — un changement = update
+      // délibéré, jamais un drift inter-edits).
+      expect(desc, `${name} doit garder la nuance ~3 km centroïde`).toMatch(
+        /centro[iï]de\s+commune.*~?\s*3\s*km/i,
+      );
+    }
+  });
+
+  it("professionnel_by_rpps : description précise la sémantique par-site (PS multi-sites)", () => {
     const tool = findTool("professionnel_by_rpps");
     expect(tool?.description).toMatch(/site/);
+  });
+
+  // V0.12.1 silent-failure-hunter S3 — verrouille l'invariant « rpps_dans_etablissement
+  // documente coords:null + pointe le pivot géoloc ». Un dev qui simplifie la
+  // description en futur edit pourrait retirer cette ligne sans rien casser
+  // (asymétrie LLM des 5 tools RPPS = par_dept/search_by_name/by_rpps/in_radius
+  // exposent geo_precision, dans_etablissement non — il DOIT documenter pourquoi).
+  it("rpps_dans_etablissement : description annonce coords/distance_km = null + pointe etablissement_by_finess", () => {
+    const desc = findTool("rpps_dans_etablissement")?.description ?? "";
+    expect(desc, "doit annoncer null sur coords/distance_km").toMatch(
+      /(coords|distance_km).*null|null.*(coords|distance_km)/i,
+    );
+    expect(desc, "doit pointer le pivot géoloc").toContain("etablissement_by_finess");
   });
 
   // /review P2 S2 silent-failure-hunter — test bout-en-bout boundary MCP :

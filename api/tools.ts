@@ -105,10 +105,18 @@ const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.
 const RPPS_INCLUDE_CATEGORIES_HINT = `Catégorie par défaut : Civil (C, ~97 % — libéraux, salariés privés, hospitaliers contractuels). Opt-in : \`include_agents_publics: true\` ajoute Agents publics (M, ~0,3 % — PH titulaires, ARS, CNAM, Éducation nationale, PMI, militaires SSA) ; \`include_etudiants: true\` ajoute Étudiants (E, ~2,5 % — internes, externes, élèves IDE/SF). Réf : ${TRE_R09_URL}.`;
 
 /**
- * Hint partagé par les 3 tools RPPS de listing qui exposent `geo_precision`
- * PAR résultat (variante courte). Le tool `professionnels_rpps_in_radius`
+ * Hint partagé par les 3 tools RPPS de listing/lookup qui exposent
+ * `geo_precision` PAR résultat (variante courte) :
+ * `professionnels_rpps_par_dept`, `rpps_search_by_name`,
+ * `professionnel_by_rpps`. Le tool `professionnels_rpps_in_radius`
  * documente la sémantique étendue (precise_only + branches hybrides +
- * couverture %) inline et n'utilise PAS ce hint court (intent volontaire).
+ * couverture %) inline et n'utilise PAS ce hint court — intent volontaire,
+ * la nuance étendue est spécifique au cas spatial.
+ *
+ * Garde-fou : tout retrait de ce hint dans un des 3 callsites OU toute
+ * modification des 3 valeurs canoniques est attrapée par le test
+ * `radius PS — geo_precision documenté (régression B5)` dans
+ * `api/tools.test.ts` (boucle `TOOLS_VERIFYING_3_VALUES`).
  */
 const RPPS_GEO_PRECISION_HINT = `Chaque résultat géolocalisé porte \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} — lire ce champ pour évaluer la fiabilité des \`coords\` (précise BAN/FINESS au m près vs centroïde commune ~3 km, non discriminant intra-commune).`;
 
@@ -2059,7 +2067,7 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
   },
   {
     name: "professionnel_by_rpps",
-    description: `Récupère la fiche complète d'un PS par identifiant national (\`rpps_id\` / IDNPS, 11 ou 12 chiffres — IDs émis depuis 2020 ont un préfixe \`"81"\` = 12 chars ; anciens IDs = 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 par site, avec sa propre \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} — un même PS peut donc cumuler un site précis FINESS et un site au centroïde commune).\n\nFallback automatique sur l'API FHIR ANS live (\`gateway.api.esante.gouv.fr/fhir/v2\`) si non trouvé en base locale (snapshot mensuel J-30 max). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (live). \`include_freshness\` n'affecte que \`source: "db"\`. ${RPPS_CGU_NOTICE}`,
+    description: `Récupère la fiche complète d'un PS par identifiant national (\`rpps_id\` / IDNPS, 11 ou 12 chiffres — IDs émis depuis 2020 ont un préfixe \`"81"\` = 12 chars ; anciens IDs = 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 par site, chacun avec sa propre \`geo_precision\` — un même PS peut donc cumuler un site précis FINESS et un site au centroïde commune).\n\n${RPPS_GEO_PRECISION_HINT}\n\nFallback automatique sur l'API FHIR ANS live (\`gateway.api.esante.gouv.fr/fhir/v2\`) si non trouvé en base locale (snapshot mensuel J-30 max). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (live). \`include_freshness\` n'affecte que \`source: "db"\`. ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
