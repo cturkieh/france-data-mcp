@@ -14,6 +14,7 @@ import {
   runBatchedRpc,
   runKeysetRpc,
   shortCircuitIfSameChecksum,
+  writeIngestLog,
 } from "./shared.js";
 
 /**
@@ -278,33 +279,153 @@ describe("runBatchedRpc — borne anti-hang (perCallTimeoutMs)", () => {
   });
 });
 
+// Contrat audit `forced` : `SELECT * FROM ingest_log WHERE forced=true` doit
+// retourner UNIQUEMENT les runs ops déclenchés via FORCE_REINGEST, jamais le
+// bruit des crons normaux. D'où les 3 garde-fous below (force=true → set ;
+// force=false ou défaut → reste undefined).
 describe("shortCircuitIfSameChecksum — levier force", () => {
   const baseLog = (): IngestLogEntry =>
     ({ source: "rpps", started_at: "t0", status: "failed", csv_url: "u" }) as IngestLogEntry;
 
-  it("force=true : retourne false MÊME si checksums identiques, SANS muter log ni écrire (audit intact)", async () => {
+  it("force=true + checksums identiques : retourne false, log.forced=true, pas de bascule skip", async () => {
     const log = baseLog();
-    // force=true sort AVANT writeIngestLog → aucun I/O DB, branche pure.
     const short = await shortCircuitIfSameChecksum(log, "deadbeef", "deadbeef", "rpps", true);
     expect(short).toBe(false);
-    // log non touché : pas de bascule en skip success.
+    expect(log.forced).toBe(true);
     expect(log.status).toBe("failed");
     expect(log.skip_reason).toBeUndefined();
     expect(log.finished_at).toBeUndefined();
   });
 
-  it("force=false + checksum différent : retourne false (pas de short-circuit, branche pure)", async () => {
+  it("force=false + checksum différent : retourne false, log.forced reste undefined", async () => {
     const log = baseLog();
     const short = await shortCircuitIfSameChecksum(log, "aaaa", "bbbb", "rpps", false);
     expect(short).toBe(false);
     expect(log.skip_reason).toBeUndefined();
+    expect(log.forced).toBeUndefined();
   });
 
-  it("force=false + pas de lastSha : retourne false (1er run, branche pure)", async () => {
+  it("force=false + pas de lastSha (1er run) : retourne false, log.forced reste undefined", async () => {
     const log = baseLog();
     const short = await shortCircuitIfSameChecksum(log, null, "bbbb", "rpps");
     expect(short).toBe(false);
     expect(log.skip_reason).toBeUndefined();
+    expect(log.forced).toBeUndefined();
+  });
+});
+
+describe("writeIngestLog — retry défensif PGRST204 (review P1 silent-failure-hunter)", () => {
+  const baseEntry = (overrides: Partial<IngestLogEntry> = {}): IngestLogEntry => ({
+    source: "rpps",
+    started_at: "t0",
+    status: "success",
+    ...overrides,
+  });
+
+  it("PGRST204 + forced=true → retry sans forced → succès + warn (migration en transition)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([
+      { code: "PGRST204", message: "Could not find the 'forced' column" },
+      null, // retry success
+    ]);
+    await writeIngestLog(baseEntry({ forced: true }), client);
+    expect(insert).toHaveBeenCalledTimes(2);
+    // 1er appel : payload avec forced=true (échoue)
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({ forced: true });
+    // 2e appel (retry) : payload SANS forced
+    expect(insert.mock.calls[1]?.[0]).not.toHaveProperty("forced");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("PGRST204");
+    expect(errSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("PGRST204 + forced=true → retry échoue aussi → console.error (audit perdu mais run préservé)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([
+      { code: "PGRST204", message: "col missing" },
+      { code: "PGRST200", message: "other failure" },
+    ]);
+    await writeIngestLog(baseEntry({ forced: true }), client);
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0]?.[0]).toContain("retry failed");
+    errSpy.mockRestore();
+  });
+
+  it("PGRST204 sans forced (autre colonne manquante) → pas de retry → console.error direct", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([
+      { code: "PGRST204", message: "Could not find some other column" },
+    ]);
+    await writeIngestLog(baseEntry(), client);
+    // Pas de forced dans entry → pas de retry, fallback direct au console.error.
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(errSpy.mock.calls[0]?.[0]).toContain("failed to write ingest_log");
+    errSpy.mockRestore();
+  });
+
+  it("autre erreur (non-PGRST204) → pas de retry → console.error direct (comportement legacy préservé)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([{ code: "23505", message: "unique violation" }]);
+    await writeIngestLog(baseEntry({ forced: true }), client);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
+  });
+
+  it("succès au 1er appel → aucun log, aucune retry (chemin nominal)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([null]);
+    await writeIngestLog(baseEntry({ forced: true }), client);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("PGRST204 + ban_eligible_distinct (autre champ récent) → retry sans ce champ → succès", async () => {
+    // Garde-fou contre régression de la classe close en V0.12.2 : tout champ
+    // optionnel listé dans PGRST204_RECOVERABLE_FIELDS doit déclencher le retry.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([
+      { code: "PGRST204", message: "col missing: ban_eligible_distinct" },
+      null,
+    ]);
+    await writeIngestLog(baseEntry({ ban_eligible_distinct: 42 }), client);
+    expect(insert).toHaveBeenCalledTimes(2);
+    expect(insert.mock.calls[0]?.[0]).toMatchObject({ ban_eligible_distinct: 42 });
+    expect(insert.mock.calls[1]?.[0]).not.toHaveProperty("ban_eligible_distinct");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("ban_eligible_distinct");
+    expect(errSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("PGRST204 + plusieurs champs recoverable → retry sans aucun → warn liste tous les droppés", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([{ code: "PGRST204", message: "col missing" }, null]);
+    await writeIngestLog(
+      baseEntry({ forced: true, ban_eligible_distinct: 100, ban_to_geocode_distinct: 50 }),
+      client,
+    );
+    expect(insert).toHaveBeenCalledTimes(2);
+    const retryPayload = insert.mock.calls[1]?.[0] as Record<string, unknown>;
+    expect(retryPayload).not.toHaveProperty("forced");
+    expect(retryPayload).not.toHaveProperty("ban_eligible_distinct");
+    expect(retryPayload).not.toHaveProperty("ban_to_geocode_distinct");
+    const warnMessage = warnSpy.mock.calls[0]?.[0] as string;
+    expect(warnMessage).toContain("forced");
+    expect(warnMessage).toContain("ban_eligible_distinct");
+    expect(warnMessage).toContain("ban_to_geocode_distinct");
+    warnSpy.mockRestore();
   });
 });
 

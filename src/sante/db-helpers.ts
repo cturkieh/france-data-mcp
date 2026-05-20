@@ -234,3 +234,24 @@ export function buildListQueryResult<TRaw, TOut, TMeta>(
     query_metadata: metadata,
   };
 }
+
+/**
+ * Defense-in-depth pour les RPC qui doivent retourner ≤ 1 row (lookup par PK) :
+ * `null` si vide, première row sinon — warne LOUD avec `hint` si N > 1 (sans
+ * throw — le caller continue avec la 1re row plutôt que de planter sur un
+ * glitch de PK). Le format du warn est load-bearing (grep ops) : ne pas
+ * reformuler les call-sites.
+ */
+export function expectSingleRow<T>(
+  rpc: string,
+  rows: T[],
+  identifier: string,
+  hint: string,
+): T | null {
+  if (rows.length > 1) {
+    console.warn(
+      `[france-data-mcp] ${rpc}(${identifier}): RPC returned ${rows.length} rows (expected ≤ 1) — picking first. ${hint}`,
+    );
+  }
+  return rows[0] ?? null;
+}

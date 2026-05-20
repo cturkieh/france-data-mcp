@@ -198,6 +198,16 @@ export interface IngestLogEntry {
    * cycle). NULL : idem ci-dessus.
    */
   ban_to_geocode_distinct?: number | null;
+  /**
+   * `true` si ce run a été déclenché par le levier opérationnel
+   * `FORCE_REINGEST=1` (workflow_dispatch) — le run s'exécute pleinement
+   * comme un cron normal MAIS le flag persiste dans l'audit. Permet de
+   * distinguer un run ops forcé d'un run cron automatique en SQL :
+   * `SELECT * FROM ingest_log WHERE forced=true`. Set par
+   * `shortCircuitIfSameChecksum(..., force=true)` (chokepoint unique).
+   * NULL/false (default) = run cron normal. Backlog P1 V0.12.2.
+   */
+  forced?: boolean;
 }
 
 /**
@@ -214,13 +224,61 @@ function getIngestLogClient(): SupabaseClient {
   return createClient(url, key, { auth: { persistSession: false } });
 }
 
-export async function writeIngestLog(entry: IngestLogEntry): Promise<void> {
-  const supabase = getIngestLogClient();
+/**
+ * Champs optionnels de `IngestLogEntry` susceptibles de causer PGRST204 quand
+ * le code TS est déployé AVANT que la migration ajoutant la colonne ne soit
+ * appliquée en prod. **Tout ajout de champ optionnel dans `IngestLogEntry`
+ * DOIT être listé ici** jusqu'à propagation de sa migration (puis peut être
+ * retiré). Sans cet allow-list, un PGRST204 future-proof perdrait silencieusement
+ * l'ENTRÉE complète de `ingest_log` (régression de la classe close en V0.12.2).
+ */
+const PGRST204_RECOVERABLE_FIELDS = [
+  "forced", // migration 20260520T140000 (V0.12.2)
+  "ban_eligible_distinct", // migration 20260520T000000
+  "ban_to_geocode_distinct", // migration 20260520T000000
+] as const satisfies ReadonlyArray<keyof IngestLogEntry>;
+
+export async function writeIngestLog(
+  entry: IngestLogEntry,
+  client?: Pick<SupabaseClient, "from">,
+): Promise<void> {
+  // Client injecté pour les tests (cf. pattern `runCanaryCheck`). En prod,
+  // default `getIngestLogClient()` — untyped supabase pour ce point d'écriture
+  // (les types générés ne connaissent pas encore les colonnes récentes).
+  const supabase = client ?? getIngestLogClient();
   const { error } = await supabase.from("ingest_log").insert(entry);
-  if (error) {
-    // We don't throw — failing to log shouldn't override the original ingest failure.
-    console.error(`[france-data-mcp] failed to write ingest_log: ${error.message}`);
+  if (!error) return;
+  // PGRST204 = column unknown côté PostgREST schema cache. Cas typique : un
+  // champ optionnel récent est passé dans le payload AVANT que sa migration
+  // ne soit appliquée en prod (fenêtre transitoire push code ↔ apply
+  // migration). On RETRY UNE FOIS sans les champs récents listés dans
+  // PGRST204_RECOVERABLE_FIELDS pour ne pas perdre l'audit complet du run
+  // (sinon `WHERE forced=true` ramène 0 et le log entier disparaît
+  // silencieusement de `ingest_log`). Les marqueurs sont sacrifiés mais le
+  // reste de l'entrée survit — diff manuel possible via les logs ops.
+  if (error.code === PGRST_COLUMN_CACHE_MISS) {
+    const legacyEntry: Partial<IngestLogEntry> = { ...entry };
+    const dropped: string[] = [];
+    for (const field of PGRST204_RECOVERABLE_FIELDS) {
+      if (legacyEntry[field] !== undefined) {
+        delete legacyEntry[field];
+        dropped.push(field);
+      }
+    }
+    if (dropped.length > 0) {
+      const retry = await supabase.from("ingest_log").insert(legacyEntry as IngestLogEntry);
+      if (!retry.error) {
+        console.warn(
+          `[france-data-mcp] writeIngestLog: PGRST204 — log écrit sans [${dropped.join(", ")}] (migration en transition ?).`,
+        );
+        return;
+      }
+      console.error(`[france-data-mcp] writeIngestLog retry failed: ${retry.error.message}`);
+      return;
+    }
   }
+  // We don't throw — failing to log shouldn't override the original ingest failure.
+  console.error(`[france-data-mcp] failed to write ingest_log: ${error.message}`);
 }
 
 /**
@@ -263,10 +321,12 @@ export async function getLastSuccessChecksum(source: IngestSource): Promise<stri
  *
  * `force=true` (levier opérationnel, ex. `FORCE_REINGEST` en
  * `workflow_dispatch`) NEUTRALISE le court-circuit : retourne `false`
- * immédiatement SANS toucher `log` ni écrire d'entrée skip — la ré-ingestion
- * complète se déroule et se loggue normalement (audit intact). Sert à
- * réappliquer un traitement aval (ex. cache BAN jamais posé) quand la source
- * n'a pas changé. Générique (chokepoint partagé) mais opt-in par caller.
+ * immédiatement SANS écrire d'entrée skip — la ré-ingestion complète se
+ * déroule et se loggue normalement (audit intact). Marque `log.forced=true`
+ * pour que le run forcé reste distinguable en audit (`SELECT * FROM
+ * ingest_log WHERE forced=true`) sans confusion avec un cron normal. Sert
+ * à réappliquer un traitement aval (ex. cache BAN jamais posé) quand la
+ * source n'a pas changé. Chokepoint unique du marqueur — opt-in par caller.
  *
  * Retourne `true` si le short-circuit s'est déclenché, `false` sinon.
  */
@@ -278,8 +338,11 @@ export async function shortCircuitIfSameChecksum(
   force = false,
 ): Promise<boolean> {
   if (force) {
-    // Helper générique : message agnostique du caller (ne nomme PAS la var
-    // d'env du caller, ce serait une inversion de couche).
+    // Set log.forced ici : le caller écrira le log en fin de run avec ce flag
+    // persisté (cf. JSDoc et `IngestLogEntry.forced`).
+    log.forced = true;
+    // Message agnostique du caller (ne nomme PAS la var d'env, inversion de
+    // couche).
     console.warn(
       `[${tag}] court-circuit same-checksum neutralisé (force) — ré-ingestion complète forcée`,
     );

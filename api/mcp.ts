@@ -160,13 +160,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     }
     res.status(200).json(isBatch ? responses : responses[0]);
   } catch (err) {
-    // Filet root : capture les exceptions qui throw HORS de la boucle batch
-    // (ex: extractIp/hashIp/extractUserAgent en cold start exotique, ou un
-    // accesseur req.body qui throw sur un body mal-formé). Sans ce filet,
-    // l'invariant "100% des 500 sont capturés par Sentry" serait cassé sur
-    // ces chemins très improbables mais possibles. console.error + Sentry.captureException
-    // garantis via captureMcpError. On re-throw pour que Vercel renvoie le 500.
     const message = err instanceof Error ? err.message : String(err);
+    // SyntaxError = JSON malformé caller-side (`req.body` getter @vercel/node
+    // throw quand Content-Type=application/json + payload non parseable) →
+    // -32700 Parse error (spec JSON-RPC 2.0 §5.1), status 400, SANS Sentry
+    // (faute caller, pas serveur — complète `beforeSendEvent` bot-noise drop
+    // en évitant l'appel). PAS de re-throw : Vercel renvoie la 400 propre.
+    if (err instanceof SyntaxError) {
+      console.warn(`[france-data-mcp] handler root: invalid JSON (${message})`);
+      // Réutilise le helper `error()` (ligne 501) — source unique de la shape
+      // JsonRpcError, évite la divergence si on ajoute des champs spec.
+      res.status(400).json(error(null, -32700, `Parse error: ${message}`));
+      return;
+    }
+    // Filet root pour les autres exceptions HORS boucle batch (ex: extractIp/
+    // hashIp/extractUserAgent en cold start exotique). Sans ce filet,
+    // l'invariant "100% des 500 sont capturés par Sentry" serait cassé.
     console.error(`[france-data-mcp] handler root error: ${message}`);
     captureMcpError(err, {
       method: "handler_root",

@@ -12,6 +12,7 @@ import {
   buildListQueryResult,
   clampLimit,
   expectRpcRows,
+  expectSingleRow,
   formatRpcError,
   trimOrNull,
   validateCoords,
@@ -195,18 +196,17 @@ export async function getFinessByNumFiness(numFiness: string): Promise<LookupRes
   if (error) {
     throw new Error(formatRpcError("finess_by_num_finess", error));
   }
+  // Defense-in-depth via `expectSingleRow` : la RPC a `LIMIT 1`, mais un
+  // deploy glitch qui le retirait ou un swap qui laissait des doublons
+  // doit surfacer LOUD (warn console.warn), pas silently picker la
+  // première row. Source unique du pattern dans `db-helpers.ts`.
   const rows = expectRpcRows<RawFinessRow>("finess_by_num_finess", data);
-  if (rows.length > 1) {
-    // The RPC has a `LIMIT 1` clause, but defense-in-depth: if a deploy
-    // glitch removed it, or if the table somehow had duplicate num_finess
-    // (PK is enforced by `finess_staging` but rename-swap relies on
-    // discipline), surface the violation loud instead of silently picking
-    // the first row.
-    console.warn(
-      `[france-data-mcp] finess_by_num_finess(${numFiness}): RPC returned ${rows.length} rows (expected ≤ 1) — picking the first. Investigate finess table for duplicate num_finess.`,
-    );
-  }
-  const first = rows[0];
+  const first = expectSingleRow(
+    "finess_by_num_finess",
+    rows,
+    numFiness,
+    "Investigate finess table for duplicate num_finess.",
+  );
   if (!first) {
     return lookupNotFound(
       numFiness,

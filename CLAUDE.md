@@ -33,6 +33,7 @@ intégration → reste parallèle/rapide. Tout nouveau test d'intégration touch
 - `RangeError` pour input invalide au boundary public (mappe JSON-RPC `-32602`).
 - `LookupResult<T>` discriminé pour distinguer "pas trouvé" vs "erreur API".
 - Tests `_resetXForTesting()` pour tout module avec état partagé.
+- **Lookup PK qui peut retourner ≤ 1 row → `expectSingleRow(rpc, rows, identifier, hint)`** (`db-helpers.ts`). Source unique du pattern « warne LOUD si N > 1, ne throw pas, picke la première » utilisé par `finess_by_num_finess` + `centres_sante_by_finess`. Le `hint` voyage dans le warn pour préserver les patterns grep ops (PAS reformuler les call-sites).
 - **Clé de déduplication d'identité = attributs de PERSONNE uniquement**, jamais d'attribut de SITE (`raison_sociale`, adresse). Un PS multi-sites partage une identité ; mettre un attribut de site dans la clé le scinde en faux doublons (régression P1). L'attribut de site voyage dans `adresse`/`sites[]`.
 - **Primitives génériques (texte, maths) → `core/`**, jamais `sante/`. `sante/` importe déjà `territoire/` : une primitive dans `sante/` consommée par `territoire/` crée une inversion de couche / cycle. Ré-export depuis l'ancien emplacement pour ne pas casser les consommateurs.
 
@@ -40,6 +41,7 @@ intégration → reste parallèle/rapide. Tout nouveau test d'intégration touch
 - `captureMcpError` / `captureMcpConfigWarning` avec fingerprint stable (`api/_lib/sentry.ts`).
 - Logs JSON 1 ligne/req via `logMcpEvent`. Rate limit Upstash 60/min/IP.
 - Anti-spoofing IP : dernier segment XFF (Vercel append en queue).
+- **`SyntaxError` dans le catch root `api/mcp.ts` → JSON-RPC `-32700 Parse error` (status 400) SANS `captureMcpError`** (V0.12.2). Faute caller (JSON body malformé via `@vercel/node` auto-parse) ≠ erreur serveur. La discrimination `err instanceof SyntaxError` AVANT le path Sentry est étroite et justifiée — toute autre exception (TypeError, ReferenceError, custom) reste capturée + re-throw (filet 100 % des 500 préservé). Test garde-fou `api/mcp-handler-parse-error.test.ts`.
 
 **Boundary (`api/_lib/args.ts`).**
 - Validators `requireXxxId` avec 3 branches (clé absente, type wrong, format wrong) via factor `requireIdPattern`.
@@ -50,6 +52,10 @@ intégration → reste parallèle/rapide. Tout nouveau test d'intégration touch
 3 sources : FINESS (bimestriel, ~95K), Ameli (hebdo, ~485K), RPPS (mensuel, ~2.23M). Pattern : download → SHA256 short-circuit si identique → COPY staging → validate → atomic swap → canary → ingest_log.
 
 **Service client typage** : pour toute RPC ajoutée par migration récente, utiliser `getUntypedServiceClient(source)` (sinon `tsc -p tsconfig.api.json` échoue, types Supabase pas regénérés).
+
+**Marqueur `forced` dans `ingest_log` (V0.12.2)** : un run déclenché via `FORCE_REINGEST=1` (workflow_dispatch) est marqué `forced=true` par `shortCircuitIfSameChecksum(..., force=true)` (chokepoint unique). Audit : `SELECT * FROM ingest_log WHERE forced=true`. Distingue un run ops manuel d'un cron normal — sinon perdu en audit quand checksums identiques.
+
+**Convention `PGRST204_RECOVERABLE_FIELDS` (V0.12.2)** : `writeIngestLog` retry défensif si PGRST204 sur un champ optionnel récent (fenêtre transitoire push code ↔ apply migration). **Tout nouvel ajout de champ optionnel dans `IngestLogEntry` DOIT être listé dans `PGRST204_RECOVERABLE_FIELDS` (`scripts/ingest/shared.ts`)** jusqu'à propagation de la migration en prod, puis peut être retiré. Sans cet allow-list, un PGRST204 perdrait silencieusement TOUTE l'entrée `ingest_log` du run (classe close en V0.12.2). Best-effort doc : appliquer la migration AVANT de déployer le code.
 
 ## Top gotchas DB
 

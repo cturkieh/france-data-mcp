@@ -4,6 +4,70 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.12.2] — 2026-05-20
+
+### Added
+
+- **Marqueur `forced` dans `ingest_log` (P1 backlog cleanup).** Un run
+  déclenché via `FORCE_REINGEST=1` (workflow_dispatch) qui réingère
+  pleinement alors que le CSV upstream est byte-identique au dernier
+  success était jusqu'ici indistinguable d'un cron normal en audit.
+  Ajout d'une colonne `forced BOOLEAN NOT NULL DEFAULT FALSE` peuplée
+  par `shortCircuitIfSameChecksum(..., force=true)` (chokepoint unique).
+  Audit : `SELECT * FROM ingest_log WHERE forced=true`. Index partiel
+  `WHERE forced=true` (rare → minimal). Migration
+  `20260520T140000_ingest_log_forced.sql`.
+
+- **Helper `expectSingleRow()` partagé (P2 dette /simplify).** Le pattern
+  defense-in-depth « RPC censée retourner ≤ 1 row, warne LOUD si N > 1 »
+  était dupliqué inline dans `finess-db.ts` (`finess_by_num_finess`) et
+  `cds-db.ts` (`centres_sante_by_finess`). Factorisé dans
+  `src/sante/db-helpers.ts` — signature `(rpc, rows, identifier, hint)`,
+  le hint d'investigation reste propre à chaque RPC (préserve grep ops).
+
+- **JSON-RPC `-32700 Parse error` propre sur JSON malformé (P2 backlog
+  cleanup).** Le `catch` root de `api/mcp.ts` route maintenant les
+  `SyntaxError` (JSON body malformé caller-side) vers une réponse 400
+  JSON-RPC `-32700` conforme spec §5.1, **sans `captureMcpError`**
+  (faute caller ≠ erreur serveur). Complète le drop bot-noise
+  `beforeSendEvent` côté Sentry en évitant l'appel tout court. Path
+  Sentry préservé pour toute autre exception (test garde-fou).
+
+### Changed
+
+- **`writeIngestLog` durci contre PGRST204 transitoire.** Si la migration
+  ajoutant un champ optionnel (`forced`, `ban_eligible_distinct`,
+  `ban_to_geocode_distinct`) n'est pas encore appliquée en prod au moment
+  où le code TS écrit dans `ingest_log`, PostgREST renvoie `PGRST204`
+  (colonne inconnue) et le log entier était jusqu'ici avalé
+  silencieusement (`writeIngestLog` ne throw pas). Retry défensif unique
+  qui re-tente l'insert sans les champs listés dans
+  `PGRST204_RECOVERABLE_FIELDS` — les marqueurs récents sont sacrifiés
+  mais le reste de l'audit survit. `console.warn` explicite mentionne
+  les champs droppés pour le diagnostic ops. **Convention** : tout
+  nouveau champ optionnel dans `IngestLogEntry` DOIT être ajouté à
+  cette liste jusqu'à propagation de sa migration en prod (puis peut
+  être retiré).
+
+- **`writeIngestLog` accepte un client optionnel en injection** pour
+  faciliter le test (pattern symétrique à `runCanaryCheck`). Default
+  inchangé (`getIngestLogClient()`), rétrocompat callers préservée.
+
+### Notes maintainers
+
+- Pour la prochaine release, **appliquer `20260520T140000_ingest_log_forced.sql`
+  en prod AVANT de déployer le code TS** (best-effort — le retry défensif
+  protège la fenêtre transitoire si l'ordre est inversé, mais le marqueur
+  `forced` est perdu pendant cette fenêtre).
+- 8 items du backlog technique initial ont été audités comme **déjà
+  soldés** dans le code (`buildListQueryResult` migré, `insertStagingBatched`
+  factorisé, `getUntypedAnonClient` substitué au `null as unknown as
+  string`, `resolveCategorieCodes` utilisé partout, `drop-stale-previous`
+  existant, circuit breaker Axiom existant, tests 429 INSEE+ANS
+  existants). 1 item droppé (`count_rpps.sql` divergence — artefact
+  session précédente). 1 item écarté par règle prod-first (`searchEntreprises`
+  400 retry — aucune trace Sentry, défense préventive refusée).
+
 ## [0.12.1] — 2026-05-20
 
 ### Changed

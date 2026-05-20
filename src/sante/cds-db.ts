@@ -24,6 +24,7 @@ import {
   buildListQueryResult,
   clampLimit,
   expectRpcRows,
+  expectSingleRow,
   formatRpcError,
   trimOrNull,
   validateCoords,
@@ -160,16 +161,16 @@ export async function getCdsByFiness(numFiness: string): Promise<LookupResult<Cd
   });
 
   if (error) throw new Error(formatRpcError("centres_sante_by_finess", error));
+  // Defense-in-depth via `expectSingleRow` (cf. lesson finess-db.ts) :
+  // PK enforced côté table mais un swap glitch ramenant 2 rows doit surfacer
+  // LOUD plutôt que silently picker la première. Source unique du pattern.
   const rows = expectRpcRows<RawCdsRow>("centres_sante_by_finess", data);
-  if (rows.length > 1) {
-    // PK enforced côté table mais defense-in-depth (cf. lesson finess-db.ts) :
-    // si un swap glitch ramène 2 rows, surface la violation au lieu de
-    // silently picker la première.
-    console.warn(
-      `[france-data-mcp] centres_sante_by_finess(${trimmed}): RPC returned ${rows.length} rows (expected ≤ 1) — picking first. Investigate centres_sante PK integrity.`,
-    );
-  }
-  const first = rows[0];
+  const first = expectSingleRow(
+    "centres_sante_by_finess",
+    rows,
+    trimmed,
+    "Investigate centres_sante PK integrity.",
+  );
   if (!first) {
     return lookupNotFound(
       trimmed,
