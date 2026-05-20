@@ -79,16 +79,20 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.10.6 — in production.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 954 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`.
+✅ **v0.11.0 — in production.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 1,159 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`. **68.5% of RPPS practitioners now precisely geolocated** (FINESS building or BAN street/building, up from 65.1% in v0.10.x).
 
 Full history: [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-> Shipped versions in the [CHANGELOG](CHANGELOG.md) (quality audits B1→B10 then P1→P4 handled, Robustness backlog closed in v0.10.6).
+> Shipped versions in the [CHANGELOG](CHANGELOG.md). Project discipline: prove every root cause against production / official docs BEFORE coding the fix.
 
-- [x] **Robustness** — drop redundant `rpps_insee_idx`, validate ANS nomenclature at boundary, validate IGN coords _(shipped v0.10.6)_
-- [ ] **v1.0+** — DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics)
+- [x] **Robustness** — drop redundant `rpps_insee_idx`, validate ANS nomenclature, validate IGN coords _(shipped v0.10.6)_
+- [x] **`ban_join` keyset** — set-based cache→`rpps` placement via keyset cursor (never sentinel), 1,065,291 rows posted on prod run #13 _(shipped v0.11.0)_
+- [x] **BAN acceptance by precision** — gate by `result_type` ∈ {housenumber, street, locality} instead of binary 0.7 score threshold; **+77,000 practitioners** moved from commune centroid (~3 km) to their exact address _(shipped v0.11.0)_
+- [x] **Phase 1 — BAN delta measurement** — `rpps_measure_ban_to_geocode` RPC logged in `ingest_log` at each cron, sizes future Phase 2 _(shipped v0.11.0)_
+- [ ] **Phase 2 — recurring re-geocoding automation** — bounded BAN step inline in the RPPS cron (diff staging vs old rpps → POST BAN on delta only → upsert cache). Architecture decision pending Phase 1 production numbers (1-2 cycles)
+- [ ] **v1.0+** — DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics), DPC (PS training history)
 
 ---
 

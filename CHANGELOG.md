@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Non publié]
+## [0.11.0] — 2026-05-20
 
 ### Added
 
@@ -152,7 +152,6 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   faux VERT « prédicat en commentaire inline » et « def future `$tag$` →
   corps mort »).
 
-## [0.11.0] — 2026-05-18
 
 **Ré-armement du géocodage BAN sur le socle stabilisé (fix A+B+C `0.10.9`).
 Les 2 index BAN ne sont plus créés dans `ingest_create_rpps_staging` (cause
@@ -203,7 +202,6 @@ jamais re-géocodé.**
   best-effort (step 7). Helpers partagés `src/core/with-timeout.ts` +
   `src/core/parse-rpc-count.ts` (dédup des jumeaux `rpps.ts`↔`ban-backfill.mjs`).
 
-## [0.10.9] — 2026-05-18
 
 **Remédiation crise cron RPPS mensuel : 3 correctifs CONJOINTS (A+B+C)
 prouvés prod. A (désamorçage index BAN) + B (robustesse matview/swap) +

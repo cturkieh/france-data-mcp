@@ -112,16 +112,20 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.10.6 — en production.** 35 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 954 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`.
+✅ **V0.11.0 — en production.** 35 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 1 159 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`. **68,5 % des PS RPPS géolocalisés précisément** (FINESS bâtiment ou BAN rue/bâtiment, vs 65,1 % en V0.10.x).
 
 Historique complet : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-> Historique des versions livrées dans le [CHANGELOG](CHANGELOG.md) (audits qualité B1→B10 puis P1→P4 traités, backlog Robustesse clos en V0.10.6).
+> Historique des versions livrées dans le [CHANGELOG](CHANGELOG.md). Discipline projet : prouver chaque cause-racine par la prod / doc officielle AVANT de coder le fix.
 
-- [x] **Robustesse** — DROP `rpps_insee_idx` redondant, validation nomenclature ANS au boundary, validation coords IGN _(livré V0.10.6)_
-- [ ] **V1.0+** — DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale)
+- [x] **Robustesse** — DROP `rpps_insee_idx` redondant, validation nomenclature ANS, validation coords IGN _(livré V0.10.6)_
+- [x] **`ban_join` keyset** — pose ensembliste cache→`rpps` en curseur keyset (jamais sentinelle), 1 065 291 lignes posées sur run #13 _(livré V0.11.0)_
+- [x] **Acceptation BAN par précision** — gate par `result_type` ∈ {housenumber, street, locality} au lieu du seuil binaire 0,7 ; **+77 000 médecins** passés du centroïde commune (~3 km) à leur adresse exacte _(livré V0.11.0)_
+- [x] **Phase 1 mesure delta BAN** — RPC `rpps_measure_ban_to_geocode` loggée dans `ingest_log` à chaque cron, dimensionne la future Phase 2 _(livré V0.11.0)_
+- [ ] **Phase 2 — automatisation re-géocodage récurrent** — brique BAN bornée in-line dans le cron RPPS (diff staging vs old rpps → POST BAN sur delta seul → upsert cache). Décision d'archi conditionnée aux chiffres prod de Phase 1 (1-2 cycles)
+- [ ] **V1.0+** — DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale), DPC (historique formations PS)
 
 ---
 
