@@ -4,6 +4,116 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.12.0] — 2026-05-20
+
+### Added
+
+- **`geo_precision` exposée par-résultat sur 4 RPC RPPS + paramètre
+  `precise_only` pour ne renvoyer que les PS géolocalisés précisément.**
+  La précision conquise par la PR #23 (FINESS join, V0.10.x) et le `ban_join`
+  keyset (V0.11.0) était calculée en DB mais JETÉE à la sortie : le mapping
+  TS `toResult` (`src/sante/rpps-db.ts:719`) hardcodait `geo_precision:
+  "centroide_commune"` pour TOUS les PS, même les ~68,5 % géolocalisés
+  précisément (BAN rue/bâtiment ou FINESS site). L'audit factuel produit
+  2026-05-20 a établi : 3 tools renvoyaient cette valeur hardcodée, 2
+  descriptions publiques contredisaient la réalité produit (« tous les PS
+  d'une même commune ont la MÊME `distance_km` » — faux pour les ~68,5 %
+  `finess_join`/`ban_address`).
+  - 4 RPC élargies pour propager `geo_precision` ∈ {`adresse`,
+    `etablissement_finess`, `centroide_commune`} :
+    - `rpps_in_radius` (V0.11.0 déjà étendue via `20260516T050000`).
+    - `rpps_search_by_name` — migration `20260520T110000`.
+    - `rpps_par_specialite_dept` — migration `20260520T120000`.
+    - `rpps_lookup_by_id` — migration `20260520T130000`.
+    Mapping `CASE WHEN geom_source` IDENTIQUE sur les 4, gardé par
+    `scripts/ingest/rpps-geo-precision-mapping-parity.test.ts` (5 tests
+    structurels sans DB, pattern aligné sur `ban-eligibility-predicate-parity`).
+  - Type TS `PerResultGeoPrecision` élargi aux 3 valeurs, mapping `toResult`
+    lit `row.geo_precision` au lieu de hardcoder (fallback OMISSION, jamais
+    `centroide_commune` silencieux qui masquerait une régression DB).
+  - Nouveau alias metadata `centroide_commune_ans_mixte` (`src/core/query-metadata.ts`)
+    avec note explicite « précision MIXTE par-résultat, lire `geo_precision`
+    PAR PS ». Note nuancée injectée à `radius_km < 3 km` qui pointe
+    `precise_only` plutôt que la note Ameli générique (cette dernière
+    affirme à tort « TOUS les PS d'une commune en bloc » — faux pour la
+    branche précise hybride).
+- **Param `precise_only: boolean` sur `professionnels_rpps_in_radius`.**
+  Migration `20260520T100000_rpps_in_radius_precise_only.sql` ajoute
+  `p_precise_only BOOLEAN DEFAULT FALSE`. Quand `true`, la CTE centroïde
+  commune est entièrement court-circuitée (`WHERE NOT p_precise_only`),
+  aucun PS au centroïde n'est inclus, le tri est 100 % par distance exacte
+  BAN/FINESS. La sentinelle P0002 matview vide est sautée puisque la
+  branche précise ne dépend pas de la matview. Quand `false` (défaut),
+  contrat V0.11.0 préservé BYTE-pour-byte. Cas d'usage typique : rayons
+  courts (<3 km), classement intra-commune fiable, « médecins à <500 m
+  d'une adresse ». Trade-off documenté : ~31,5 % de PS invisibles en
+  `precise_only=true`.
+- **Descriptions LLM des 4 tools RPPS réécrites.** Mentionnent
+  explicitement les 3 valeurs `geo_precision`, la part de précision
+  conquise (~68,5 %), le paramètre `precise_only` et la nuance
+  intra-commune (qui reste pertinente uniquement pour la branche
+  centroïde résiduelle en mode hybride par défaut).
+- **Garde runtime côté lib `toResult`** : `assertGeoPrecision(row)` throw
+  bruyamment si la RPC renvoie une valeur hors set canonique (drift RPC =
+  contract violation, jamais silencieux). `warnIfAnomalous(row, coords)`
+  warn explicitement si la RPC émet une `geo_precision` sur un PS sans
+  coordonnées exploitables (invariant amont violé observable, plus mangé
+  sans signal). Couvre les 2 cas (geom null ET coordinates malformé).
+- **Note metadata explicite quand `precise_only=true && count=0`** :
+  distingue zone désertique légitime d'une régression GiST partielle (cf.
+  CLAUDE.md gotcha `rpps-in-radius-57014-partial-gist-decouple`) — le LLM
+  peut alors suggérer le mode hybride au user.
+
+### Changed
+
+- `RawRppsRow` gagne `geo_precision?: PerResultGeoPrecision | null` (additif,
+  non breaking) — réutilise le type pour éviter une 2e source de vérité.
+- Test régression B5 (`api/tools.test.ts`) réécrit pour V0.12.0 — verrouille
+  les 3 valeurs canoniques + la narration `precise_only` (pas juste le mot)
+  + le taux `31,5 %` (sentinelle anti-régression de la description).
+- `centroide_commune_ans` (alias V0.10.x) marqué `@deprecated` — plus aucune
+  RPC ne le produit, conservé pour rétrocompat de clients qui auraient
+  caché la string `query_metadata.geo_precision`.
+- Handler `professionnels_rpps_in_radius` utilise désormais
+  `coerceBoolean(args.precise_only, "precise_only")` (pattern dominant du
+  fichier : un client JSON-RPC stringifiant `"true"` est correctement
+  reconnu ; `"yes"` throw `RangeError` actionnable plutôt que retomber
+  silencieusement en hybride).
+- Lib publique `getRppsInRadius` validate `typeof input.preciseOnly`
+  (cohérent avec `validateCoords`/`validateRadiusKm`) — protection caller
+  npm hors MCP qui n'a pas le filet `coerceBoolean`.
+
+### Tests
+
+- 1 189 tests passent (était 1 159 V0.11.0). +30 tests dédiés à V0.12.0 :
+  - 5 dans `rpps-db.test.ts` — propagation 3 valeurs, omission contrôlée
+    quand RPC ne renvoie pas la colonne (anti-hardcode), propagation
+    param `preciseOnly` true/false strict, contract violation runtime,
+    warn invariant amont, note metadata 0 résultats, garde boundary lib.
+  - 6 dans `tools.test.ts` — descriptions 4 tools, schema `precise_only`,
+    narration utile asserée, taux 31,5 %, boundary MCP `"yes"` → throw.
+  - 6 dans `query-metadata.test.ts` — note Ameli pure vs RPPS mixte
+    nuancée, seuil exact 3 km, alias mixte propagé.
+  - 5 dans `rpps-geo-precision-mapping-parity.test.ts` (nouveau guard
+    structurel) — verrouille byte-identique le mapping `geom_source →
+    geo_precision` sur les 4 RPC + le hardcode `'centroide_commune'::text`
+    de la branche centroïde de `rpps_in_radius`, regex LARGE sur source
+    ET valeur (filet contre l'ajout silencieux d'un 4e `geom_source`).
+
+### Migration notes (op)
+
+- Les 4 migrations sont au format T (`YYYYMMDDTHHMMSS_*.sql`). Pattern
+  documenté du projet : application prod **manuelle** via SQL Editor
+  Supabase (la CLI `supabase db reset` les skip côté local — cf.
+  `ban-geocode-parity.integration.test.ts:311`). Ordre d'application :
+  `T100000` (rpps_in_radius précise_only) → `T110000` (search_by_name)
+  → `T120000` (par_specialite_dept) → `T130000` (lookup_by_id).
+- DROP+CREATE obligatoire sur les 4 RPC (RETURNS TABLE change, +1 colonne
+  `geo_precision`) — ERROR Postgres `42P13` sinon. Les `GRANT EXECUTE TO
+  anon` sont re-posés dans chaque migration (DROP les révoque).
+- Aucun changement de matview ni d'index. Pas de bombe OID (toutes les
+  matviews sont reconstruites post-swap, pas refresh-only — V0.11.0).
+
 ## [0.11.0] — 2026-05-20
 
 ### Added

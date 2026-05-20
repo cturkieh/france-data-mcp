@@ -112,7 +112,7 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.11.0 — en production.** 35 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 1 159 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`. **68,5 % des PS RPPS géolocalisés précisément** (FINESS bâtiment ou BAN rue/bâtiment, vs 65,1 % en V0.10.x).
+✅ **V0.12.0 — en production.** 35 tools, 4 sources santé ingérées (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN en live. 1 189 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`. **68,5 % des PS RPPS géolocalisés précisément** (FINESS bâtiment ou BAN rue/bâtiment) — **désormais exposés au client MCP** via `geo_precision` ∈ {`adresse`, `etablissement_finess`, `centroide_commune`} par-résultat sur 4 tools RPPS, et filtre `precise_only: true` pour ne renvoyer que les PS précis (rayons courts <3 km, classement intra-commune fiable).
 
 Historique complet : [CHANGELOG](CHANGELOG.md).
 
@@ -124,6 +124,7 @@ Historique complet : [CHANGELOG](CHANGELOG.md).
 - [x] **`ban_join` keyset** — pose ensembliste cache→`rpps` en curseur keyset (jamais sentinelle), 1 065 291 lignes posées sur run #13 _(livré V0.11.0)_
 - [x] **Acceptation BAN par précision** — gate par `result_type` ∈ {housenumber, street, locality} au lieu du seuil binaire 0,7 ; **+77 000 médecins** passés du centroïde commune (~3 km) à leur adresse exacte _(livré V0.11.0)_
 - [x] **Phase 1 mesure delta BAN** — RPC `rpps_measure_ban_to_geocode` loggée dans `ingest_log` à chaque cron, dimensionne la future Phase 2 _(livré V0.11.0)_
+- [x] **Exposition `geo_precision` côté client MCP** — la précision conquise par PR #23 + `ban_join` était jusqu'ici écrasée en `centroide_commune` par le mapping TS ; 4 RPC propagent désormais les 3 valeurs réelles, paramètre `precise_only` ajouté, descriptions LLM réécrites, garde-fou parité de mapping multi-migrations _(livré V0.12.0)_
 - [ ] **Phase 2 — automatisation re-géocodage récurrent** — brique BAN bornée in-line dans le cron RPPS (diff staging vs old rpps → POST BAN sur delta seul → upsert cache). Décision d'archi conditionnée aux chiffres prod de Phase 1 (1-2 cycles)
 - [ ] **V1.0+** — DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale), DPC (historique formations PS)
 
