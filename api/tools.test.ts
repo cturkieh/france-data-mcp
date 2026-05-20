@@ -1208,7 +1208,11 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
       | undefined;
     expect(props?.precise_only?.type).toBe("boolean");
     expect(props?.precise_only?.default).toBe(false);
-    expect(props?.precise_only?.description).toMatch(/adresse|etablissement_finess/);
+    // V0.12.1 — la description du param décrit l'EFFET du switch sans
+    // re-documenter la sémantique complète du tool (anti-drift inter-edits).
+    // La sémantique détaillée (3 valeurs geo_precision, ~31,5 % résiduel,
+    // rayons courts) est dans la description du tool, asserée plus haut.
+    expect(props?.precise_only?.description).toMatch(/centroide commune|distance_km/i);
   });
 
   // M3 silent-failure-hunter : asymétrie corrigée — les 4 tools RPPS de

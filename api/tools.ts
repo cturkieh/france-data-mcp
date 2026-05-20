@@ -102,7 +102,15 @@ const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.
  * source — cf. DSFT v3.1 §5.1.2) ; ces flags discriminent un statut
  * juridique d'enregistrement, pas une activité.
  */
-const RPPS_INCLUDE_CATEGORIES_HINT = `Par défaut, ne renvoie que les PS de catégorie Civil (C) — droit privé : libéraux, salariés privés, hospitaliers contractuels, ~97 % de la base. Passer \`include_agents_publics: true\` pour inclure aussi les Agents publics (M) — fonctionnaires d'État + collectivités + militaires SSA, ~0,3 % (PH titulaires, médecins inspecteurs ARS, médecins conseils CNAM, médecins scolaires Éducation nationale, médecins PMI). Passer \`include_etudiants: true\` pour inclure aussi les Étudiants (E) — internes, externes, élèves IDE/SF, ~2,5 %. Source nomenclature : ${TRE_R09_URL}.`;
+const RPPS_INCLUDE_CATEGORIES_HINT = `Catégorie par défaut : Civil (C, ~97 % — libéraux, salariés privés, hospitaliers contractuels). Opt-in : \`include_agents_publics: true\` ajoute Agents publics (M, ~0,3 % — PH titulaires, ARS, CNAM, Éducation nationale, PMI, militaires SSA) ; \`include_etudiants: true\` ajoute Étudiants (E, ~2,5 % — internes, externes, élèves IDE/SF). Réf : ${TRE_R09_URL}.`;
+
+/**
+ * Hint partagé par les 3 tools RPPS de listing qui exposent `geo_precision`
+ * PAR résultat (variante courte). Le tool `professionnels_rpps_in_radius`
+ * documente la sémantique étendue (precise_only + branches hybrides +
+ * couverture %) inline et n'utilise PAS ce hint court (intent volontaire).
+ */
+const RPPS_GEO_PRECISION_HINT = `Chaque résultat géolocalisé porte \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} — lire ce champ pour évaluer la fiabilité des \`coords\` (précise BAN/FINESS au m près vs centroïde commune ~3 km, non discriminant intra-commune).`;
 
 /** Sous-schéma JSON Schema partagé par les 3 tools RPPS query. */
 const RPPS_INCLUDE_CATEGORIES_SCHEMA = {
@@ -1590,16 +1598,18 @@ export const TOOLS: McpTool[] = [
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
   {
     name: "professionnels_rpps_in_radius",
-    description: `Recherche de professionnels de santé dans un rayon via le RPPS (Annuaire Santé ANS). À la différence de \`professionnels_in_radius\` (Ameli, libéraux conventionnés uniquement), cette recherche couvre **tous les PS** : libéraux, salariés (hospitaliers, salariés en cabinet), mixtes, remplaçants. Filtres : \`profession_codes\` (nomenclature ANS — ex: 10 Médecin, 60 Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT}
+    description: `Trouve les PS dans un rayon via RPPS (Annuaire Santé ANS — **tous statuts** : libéraux + salariés + mixtes + remplaçants ; vs \`professionnels_in_radius\` Ameli = libéraux conventionnés seuls).
 
-**Précision géo HYBRIDE par résultat (V0.12.0)** — chaque PS porte un champ \`geo_precision\` :
-- \`"adresse"\` : coords BAN (rue / lieu-dit / bâtiment) — \`distance_km\` exacte au m près, classement individuel fiable.
-- \`"etablissement_finess"\` : coords du site FINESS joint via \`num_finess\` — \`distance_km\` exacte au site.
-- \`"centroide_commune"\` : centroïde commune (~3 km moyenne) — \`distance_km\` IDENTIQUE pour tous les PS de la même commune, NE PAS utiliser pour classer/choisir un PS individuel (uniquement filtre de zone).
+**Param critique \`precise_only\`** — Défaut \`false\` (mode hybride). À \`true\` : ne renvoie que les PS géolocalisés précisément (\`distance_km\` exacte au m près) — recommandé pour rayons courts (<3 km), classement intra-commune, "PS à <500 m d'une adresse".
 
-Couverture courante : ~68,5 % des PS sont précis (\`adresse\` + \`etablissement_finess\`), ~31,5 % en \`centroide_commune\` résiduel. Pour FORCER 100 % de résultats précis (rayons courts <3 km, classement intra-commune fiable), passer \`precise_only: true\` — la branche centroïde est entièrement exclue, le tri est strictement par distance exacte BAN/FINESS.
+Chaque résultat porte \`geo_precision\` ∈ :
+- \`"adresse"\` — coords BAN rue/lieu-dit/bâtiment, \`distance_km\` exacte.
+- \`"etablissement_finess"\` — coords du site FINESS (via \`num_finess\`), \`distance_km\` exacte au site.
+- \`"centroide_commune"\` — centroïde commune (~3 km), \`distance_km\` IDENTIQUE pour tous les PS de la commune — ne PAS l'utiliser pour classer individuellement, seulement comme filtre de zone.
 
-En mode hybride (défaut), les deux branches sont fusionnées et triées globalement par \`distance_km\`. Au sein d'une même commune via la branche centroïde résiduelle, les PS partagent la même \`distance_km\` et sont retournés en bloc (granularité commune pour cette branche uniquement) ; la branche précise est, elle, à granularité adresse. ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
+Couverture actuelle : ~68,5 % précis, ~31,5 % \`centroide_commune\` résiduel. Mode hybride = précis (granularité adresse) + centroïde (granularité commune) fusionnés et triés globalement par \`distance_km\`.
+
+Filtres : \`profession_codes\` (ex: \`["10"]\` Médecin, \`["60"]\` Infirmier), \`savoir_faire_codes\` (spécialité fine DES/DESC), \`mode_exercice_codes\`. ${RPPS_MODE_EXERCICE_HINT} ${RPPS_INCLUDE_CATEGORIES_HINT} ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1644,7 +1654,7 @@ En mode hybride (défaut), les deux branches sont fusionnées et triées globale
         precise_only: {
           type: "boolean",
           description:
-            'V0.12.0 — si true, ne renvoie QUE les PS géolocalisés précisément (`geo_precision` ∈ {`adresse` BAN, `etablissement_finess` FINESS}, `distance_km` exacte au m près). Exclut les ~31,5 % de PS au centroïde commune. Pertinent pour les rayons courts (<3 km), le classement intra-commune fiable, ou les recherches type "médecins à <500 m d\'une adresse". Défaut false (mode hybride : précis + centroïde commune résiduel).',
+            "Si true, exclut les PS au centroïde commune et ne renvoie que ceux à `distance_km` exacte (cf. description du tool pour la sémantique complète et le seuil d'usage recommandé). Défaut false.",
           default: false,
         },
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
@@ -1681,9 +1691,11 @@ En mode hybride (défaut), les deux branches sont fusionnées et triées globale
   },
   {
     name: "professionnels_rpps_par_dept",
-    description: `Listing départemental de PS via RPPS (libéraux + salariés). Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. Re-paginer via \`offset\` tant que \`truncated=true\`. Préférer \`professionnels_par_specialite_dept\` (Ameli) pour les libéraux conventionnés ; cet outil sert à compter ou lister les salariés / l'effectif total. ${RPPS_INCLUDE_CATEGORIES_HINT}
+    description: `Liste tous les PS d'un département via RPPS (libéraux + salariés). Pour les libéraux conventionnés uniquement, préférer \`professionnels_par_specialite_dept\` (Ameli). Re-paginer via \`offset\` tant que \`truncated=true\`.
 
-Chaque PS géolocalisé porte un champ \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} (V0.12.0) — lire ce champ pour savoir si \`coords\` est précise (BAN rue/bâtiment ou site FINESS) ou approximative (centroïde commune ~3 km, ne pas l'utiliser pour distinguer 2 PS d'une même commune). ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
+${RPPS_GEO_PRECISION_HINT}
+
+Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice_code\`. ${RPPS_INCLUDE_CATEGORIES_HINT} ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1739,7 +1751,9 @@ Chaque PS géolocalisé porte un champ \`geo_precision\` ∈ {\`"adresse"\`, \`"
   },
   {
     name: "rpps_dans_etablissement",
-    description: `Liste les professionnels de santé rattachés à un établissement FINESS (par numéro FINESS site, 9 chiffres). C'est le pivot RPPS↔FINESS — répond à "qui travaille dans ce labo / hôpital / clinique ?". Le \`mode_exercice\` distingue les libéraux exerçant sur place (vacations) des salariés. Couverture : RPPS expose ce lien quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts. ${RPPS_INCLUDE_CATEGORIES_HINT} ${RPPS_CGU_NOTICE}`,
+    description: `Liste les PS rattachés à un établissement FINESS (\`num_finess\` 9 chiffres). Pivot RPPS↔FINESS — répond à "qui travaille dans ce labo / hôpital / clinique ?". Le \`mode_exercice\` distingue les libéraux exerçant sur place (vacations) des salariés. Couverture : RPPS expose ce lien quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts.
+
+Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par établissement, pas spatial — pour la géoloc, pivoter via \`etablissement_by_finess\` sur le \`num_finess\`). ${RPPS_INCLUDE_CATEGORIES_HINT} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -2004,19 +2018,16 @@ Chaque PS géolocalisé porte un champ \`geo_precision\` ∈ {\`"adresse"\`, \`"
   },
   {
     name: "rpps_search_by_name",
-    description: `Recherche fuzzy de professionnels de santé par identité (nom + prénom optionnel + département optionnel). Utilise un matching trigram (pg_trgm) tolérant aux accents, typos et variations d'orthographe. Tri par pertinence décroissante. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).\n\nUsage typique : "trouve-moi le Dr Martin à Paris" (nom obligatoire, prénom et département facultatifs pour affiner). Sans département, recherche nationale : des homonymes exacts (ex. plusieurs « Pierre Martin ») obtiennent TOUS le même \`match_score\` ~1.0 — il ne les départage pas. Pour désambiguïser, filtrer par \`departement\` (ou affiner avec \`prénom\`). \`truncated: true\` signifie que d'autres résultats existent : restreindre la requête plutôt que parcourir.\n\n**Format de retour** : objet \`{ count, truncated, results, query_metadata }\` aligné sur les autres tools RPPS de listing. Chaque résultat porte un champ \`match_score\` ∈ [0..1] (score trigram pg_trgm). Un score < 0.5 indique souvent une homonymie partielle à confirmer côté caller.\n\nChaque PS géolocalisé porte un champ \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} (V0.12.0) — lire ce champ pour évaluer la fiabilité des \`coords\` (précises BAN/FINESS vs centroïde commune ~3 km).\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
+    description: `Trouve un PS par identité (matching trigram tolérant aux accents/typos). Usage : "Dr Martin à Paris" → \`nom: "Martin", departement: "75"\`. Nom obligatoire ; \`prenom\` et \`departement\` affinent.\n\nTri par \`match_score\` ∈ [0..1] décroissant (score trigram pg_trgm). Un score <0.5 = homonymie partielle à confirmer côté caller. Sans \`departement\`, des homonymes exacts ("Pierre Martin") ont TOUS le même score ~1.0 et ne sont pas départagés — toujours filtrer par dept ou prénom sur un nom commun.\n\n\`truncated: true\` = d'autres résultats existent (restreindre, ne pas parcourir).\n\n${RPPS_GEO_PRECISION_HINT}\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
-        nom: { type: "string", description: "Nom de famille (obligatoire, non vide)." },
-        prenom: {
-          type: "string",
-          description: "Prénom (optionnel — affine le score si fourni).",
-        },
+        nom: { type: "string", description: "Nom de famille (non vide)." },
+        prenom: { type: "string", description: "Prénom du PS." },
         departement: {
           type: "string",
           description:
-            "Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères (Corse '2A'/'2B', pas '20'), DOM/COM 3 caractères. Optionnel.",
+            "Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères (Corse '2A'/'2B', pas '20'), DOM/COM 3 caractères.",
         },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
         limit: {
@@ -2048,7 +2059,7 @@ Chaque PS géolocalisé porte un champ \`geo_precision\` ∈ {\`"adresse"\`, \`"
   },
   {
     name: "professionnel_by_rpps",
-    description: `Fiche d'un professionnel de santé par identifiant national (rpps_id / IDNPS, 11 ou 12 chiffres — IDNPS modernes émis depuis 2020 ont un préfixe "81" qui les fait à 12 chars, anciens IDs sans préfixe à 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 row par site, chaque site porte sa propre \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} — V0.12.0 ; un PS peut donc avoir un site précis FINESS et un autre au centroïde commune). Si non trouvé en base locale (ingestion mensuelle, J-30 max), tente automatiquement un fallback live sur l'API FHIR ANS (\`gateway.api.esante.gouv.fr/fhir/v2\`) — fraîcheur quotidienne, gratuit (clé \`ESANTE-API-KEY\` issue de portal.api.esante.gouv.fr requise côté serveur). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (fallback live). \`include_freshness\` n'affecte que les retours \`source: "db"\` (FHIR ANS étant live). ${RPPS_CGU_NOTICE}`,
+    description: `Récupère la fiche complète d'un PS par identifiant national (\`rpps_id\` / IDNPS, 11 ou 12 chiffres — IDs émis depuis 2020 ont un préfixe \`"81"\` = 12 chars ; anciens IDs = 11 chars). Renvoie N entrées quand le PS exerce sur plusieurs sites (1 par site, avec sa propre \`geo_precision\` ∈ {\`"adresse"\`, \`"etablissement_finess"\`, \`"centroide_commune"\`} — un même PS peut donc cumuler un site précis FINESS et un site au centroïde commune).\n\nFallback automatique sur l'API FHIR ANS live (\`gateway.api.esante.gouv.fr/fhir/v2\`) si non trouvé en base locale (snapshot mensuel J-30 max). Le champ \`source\` distingue \`db\` (base locale) de \`ans_fhir\` (live). \`include_freshness\` n'affecte que \`source: "db"\`. ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
