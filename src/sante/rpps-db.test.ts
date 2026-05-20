@@ -452,6 +452,13 @@ describe("countRppsByCommune (V0.9)", () => {
 });
 
 describe("getRppsInRadius — geo_precision par PS (V0.12.0 — 3 valeurs)", () => {
+  beforeEach(() => {
+    // Reset mock entre les it() : sinon le test « pas appelé » l.X compte
+    // les calls des suites précédentes (countRppsByCommune, etc.) et fail
+    // sur "been called 12 times".
+    mockRpc.mockReset();
+  });
+
   const baseRow = makeRawRppsRow({
     id: 7,
     prenom: "PIERRE",
@@ -517,6 +524,81 @@ describe("getRppsInRadius — geo_precision par PS (V0.12.0 — 3 valeurs)", () 
       "rpps_in_radius",
       expect.objectContaining({ p_precise_only: false }),
     );
+  });
+
+  // H1 silent-failure-hunter : drift RPC = contract violation observable.
+  // Sans ce check runtime, une 4e valeur introduite par étourderie passerait
+  // silencieusement au client MCP (qui ne saurait pas la mapper sur ses
+  // 3 narrations connues).
+  it("throw bruyamment si la RPC renvoie une geo_precision hors set canonique (drift RPC)", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: [{ ...baseRow, geo_precision: "iris" }],
+      error: null,
+    });
+    await expect(
+      getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 }),
+    ).rejects.toThrow(/contract violation.*iris.*hors set canonique/);
+  });
+
+  // M1 silent-failure-hunter : un PS sans coords portant pourtant une
+  // geo_precision = invariant amont violé. La lib OMET le champ public
+  // (cohérent avec coords:null) MAIS warn explicitement — sans ce signal,
+  // l'anomalie serait mangée sans observabilité (catch silencieux interdit).
+  it("warn si geom=null mais raw.geo_precision présent (invariant amont violé)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mockRpc.mockResolvedValueOnce({
+        data: [{ ...baseRow, geom: null, geo_precision: "centroide_commune" }],
+        error: null,
+      });
+      const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+      expect(out.results[0]?.coords).toBeNull();
+      expect(out.results[0]?.geo_precision).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[france-data-mcp]"));
+      expect(warnSpy.mock.calls[0]?.[0]).toMatch(/anomalie contrat RPC|geo_precision/);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  // M4 silent-failure-hunter : preciseOnly=true + 0 résultat = ambiguïté
+  // entre zone désertique et régression GiST partielle (cf. CLAUDE.md
+  // gotcha rpps-in-radius-57014-partial-gist-decouple). Note metadata
+  // explicite pour que le LLM puisse suggérer le mode hybride.
+  it("preciseOnly=true + 0 résultats → note metadata 'précise centroïde commune exclus'", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    const out = await getRppsInRadius({
+      center: { lat: 50.63, lon: 3.06 },
+      radiusKm: 5,
+      preciseOnly: true,
+    });
+    expect(out.count).toBe(0);
+    const notesJoined = out.query_metadata?.notes.join(" ") ?? "";
+    expect(notesJoined).toMatch(/precise_only=true.*0 résultat/);
+    expect(notesJoined).toMatch(/precise_only=false|mode hybride/);
+  });
+
+  it("preciseOnly=false + 0 résultats → PAS de note 'precise_only' (le caller n'a pas exclu de PS)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    const out = await getRppsInRadius({ center: { lat: 50.63, lon: 3.06 }, radiusKm: 5 });
+    expect(out.count).toBe(0);
+    const notesJoined = out.query_metadata?.notes.join(" ") ?? "";
+    expect(notesJoined).not.toMatch(/precise_only=true.*0 résultat/);
+  });
+
+  // L2 silent-failure-hunter : caller npm hors MCP (sans coerceBoolean filet)
+  // passant preciseOnly:"yes" doit throw RangeError au boundary lib, pas
+  // retomber silencieusement en hybride.
+  it("preciseOnly typé non-boolean → RangeError au boundary lib (hors MCP)", async () => {
+    await expect(
+      getRppsInRadius({
+        center: { lat: 50.63, lon: 3.06 },
+        radiusKm: 5,
+        // biome-ignore lint/suspicious/noExplicitAny: simule un caller npm sans filet TS
+        preciseOnly: "yes" as any,
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 });
 

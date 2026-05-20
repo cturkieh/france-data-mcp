@@ -461,6 +461,16 @@ export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQue
   const limit = clampLimit(input.limit);
   validateCoords(input.center.lat, input.center.lon);
   validateRadiusKm(input.radiusKm);
+  // V0.12.0 — garde lib publique (npm consumers hors MCP) : un caller
+  // passant `preciseOnly: "yes"` aurait `=== true` ⇒ false ⇒ mode hybride
+  // silencieux. Throw `RangeError` cohérent avec `validateCoords`/`validateRadiusKm`
+  // ci-dessus → mappe JSON-RPC `-32602` au boundary MCP (lib reste utilisable
+  // hors MCP avec la même protection).
+  if (input.preciseOnly !== undefined && typeof input.preciseOnly !== "boolean") {
+    throw new RangeError(
+      `[france-data-mcp] getRppsInRadius: preciseOnly doit être boolean (reçu ${JSON.stringify(input.preciseOnly)}).`,
+    );
+  }
 
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("rpps_in_radius", {
@@ -481,7 +491,23 @@ export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQue
   });
 
   if (error) throw new Error(formatRpcError("rpps_in_radius", error));
-  return buildQueryResult("rpps_in_radius", data, limit, rppsRadiusMetadata(input.radiusKm));
+  const result = buildQueryResult(
+    "rpps_in_radius",
+    data,
+    limit,
+    rppsRadiusMetadata(input.radiusKm),
+  );
+  // V0.12.0 — note metadata explicite quand precise_only=true ET 0 résultat :
+  // distingue (a) zone désertique légitime de (b) régression GiST partielle
+  // (cf. CLAUDE.md gotcha rpps-in-radius-57014-partial-gist-decouple). Sans
+  // ce signal, un caller LLM ne peut pas suggérer au user « essaie le mode
+  // hybride » (qui inclurait les PS centroïde commune dans la zone).
+  if (input.preciseOnly === true && result.count === 0 && result.query_metadata) {
+    result.query_metadata.notes.push(
+      "precise_only=true et 0 résultat dans le rayon : il peut exister des PS au centroïde commune dans la zone (geom_source='commune_centroid' exclus de la branche précise). Relancer avec precise_only=false (mode hybride) pour les inclure, ou élargir radius_km.",
+    );
+  }
+  return result;
 }
 
 export async function getRppsParSpecialiteDept(
@@ -749,14 +775,53 @@ function toResult(row: RawRppsRow): RppsResult {
     },
     coords,
     distance_km: metersToKm(row.distance_meters),
-    // V0.12.0 : précision lue de la RPC (3 valeurs possibles : adresse,
-    // etablissement_finess, centroide_commune). Si la RPC ne renvoie pas la
-    // colonne (legacy / mock incomplet), on omet le champ — préférer omettre
-    // à hardcoder "centroide_commune" qui masquerait une régression DB ou
-    // un test mock non aligné (cohérent avec `coords: null`).
-    ...(coords && row.geo_precision ? { geo_precision: row.geo_precision } : {}),
+    // V0.12.0 — contrat `RawRppsRow.geo_precision` documenté l.670 ; throw
+    // bruyant si valeur hors set canonique (drift RPC = contract violation).
+    ...(coords && row.geo_precision ? assertGeoPrecision(row) : warnIfAnomalous(row)),
     telephone: row.telephone,
   };
+}
+
+/**
+ * V0.12.0 — branche d'omission : signale (warn, pas throw) l'invariant violé
+ * `!coords && row.geo_precision` (la RPC émet une précision géo sur un PS
+ * sans coordonnées). Retourne `{}` pour le spread (= omission propre). Sans
+ * ce warn, l'anomalie amont serait mangée sans signal observabilité — règle
+ * CLAUDE.md projet : zéro catch silencieux côté lib `src/`.
+ */
+function warnIfAnomalous(row: RawRppsRow): Record<string, never> {
+  if (row.geo_precision && row.geom === null) {
+    console.warn(
+      `[france-data-mcp] rpps row id=${row.id} rpps_id=${row.rpps_id} a geo_precision="${row.geo_precision}" mais geom=null — anomalie contrat RPC (un PS sans coords ne devrait pas porter de précision géo). Champ public omis.`,
+    );
+  }
+  return {};
+}
+
+/**
+ * V0.12.0 — Garde runtime au mapping `toResult` : valide la valeur émise par
+ * la RPC contre le set canonique de `PerResultGeoPrecision`. Le typage TS
+ * `RawRppsRow.geo_precision?: PerResultGeoPrecision | null` est effacé au
+ * runtime — sans cette assertion, une future RPC introduisant `'iris'` ou
+ * une faute de frappe passerait silencieusement au client MCP (qui ne saurait
+ * pas mapper sur ses 3 narrations connues). Cohérent avec la discipline
+ * `expectRpcRows` (db-helpers) : un drift RPC = contract violation, jamais
+ * silencieux. Le garde-fou parité SQL (`rpps-geo-precision-mapping-parity`)
+ * ferme la porte côté migrations, ce check ferme côté lib npm contre une
+ * panne déployée hors guard.
+ *
+ * Logue aussi l'invariant violé `!coords && row.geo_precision` (M1 silent-
+ * failure-hunter) : la RPC ne devrait pas émettre une précision géo sur un PS
+ * sans coordonnées — drift amont mangé sans warn devient observable.
+ */
+function assertGeoPrecision(row: RawRppsRow): { geo_precision: PerResultGeoPrecision } {
+  const value = row.geo_precision;
+  if (value !== "adresse" && value !== "etablissement_finess" && value !== "centroide_commune") {
+    throw new Error(
+      `[france-data-mcp] rpps RPC contract violation — geo_precision="${String(value)}" hors set canonique {adresse, etablissement_finess, centroide_commune} (id=${row.id}, rpps_id=${row.rpps_id}). Migration drift ?`,
+    );
+  }
+  return { geo_precision: value };
 }
 
 function toCompactResult(row: RawRppsCompactRow): RppsResult {

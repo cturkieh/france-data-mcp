@@ -1661,14 +1661,13 @@ En mode hybride (défaut), les deux branches sont fusionnées et triées globale
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       // V0.12.0 — `coerceBoolean` traite les `"true"`/`1` stringifiés (JSON-RPC
-      // tolérant) en RangeError plutôt que retomber silencieusement en hybride.
-      // Pattern dominant du fichier (dedupe_by_ps, include_etudiants,
-      // compare_national…) ; ne pas remettre `args.precise_only === true` raw
-      // qui rouvrirait la classe de silent failure que coerceBoolean a été
-      // créée pour fermer (cf. son commentaire l.451).
-      if (coerceBoolean(args.precise_only, "precise_only") === true) {
-        input.preciseOnly = true;
-      }
+      // tolérant : retourne `true`/`false`) et throw `RangeError` actionnable
+      // sur les inputs non reconnus (`"yes"`, `{}`, …). Pattern explicite
+      // `!== undefined` cohérent avec compareNational l.1830/1879 et préserve
+      // l'intention `false explicite` du caller (utile pour traçabilité ;
+      // côté lib, `input.preciseOnly === true` strict reste sûr).
+      const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
+      if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
       return withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]);
     },
   },

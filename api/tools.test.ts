@@ -1183,14 +1183,18 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
     expect(tool?.description).toMatch(/m[êe]me .*commune|ne (pas|discrimine)/i);
   });
 
-  it("professionnels_rpps_in_radius (V0.12.0) : description documente les 3 valeurs geo_precision + precise_only", () => {
+  it("professionnels_rpps_in_radius (V0.12.0) : description documente les 3 valeurs geo_precision + narration precise_only", () => {
     const tool = findTool("professionnels_rpps_in_radius");
     expect(tool?.description).toMatch(/geo_precision/);
     // Les 3 valeurs publiques doivent apparaître pour éclairer le LLM caller.
     expect(tool?.description).toContain("adresse");
     expect(tool?.description).toContain("etablissement_finess");
     expect(tool?.description).toContain("centroide_commune");
-    expect(tool?.description).toContain("precise_only");
+    // Narration utile de `precise_only` (pas juste le mot) : un dev qui retire
+    // l'explication mais garde le nom de param ferait silencieusement perdre
+    // au LLM la connaissance du quand-l'activer (M2 silent-failure-hunter).
+    expect(tool?.description).toMatch(/precise_only.*(true|exclut|forcer|100\s*%)/i);
+    expect(tool?.description).toMatch(/31[,.]5\s*%/); // taux de centroïde résiduel
     // L'avertissement intra-commune reste pertinent UNIQUEMENT pour la branche
     // centroïde résiduelle (mode hybride). Une régression qui retire la
     // narration "même commune" ferait perdre cette nuance au caller.
@@ -1207,22 +1211,28 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
     expect(props?.precise_only?.description).toMatch(/adresse|etablissement_finess/);
   });
 
-  it("professionnels_rpps_par_dept (V0.12.0) : description mentionne geo_precision par-résultat", () => {
-    const tool = findTool("professionnels_rpps_par_dept");
-    expect(tool?.description).toMatch(/geo_precision/);
-    expect(tool?.description).toContain("adresse");
-    expect(tool?.description).toContain("etablissement_finess");
-    expect(tool?.description).toContain("centroide_commune");
-  });
+  // M3 silent-failure-hunter : asymétrie corrigée — les 4 tools RPPS de
+  // listing/lookup vérifient TOUS la présence des 3 valeurs canoniques
+  // (pas juste le mot `geo_precision` qui laissait passer une description
+  // appauvrie à `"NB: champ geo_precision présent."`).
+  const TOOLS_VERIFYING_3_VALUES = [
+    "professionnels_rpps_par_dept",
+    "rpps_search_by_name",
+    "professionnel_by_rpps",
+  ] as const;
 
-  it("rpps_search_by_name (V0.12.0) : description mentionne geo_precision par-résultat", () => {
-    const tool = findTool("rpps_search_by_name");
-    expect(tool?.description).toMatch(/geo_precision/);
-  });
+  for (const name of TOOLS_VERIFYING_3_VALUES) {
+    it(`${name} (V0.12.0) : description mentionne les 3 valeurs canoniques geo_precision`, () => {
+      const tool = findTool(name);
+      expect(tool?.description).toMatch(/geo_precision/);
+      expect(tool?.description).toContain("adresse");
+      expect(tool?.description).toContain("etablissement_finess");
+      expect(tool?.description).toContain("centroide_commune");
+    });
+  }
 
-  it("professionnel_by_rpps (V0.12.0) : description mentionne geo_precision par-site (PS multi-sites)", () => {
+  it("professionnel_by_rpps (V0.12.0) : description précise la sémantique par-site (PS multi-sites)", () => {
     const tool = findTool("professionnel_by_rpps");
-    expect(tool?.description).toMatch(/geo_precision/);
     expect(tool?.description).toMatch(/site/);
   });
 });

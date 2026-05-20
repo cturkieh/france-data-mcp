@@ -111,11 +111,18 @@ describe("RPPS geo_precision mapping parity (V0.12.0)", () => {
     ).toBe(true);
   });
 
-  it("aucune RPC n'utilise une valeur de precision en dehors du set canonique", () => {
-    // Filet contre une 4e valeur introduite par étourderie (ex. `'imprecis'`,
-    // `'iris'`, `'pkn'`). On extrait les paires `when '<source>' then '<value>'`
-    // sur les corps des 4 RPC concaténés et on vérifie que CHAQUE `<value>`
-    // est dans le set canonique.
+  it("aucune RPC n'utilise une source OU une valeur de precision en dehors du set canonique", () => {
+    // Filet contre :
+    //  (a) une 4e PRÉCISION introduite par étourderie (ex. `THEN 'imprecis'`,
+    //      `'iris'`, `'pkn'`) — le LLM caller ne saurait pas la mapper sur ses
+    //      3 narrations connues ;
+    //  (b) un 4e GEOM_SOURCE introduit côté DB (ex. `WHEN 'iris_address'`)
+    //      sans mise à jour du set canonique — la PRÉCISION peut être valide
+    //      mais le test S1 code-reviewer pointait le faux vert latent : avec
+    //      un regex LHS whitelisté, l'ajout de `WHEN 'new_source' THEN 'imprecis'`
+    //      ne serait PAS détecté (LHS hors whitelist court-circuite la capture).
+    // Le regex est donc LARGE (`WHEN '<any>' THEN '<any>'`) et la validation
+    // se fait par appartenance aux DEUX sets canoniques (sources + valeurs).
     const allBodies = [
       "rpps_in_radius",
       "rpps_search_by_name",
@@ -125,18 +132,29 @@ describe("RPPS geo_precision mapping parity (V0.12.0)", () => {
       .map((fn) => compactBody(latestFunctionBody(sql, fn, { stripComments: true })))
       .join("\n");
 
+    const allowedSources = new Set(MAPPING_CANONICAL.map((m) => m.source));
     const allowedValues = new Set(MAPPING_CANONICAL.map((m) => m.precision));
-    const pairRe = /when\s+'(ban_address|finess_join|commune_centroid)'\s+then\s+'([^']+)'/g;
+    const pairRe = /when\s+'([^']+)'\s+then\s+'([^']+)'/g;
     const violations: string[] = [];
     for (const m of allBodies.matchAll(pairRe)) {
       const [, source, value] = m;
-      if (!allowedValues.has(`'${value}'`)) {
-        violations.push(`'${source}' → '${value}' (hors set canonique)`);
+      const sourceLit = `'${source}'`;
+      const valueLit = `'${value}'`;
+      // Filtre : on ne ramasse QUE les paires `WHEN '<x>' THEN '<y>'` qui
+      // ressemblent à un mapping geom_source/geo_precision (la source ou la
+      // valeur appartiennent au set canonique). Sinon faux positifs sur des
+      // CASE WHEN non liés (statuts, libellés, …) ailleurs dans le corps.
+      const looksLikeMapping = allowedSources.has(sourceLit) || allowedValues.has(valueLit);
+      if (!looksLikeMapping) continue;
+      if (!allowedSources.has(sourceLit)) {
+        violations.push(`source '${source}' → '${value}' (source hors set canonique)`);
+      } else if (!allowedValues.has(valueLit)) {
+        violations.push(`'${source}' → valeur '${value}' (valeur hors set canonique)`);
       }
     }
     expect(
       violations,
-      `mapping non canonique détecté : ${violations.join(", ")}. Le set autorisé est {adresse, etablissement_finess, centroide_commune}.`,
+      `mapping non canonique détecté : ${violations.join(", ")}. Sets autorisés : sources={ban_address, finess_join, commune_centroid}, précisions={adresse, etablissement_finess, centroide_commune}.`,
     ).toEqual([]);
   });
 });
