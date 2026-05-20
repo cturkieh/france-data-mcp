@@ -24,4 +24,6 @@ docs/superpowers/
 # étourderie. NE JAMAIS retirer ce pattern sans audit du contenu généré.
 .claude/*
 # Pas d'exception aujourd'hui — si tu veux partager un hook avec l'équipe,
-# l'ajouter ici avec `!.claude/hooks/foo.sh` puis vérifier `git check-ignore -v`.
+# ajouter le PARENT puis le fichier : `!.claude/hooks/` ET `!.claude/hooks/foo.sh`
+# (git ne re-scanne pas les enfants d'un répertoire exclu). Vérifier avec
+# `git check-ignore -v .claude/hooks/foo.sh` que la règle attrape bien la cible.

@@ -4,6 +4,89 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.12.1] — 2026-05-20
+
+### Changed
+
+- **Descriptions tools RPPS refondues pour la clarté LLM (-31 % de chars
+  sur 4 tools, ~680 tokens économisés par session client MCP).** Pas de
+  changement de logique runtime — refactor strings uniquement. Triggers
+  d'usage et hiérarchie d'info repensés pour un LLM client (Claude.ai,
+  Cursor, agents) :
+  - **Action-first opening** sur les 5 tools RPPS (« Trouve », « Liste »,
+    « Récupère ») — cohérence verbale, décision LLM en <30 mots.
+  - **`precise_only` hoisté en lead** dans `professionnels_rpps_in_radius`
+    (bloc « **Param critique** — Défaut `false` ... À `true` ... »
+    AVANT les détails sur les filtres et catégories). Le défaut est
+    annoncé avant le comportement opt-in.
+  - **Constant `RPPS_GEO_PRECISION_HINT` factorisé** sur 3 consommateurs
+    (`professionnels_rpps_par_dept`, `rpps_search_by_name`,
+    `professionnel_by_rpps`) — DRY symétrique à
+    `RPPS_INCLUDE_CATEGORIES_HINT`. Le tool `professionnels_rpps_in_radius`
+    documente la sémantique étendue (precise_only + branches hybrides +
+    couverture %) inline et n'utilise PAS ce hint court — intent volontaire
+    documenté en JSDoc + gardé par test de parité.
+  - **`RPPS_INCLUDE_CATEGORIES_HINT` compressé** de ~140 à ~50 mots
+    (5 consommateurs bénéficiaires, bonus pour les tools non touchés
+    `rpps_dans_etablissement` + `densite_professionnels_sante`).
+  - **`inputSchema.precise_only.description` ne re-documente plus la
+    sémantique du tool** (anti-drift inter-edits) — 1 ligne pointant la
+    description du tool. Le marqueur `V0.12.0 —` parasite retiré.
+  - **`rpps_dans_etablissement` documente coords:null** + pointe le pivot
+    `etablissement_by_finess` (ferme l'asymétrie LLM des 5 tools RPPS).
+  - Markdown unifié : backticks pour identifiants techniques, ASCII pour
+    exemples de prose (suppression des `« »` français en doc technique).
+  - Suppression des `(V0.12.0)` parasites dans les prose LLM-facing
+    (sans intérêt pour un caller, marqueurs internes seulement).
+- **`RawRppsRow.geo_precision` réutilise `PerResultGeoPrecision`** (cohérent
+  avec V0.12.0, source unique de vérité).
+
+### Added
+
+- **Tests régression renforcés** :
+  - Assertion `precise_only.description` durcie : passe de regex tautologique
+    (`/centroide commune|distance_km/i` matchait n'importe quoi grâce à
+    l'alternation et l'accent manquant) à 4 assertions structurelles
+    (verbe d'exclusion, `centro[iï]de commune`, `distance_km`,
+    `défaut false`) + borne anti-rebond drift (<300 chars).
+  - Nouveau test direct sur la constante `RPPS_GEO_PRECISION_HINT` :
+    verrouille les 3 valeurs canoniques + la nuance `~3 km` centroïde
+    présentes dans les 3 callsites. Ferme la classe « régression de la
+    constante propagée silencieusement aux 3 consommateurs ».
+  - Nouveau test sur `rpps_dans_etablissement` : verrouille la note
+    `coords/distance_km = null` + le pointeur `etablissement_by_finess`.
+    Sans cette assertion, un dev qui simplifie la description en futur
+    edit pourrait retirer la ligne et casser l'asymétrie LLM
+    silencieusement.
+- **`.gitignore` allowlist `.claude/*`** au lieu d'entry-par-entry —
+  évite N commits `.gitignore` futurs à chaque nouveau fichier généré
+  par le harness Claude Code (settings.local, scheduled_tasks.lock,
+  cache/, transcripts/…). Exceptions explicites possibles via
+  `!.claude/<chemin>` (note dans le commentaire : parent + fichier requis
+  pour les sous-dossiers).
+
+### Tests
+
+- **1 191 tests verts** (était 1 189 V0.12.0). +2 nouveaux régression :
+  garde-fou constante `RPPS_GEO_PRECISION_HINT`, garde-fou
+  `rpps_dans_etablissement` coords:null.
+
+### Discipline post-fix
+
+Cycle complet appliqué sur ce refactor pourtant léger (4 commits) :
+- /simplify (3 agents reuse/quality/efficiency en parallèle) : 4 H + 4 M
+  + 4 L appliqués (commit `bc58938`).
+- /review Passe 1 (3 agents code-reviewer + silent-failure-hunter +
+  code-simplifier) : 2 H + 3 S, fixes appliqués (commit `92a6022`).
+- /review Passe 2 (2 agents) : GO unanime + 1 S de polissage gitignore
+  (commit `<this>`).
+- 4 commits cumulés, traçabilité fine.
+
+### Migration notes (op)
+
+Aucune migration SQL (refactor strings uniquement). Aucune action prod
+requise au-delà du redéploiement Vercel automatique sur push main.
+
 ## [0.12.0] — 2026-05-20
 
 ### Added
