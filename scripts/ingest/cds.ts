@@ -23,9 +23,9 @@ import {
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
-  safeSerializeIngestLog,
   shortCircuitIfSameChecksum,
-  writeIngestLog,
+  writeIngestLogFailureFallback,
+  writeIngestLogSuccessSafe,
 } from "./shared.js";
 
 // CSV CDS officiel CNAM via data.gouv. Le slug `annuaire-sante-ameli` est
@@ -468,7 +468,7 @@ async function main(): Promise<void> {
     // SUCCESS
     log.status = "success";
     log.finished_at = new Date().toISOString();
-    await writeIngestLog(log);
+    await writeIngestLogSuccessSafe(log, "cds");
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
     console.log(
       `[cds] success: ${stats.inserted} CDS ingested (raw=${stats.rawRows}) in ${elapsedSec}s`,
@@ -487,22 +487,8 @@ async function main(): Promise<void> {
     log.error_phase = ingestErr.phase;
     log.error_message = ingestErr.message;
     log.finished_at = new Date().toISOString();
-    // Émettre le fallback stderr AVANT writeIngestLog : si la DB est la cause
-    // racine de l'échec (cas le plus fréquent), getIngestLogClient/insert peut
-    // throw et court-circuiterait tout ce qui suit, faisant disparaître la
-    // seule trace structurée que le script auto-issue grep. Ordre = survie.
-    console.error(`[cds][ingest_log_fallback] ${safeSerializeIngestLog(log)}`);
+    await writeIngestLogFailureFallback(log, "cds");
     console.error(`[cds] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
-    try {
-      await writeIngestLog(log);
-    } catch (logErr) {
-      // writeIngestLog catch déjà les erreurs Supabase formatées ; un throw ici
-      // = getIngestLogClient (env absente) ou exception réseau brute. On le
-      // signale sans laisser une UnhandledRejection avaler le process.exit(1).
-      console.error(
-        `[cds] writeIngestLog threw (DB likely the root cause): ${logErr instanceof Error ? logErr.message : String(logErr)}`,
-      );
-    }
     process.exit(1);
   }
 }

@@ -28,9 +28,9 @@ import {
   runBatchedRpc,
   runIfMain,
   runKeysetRpc,
-  safeSerializeIngestLog,
   shortCircuitIfSameChecksum,
-  writeIngestLog,
+  writeIngestLogFailureFallback,
+  writeIngestLogSuccessSafe,
 } from "./shared.js";
 
 /**
@@ -572,7 +572,7 @@ async function main(): Promise<void> {
       log.status = "success";
     }
     log.finished_at = new Date().toISOString();
-    await writeIngestLog(log);
+    await writeIngestLogSuccessSafe(log, "rpps");
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
     console.log(`[rpps] success: ${stats.inserted} rows ingested in ${elapsedSec}s`);
   } catch (err) {
@@ -589,8 +589,7 @@ async function main(): Promise<void> {
     log.error_phase = ingestErr.phase;
     log.error_message = ingestErr.message;
     log.finished_at = new Date().toISOString();
-    await writeIngestLog(log);
-    console.error(`[rpps][ingest_log_fallback] ${safeSerializeIngestLog(log)}`);
+    await writeIngestLogFailureFallback(log, "rpps");
     console.error(`[rpps] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
     process.exit(1);
   }

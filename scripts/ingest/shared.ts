@@ -157,6 +157,16 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
 /** Sources supportées dans `ingest_log.source` (utile pour `getLastSuccessChecksum`). */
 export type IngestSource = "finess" | "ameli_ps" | "rpps" | "cds";
 
+/**
+ * Préfixe utilisé dans les logs stderr structurés des callers ingest
+ * (`[source][ingest_log_fallback]`). Distinct de `IngestSource` : le préfixe
+ * stderr garde la convention historique `ameli` là où la table DB stocke
+ * `ameli_ps`. Convention humaine (lue visuellement par l'opérateur dans les
+ * logs GitHub Actions) — AUCUN script ne grep ces préfixes aujourd'hui.
+ * Garder `ameli` (vs `ameli_ps`) évite le bruit dans les logs cron.
+ */
+export type IngestStderrPrefix = "finess" | "ameli" | "rpps" | "cds";
+
 export interface IngestLogEntry {
   source: string;
   started_at: string;
@@ -282,6 +292,99 @@ export async function writeIngestLog(
 }
 
 /**
+ * Pattern défensif uniforme pour les branches d'échec des callers ingest
+ * (`rpps.ts`, `finess.ts`, `ameli.ts`, `cds.ts`). Émet d'abord un snapshot
+ * structuré du log en stderr (préfixe `[source][ingest_log_fallback]`,
+ * convention humaine lue visuellement dans les logs GitHub Actions — voir
+ * `IngestStderrPrefix` JSDoc), PUIS tente l'insert DB de façon isolée. Si
+ * writeIngestLog throw (ex. `getIngestLogClient` env absente, exception
+ * réseau brute), on log proprement sans laisser une UnhandledRejection
+ * avaler le `process.exit(1)` du caller.
+ *
+ * Source unique du pattern auparavant inline-only dans `cds.ts` (V0.12.3) ;
+ * les 3 autres callers avaient le pattern inverse (writeIngestLog avant
+ * fallback) qui perdait le snapshot structuré si writeIngestLog throw.
+ *
+ * **Branches success** : utiliser `writeIngestLogSuccessSafe`, pas ce
+ * helper (sinon stderr bruyant en chemin nominal).
+ */
+export async function writeIngestLogFailureFallback(
+  log: IngestLogEntry,
+  source: IngestStderrPrefix,
+  client?: Pick<SupabaseClient, "from">,
+): Promise<void> {
+  // Ordre = survie : stderr fallback structuré AVANT writeIngestLog. Si la DB
+  // est la cause racine de l'échec (cas fréquent), l'insert va throw et
+  // court-circuiter le reste — le `[source][ingest_log_fallback]` est alors
+  // la seule trace structurée qui survit dans les logs Vercel/GitHub Actions.
+  // Défense au call site : `safeSerializeIngestLog` est triple-safety mais
+  // peut encore throw sur cas adversariels (Proxy révoqué sur log entier
+  // avant Object.entries) → garantit une string ultime pour console.error.
+  const serialized = serializeLogSafelyAtCallSite(log);
+  console.error(`[${source}][ingest_log_fallback] ${serialized}`);
+  try {
+    await writeIngestLog(log, client);
+  } catch (logErr) {
+    // Un throw qui remonte ici = `getIngestLogClient` (env Supabase absente)
+    // ou exception réseau brute (writeIngestLog gère déjà les erreurs Supabase
+    // formatées + retry PGRST204). On log sans laisser une UnhandledRejection
+    // avaler le `process.exit(1)` du caller.
+    const msg = logErr instanceof Error ? logErr.message : String(logErr);
+    console.error(`[${source}] writeIngestLog threw (DB likely the root cause): ${msg}`);
+  }
+}
+
+/**
+ * Pattern défensif pour la branche success des callers ingest (V0.12.3).
+ * Sur le chemin nominal, writeIngestLog peut throw sur cas dégradés
+ * (env Supabase absente, réseau coupé post-SWAP) — sans filet, le throw
+ * remonte, l'`await` rejette → process exit non-déterministe → audit row
+ * LOST sans signal opérateur. Pire qu'un failed perdu : l'ops croit que
+ * le cron n'a pas tourné alors qu'il a réussi côté prod.
+ *
+ * Différence avec `writeIngestLogFailureFallback` : PAS de stderr fallback
+ * en chemin nominal (sinon log bruyant à chaque cron success). Le fallback
+ * stderr distinct `[source][ingest_log_success_fallback]` n'est émis QUE
+ * si writeIngestLog throw — signal opérateur clair que l'audit a été perdu
+ * sur un run réussi.
+ */
+export async function writeIngestLogSuccessSafe(
+  log: IngestLogEntry,
+  source: IngestStderrPrefix,
+  client?: Pick<SupabaseClient, "from">,
+): Promise<void> {
+  try {
+    await writeIngestLog(log, client);
+  } catch (logErr) {
+    // Throw rare (DB cliente non constructible). Émettre le fallback
+    // structuré SEULEMENT dans ce cas : success a réussi côté prod, on doit
+    // absolument tracer l'audit même si la row DB est perdue. Préfixe
+    // distinct du failed path pour la lisibilité ops.
+    const msg = logErr instanceof Error ? logErr.message : String(logErr);
+    const serialized = serializeLogSafelyAtCallSite(log);
+    console.error(`[${source}][ingest_log_success_fallback] ${serialized}`);
+    console.error(`[${source}] writeIngestLog threw on SUCCESS path (audit row LOST): ${msg}`);
+  }
+}
+
+/**
+ * Wrap `safeSerializeIngestLog` au call site : garantit une string ultime
+ * même si `safeSerializeIngestLog` lui-même throw (cas adversariel : Proxy
+ * révoqué sur `log` entier qui fait throw `JSON.stringify` ET `Object.entries`
+ * AVANT d'atteindre le triple-fallback). Source unique appelée par les 2
+ * helpers défensifs. NE PAS exporter — détail d'implémentation V0.12.3.
+ */
+function serializeLogSafelyAtCallSite(log: IngestLogEntry): string {
+  try {
+    return safeSerializeIngestLog(log);
+  } catch (serErr) {
+    const msg = serErr instanceof Error ? serErr.message : "non-Error throw";
+    console.warn(`[france-data-mcp] serializeLogSafelyAtCallSite: safeSerialize threw: ${msg}`);
+    return "[serialize-call-site-unrenderable]";
+  }
+}
+
+/**
  * Retourne le checksum SHA-256 du dernier run `success` pour cette source,
  * ou `null` si aucun run réussi (premier run, table vidée). Utilisé par
  * `finess.ts` et `ameli.ts` pour court-circuiter les étapes COPY → SWAP
@@ -334,8 +437,9 @@ export async function shortCircuitIfSameChecksum(
   log: IngestLogEntry,
   lastSha: string | null,
   currentSha: string,
-  tag: string,
+  tag: IngestStderrPrefix,
   force = false,
+  client?: Pick<SupabaseClient, "from">,
 ): Promise<boolean> {
   if (force) {
     // Set log.forced ici : le caller écrira le log en fin de run avec ce flag
@@ -353,7 +457,10 @@ export async function shortCircuitIfSameChecksum(
   log.skip_reason = "same_checksum";
   log.row_count = null;
   log.finished_at = new Date().toISOString();
-  await writeIngestLog(log);
+  // 5e site success path (V0.12.3) : same-checksum skip est aussi un chemin
+  // nominal qui pose status=success ; protégé contre throw catastrophique
+  // pour cohérence avec les 4 callers ingest (audit row LOST sinon).
+  await writeIngestLogSuccessSafe(log, tag, client);
   console.log(
     `[${tag}] same checksum as last success (${currentSha.slice(0, 8)}…) — skipping ingestion`,
   );
@@ -585,15 +692,27 @@ export function safeSerializeIngestLog(log: IngestLogEntry): string {
   try {
     return JSON.stringify(log);
   } catch (err) {
-    // We're already in a "log of last resort" path — JSON.stringify failing
-    // means there's a circular ref / BigInt / non-enumerable in `log`. Emit
-    // a console.warn so the failure mode is auditable, then return the
-    // flat serialization so the caller still gets a parseable line.
+    // Path log-of-last-resort : JSON.stringify a échoué (circular ref /
+    // BigInt / non-enumerable). On émet un console.warn pour auditabilité,
+    // puis on tente le fallback flat — lui-même wrappé en try/catch car
+    // `Object.entries` + `String(v)` peut throw sur Proxy révoqué, Symbol,
+    // ou objet avec [Symbol.toPrimitive] throwant. Double safety net pour
+    // garantir que le helper appelant a TOUJOURS une string à logguer (V0.12.3).
     console.warn("[france-data-mcp] safeSerializeIngestLog: JSON.stringify failed:", err);
-    const flat = Object.entries(log)
-      .map(([k, v]) => `${k}=${String(v)}`)
-      .join(" ");
-    return `[serialize-fallback err=${err instanceof Error ? err.message : String(err)}] ${flat}`;
+    const jsonErrMsg = err instanceof Error ? err.message : String(err);
+    try {
+      const flat = Object.entries(log)
+        .map(([k, v]) => `${k}=${String(v)}`)
+        .join(" ");
+      return `[serialize-fallback err=${jsonErrMsg}] ${flat}`;
+    } catch (flatErr) {
+      // Cas extrême : même le fallback flat plante. Retour string LITTÉRALE
+      // FIXE — zéro accès dynamique sur `log` (les accès `log.status` /
+      // `log.error_phase` peuvent eux-mêmes throw sur Proxy révoqué, getter
+      // throwant ou Symbol.toPrimitive piégeux). Triple-safety net V0.12.3.
+      console.warn("[france-data-mcp] safeSerializeIngestLog: flat fallback also threw:", flatErr);
+      return "[serialize-triple-fallback-unrenderable]";
+    }
   }
 }
 

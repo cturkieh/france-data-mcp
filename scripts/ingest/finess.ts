@@ -16,9 +16,9 @@ import {
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
-  safeSerializeIngestLog,
   shortCircuitIfSameChecksum,
-  writeIngestLog,
+  writeIngestLogFailureFallback,
+  writeIngestLogSuccessSafe,
 } from "./shared.js";
 
 // Canonical FINESS extract on data.gouv (geocoded version). Verify the resource
@@ -298,7 +298,7 @@ async function main(): Promise<void> {
     // SUCCESS
     log.status = "success";
     log.finished_at = new Date().toISOString();
-    await writeIngestLog(log);
+    await writeIngestLogSuccessSafe(log, "finess");
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
     console.log(`[finess] success: ${stats.inserted} rows ingested in ${elapsedSec}s`);
   } catch (err) {
@@ -318,11 +318,7 @@ async function main(): Promise<void> {
     log.error_phase = ingestErr.phase;
     log.error_message = ingestErr.message;
     log.finished_at = new Date().toISOString();
-    await writeIngestLog(log);
-    // Stderr fallback ensures the failure stays diagnosable even when
-    // writeIngestLog silently fails (table missing, RLS, etc.). Same
-    // [ingest_log_fallback] prefix as Ameli for grep consistency.
-    console.error(`[finess][ingest_log_fallback] ${safeSerializeIngestLog(log)}`);
+    await writeIngestLogFailureFallback(log, "finess");
     console.error(`[finess] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
     process.exit(1);
   }

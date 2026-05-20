@@ -4,6 +4,75 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.12.3] — 2026-05-20
+
+### Added
+
+- **Helpers défensifs uniformes pour `writeIngestLog`** : 2 nouveaux helpers
+  partagés dans `scripts/ingest/shared.ts` ferment la classe de silent
+  failures sur les chemins d'audit ingest :
+  - `writeIngestLogFailureFallback(log, source, client?)` factorise le
+    pattern défensif inline-only de `cds.ts` (stderr fallback structuré
+    AVANT writeIngestLog + try/catch interne pour éviter
+    `UnhandledRejection` qui avalerait `process.exit(1)`). Les 3 callers
+    `rpps.ts`/`finess.ts`/`ameli.ts` qui avaient l'ordre inverse
+    (writeIngestLog AVANT fallback) sont désormais protégés contre un
+    throw DB qui aurait perdu le snapshot structuré.
+  - `writeIngestLogSuccessSafe(log, source, client?)` clôt la dette
+    symétrique sur les chemins SUCCESS : un throw catastrophique de
+    `writeIngestLog` sur un run réussi côté prod (env Supabase coupée,
+    réseau brut post-SWAP) perdait silencieusement l'audit row sans
+    signal opérateur (pire qu'un failed perdu — l'ops croit que le cron
+    n'a pas tourné). Émet `[source][ingest_log_success_fallback]`
+    distinct du failed path en cas de throw. Les 5 sites success
+    migrent : `rpps.ts`, `finess.ts`, `ameli.ts`, `cds.ts` +
+    `shortCircuitIfSameChecksum` (court-circuit same-checksum).
+
+- **Type `IngestStderrPrefix`** distinct d'`IngestSource` : `"finess" |
+  "ameli" | "rpps" | "cds"` (vs `"ameli_ps"` côté DB). Convention
+  humaine pour les logs stderr (pas grep automatique aujourd'hui),
+  ancrée pour éviter typo opérateur silencieuse.
+
+### Changed
+
+- **`safeSerializeIngestLog` triple-safety net** : le fallback flat
+  `Object.entries(log).map(String(v))` est désormais wrappé dans son
+  propre try/catch, retournant une string LITTÉRALE FIXE
+  `"[serialize-triple-fallback-unrenderable]"` (zéro accès dynamique sur
+  `log`) si même le fallback flat throw (cas adversarials : Proxy
+  révoqué sur `log.status`, `Symbol.toPrimitive` throwant). Défense
+  additionnelle au CALL SITE via `serializeLogSafelyAtCallSite` privé
+  qui wrappe `safeSerializeIngestLog` lui-même — garantit aux 2 helpers
+  défensifs qu'ils ont TOUJOURS une string à logguer, même dans le
+  scénario adversariel où `safeSerializeIngestLog` throw avant
+  d'atteindre son triple-fallback.
+
+- **`shortCircuitIfSameChecksum`** : signature durcie `tag: string` →
+  `tag: IngestStderrPrefix`. Permet l'injection du paramètre `client?`
+  optionnel (testabilité). Tous les callers existants compatibles
+  (littéraux conformes).
+
+### Removed
+
+- **`pnpm db:push`** retiré du `package.json` (alias mort depuis V0.4.4 :
+  le CLI Supabase rejette le format de migration `YYYYMMDDTHHMMSS_*.sql`
+  utilisé par les 52 migrations récentes). Canal d'apply réel = dashboard
+  SQL editor manuel — documenté dans CLAUDE.md projet section Ingestion.
+  L'auto-apply via GitHub Actions a été audité et parqué (mémoire
+  `migration-autoapply-deferred` — risque moyen sur les données, préférence
+  safe).
+
+### Notes maintainers
+
+- Convention nouvelle : **tout nouveau caller ingest qui écrit dans
+  `ingest_log` DOIT utiliser les helpers défensifs** (`writeIngestLogFailureFallback`
+  branche échec, `writeIngestLogSuccessSafe` branche succès), pas
+  `writeIngestLog` direct. Source unique du pattern de survie audit.
+- Dette résiduelle parquée : `getLastSuccessChecksum` peut throw via
+  `getIngestLogClient` sans try/catch dédié (silent gap noté par
+  silent-failure-hunter mais hors scope V0.12.3 — pas une régression
+  introduite). À traiter dans une V0.13+ ou si une trace prod apparaît.
+
 ## [0.12.2] — 2026-05-20
 
 ### Added

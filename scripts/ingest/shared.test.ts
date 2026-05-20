@@ -15,6 +15,8 @@ import {
   runKeysetRpc,
   shortCircuitIfSameChecksum,
   writeIngestLog,
+  writeIngestLogFailureFallback,
+  writeIngestLogSuccessSafe,
 } from "./shared.js";
 
 /**
@@ -312,6 +314,50 @@ describe("shortCircuitIfSameChecksum — levier force", () => {
     expect(log.skip_reason).toBeUndefined();
     expect(log.forced).toBeUndefined();
   });
+
+  it("court-circuit DÉCLENCHÉ : retourne true, écrit log via writeIngestLogSuccessSafe (5e site V0.12.3)", async () => {
+    // Garde-fou contre régression : si demain le 5e site repasse à writeIngestLog
+    // direct (au lieu du helper safe), un throw catastrophique avalerait l'audit.
+    // Le test valide le contrat protégé : insert appelé + status=success +
+    // skip_reason=same_checksum + return true.
+    const log = baseLog();
+    const { client, insert } = fakeSupabase([null]);
+    const short = await shortCircuitIfSameChecksum(log, "abcdef", "abcdef", "rpps", false, client);
+    expect(short).toBe(true);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(log.status).toBe("success");
+    expect(log.skip_reason).toBe("same_checksum");
+    expect(log.row_count).toBeNull();
+  });
+
+  it("court-circuit DÉCLENCHÉ + writeIngestLog throw : retourne true SANS rejeter + fallback stderr distinct success", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = baseLog();
+    const throwingClient = {
+      from: () => ({
+        insert: () => {
+          throw new Error("ECONNREFUSED post-skip");
+        },
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat injecté
+    } as any;
+    const short = await shortCircuitIfSameChecksum(
+      log,
+      "abcdef",
+      "abcdef",
+      "rpps",
+      false,
+      throwingClient,
+    );
+    // Le caller (main) attend `true` pour return early — un throw casserait la
+    // sémantique. Le helper safe protège ça.
+    expect(short).toBe(true);
+    // Le fallback stderr DISTINCT du failed path est émis.
+    expect(
+      errSpy.mock.calls.some((c) => String(c[0]).includes("[rpps][ingest_log_success_fallback]")),
+    ).toBe(true);
+    errSpy.mockRestore();
+  });
 });
 
 describe("writeIngestLog — retry défensif PGRST204 (review P1 silent-failure-hunter)", () => {
@@ -426,6 +472,161 @@ describe("writeIngestLog — retry défensif PGRST204 (review P1 silent-failure-
     expect(warnMessage).toContain("ban_eligible_distinct");
     expect(warnMessage).toContain("ban_to_geocode_distinct");
     warnSpy.mockRestore();
+  });
+});
+
+describe("writeIngestLogFailureFallback — pattern défensif uniforme V0.12.3 (4 callers ingest)", () => {
+  // Contrat : émet d'abord un snapshot stderr structuré ([source][ingest_log_fallback]
+  // pour le script auto-issue), PUIS tente writeIngestLog dans try/catch. Si
+  // writeIngestLog throw (env Supabase absente, exception réseau brute), log
+  // proprement sans laisser une UnhandledRejection avaler le process.exit(1)
+  // du caller. Source unique du pattern précédemment inline-only dans cds.ts.
+
+  const failedLog = (): IngestLogEntry => ({
+    source: "rpps",
+    started_at: "t0",
+    status: "failed",
+    error_phase: "validate",
+    error_message: "boom",
+  });
+
+  it("émet le fallback stderr AVANT writeIngestLog (ordre = survie), puis insert OK", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([null]);
+    await writeIngestLogFailureFallback(failedLog(), "rpps", client);
+    // Ordre garanti : 1er stderr = fallback structuré, AVANT l'insert.
+    const fallbackCallIdx = errSpy.mock.calls.findIndex((c) =>
+      String(c[0]).includes("[rpps][ingest_log_fallback]"),
+    );
+    expect(fallbackCallIdx).toBeGreaterThanOrEqual(0);
+    expect(insert).toHaveBeenCalledTimes(1);
+    // Pas de "writeIngestLog threw" (success path).
+    expect(errSpy.mock.calls.some((c) => String(c[0]).includes("writeIngestLog threw"))).toBe(
+      false,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("writeIngestLog throw → fallback stderr préservé + log d'erreur, jamais d'UnhandledRejection", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // fakeSupabase ne throw pas naturellement — on injecte un client qui
+    // throw sur insert pour simuler getIngestLogClient/réseau brut.
+    const throwingClient = {
+      from: () => ({
+        insert: () => {
+          throw new Error("ECONNREFUSED supabase.co");
+        },
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat injecté
+    } as any;
+    await expect(
+      writeIngestLogFailureFallback(failedLog(), "finess", throwingClient),
+    ).resolves.toBeUndefined(); // PAS de throw — c'est ça le contrat
+    // Fallback structuré ÉMIS malgré le throw.
+    expect(
+      errSpy.mock.calls.some((c) => String(c[0]).includes("[finess][ingest_log_fallback]")),
+    ).toBe(true);
+    // Log d'erreur dédié pour le throw.
+    expect(
+      errSpy.mock.calls.some(
+        (c) =>
+          String(c[0]).includes("writeIngestLog threw") && String(c[0]).includes("ECONNREFUSED"),
+      ),
+    ).toBe(true);
+    errSpy.mockRestore();
+  });
+
+  it("writeIngestLog retourne error (insert error géré en interne) → pas de double-log 'threw'", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Erreur retournée par supabase mais writeIngestLog la catche en interne
+    // (console.error + return) — pas un throw. Le helper ne doit PAS émettre
+    // un 2e log "threw" (le writeIngestLog interne a déjà loggué).
+    const { client } = fakeSupabase([{ code: "23505", message: "duplicate key" }]);
+    await writeIngestLogFailureFallback(failedLog(), "ameli", client);
+    expect(errSpy.mock.calls.some((c) => String(c[0]).includes("writeIngestLog threw"))).toBe(
+      false,
+    );
+    errSpy.mockRestore();
+  });
+
+  it("préfixe `source` correctement propagé pour les 4 sources (rpps/finess/ameli/cds)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // `as const` : force le type littéral `IngestStderrPrefix` à l'inférence
+    // (sinon `string[]` faiblement typé, et un éventuel "ameli_ps" passerait
+    // — les .test.ts ne sont pas typecheckés par le CI, cf. tsconfig.api.json).
+    for (const source of ["rpps", "finess", "ameli", "cds"] as const) {
+      const { client } = fakeSupabase([null]);
+      await writeIngestLogFailureFallback({ ...failedLog(), source }, source, client);
+      expect(
+        errSpy.mock.calls.some((c) => String(c[0]).includes(`[${source}][ingest_log_fallback]`)),
+      ).toBe(true);
+    }
+    errSpy.mockRestore();
+  });
+});
+
+describe("writeIngestLogSuccessSafe — protège la branche success contre throw catastrophique V0.12.3", () => {
+  // Contrat : sur chemin success, writeIngestLog peut throw (env Supabase
+  // absente, réseau coupé post-SWAP). Sans filet, l'`await` rejette → process
+  // exit non-déterministe → audit row LOST sans signal opérateur. Le helper
+  // try/catch writeIngestLog ; en cas de throw émet un fallback stderr DISTINCT
+  // du failed path (`[source][ingest_log_success_fallback]`) pour que l'ops
+  // sache qu'un run RÉUSSI côté prod a perdu son audit.
+
+  const successLog = (): IngestLogEntry => ({
+    source: "rpps",
+    started_at: "t0",
+    status: "success",
+    row_count: 1000,
+  });
+
+  it("succès nominal → aucun stderr (pas de bruit en chemin nominal)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client, insert } = fakeSupabase([null]);
+    await writeIngestLogSuccessSafe(successLog(), "rpps", client);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(errSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("writeIngestLog throw → fallback stderr DISTINCT du failed path + log d'erreur, jamais d'UnhandledRejection", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const throwingClient = {
+      from: () => ({
+        insert: () => {
+          throw new Error("ECONNREFUSED supabase.co");
+        },
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat injecté
+    } as any;
+    await expect(
+      writeIngestLogSuccessSafe(successLog(), "finess", throwingClient),
+    ).resolves.toBeUndefined();
+    // Préfixe success_fallback : permet à l'ops de distinguer "audit perdu sur run réussi"
+    // (situation pire que failed perdu) d'un failed path normal.
+    expect(
+      errSpy.mock.calls.some((c) => String(c[0]).includes("[finess][ingest_log_success_fallback]")),
+    ).toBe(true);
+    expect(
+      errSpy.mock.calls.some(
+        (c) =>
+          String(c[0]).includes("writeIngestLog threw on SUCCESS path") &&
+          String(c[0]).includes("ECONNREFUSED"),
+      ),
+    ).toBe(true);
+    errSpy.mockRestore();
+  });
+
+  it("writeIngestLog retourne error supabase (insert error géré en interne) → pas de stderr success_fallback", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client } = fakeSupabase([{ code: "23505", message: "duplicate key" }]);
+    await writeIngestLogSuccessSafe(successLog(), "ameli", client);
+    // writeIngestLog gère déjà en interne (console.error préfixé) ; le
+    // helper ne doit PAS émettre son propre fallback stderr.
+    expect(
+      errSpy.mock.calls.some((c) => String(c[0]).includes("[ameli][ingest_log_success_fallback]")),
+    ).toBe(false);
+    errSpy.mockRestore();
   });
 });
 

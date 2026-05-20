@@ -1,6 +1,6 @@
 {
   "name": "france-data-mcp",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "mcpName": "io.github.cturkieh/france-data-mcp",
   "description": "MCP TypeScript pour combiner et réconcilier 6 référentiels publics français (INSEE SIRENE, FINESS DREES, RPPS Annuaire Santé ANS, Annuaire Santé Ameli, IGN, DINUM) — avec cross-source FINESS↔RPPS↔SIRENE, détection des SIRET fermés invisibles côté DREES, scoring d'adresse Dice, rate limit & observabilité structurée. Production-ready pour Claude, Cursor et toute app TypeScript.",
   "keywords": [
@@ -76,7 +76,6 @@
     "db:start": "supabase start",
     "db:stop": "supabase stop",
     "db:reset": "supabase db reset",
-    "db:push": "supabase db push",
     "db:types": "supabase gen types typescript --local > src/storage/supabase-types.ts",
     "ingest:finess": "tsx scripts/ingest/finess.ts",
     "ingest:ameli": "tsx scripts/ingest/ameli.ts",

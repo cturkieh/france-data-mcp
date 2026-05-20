@@ -21,9 +21,9 @@ import {
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
-  safeSerializeIngestLog,
   shortCircuitIfSameChecksum,
-  writeIngestLog,
+  writeIngestLogFailureFallback,
+  writeIngestLogSuccessSafe,
 } from "./shared.js";
 
 // Canonical Annuaire Santé Ameli PS extract on data.gouv. The dataset slug
@@ -293,7 +293,7 @@ async function main(): Promise<void> {
       log.status = "success";
     }
     log.finished_at = new Date().toISOString();
-    await writeIngestLog(log);
+    await writeIngestLogSuccessSafe(log, "ameli");
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
     console.log(`[ameli] success: ${stats.inserted} rows ingested in ${elapsedSec}s`);
   } catch (err) {
@@ -314,14 +314,7 @@ async function main(): Promise<void> {
     log.error_phase = ingestErr.phase;
     log.error_message = ingestErr.message;
     log.finished_at = new Date().toISOString();
-    await writeIngestLog(log);
-    // Always emit a parseable JSON snapshot of the failure log on stderr.
-    // If `writeIngestLog` itself silently failed (RLS, network, table
-    // missing), this is the only structured trace surviving in the GitHub
-    // Actions output. The auto-issue script greps the prefix. Use the
-    // safe serializer so a circular ref / BigInt smuggled into `log`
-    // doesn't throw INSIDE the catch and defeat the survival path.
-    console.error(`[ameli][ingest_log_fallback] ${safeSerializeIngestLog(log)}`);
+    await writeIngestLogFailureFallback(log, "ameli");
     console.error(`[ameli] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
     process.exit(1);
   }
