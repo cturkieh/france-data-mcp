@@ -78,6 +78,67 @@ export type DinumLookupError = {
   status: "rejected" | "not_found" | "ambiguous" | "config_missing" | "enrichment_failed";
 };
 
+/**
+ * Méthode de résolution effective qui a permis de produire le résultat. Sert
+ * de signal de traçabilité pour le caller LLM (Resolver V2).
+ *
+ * - `rpps` : cas nominal V0.7.0 — RPPS a fourni ≥ 1 SIRET, DINUM a enrichi,
+ *   au moins un candidat matche l'adresse FINESS. **Pas de fallback déclenché.**
+ * - `address_fallback` : RPPS n'a fourni aucun SIRET exploitable (vide ou tous
+ *   sentinelle/malformés). Le resolver est passé en fallback géographique
+ *   (DINUM `/near_point`) filtré par NAF compatible avec la famille FINESS.
+ * - `mixed` : RPPS a fourni des SIRET ET le fallback a été déclenché aussi
+ *   (parce qu'aucun candidat RPPS ne matchait l'adresse FINESS, et que DINUM
+ *   a répondu sans erreur). Les candidats finaux mélangent les 2 sources.
+ */
+export type ResolutionMethod = "rpps" | "address_fallback" | "mixed";
+
+/**
+ * Pourquoi le fallback géographique a été déclenché. `null` si la méthode est
+ * `"rpps"` (cas nominal, pas de fallback). Sert au caller LLM à comprendre
+ * la nature du fallback (et au futur audit prod).
+ *
+ * - `no_rpps` : aucun SIRET trouvé côté RPPS (table vide pour ce num_finess
+ *   ou tous SIRET filtrés par les sentinelles `finess_unmatched` / malformés).
+ * - `no_best_match_with_clean_dinum` : RPPS a fourni des SIRET, DINUM a
+ *   répondu sans erreur, mais aucun candidat n'atteint le seuil d'adresse
+ *   (`score_adresse >= 0.6`). Cas typique : PS a déclaré le siège HQ d'un
+ *   groupe distant du site physique.
+ * - `no_naf_mapping_for_famille` : un fallback ALLAIT être tenté mais la
+ *   famille FINESS source n'a aucun NAF compatible mappé (cf.
+ *   `DELIBERATELY_NO_NAF` ou famille `autre`). Skip silencieux — préserve le
+ *   garde-fou Franco-Britannique (mieux vaut pas de fallback qu'un mauvais
+ *   match). Le `method` reste `"rpps"` dans ce cas, et seul `fallback_reason`
+ *   est renseigné pour permettre l'audit.
+ */
+export type FallbackReason =
+  | "no_rpps"
+  | "no_best_match_with_clean_dinum"
+  | "no_naf_mapping_for_famille"
+  | null;
+
+/**
+ * Statut de désambiguïsation après application du gate NAF + signal RPPS.
+ * Décrit ce qui est arrivé quand le fallback géo a ramené > 1 candidat (ou,
+ * pour `not_applicable`, qu'il n'a même pas été déclenché).
+ *
+ * - `not_applicable` : pas de fallback déclenché (method === `"rpps"`) OU
+ *   fallback déclenché mais 0 candidat retenu après gate NAF. Le caller ne
+ *   doit pas interpréter ce statut comme une qualité de match.
+ * - `single_after_gate` : 1 seul candidat après gate d'activité — pas
+ *   d'ambiguïté à arbitrer.
+ * - `by_rpps_signal` : > 1 candidat après gate, départage par présence d'un
+ *   SIRET côté RPPS (le PS l'avait déclaré → signal de confiance).
+ * - `ambiguous` : > 1 candidat ex-aequo après gate ET signal RPPS épuisé.
+ *   `best_match` est `null` et le caller doit cross-checker manuellement —
+ *   les candidats sont exposés dans `candidates[]` avec leur scoring complet.
+ */
+export type DisambiguationStatus =
+  | "not_applicable"
+  | "single_after_gate"
+  | "by_rpps_signal"
+  | "ambiguous";
+
 export interface SiretCandidate {
   siret: string;
   /** Toutes les sources qui ont mentionné ce SIRET (dédupliquées). */
@@ -139,6 +200,42 @@ export interface SiretResolution {
   sirens_actif: Record<string, boolean | null>;
   /** Diagnostic par SIREN qui a échoué côté DINUM. Vide quand tout est OK. */
   dinum_errors: DinumLookupError[];
+  /**
+   * Méthode effective de résolution. **Resolver V2 (V0.13.0)** : permet au
+   * caller LLM de savoir si le SIRET retourné vient du pivot RPPS classique
+   * (V0.7) ou du fallback géographique introduit en V0.13.
+   *
+   * Pour rétrocompatibilité avant V0.13 : la valeur `"rpps"` est strictement
+   * équivalente au comportement V0.7 (jamais de fallback déclenché).
+   */
+  method: ResolutionMethod;
+  /**
+   * Pourquoi le fallback a été déclenché (ou skippé). `null` si pas de
+   * fallback envisagé (`method === "rpps"` et best_match trouvé directement).
+   * Cf. `FallbackReason` pour les 3 cas distingués.
+   *
+   * Notamment : `"no_naf_mapping_for_famille"` peut être renseigné AVEC un
+   * `method === "rpps"` — c'est le skip silencieux du fallback pour
+   * `DELIBERATELY_NO_NAF` / famille `autre`. Ce cas garantit le garde-fou
+   * Franco-Britannique : pas de fallback ≠ pas d'amélioration possible.
+   */
+  fallback_reason: FallbackReason;
+  /**
+   * Liste des NAF effectivement passés à DINUM `/near_point` côté fallback
+   * géographique. Vide tableau si pas de fallback déclenché.
+   *
+   * Exposé pour audit + observabilité prod (savoir quels NAF ont été cherchés
+   * permet de mesurer combien de cas le mapping `naf-finess-mapping.ts` aurait
+   * besoin d'élargir/resserrer).
+   */
+  naf_filter_used: string[];
+  /**
+   * Statut de désambiguïsation après gate d'activité + signal RPPS. Cf.
+   * `DisambiguationStatus`. La valeur `"ambiguous"` signale au caller que
+   * plusieurs candidats matchent les critères et qu'`best_match` est `null` :
+   * une intervention manuelle est requise pour trancher.
+   */
+  disambiguation_status: DisambiguationStatus;
 }
 
 /** Seuil au-dessus duquel un score d'adresse Dice est considéré comme un match physique du site. */
@@ -155,12 +252,20 @@ export async function resolveSiretsForFiness(
 ): Promise<SiretResolution> {
   const rppsSirets = await getDistinctSiretsForFinessFromRpps(numFiness);
   if (rppsSirets.length === 0) {
+    // V0.7-compatible : RPPS vide → résolution vide. La traçabilité V0.13
+    // expose `fallback_reason: "no_rpps"` pour signaler la cause au caller —
+    // le commit suivant (Resolver V2 cœur) branchera ici le fallback géo
+    // quand la famille FINESS a un mapping NAF.
     return {
       candidates: [],
       best_match: null,
       sirens_explored: [],
       sirens_actif: {},
       dinum_errors: [],
+      method: "rpps",
+      fallback_reason: "no_rpps",
+      naf_filter_used: [],
+      disambiguation_status: "not_applicable",
     };
   }
 
@@ -341,12 +446,24 @@ export async function resolveSiretsForFiness(
   const bestMatch =
     top && top.score_adresse !== null && top.score_adresse >= BEST_MATCH_THRESHOLD ? top : null;
 
+  // V0.7-compatible : pas de fallback ici, seulement la traçabilité enrichie.
+  // `fallback_reason` est non-null UNIQUEMENT pour expliquer pourquoi on n'a
+  // PAS pu produire de `best_match` malgré une cascade RPPS→DINUM OK — signal
+  // utile au caller LLM, indépendant de la décision de fallback (qui sera
+  // branchée au commit Resolver V2 cœur).
+  const fallbackReason: FallbackReason =
+    bestMatch === null && dinumErrors.length === 0 ? "no_best_match_with_clean_dinum" : null;
+
   return {
     candidates: sorted,
     best_match: bestMatch,
     sirens_explored: sirensDistincts,
     sirens_actif: sirensActif,
     dinum_errors: dinumErrors,
+    method: "rpps",
+    fallback_reason: fallbackReason,
+    naf_filter_used: [],
+    disambiguation_status: "not_applicable",
   };
 }
 
