@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — V0.13.1 (Raffinements désambiguïsation Resolver V2)
+## [0.13.1] — 2026-05-21 (Raffinements désambiguïsation Resolver V2)
 
 ### Added — Sous-score nom + succession SIRET dans `verifier_site_actif`
 
