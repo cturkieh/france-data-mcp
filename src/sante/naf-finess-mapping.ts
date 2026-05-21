@@ -29,6 +29,17 @@ import type { FinessFamille, FinessFamilleQuery } from "./finess-categories.js";
 import type { NafCodeSante } from "./naf-codes.js";
 
 /**
+ * Normalisation d'un code NAF SIRENE en sa forme canonique compact-majuscule
+ * (ex. `" 86.90b "` → `"8690B"`). Factorisée pour éviter toute divergence
+ * entre les comparaisons NAF dans le projet ; partagée avec `coverage.ts`
+ * pour qu'`etabMatchesNaf` et le gate famille traitent les variantes SIRENE
+ * identiquement (réutiliser ce helper plutôt que d'en réinventer un local).
+ */
+export function normalizeNafCode(naf: string): string {
+  return naf.replace(/\./g, "").toUpperCase().trim();
+}
+
+/**
  * NAF acceptés (gate "compatible") pour chaque famille FINESS.
  *
  * Le set est volontairement LARGE pour les familles fourre-tout DREES
@@ -161,8 +172,62 @@ export function isNafCompatibleWithFamille(
   if (!naf) return false;
   const compatibles = nafsForFamille(famille);
   if (compatibles.length === 0) return false;
-  const normalized = naf.replace(/\./g, "").toUpperCase().trim();
-  return (compatibles as readonly string[]).includes(normalized);
+  return (compatibles as readonly string[]).includes(normalizeNafCode(naf));
+}
+
+/**
+ * Table inverse pré-calculée : NAF SIRENE → familles FINESS compatibles. Built
+ * une seule fois au module load à partir de `NAF_BY_FAMILLE` (one source of
+ * truth — toute évolution de la table principale propage automatiquement).
+ *
+ * Many-to-many : un NAF peut dériver vers plusieurs familles (ex. `8610Z`
+ * partagé par mco/ssr/sld/had/psychiatrie/dialyse/addictologie/prevention_sante).
+ * Filtre défensif `DELIBERATELY_NO_NAF` : si une telle famille avait par erreur
+ * un NAF mappé, elle ne ressort jamais ici — verrouille l'invariant test
+ * "n'inclut JAMAIS les familles DELIBERATELY_NO_NAF".
+ */
+const FAMILLES_BY_NAF: Readonly<Record<string, readonly FinessFamilleQuery[]>> = (() => {
+  const acc: Record<string, FinessFamilleQuery[]> = {};
+  for (const famille of Object.keys(NAF_BY_FAMILLE) as FinessFamilleQuery[]) {
+    if (DELIBERATELY_NO_NAF.has(famille)) continue;
+    for (const naf of NAF_BY_FAMILLE[famille]) {
+      const bucket = acc[naf];
+      if (bucket) {
+        bucket.push(famille);
+      } else {
+        acc[naf] = [famille];
+      }
+    }
+  }
+  return acc;
+})();
+
+/**
+ * Familles FINESS compatibles avec un code NAF SIRENE — inverse de
+ * `nafsForFamille`. Premier consommateur :
+ *  - `src/sante/coverage.ts` — couche 1 du gate `finess_sirene_coverage_in_radius` :
+ *    quand le caller ne passe pas `familles`, le scope FINESS est auto-dérivé
+ *    via cette fonction pour garantir un ratio de couverture cohérent
+ *    (sites FINESS du NAF cible vs SIRET SIRENE du NAF cible, à périmètre
+ *    équivalent).
+ *
+ * Normalise le NAF en entrée comme `isNafCompatibleWithFamille` (point
+ * séparateur SIRENE, casse, espaces).
+ *
+ * @example
+ * ```ts
+ * nafToCompatibleFamilles("8690B")  // → ["labo"]
+ * nafToCompatibleFamilles("8610Z")  // → ["mco","ssr","sld","had","psychiatrie",
+ *                                   //    "dialyse","addictologie","prevention_sante"]
+ * nafToCompatibleFamilles("8542Z")  // → [] (école — hors périmètre santé)
+ * nafToCompatibleFamilles(null)     // → []
+ * ```
+ */
+export function nafToCompatibleFamilles(
+  naf: string | null | undefined,
+): readonly FinessFamilleQuery[] {
+  if (!naf) return [];
+  return FAMILLES_BY_NAF[normalizeNafCode(naf)] ?? [];
 }
 
 /**

@@ -353,8 +353,33 @@ const COVERAGE_OUTPUT_SCHEMA: Record<string, unknown> = {
       type: "boolean",
       description: "true si le cap `maxUnitesLegales` a été atteint avant énumération complète.",
     },
+    familles_auto_derivees: {
+      type: ["array", "null"],
+      items: { type: "string" },
+      description:
+        "Familles FINESS auto-dérivées du `naf` cible quand `familles` n'est pas passé (V0.13.2 couche 1 — garantit un ratio cohérent). `null` si le caller a passé `familles` explicitement.",
+    },
+    familles_excluees_naf: {
+      type: "array",
+      items: { type: "string" },
+      description:
+        "Familles passées en input mais incompatibles avec le `naf` cible, exclues du périmètre FINESS (V0.13.2 couche 2). Absent si tout est cohérent ou si `familles` n'a pas été passé.",
+    },
+    coverage_status: {
+      type: "string",
+      enum: ["computed", "scope_empty_unknown_naf", "scope_empty_familles_incompatible"],
+      description:
+        "Statut typé du calcul (toujours présent). `computed` = calcul nominal (finess_sites peut être 0 sur rayon vide). `scope_empty_unknown_naf` = NAF non mappé, court-circuit (corriger le NAF ou compléter naf-finess-mapping). `scope_empty_familles_incompatible` = `familles` toutes incompatibles avec le NAF (réviser le couple ou omettre `familles` pour auto-derive). Le `caveats[]` reste exposé en parallèle pour lecture humaine — ce champ fait foi pour le routage.",
+    },
   },
-  required: ["finess_sites", "sirene_sirets", "coverage_ratio", "methodology"],
+  required: [
+    "finess_sites",
+    "sirene_sirets",
+    "coverage_ratio",
+    "methodology",
+    "familles_auto_derivees",
+    "coverage_status",
+  ],
 };
 
 /**
@@ -2172,6 +2197,8 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       "Métrique : ratio sites FINESS / SIRET SIRENE. Utile pour détecter une sur-déclaration FINESS " +
       "(sites encore listés mais SIRET fermés) ou une sous-déclaration DREES (sites SIRENE non agréés FINESS). " +
       "Inclut une méthodologie explicite + caveats. " +
+      "V0.13.2 : si `familles` n'est pas passé, le scope FINESS est auto-dérivé du NAF cible (garantit un ratio cohérent — sinon `finess_sites` mélangerait toutes les familles co-localisées dans le rayon). " +
+      "Le matching FINESS↔SIRET est gaté par activité NAF↔famille (cas Hôpital Franco-Britannique : IFSI et labo au 4 rue Kléber ne sont plus confondus). " +
       "Source : FINESS DREES + DINUM Recherche Entreprises + SIRENE INSEE.",
     inputSchema: {
       type: "object",
@@ -2193,7 +2220,7 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         familles: {
           type: "array",
           items: { type: "string", enum: [...FINESS_FAMILLE_INPUTS] },
-          description: `Familles FINESS à inclure côté DREES (défaut : toutes). Valeurs : ${FAMILLES_LIST}.`,
+          description: `Familles FINESS à inclure côté DREES. V0.13.2 : si omis, auto-dérivé du NAF cible via la table naf-finess-mapping (ex: naf=8690B → familles=[labo] ; naf=8610Z → multi-familles hospitalières). Passer explicitement si vous voulez restreindre davantage le scope. Valeurs : ${FAMILLES_LIST}.`,
         },
         max_unites_legales: {
           type: "number",

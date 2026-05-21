@@ -11,11 +11,18 @@
  * **SIRET physiques DINUM** (et NON les UL). Le champ `methodology` + `caveats[]`
  * documente honnêtement les limites pour respecter la discipline « zéro overclaim ».
  *
- * Algorithme en 5 étapes :
- * 1. FINESS via `getFinessInRadius` (familles filtrables)
+ * Algorithme en 6 étapes (V0.13.2 : gate NAF↔familles en couche 1/2 + couche 3) :
+ * 0. **Gate NAF↔familles** : si caller ne passe pas `familles`, auto-dérive depuis
+ *    le NAF cible via `nafToCompatibleFamilles` (couche 1 — corrige le ratio
+ *    par défaut, sinon `finess_sites` mélangerait toutes les familles du rayon).
+ *    Si caller passe `familles`, intersection avec les familles compatibles
+ *    NAF + caveat sur exclusions (couche 2 — pas de silence muet sur incohérence).
+ * 1. FINESS via `getFinessInRadius` (familles = scope dérivé en étape 0)
  * 2. UL DINUM via `reverseGeocode` → département → `searchEntreprises(naf, dept)`
  * 3. Pour chaque UL (cap `maxUnitesLegales`), `getEntrepriseBySiren` → SIRET actifs du NAF cible dans le rayon
- * 4. Matching FINESS↔SIRET par score Dice adresse (≥ 0.7 = matched, greedy best-first)
+ * 4. Matching FINESS↔SIRET par score Dice adresse (≥ 0.7) **+ gate NAF↔famille
+ *    sur chaque pair** (couche 3 — défense en profondeur contre co-localisation
+ *    type Hôpital Franco-Britannique où IFSI et labo partagent 4 rue Kléber)
  * 5. Construction du résultat avec samples (top 10 par catégorie) + methodology + caveats
  */
 
@@ -31,6 +38,7 @@ import type { FinessFamilleQuery } from "./finess-db.js";
 import { getFinessInRadius } from "./finess-db.js";
 import type { FinessResult } from "./finess-db.js";
 import { haversineDistance } from "./finess.js";
+import { nafToCompatibleFamilles, normalizeNafCode } from "./naf-finess-mapping.js";
 import type { DinumLookupError } from "./siret-resolver.js";
 
 export type { FinessFamilleQuery } from "./finess-db.js";
@@ -70,6 +78,24 @@ export interface SireneOnlySample {
   raison_sociale_ul: string;
   adresse_libelle: string;
 }
+
+/**
+ * Statut typé pour permettre au caller LLM de router proprement sans parser
+ * les caveats textuels. Le caveat reste exposé en parallèle pour lecture humaine.
+ *
+ *  - `computed` : calcul nominal (peut retourner finess_sites=0 sur rayon vide,
+ *    mais le périmètre lui-même est valide — c'est une absence d'établissements,
+ *    pas une incohérence d'input).
+ *  - `scope_empty_unknown_naf` : `naf` non mappé vers une famille FINESS connue.
+ *    finess_sites=0 par court-circuit — corriger le NAF ou compléter naf-finess-mapping.
+ *  - `scope_empty_familles_incompatible` : caller a passé `familles` mais toutes
+ *    incompatibles avec le `naf` cible. finess_sites=0 par court-circuit —
+ *    réviser le couple naf/familles ou omettre `familles` pour auto-derive.
+ */
+export type CoverageStatus =
+  | "computed"
+  | "scope_empty_unknown_naf"
+  | "scope_empty_familles_incompatible";
 
 export interface CoverageResult {
   // Décomptes bruts
@@ -115,6 +141,32 @@ export interface CoverageResult {
   total_unites_legales_estime: number | null;
   /** Erreurs lookup DINUM par SIREN. */
   dinum_errors: DinumLookupError[];
+  /**
+   * Trace de la couche 1 du gate NAF↔familles (V0.13.2) : familles dérivées
+   * automatiquement du `naf` cible quand le caller n'a pas passé `familles`
+   * explicitement. `null` si le caller a fourni `familles` (choix conservé).
+   * Permet au caller LLM de comprendre pourquoi le scope FINESS est restreint.
+   *
+   * @example `naf=8690B` sans `familles` → `["labo"]`.
+   * @example `naf=8610Z` sans `familles` → multi-familles hospitalières.
+   * @example caller passe `familles=["labo"]` → `null`.
+   */
+  familles_auto_derivees: FinessFamilleQuery[] | null;
+  /**
+   * Trace de la couche 2 du gate NAF↔familles (V0.13.2) : familles passées par
+   * le caller mais incompatibles avec le `naf` cible, donc exclues du périmètre
+   * FINESS. Absent (ou tableau vide) si tout est cohérent OU si caller n'a pas
+   * passé `familles`.
+   *
+   * @example `naf=8690B, familles=["labo","enfance_protection"]` → `["enfance_protection"]`.
+   */
+  familles_excluees_naf?: FinessFamilleQuery[];
+  /**
+   * Statut typé du calcul (toujours présent, défaut `"computed"`). Permet au
+   * caller LLM de router sans parser les `caveats[]`. Le caveat reste exposé
+   * en parallèle pour lecture humaine. Voir `CoverageStatus` pour la sémantique.
+   */
+  coverage_status: CoverageStatus;
 }
 
 /**
@@ -126,13 +178,91 @@ export async function getCoverageFinessVsSireneInRadius(
   const { center, radiusKm, naf, familles, maxUnitesLegales = 10 } = input;
   const cappedMaxUl = Math.min(Math.max(1, maxUnitesLegales), 25);
 
+  // ── Étape 0 : Gate NAF↔familles ─────────────────────────────────────────────
+  // Couche 1 (auto-derive) — Neuilly « 200 sites tous types » vs « 12 labos » :
+  //   si caller n'a pas passé `familles`, on dérive du NAF cible sinon le
+  //   `finess_sites` mélangerait toutes les familles co-localisées dans le rayon.
+  // Couche 2 (intersection) : si caller a passé `familles`, on garde l'inter-
+  //   section avec les familles compatibles NAF + caveat sur les exclues.
+  // Le `nafCompatiblesSet` construit ici est aussi le gate de la couche 3
+  //   (matching) en aval — un seul Set par requête sert les trois couches.
+  const nafCompatibles = nafToCompatibleFamilles(naf);
+  const nafCompatiblesSet = new Set<string>(nafCompatibles);
+  const callerFamilles = familles && familles.length > 0 ? familles : null;
+  const scopeFamilles = callerFamilles
+    ? callerFamilles.filter((f) => nafCompatiblesSet.has(f))
+    : [...nafCompatibles];
+  const famillesExcluees = callerFamilles
+    ? callerFamilles.filter((f) => !nafCompatiblesSet.has(f))
+    : [];
+  const famillesAutoDerivees: FinessFamilleQuery[] | null = callerFamilles
+    ? null
+    : [...nafCompatibles];
+
+  const scopeCaveats: string[] = [];
+  if (famillesExcluees.length > 0) {
+    scopeCaveats.push(
+      `Famille(s) ${famillesExcluees.join(", ")} passée(s) en input mais incompatible(s) avec le NAF ${naf} — exclue(s) du périmètre FINESS (cf. naf-finess-mapping). Couverture calculée sur scope=[${scopeFamilles.join(", ") || "(vide)"}].`,
+    );
+  }
+
+  // Court-circuit : aucune famille FINESS compatible avec le NAF — appeler
+  // getFinessInRadius / DINUM serait coûteux pour un ratio dénué de sens.
+  if (scopeFamilles.length === 0) {
+    const status: CoverageStatus = callerFamilles
+      ? "scope_empty_familles_incompatible"
+      : "scope_empty_unknown_naf";
+    if (status === "scope_empty_unknown_naf") {
+      // Qualifier le warn pour triage ops : typo de format (caller bug) vs NAF
+      // valide-mais-hors-périmètre-santé (mapping à compléter).
+      const qualifier = /^\d{4}[A-Z]$/.test(normalizeNafCode(naf))
+        ? "NAF format valide, hors périmètre santé OU mapping à compléter"
+        : "format invalide, attendu NNNNL (4 chiffres + 1 lettre)";
+      console.warn(
+        `[france-data-mcp] coverage: NAF ${naf} non mappé vers une famille FINESS (${qualifier}). finess_sites=0 par court-circuit.`,
+      );
+    }
+    const reasonCaveat = callerFamilles
+      ? `Aucune des familles passées (${callerFamilles.join(", ")}) n'est compatible avec le NAF ${naf}. finess_sites=0 — réviser le couple naf/familles ou omettre familles= pour auto-derive.`
+      : `Le NAF ${naf} n'est pas mappé vers une famille FINESS connue (naf-finess-mapping.ts). finess_sites=0 — vérifier le code NAF ou compléter le mapping.`;
+    return buildEmptyCoverageResult({
+      naf,
+      radiusKm,
+      cappedMaxUl,
+      famillesAutoDerivees,
+      famillesExcluees,
+      coverage_status: status,
+      extraCaveats: [reasonCaveat, ...scopeCaveats],
+    });
+  }
+
   // ── Étape 1 : FINESS dans le rayon ──────────────────────────────────────────
   const finessQueryResult = await getFinessInRadius({
     center: { lat: center.lat, lon: center.lon },
     radiusKm,
-    familles,
+    familles: scopeFamilles,
   });
-  const finessResults: FinessResult[] = finessQueryResult.results;
+  // Pre-filter par le gate NAF↔famille : garantit que `finess_sites`,
+  // `finess_only_samples` et le ratio ne reflètent QUE des FINESS dont la
+  // famille est compatible avec le NAF cible. Sans ce filtre, un FINESS hors
+  // scope (catégorie ambiguë, ou régression du restrict côté getFinessInRadius)
+  // contribuerait à `finess_only_count` comme une fausse sous-déclaration DREES
+  // (cas Hôpital Franco-Britannique : l'IFSI co-localisé serait compté).
+  // Le gate étant en amont, il n'a plus besoin d'être répété pair-par-pair
+  // dans la boucle de matching.
+  const finessRowsRaw = finessQueryResult.results;
+  const finessResults: FinessResult[] = finessRowsRaw.filter((f) =>
+    nafCompatiblesSet.has(f.categorie.famille),
+  );
+  // Observability ops : un drop > 0 signale que `getFinessInRadius` a renvoyé
+  // des familles hors `scopeFamilles` malgré le restrict — régression du RPC
+  // ou catégorie FINESS ambiguë. Cas attendu en prod : 0 drop.
+  const droppedNafIncompatible = finessRowsRaw.length - finessResults.length;
+  if (droppedNafIncompatible > 0) {
+    console.warn(
+      `[france-data-mcp] coverage: ${droppedNafIncompatible} FINESS row(s) ramenée(s) par getFinessInRadius mais hors scope NAF ${naf} — filtre défensif appliqué. Possible régression du restrict_familles côté RPC.`,
+    );
+  }
 
   // ── Étape 2 : UL DINUM via reverseGeocode → département ────────────────────
   let reverse: Awaited<ReturnType<typeof reverseGeocode>>;
@@ -236,6 +366,9 @@ export async function getCoverageFinessVsSireneInRadius(
   // ── Étape 4 : Matching greedy best-first FINESS ↔ SIRET ────────────────────
   // Normalisations hoistées hors de la double boucle : O(N + M) au lieu de
   // O(N×M) appels normalizeForCompare.
+  // Le filtrage famille↔NAF est déjà appliqué en amont (pre-filter étape 1) :
+  // tous les `finessResults` ici sont garantis compatibles avec le NAF cible,
+  // pas besoin de regater pair-par-pair.
   type ScoredPair = { finessIdx: number; siretIdx: number; score: number };
   const finessAddrNorms = finessResults.map((f) =>
     normalizeForCompare(buildFinessAdresseLibelle(f)),
@@ -314,9 +447,19 @@ export async function getCoverageFinessVsSireneInRadius(
 
   const nProcessed = ulToProcess.length;
   const methodology = buildMethodology(naf, radiusKm, cappedMaxUl);
-  const caveats = buildCaveats(truncatedUl, cappedMaxUl, nProcessed, totalUlEstime, dinumErrors);
+  const baseCaveats = buildCaveats(
+    truncatedUl,
+    cappedMaxUl,
+    nProcessed,
+    totalUlEstime,
+    dinumErrors,
+  );
+  // scopeCaveats (intersection partielle V0.13.2) en tête : c'est l'info la
+  // plus structurante pour interpréter le ratio — doit être lue avant les
+  // caveats généraux DREES/DINUM.
+  const caveats = [...scopeCaveats, ...baseCaveats];
 
-  return {
+  const result: CoverageResult = {
     finess_sites,
     sirene_sirets,
     finess_only_count,
@@ -331,7 +474,13 @@ export async function getCoverageFinessVsSireneInRadius(
     truncated_unites_legales: truncatedUl,
     total_unites_legales_estime: totalUlEstime,
     dinum_errors: dinumErrors,
+    familles_auto_derivees: famillesAutoDerivees,
+    coverage_status: "computed",
   };
+  if (famillesExcluees.length > 0) {
+    result.familles_excluees_naf = famillesExcluees;
+  }
+  return result;
 }
 
 /**
@@ -342,12 +491,45 @@ export async function getCoverageFinessVsSireneInRadius(
  */
 function etabMatchesNaf(etab: Etablissement, targetNaf: string): boolean {
   if (!etab.naf) return false;
-  return normalizeNafForCompare(etab.naf) === normalizeNafForCompare(targetNaf);
+  return normalizeNafCode(etab.naf) === normalizeNafCode(targetNaf);
 }
 
-/** Format compact sans point : "86.90B" → "8690B". */
-function normalizeNafForCompare(naf: string): string {
-  return naf.replace(".", "").toUpperCase();
+/**
+ * Construit un `CoverageResult` à 0 pour les chemins de court-circuit (scope
+ * FINESS vide). Factorise les 16 champs du shape pour éviter qu'un futur ajout
+ * à `CoverageResult` ne soit oublié dans le path court-circuit (drift risk).
+ */
+function buildEmptyCoverageResult(args: {
+  naf: string;
+  radiusKm: number;
+  cappedMaxUl: number;
+  famillesAutoDerivees: FinessFamilleQuery[] | null;
+  famillesExcluees: FinessFamilleQuery[];
+  coverage_status: CoverageStatus;
+  extraCaveats: string[];
+}): CoverageResult {
+  const result: CoverageResult = {
+    finess_sites: 0,
+    sirene_sirets: 0,
+    finess_only_count: 0,
+    sirene_only_count: 0,
+    matched_count: 0,
+    coverage_ratio: null,
+    matched_samples: [],
+    finess_only_samples: [],
+    sirene_only_samples: [],
+    methodology: buildMethodology(args.naf, args.radiusKm, args.cappedMaxUl),
+    caveats: [...args.extraCaveats, ...buildCaveats(false, args.cappedMaxUl, 0, null, [])],
+    truncated_unites_legales: false,
+    total_unites_legales_estime: null,
+    dinum_errors: [],
+    familles_auto_derivees: args.famillesAutoDerivees,
+    coverage_status: args.coverage_status,
+  };
+  if (args.famillesExcluees.length > 0) {
+    result.familles_excluees_naf = args.famillesExcluees;
+  }
+  return result;
 }
 
 function buildMethodology(naf: string, radiusKm: number, maxUl: number): string {

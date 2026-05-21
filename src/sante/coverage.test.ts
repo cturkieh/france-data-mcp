@@ -419,3 +419,354 @@ describe("getCoverageFinessVsSireneInRadius — dinum_errors", () => {
     expect(result.coverage_ratio).toBeNull();
   });
 });
+
+// ── Tests V0.13.2 : gate d'activité NAF/famille (Franco-Britannique) ─────────
+
+/**
+ * Construit un FinessResult d'IFSI / école co-localisé (famille
+ * `enfance_protection`, hors périmètre santé strict). Reproduit le cas
+ * Hôpital Franco-Britannique 4 rue Kléber : l'IFSI partage l'adresse du
+ * labo mais ne doit JAMAIS matcher un SIRET de labo via le gate NAF.
+ */
+function makeIfsiSameAddress(id: string, label: string): FinessResult {
+  return {
+    num_finess: `91000000${id}`,
+    raison_sociale: label,
+    categorie: { code: "300", libelle: "IFSI", famille: "enfance_protection" },
+    adresse: {
+      voie: "4 RUE KLEBER",
+      code_postal: "92300",
+      ville: "LEVALLOIS",
+      code_departement: "92",
+      code_insee: "92044",
+    },
+    coords: { lat: 48.8932, lon: 2.2872 },
+    distance_km: 0.0,
+    telephone: null,
+    email: null,
+  };
+}
+
+function makeLaboSameAddress(id: string, label: string): FinessResult {
+  return {
+    num_finess: `92000000${id}`,
+    raison_sociale: label,
+    categorie: { code: "611", libelle: "LBM", famille: "labo" },
+    adresse: {
+      voie: "4 RUE KLEBER",
+      code_postal: "92300",
+      ville: "LEVALLOIS",
+      code_departement: "92",
+      code_insee: "92044",
+    },
+    coords: { lat: 48.8932, lon: 2.2872 },
+    distance_km: 0.0,
+    telephone: null,
+    email: null,
+  };
+}
+
+describe("getCoverageFinessVsSireneInRadius — V0.13.2 gate NAF Franco-Britannique", () => {
+  it("IFSI co-localisé éliminé du périmètre — finess_sites=1, matched=1, IFSI absent du rapport", async () => {
+    // Cas réel Hôpital Franco-Britannique : labo + IFSI au 4 rue Kléber.
+    // Pre-filter par nafCompatiblesSet en amont : l'IFSI (famille=enfance_protection)
+    // n'apparaît plus du tout dans le rapport (ni matched, ni finess_only) —
+    // garantit qu'un caller LLM ne le confondra pas avec une "sous-déclaration
+    // DREES". Greedy first-served sur Dice 1.0 ne décide plus l'appariement.
+    const labo = makeLaboSameAddress("1", "BIOLAB FRANCO");
+    const ifsi = makeIfsiSameAddress("2", "IFSI FRANCO");
+    // IFSI en tête : sans pre-filter, greedy first-served l'aurait apparié au SIRET labo.
+    vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 2,
+      truncated: false,
+      results: [ifsi, labo],
+    });
+
+    const SIREN = "777111222";
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue(
+      makeSearchResult(SIREN, "BIOLAB FRANCO SAS"),
+    );
+    const siretLabo = makeEtab(`${SIREN}00001`, "4 RUE KLEBER 92300 LEVALLOIS", 2.2872, 48.8932);
+    vi.spyOn(dinumMod, "getEntrepriseBySiren").mockResolvedValue(
+      makeEntrepriseLookup(SIREN, "BIOLAB FRANCO SAS", [siretLabo]),
+    );
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: { lon: 2.2872, lat: 48.8932 },
+      radiusKm: 0.1,
+      naf: NAF, // 8690B
+    });
+
+    // Le périmètre FINESS est restreint au scope NAF — l'IFSI est invisible.
+    expect(result.finess_sites).toBe(1);
+    expect(result.sirene_sirets).toBe(1);
+    expect(result.matched_count).toBe(1);
+    expect(result.matched_samples).toHaveLength(1);
+    expect(result.matched_samples[0]?.finess.num_finess).toBe(labo.num_finess);
+    expect(result.matched_samples[0]?.finess.raison_sociale).toBe("BIOLAB FRANCO");
+    // L'IFSI ne doit apparaître NULLE PART dans le rapport (pas dans finess_only,
+    // pas dans matched, pas dans le count).
+    const allFinessIds = [
+      ...result.matched_samples.map((s) => s.finess.num_finess),
+      ...result.finess_only_samples.map((s) => s.num_finess),
+    ];
+    expect(allFinessIds).not.toContain(ifsi.num_finess);
+    expect(result.finess_only_count).toBe(0);
+    expect(result.coverage_status).toBe("computed");
+  });
+});
+
+describe("getCoverageFinessVsSireneInRadius — V0.13.2 auto-derive familles (couche 1)", () => {
+  it("appel sans `familles` → getFinessInRadius reçoit familles auto-dérivées du NAF", async () => {
+    // Cas réel Neuilly : caller appelle (naf=8690B) sans préciser familles.
+    // Avant : finess_sites comptait 200 sites tous types (hôpital, EHPAD, etc.) —
+    //         ratio coverage = 200/12 ≈ 17, complètement trompeur.
+    // Après : auto-dérive `familles=["labo"]` → getFinessInRadius restreint
+    //         au scope cohérent avec le NAF cible. Ratio recalibré.
+    const finessSpy = vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue({
+      total: 0,
+      page: 1,
+      perPage: 25,
+      totalPages: 0,
+      entreprises: [],
+    });
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8690B", // labos
+    });
+
+    expect(finessSpy).toHaveBeenCalledTimes(1);
+    const callArg = finessSpy.mock.calls[0]?.[0];
+    expect(callArg?.familles).toEqual(["labo"]);
+    // Le résultat doit exposer la trace de la couche 1 pour la transparence
+    expect(result.familles_auto_derivees).toEqual(["labo"]);
+  });
+
+  it("appel sans `familles` pour 8610Z hospitalier → many-to-many (mco/ssr/sld/had/psy...)", async () => {
+    // 8610Z partagé par 8 familles. L'auto-derive doit toutes les propager
+    // côté getFinessInRadius — sinon coverage hospitalier sous-compte.
+    const finessSpy = vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue({
+      total: 0,
+      page: 1,
+      perPage: 25,
+      totalPages: 0,
+      entreprises: [],
+    });
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8610Z",
+    });
+
+    const callArg = finessSpy.mock.calls[0]?.[0];
+    expect(callArg?.familles).toContain("mco");
+    expect(callArg?.familles).toContain("ssr");
+    expect(callArg?.familles).toContain("psychiatrie");
+    expect(callArg?.familles?.length).toBeGreaterThanOrEqual(5);
+    expect(result.familles_auto_derivees).toEqual(callArg?.familles);
+  });
+
+  it("appel AVEC `familles` explicite → pas d'auto-derive (familles_auto_derivees=null)", async () => {
+    // Le caller a fait un choix explicite — on ne le superpose pas. Le champ
+    // `familles_auto_derivees` est null pour signaler "scope choisi par caller".
+    vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue({
+      total: 0,
+      page: 1,
+      perPage: 25,
+      totalPages: 0,
+      entreprises: [],
+    });
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8690B",
+      familles: ["labo"],
+    });
+
+    expect(result.familles_auto_derivees).toBeNull();
+  });
+});
+
+describe("getCoverageFinessVsSireneInRadius — V0.13.2 coverage_status typé", () => {
+  it("flow nominal → coverage_status='computed' (toujours présent)", async () => {
+    // Garde-fou : le champ doit être TOUJOURS sérialisé, jamais undefined,
+    // pour que le caller LLM puisse router sans gérer le cas absent.
+    vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue({
+      total: 0,
+      page: 1,
+      perPage: 25,
+      totalPages: 0,
+      entreprises: [],
+    });
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8690B",
+    });
+
+    expect(result.coverage_status).toBe("computed");
+  });
+
+  it("NAF inconnu → coverage_status='scope_empty_unknown_naf' + warn ops", async () => {
+    // 8542Z (école) n'a aucune famille FINESS mappée — court-circuit explicite.
+    // Garantit qu'un typo NAF ne tombe pas silencieusement sur "rayon vide".
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8542Z", // NAF école — non mappé
+    });
+
+    expect(result.coverage_status).toBe("scope_empty_unknown_naf");
+    expect(result.finess_sites).toBe(0);
+    // Observability ops : warn explicite quand le mapping est incomplet
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("non mappé"));
+    warnSpy.mockRestore();
+  });
+
+  it("familles toutes incompatibles → coverage_status='scope_empty_familles_incompatible'", async () => {
+    // Caller a passé des familles, toutes incompatibles avec le NAF.
+    // Distinct du cas précédent (NAF connu mais scope manuel cassé).
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8690B",
+      familles: ["enfance_protection"],
+    });
+
+    expect(result.coverage_status).toBe("scope_empty_familles_incompatible");
+    expect(result.finess_sites).toBe(0);
+  });
+});
+
+describe("getCoverageFinessVsSireneInRadius — V0.13.2 familles incohérentes (couche 2)", () => {
+  it("familles=['enfance_protection'] + naf='8690B' → finess_sites=0 + caveat explicite", async () => {
+    // Caller explicite mais incohérent : aucune famille passée n'est compatible
+    // avec le NAF cible. On ne peut pas calculer un ratio sensé — on retourne
+    // finess_sites=0 + caveat fort qui explique pourquoi (pas un silence muet).
+    // getFinessInRadius peut être court-circuité ; pas une exigence stricte
+    // sur l'appel, mais sur le résultat final + le caveat.
+    vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 5,
+      truncated: false,
+      // Même si le mock dit "5 résultats", le scope dérivé est vide donc
+      // finess_sites doit être 0.
+      results: [makeIfsiSameAddress("9", "IFSI A"), makeIfsiSameAddress("10", "IFSI B")],
+    });
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue({
+      total: 0,
+      page: 1,
+      perPage: 25,
+      totalPages: 0,
+      entreprises: [],
+    });
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8690B",
+      familles: ["enfance_protection"],
+    });
+
+    expect(result.finess_sites).toBe(0);
+    expect(result.matched_count).toBe(0);
+    // Caveat doit nommer explicitement la famille exclue ET le NAF
+    const incompatibleCaveat = result.caveats.find(
+      (c) => c.includes("enfance_protection") && c.includes("8690B"),
+    );
+    expect(
+      incompatibleCaveat,
+      `Caveat manquant pour familles incompatibles. Caveats actuels: ${JSON.stringify(result.caveats, null, 2)}`,
+    ).toBeDefined();
+    expect(result.familles_excluees_naf).toContain("enfance_protection");
+  });
+
+  it("familles=['labo','enfance_protection'] + naf='8690B' → scope=['labo'] + caveat sur exclu", async () => {
+    // Intersection partielle : la famille labo passe le filtre, enfance_protection
+    // est exclue (incompatible avec 8690B). getFinessInRadius doit recevoir
+    // SEULEMENT ["labo"] et un caveat doit lister "enfance_protection" comme exclue.
+    const finessSpy = vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 1,
+      truncated: false,
+      results: [makeLaboSameAddress("7", "LABO X")],
+    });
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue({
+      total: 0,
+      page: 1,
+      perPage: 25,
+      totalPages: 0,
+      entreprises: [],
+    });
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8690B",
+      familles: ["labo", "enfance_protection"],
+    });
+
+    const callArg = finessSpy.mock.calls[0]?.[0];
+    expect(callArg?.familles).toEqual(["labo"]);
+    expect(result.familles_excluees_naf).toEqual(["enfance_protection"]);
+    expect(result.familles_excluees_naf).not.toContain("labo");
+    // Caveat de transparence sur l'exclusion
+    const exclCaveat = result.caveats.find(
+      (c) => c.includes("enfance_protection") && c.includes("8690B"),
+    );
+    expect(exclCaveat).toBeDefined();
+  });
+
+  it("familles non passées + auto-derive ⇒ familles_excluees_naf reste absent/vide", async () => {
+    // Si le caller n'a rien passé, il n'a rien à se voir reprocher — pas de
+    // familles_excluees_naf, juste familles_auto_derivees.
+    vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    vi.spyOn(dinumMod, "searchEntreprises").mockResolvedValue({
+      total: 0,
+      page: 1,
+      perPage: 25,
+      totalPages: 0,
+      entreprises: [],
+    });
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: "8690B",
+    });
+
+    expect(
+      result.familles_excluees_naf === undefined || result.familles_excluees_naf.length === 0,
+      `familles_excluees_naf doit être vide/absent en cas d'auto-derive sans input. Reçu: ${JSON.stringify(result.familles_excluees_naf)}`,
+    ).toBe(true);
+  });
+});

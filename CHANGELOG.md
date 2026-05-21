@@ -4,6 +4,104 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.13.2] — 2026-05-21 (Gate NAF↔familles `finess_sirene_coverage_in_radius`)
+
+### Fixed — Couverture FINESS↔SIRENE biaisée par les familles co-localisées
+
+L'outil `finess_sirene_coverage_in_radius` retournait un ratio de couverture
+trompeur sur deux fronts, identifiés en prod :
+
+1. **Ratio par défaut faussé** — un appel `(naf=8690B)` sans `familles` à
+   Neuilly comptait ~200 sites FINESS (hôpital + EHPAD + labos + IFSI…)
+   contre une douzaine de SIRET labos DINUM → ratio ~17 alors que la
+   sémantique du tool promet « à périmètre équivalent ».
+
+2. **Matching croisé sur co-localisation** — Hôpital Franco-Britannique
+   (4 rue Kléber) : 7 entités FINESS partagent l'adresse, dont un IFSI
+   (famille `enfance_protection`) et un labo (famille `labo`). Le matching
+   greedy best-first sur Dice 1.0 appariait l'IFSI au SIRET labo selon
+   l'ordre d'insertion — fausse sous-déclaration DREES côté `finess_only`.
+
+### Added — Gate NAF↔familles en 2 couches consolidées (additif, non-breaking)
+
+- **Nouvelle fonction `nafToCompatibleFamilles(naf)`** dans
+  `src/sante/naf-finess-mapping.ts` : inverse de `nafsForFamille`, retourne
+  les familles FINESS compatibles avec un NAF (many-to-many — `8610Z` →
+  8 familles hospitalières ; `8690B` → `["labo"]` uniquement). Réutilise
+  la même table que `nafsForFamille` (one source of truth, round-trip
+  invariant testé). Filtre défensif `DELIBERATELY_NO_NAF`.
+
+- **Auto-derive du scope FINESS** : si caller ne passe pas `familles`,
+  `getFinessInRadius` est appelé avec les familles dérivées du NAF. Le
+  champ `familles_auto_derivees` (nullable, exposé dans le résultat) trace
+  la décision pour le caller LLM. Cas Neuilly : `finess_sites` passe de
+  ~200 à la douzaine de labos réels.
+
+- **Intersection si `familles` explicite** : si caller passe `familles`,
+  intersection avec `nafToCompatibleFamilles(naf)`. Les familles écartées
+  sont exposées via `familles_excluees_naf` + caveat textuel — jamais de
+  silence muet. Court-circuit (`finess_sites=0` + caveat fort) si toutes
+  les familles passées sont incompatibles.
+
+- **Pre-filter du pool FINESS** : après `getFinessInRadius`, filtre
+  défensif `nafCompatiblesSet.has(famille)` → garantit que `finess_sites`,
+  `finess_only_samples` et le ratio ne reflètent QUE des FINESS dans le
+  scope NAF. L'IFSI Franco-Britannique disparaît du rapport (au lieu
+  d'apparaître comme sous-déclaration). `console.warn` ops si jamais des
+  lignes hors scope sont retournées (régression possible du restrict côté
+  RPC `getFinessInRadius`).
+
+- **Nouveau champ typé `coverage_status: CoverageStatus`** (toujours
+  présent dans `CoverageResult`) :
+  - `"computed"` — calcul nominal (peut retourner `finess_sites=0` sur
+    rayon vide, mais le périmètre est valide).
+  - `"scope_empty_unknown_naf"` — NAF non mappé vers une famille connue.
+    Court-circuit ; `console.warn` ops qualifié (format invalide vs hors
+    périmètre santé).
+  - `"scope_empty_familles_incompatible"` — caller a passé `familles`,
+    toutes incompatibles avec le NAF. Court-circuit.
+
+  Permet au caller LLM de router sans parser les `caveats[]`. Le caveat
+  textuel reste exposé en parallèle (lecture humaine).
+
+### Internal — refactoring code-reuse
+
+- `normalizeNafCode` extrait + exporté depuis `naf-finess-mapping.ts`,
+  réutilisé dans `coverage.ts` (`etabMatchesNaf` consomme désormais le
+  helper partagé au lieu d'un `normalizeNafForCompare` local quasi-identique).
+
+- Helper privé `buildEmptyCoverageResult` factorise les 16 champs du
+  shape `CoverageResult` à 0 (anti-drift quand un futur champ est ajouté
+  au type).
+
+### Acceptance prod
+
+- **Franco-Britannique (4 rue Kléber)** avec `naf=8690B` : doit
+  `matched_count=1` (labo seul), `finess_sites=1`, IFSI absent de tout
+  le rapport, `coverage_status="computed"`.
+- **Neuilly** avec `naf=8690B` sans `familles` : doit
+  `familles_auto_derivees=["labo"]` visible, `finess_sites` réduit à la
+  douzaine de labos (au lieu de ~200 sites tous types).
+
+### Tests
+
+- 8 nouveaux tests `nafToCompatibleFamilles` (many-to-many, normalisation,
+  invariants `DELIBERATELY_NO_NAF` + round-trip).
+- 9 nouveaux tests `coverage.ts` (gate Franco-Britannique, auto-derive
+  many-to-many 8610Z, familles incohérentes, intersection partielle,
+  3 cas `coverage_status`).
+- Tests 920028487/920028685/920000643 du Resolver V2 inchangés
+  (`coverage.ts` n'importe pas `siret-resolver.ts` ; pas de risque
+  régression).
+
+### Non-régressions garanties
+
+- Resolver V2 / `verifier_site_actif` / `inspect_site` / Reconciler RPPS
+  intacts (gate `isNafCompatibleWithFamille` toujours utilisé par
+  `siret-resolver.ts` côté DINUM `/near_point`, non touché).
+- Suite unit complète : 1281 tests verts (vs 1278 avant la release —
+  3 nouveaux tests `coverage_status`).
+
 ## [0.13.1] — 2026-05-21 (Raffinements désambiguïsation Resolver V2)
 
 ### Added — Sous-score nom + succession SIRET dans `verifier_site_actif`

@@ -5,6 +5,7 @@ import {
   DELIBERATELY_NO_NAF,
   _NAF_BY_FAMILLE_INTERNAL,
   isNafCompatibleWithFamille,
+  nafToCompatibleFamilles,
   nafsForFamille,
 } from "./naf-finess-mapping.js";
 
@@ -158,5 +159,82 @@ describe("invariants de cohérence de la table", () => {
     // DELIBERATELY_NO_NAF sans ajouter de NAF mappés, ce test crie.
     expect(DELIBERATELY_NO_NAF.has("groupement")).toBe(true);
     expect(nafsForFamille("groupement")).toEqual([]);
+  });
+});
+
+describe("nafToCompatibleFamilles", () => {
+  it("retourne la famille unique pour un NAF mono-famille (8690B → [labo])", () => {
+    // Le NAF labos d'analyses médicales n'est mappé QUE par la famille labo —
+    // utilisé en couche 1 du gate coverage : si caller passe naf=8690B sans
+    // familles, on dérive automatiquement vers ["labo"] et on borne le scope FINESS.
+    expect(nafToCompatibleFamilles("8690B")).toEqual(["labo"]);
+    expect(nafToCompatibleFamilles("4773Z")).toEqual(["pharmacie"]);
+  });
+
+  it("retourne plusieurs familles pour un NAF many-to-many (8610Z hospitalier)", () => {
+    // 8610Z (activités hospitalières INSEE) est partagé par 8 familles DREES :
+    // mco, ssr, sld, had, psychiatrie, dialyse, addictologie, prevention_sante.
+    // Indispensable pour le coverage hospitalier — sans many-to-many, on
+    // sous-comptera systématiquement les sites hospitaliers réels.
+    const families = nafToCompatibleFamilles("8610Z");
+    expect(families).toContain("mco");
+    expect(families).toContain("ssr");
+    expect(families).toContain("sld");
+    expect(families).toContain("had");
+    expect(families).toContain("psychiatrie");
+    expect(families.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("retourne [] pour un NAF non mappé (cas Franco-Britannique IFSI 8542Z école)", () => {
+    // Cas réel hôpital Franco-Britannique : l'IFSI co-localisé a NAF école
+    // (8542Z, enseignement supérieur), qui n'est mappé par AUCUNE famille
+    // FINESS sanitaire. La fonction inverse doit retourner [] proprement —
+    // le caller (coverage) traduit cela en "famille non compatible".
+    expect(nafToCompatibleFamilles("8542Z")).toEqual([]);
+  });
+
+  it("normalise le NAF avec point séparateur SIRENE ('86.90B' → [labo])", () => {
+    expect(nafToCompatibleFamilles("86.90B")).toEqual(["labo"]);
+    expect(nafToCompatibleFamilles("86.10Z").length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("normalise la casse et trim les espaces autour du NAF", () => {
+    expect(nafToCompatibleFamilles(" 8690b ")).toEqual(["labo"]);
+  });
+
+  it("retourne [] pour null / undefined / chaîne vide", () => {
+    expect(nafToCompatibleFamilles(null)).toEqual([]);
+    expect(nafToCompatibleFamilles(undefined)).toEqual([]);
+    expect(nafToCompatibleFamilles("")).toEqual([]);
+  });
+
+  it("n'inclut JAMAIS les familles DELIBERATELY_NO_NAF (invariant)", () => {
+    // Garde-fou : même si DELIBERATELY_NO_NAF et NAF_BY_FAMILLE étaient un
+    // jour mal synchronisées, la fonction inverse ne doit jamais ressortir
+    // une famille listée comme DELIBERATELY_NO_NAF. Test parcourt tous les
+    // NAF santé connus et vérifie sur chacun.
+    for (const naf of Object.keys(NAF_SANTE)) {
+      const families = nafToCompatibleFamilles(naf);
+      for (const f of DELIBERATELY_NO_NAF) {
+        expect(
+          families,
+          `NAF "${naf}" ne doit pas dériver vers la famille "${f}" (DELIBERATELY_NO_NAF).`,
+        ).not.toContain(f);
+      }
+    }
+  });
+
+  it("la fonction inverse est cohérente avec nafsForFamille (round-trip)", () => {
+    // Invariant croisé : si famille X a NAF Y, alors nafToCompatibleFamilles(Y)
+    // doit contenir X. Toute désynchro est un silent failure du gate.
+    for (const famille of Object.keys(FINESS_FAMILY_CODES) as FinessFamilleQuery[]) {
+      const nafs = nafsForFamille(famille);
+      for (const naf of nafs) {
+        expect(
+          nafToCompatibleFamilles(naf),
+          `Round-trip cassé : famille "${famille}" mappe le NAF "${naf}", mais nafToCompatibleFamilles("${naf}") ne contient pas "${famille}".`,
+        ).toContain(famille);
+      }
+    }
   });
 });
