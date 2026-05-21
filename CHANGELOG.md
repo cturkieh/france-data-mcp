@@ -4,6 +4,97 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.13.0] — Unreleased
+
+### Added — Resolver V2 (chantier majeur croisement FINESS↔SIRENE)
+
+Le pivot RPPS→DINUM V0.7 couvre mal certains cas pourtant courants :
+laboratoires de biologie dont les biologistes ne déclarent pas leur site
+au RPPS, EHPAD/pharmacies/centres techniques sans titulaire RPPS rattaché,
+et déménagements (PMA Chérest → Ambroise Paré : SIRENE sait au 1er septembre
+2025, mais V0.7 ne pouvait pas le détecter sans pivot RPPS exploitable).
+
+V0.13 introduit un **fallback géographique** déclenché quand `best_match`
+reste null après la cascade V0.7 ET que DINUM a répondu sans erreur. Le
+fallback appelle DINUM `/near_point` (rayon 150 m sur les coords FINESS)
+filtré par les NAF compatibles avec la famille FINESS du site source.
+Un **gate d'activité** (mode many-to-many) éliminate les candidats hors
+secteur, préservant le garde-fou Franco-Britannique (un labo ne sera jamais
+rattaché à un IFSI co-localisé).
+
+- **Nouveau module `src/sante/naf-finess-mapping.ts`** : table NAF ↔ famille
+  FINESS many-to-many calibrée sur la nomenclature NAF rév.2 + taxonomie
+  DREES. Helpers publics `nafsForFamille()` + `isNafCompatibleWithFamille()`.
+  Familles `groupement` (GCS/GCSMS) et `autre` listées dans
+  `DELIBERATELY_NO_NAF` → fallback désactivé pour elles (skip silencieux,
+  préserve le garde-fou). Imagerie inclut 8622A (radio libérale) + 8690F
+  (centres en SCM/SEL). 20 tests d'invariant (couverture complète des
+  familles, parité NAF_SANTE, normalisation casse/point/espace).
+
+- **Traçabilité Resolver V2 exposée** sur les 3 tools publics
+  (`verifier_site_actif`, `historique_etablissement`, `reconcilier_finess_sirene`)
+  + propagation dans `inspect_site.statut_site` :
+  - `method`: `"rpps"` (V0.7 nominal) / `"address_fallback"` (RPPS vide) /
+    `"mixed"` (RPPS partiel + fallback complète)
+  - `fallback_reason`: `"no_rpps"` / `"no_best_match_with_clean_dinum"` /
+    `"no_naf_mapping_for_famille"` / `"no_finess_coords"` / `null`
+  - `naf_filter_used`: NAF passés à `/near_point` (audit + observabilité)
+  - `disambiguation_status`: `"single_after_gate"` / `"by_rpps_signal"` /
+    `"ambiguous"` / `"not_applicable"`
+
+- **Préfixe LLM-friendly dans `explication`** : quand le SIRET vient du
+  fallback, le texte commence par
+  `[Resolver V2 : SIRET résolu via fallback géographique DINUM /near_point —
+  NAF 8690B, single_after_gate]`. Cas nominal V0.7 : pas de préfixe.
+
+- **Désambiguïsation `ambiguous`** : message d'explication dédié quand
+  plusieurs candidats matchent la famille FINESS via fallback géo sans
+  signal RPPS pour départager (`best_match: null` + candidats listés pour
+  intervention manuelle).
+
+- **8 nouveaux tests dédiés fallback** dans `cross-source.test.ts > "Resolver
+  V2 fallback géo"` + **2 fixtures cas réels** :
+  - Eylau Victor Hugo (RPPS vide labo → fallback retrouve le SIRET labo)
+  - PMA Chérest (déménagement détecté, `method="mixed"`, ancien + nouveau
+    SIRET exposés)
+  - Hôpital Franco-Britannique 4 rue Kléber (co-localisation labo/école →
+    gate écarte l'école 8542Z)
+  - 2 labos co-localisés ex-aequo → `disambiguation_status: "ambiguous"`
+  - Famille `groupement` GCS → fallback skip silencieux (`searchEntreprises`
+    JAMAIS appelée)
+  - Famille `autre` → skip silencieux
+  - `coords: null` → skip silencieux
+  - DINUM en erreur → fallback ne se déclenche pas (Q1 verrouillée)
+  - Non-régression V0.7 (best_match RPPS direct → pas de fallback déclenché)
+
+### Changed
+
+- **Suppression de l'early return RPPS vide dans `resolveSiretsForFiness`** :
+  le cas `rppsSirets.length === 0` tombe maintenant naturellement dans la
+  branche fallback (cascade DINUM = no-op sur liste vide). Sémantique
+  publique non-breaking (la résolution finale reste cohérente), mais le
+  comportement de résultat CHANGE : un FINESS qui retournait `indetermine`
+  V0.7 retournera désormais souvent `actif`/`ferme` via fallback géo. Effet
+  voulu, à monitorer en prod.
+
+- **Factorisation cascade `inspect_site` (`SiteContext`)** : `verifierSiteActif`
+  et `historiqueEtablissement` acceptent un paramètre optionnel
+  `context?: SiteContext` pour partager FINESS + résolution pré-chargés.
+  `inspect_site` charge maintenant le contexte une seule fois et le passe
+  aux 2 sous-appels (économie ~600 ms + 50 % de la charge rate-limit
+  DINUM par invocation). Architecture en 2 phases : Phase A
+  (`getFinessByNumFiness` + `getRppsDansEtablissement` en parallèle) →
+  Phase B (`verifierSiteActif(context)` + `historiqueEtablissement(context)`
+  en parallèle). Backward-compat strict : les callers MCP qui passent
+  `verifierSiteActif(numFiness)` directement gardent le comportement V0.10.
+
+- **Désync FINESS↔RPPS détectée AVANT la cascade** : la branche
+  "FINESS absent + PS RPPS rattachés" est désormais détectée par
+  `inspect_site` AVANT d'appeler la cascade RPPS→DINUM (au lieu d'après le
+  verifier), économisant l'appel DINUM gaspillé dans ce cas pathologique
+  (latence DREES 1-2 mois). Le warning console reste émis pour le signal
+  opérationnel.
+
 ## [0.12.3] — 2026-05-20
 
 ### Added
