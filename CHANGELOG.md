@@ -4,6 +4,95 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.13.3] — 2026-05-21 (KNN GiST sur `rpps_in_radius` — fix timeout zone dense)
+
+### Fixed — Timeout `professionnels_rpps_in_radius` en zone dense (chantier A backlog)
+
+L'outil `professionnels_rpps_in_radius` time-outait sur grand rayon + zone
+dense (cas démo : Neuilly 2 km, tous PS). Cause-racine identifiée par
+diagnostic prod `EXPLAIN ANALYZE BUFFERS` (discipline cardinale « prouver
+la cause par la prod, jamais par inférence ») :
+
+- **`ORDER BY ST_Distance(r.geog, v_point) LIMIT N` ne déclenche pas le KNN
+  GiST.** Le planner ramène TOUTES les lignes du bbox `&&` (7 630 lignes
+  à 2 km Neuilly post-V0.13 ban_join, cluster `ban_address` dense Paris ouest
+  sur 1,14 M lignes), recalcule la distance exacte par-ligne, top-N heapsort.
+- Hypothèses brief écartées par la prod : limit caller trop élevé (faux —
+  clampLimit serveur à 100), branche centroid coûteuse (vraie mais
+  secondaire), régression GiST partiel post-V0.13 (intact, 107 MB, prédicat
+  byte-identique au RPC).
+
+C'est le **piège V0.10.2 inversé** : V0.10.2 documentait le cluster
+centroïdes commune, V0.13 a inflaté `ban_address` qui hérite du même
+piège sur cluster Paris dense.
+
+### Added — KNN PostGIS sur la CTE `precise` de `rpps_in_radius`
+
+Migration `20260521T140000_rpps_in_radius_knn.sql` : `ORDER BY r.geog <->
+v_point` (operator KNN GiST) au lieu de `ORDER BY ST_Distance(...)`. L'index
+GiST PARTIEL `rpps_geog_precise_gist` trie en streaming par bounding box +
+early-stop natif sur LIMIT.
+
+`distance_meters` reste calculé via `ST_Distance(r.geog, v_point)` dans le
+SELECT (distance géodésique exacte ; l'opérateur `<->` sur `geography`
+retourne une distance bbox approximative — bonne pour le tri KNN, mauvaise
+comme valeur publique). Postgres calcule les deux mais `ST_Distance` ne
+tourne que sur les 100 rows post-KNN (au lieu de 7 630 pré-fix).
+
+Contrat API préservé byte-pour-byte : signature `BOOLEAN p_precise_only`,
+sentinelle P0002 (matview vide), tri global UNION ALL `ORDER BY
+distance_meters, id LIMIT p_limit`. Aucun changement côté caller MCP.
+
+### Mesures prod avant / après
+
+| Test (Neuilly 2 km, tous PS, limit 100) | Pré-fix | Post-fix | Gain |
+|---|---|---|---|
+| RPC hybride (cas démo)               | timeout-prone | **80,7 ms** | **>30×** |
+| RPC precise_only=true                | 2 594 ms      | **56 ms**   | **×46** |
+| Buffers (precise_only)               | 10 628        | **1 393**   | ×7,6 |
+
+### Gotcha CLAUDE.md — `ORDER BY ST_Distance ≠ KNN GiST`
+
+Ajout durable à la section « Top gotchas DB » pour tout futur `ORDER BY
+distance + LIMIT N` sur `geography` :
+
+- Utiliser l'opérateur KNN `geog <-> point` dans `ORDER BY` pour activer
+  l'early-stop GiST.
+- Garder `ST_Distance` dans le SELECT pour la valeur géodésique exacte.
+- Vérification rapide qu'un plan utilise le KNN : `Order By: (geog <-> ...)`
+  dans `Index Scan using <gist_index>` (pas un `Sort` séparé).
+
+### Dette parquée (hors V0.13.3)
+
+Branche centroid : `Index Scan using rpps_insee_id_idx` retire 3 368 lignes
+en `Filter: r.geom_source = 'commune_centroid'` à 500 m Paris. Un index
+partiel `rpps_insee_id_centroid_idx ON rpps(code_insee, id) WHERE
+geom_source = 'commune_centroid'` rendrait le scan ciblé directement
+(~50–100 ms gagnées par commune touchée). Coût : maintenance d'un index
+supplémentaire à chaque ingestion mensuelle RPPS. À ouvrir si la branche
+centroid devient le goulot. Non bloquant V0.13.3 — la branche `precise`
+dominait à 96 % le temps de réponse.
+
+### Acceptance prod
+
+- **Neuilly 2 km hybride** (cas démo) : 80,7 ms (vs timeout-prone). Démo unblocked.
+- **Neuilly 2 km precise_only=true** : 56 ms (vs 2 594 ms). ×46.
+
+### Non-régressions
+
+- `isNafCompatibleWithFamille` toujours utilisé par `siret-resolver.ts`
+  (Resolver V2 inchangé). Les 3 cas FINESS 920028487/920028685/920000643
+  ne passent pas par `rpps_in_radius`.
+- 1281 unit tests verts (les tests `rpps-db.test.ts` sont mockés, n'exécutent
+  pas le SQL changé).
+
+### Application en prod
+
+Migration appliquée manuellement via Supabase Dashboard SQL editor (canal
+V0.12.3 — format `YYYYMMDDTHHMMSS_*.sql` rejeté par `supabase db push`).
+Validation post-fix par `EXPLAIN ANALYZE BUFFERS` sur le cas démo Neuilly
+avant le commit du code.
+
 ## [0.13.2] — 2026-05-21 (Gate NAF↔familles `finess_sirene_coverage_in_radius`)
 
 ### Fixed — Couverture FINESS↔SIRENE biaisée par les familles co-localisées
