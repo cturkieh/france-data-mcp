@@ -684,9 +684,11 @@ async function tryAddressFallback(args: {
 
   // Dédup des Etablissement par SIRET. Plusieurs NAF peuvent ramener la même
   // entreprise si DINUM retourne plusieurs activités sur un même siège — on
-  // garde la première occurrence rencontrée (suffisant : on relookup via SIREN
-  // juste après pour les détails enrichis).
+  // garde la première occurrence rencontrée. On capte AUSSI `nomComplet` côté
+  // entreprise au passage (Fix P2 code-reviewer) : DINUM /near_point l'expose
+  // déjà, pas besoin de re-lookup SIREN si l'enrichment ultérieur échoue.
   const fallbackEtabs = new Map<string, Etablissement>();
+  const nomCompletByEtab = new Map<string, string>();
   for (let i = 0; i < nearPointResults.length; i++) {
     const settled = nearPointResults[i];
     const naf = nafs[i] as string;
@@ -696,12 +698,22 @@ async function tryAddressFallback(args: {
       console.error(
         `[france-data-mcp] siret-resolver: fallback near_point naf=${naf} for num_finess=${finess.num_finess} failed: ${msg}`,
       );
+      // Fix P1 silent-failure-hunter : surface l'échec partiel dans
+      // `dinum_errors` pour ne pas mentir au caller sur la propreté de la
+      // résolution. Clé sentinelle `near_point:<naf>` (pas un SIREN) — distingue
+      // visuellement un échec de NAF d'un échec d'enrichment SIREN.
+      dinumErrors.push({
+        siren: `near_point:${naf}`,
+        message: `near_point naf=${naf}: ${msg}`,
+        status: "rejected",
+      });
       continue;
     }
     for (const ent of settled.value.entreprises) {
       for (const etab of ent.etablissements) {
         if (!fallbackEtabs.has(etab.siret)) {
           fallbackEtabs.set(etab.siret, etab);
+          if (ent.nomComplet) nomCompletByEtab.set(etab.siret, ent.nomComplet);
         }
       }
     }
@@ -753,11 +765,20 @@ async function tryAddressFallback(args: {
     }
     const lookup = settled.value.lookup;
     if (!lookup.found) {
-      // Pas remonter dans dinum_errors : le candidat existe (DINUM near_point l'a
-      // ramené) mais l'UL parente est en diffusion partielle. Best-effort.
+      // Fix P1 silent-failure-hunter : push dans `dinum_errors` pour distinguer
+      // « SIREN sans enrichment » (diffusion partielle = info récupérable) de
+      // « pas exploré » (vrai silence). Symétrique au pattern V0.7 cascade
+      // (lookup INSEE fallback) qui pousse aussi dans dinum_errors. La
+      // `lookupStatus` discrimine la cause (not_found / ambiguous /
+      // config_missing) pour audit ops.
       console.warn(
         `[france-data-mcp] siret-resolver: fallback SIREN ${siren} not_found (${lookup.lookupStatus}): ${lookup.message}`,
       );
+      dinumErrors.push({
+        siren,
+        message: `fallback_siren_enrichment: ${lookup.message}`,
+        status: lookup.lookupStatus,
+      });
       sirenInfo.set(siren, { actif: null, nomComplet: null });
       continue;
     }
@@ -769,10 +790,18 @@ async function tryAddressFallback(args: {
   // Injecter les candidats fallback dans la Map partagée. Calcule un score
   // adresse informatif (les SIRET sont déjà géo-proches, score quasi uniforme
   // — exposé pour debug/audit, PAS utilisé pour discriminer).
+  //
+  // Fix P2 code-reviewer : si l'enrichment SIREN a échoué, on retombe sur le
+  // `nomComplet` que DINUM /near_point avait DÉJÀ fourni (capté dans
+  // `nomCompletByEtab` en amont). Évite un `raison_sociale_ul: null` alors
+  // que la donnée était disponible — et économise un appel INSEE redondant
+  // côté `reconcilierFinessSirene` (P2.3 V0.7.1).
   const fallbackCandidates: SiretCandidate[] = [];
   for (const etab of compatibleEtabs) {
     const siren = etab.siret.slice(0, 9);
     const info = sirenInfo.get(siren);
+    const nearPointNomComplet = nomCompletByEtab.get(etab.siret) ?? null;
+    const resolvedNomComplet = info?.nomComplet ?? nearPointNomComplet;
     const adresse = etab.adresse?.trim() || null;
     const score = adresse ? diceCoefficient(finessAddrNorm, normalizeForCompare(adresse)) : null;
     const existing = candidates.get(etab.siret);
@@ -782,7 +811,7 @@ async function tryAddressFallback(args: {
       existing.actif = etab.actif;
       existing.adresse_libelle = adresse;
       existing.date_creation = etab.dateCreation ?? null;
-      if (info?.nomComplet) existing.raison_sociale_ul = info.nomComplet;
+      if (resolvedNomComplet) existing.raison_sociale_ul = resolvedNomComplet;
       if (!existing.sources.includes("dinum_address_match")) {
         existing.sources.push("dinum_address_match");
       }
@@ -796,7 +825,7 @@ async function tryAddressFallback(args: {
         actif: etab.actif,
         adresse_libelle: adresse,
         date_creation: etab.dateCreation ?? null,
-        raison_sociale_ul: info?.nomComplet ?? null,
+        raison_sociale_ul: resolvedNomComplet,
       };
       candidates.set(etab.siret, cand);
       fallbackCandidates.push(cand);

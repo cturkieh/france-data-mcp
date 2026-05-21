@@ -200,6 +200,14 @@ export interface VerifierSiteActifResult {
  * Coût : 1 RPC FINESS + 1 SELECT RPPS + N appels DINUM (N = nombre de SIREN
  * distincts, typiquement 1). Pas d'appel INSEE direct ici — DINUM gère son
  * propre fallback INSEE V3.11 en interne pour les SIREN diffusion partielle.
+ *
+ * **Contrat `notFound`** : cette fonction ne retourne `lookupNotFound` QUE
+ * pour la cause `!finess.found` (FINESS DREES absent). Toute nouvelle branche
+ * `notFound` (validation interne ajoutée à l'avenir) DOIT mettre à jour
+ * l'invariant fail-loud de `inspect-site.ts` (cf. throw « invariant violation
+ * — verifierSiteActif a retourné not_found avec un context.finess.found===true »)
+ * qui s'appuie sur cette propriété pour distinguer une vraie panne d'un
+ * not_found métier après pré-check du context.
  */
 export async function verifierSiteActif(
   numFiness: string,
@@ -262,11 +270,17 @@ function buildVerifierExplication(
   // V0.13 Resolver V2 : préfixe la méthode quand un fallback a été utile ou
   // tenté. Le caller LLM sait que le SIRET ne vient pas du pivot RPPS classique.
   const methodPrefix = buildMethodPrefix(resolution);
+  // Fix P2 code-reviewer : un `best_match` du fallback géo peut avoir un
+  // `score_adresse === null` (etab DINUM sans adresse libellée exploitable).
+  // `?.toFixed(2)` propage `undefined` qui se stringify en littéralement
+  // "undefined" dans l'`explication` LLM. Substitut explicite "n/a (fallback)".
+  const scoreDisplay = (s: number | null): string =>
+    s === null ? "n/a (fallback géo)" : s.toFixed(2);
   if (verdictSite === "actif" && best) {
-    return `${methodPrefix}Site actif côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué actif. Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}.${dinumDiagSuffix}`;
+    return `${methodPrefix}Site actif côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${scoreDisplay(best.score_adresse)}) marqué actif. Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}.${dinumDiagSuffix}`;
   }
   if (verdictSite === "ferme" && best) {
-    return `${methodPrefix}Site fermé côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué inactif (date_creation: ${best.date_creation ?? "?"}). FINESS DREES probablement en retard sur la fermeture (latence 1-2 mois). Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}. Pour la timeline complète : historique_etablissement(num_finess).${dinumDiagSuffix}`;
+    return `${methodPrefix}Site fermé côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${scoreDisplay(best.score_adresse)}) marqué inactif (date_creation: ${best.date_creation ?? "?"}). FINESS DREES probablement en retard sur la fermeture (latence 1-2 mois). Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}. Pour la timeline complète : historique_etablissement(num_finess).${dinumDiagSuffix}`;
   }
   if (resolution.candidates.length === 0) {
     return `${methodPrefix}Aucun SIRET candidat trouvé pour ce FINESS — pivot RPPS impossible et fallback géo sans résultat (cf. fallback_reason="${resolution.fallback_reason ?? "n/a"}"). Cross-check manuel : entreprises_in_radius autour de l'adresse FINESS, ou recherche directe sur recherche-entreprises.api.gouv.fr.${dinumDiagSuffix}`;

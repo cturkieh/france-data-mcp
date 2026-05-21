@@ -763,6 +763,37 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
     }
   });
 
+  it("Fix P1 silent-failure-hunter — near_point rejection partielle est tracée dans dinum_errors", async () => {
+    // Avant fix : un NAF qui plante en /near_point était console.error + continue
+    // SANS push dans dinum_errors → le caller voyait `dinum_errors: []` alors
+    // qu'un appel DINUM avait planté. Asymétrie avec la cascade V0.7 corrigée.
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        // Famille `ambulatoire` mappe vers 6 NAF → 6 appels /near_point parallèles.
+        categorie: { code: "124", libelle: "Centre de Santé", famille: "ambulatoire" },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    // Un NAF spécifique plante, les autres ramènent vide.
+    vi.spyOn(dinum, "searchEntreprises").mockImplementation(async (opts) => {
+      if (opts.naf === "8621Z") throw new Error("DINUM HTTP 503 (near_point)");
+      return { total: 0, page: 1, perPage: 25, totalPages: 0, entreprises: [] };
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // L'échec partiel d'un NAF DOIT être tracé dans dinum_errors.
+      expect(result.dinum_errors.length).toBeGreaterThanOrEqual(1);
+      const nearPointError = result.dinum_errors.find((e) => e.siren.startsWith("near_point:"));
+      expect(nearPointError).toBeDefined();
+      expect(nearPointError?.status).toBe("rejected");
+      expect(nearPointError?.message).toContain("HTTP 503");
+    }
+    errSpy.mockRestore();
+  });
+
   it("Fixture #3 — non-régression V0.7 (best_match RPPS direct → pas de fallback déclenché)", async () => {
     // Cas nominal V0.7 préservé : RPPS donne un SIRET dont l'adresse DINUM
     // matche l'adresse FINESS (score ≥ 0.6) → best_match direct, fallback
