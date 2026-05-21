@@ -43,6 +43,7 @@ import {
   formatRpcError,
   trimOrNull,
   validateCoords,
+  validatePreciseOnly,
   validateRadiusKm,
 } from "./db-helpers.js";
 import { type GeoJsonPoint, TRE_R09_URL } from "./rpps-types.js";
@@ -462,16 +463,9 @@ export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQue
   const limit = clampLimit(input.limit);
   validateCoords(input.center.lat, input.center.lon);
   validateRadiusKm(input.radiusKm);
-  // V0.12.0 — garde lib publique (npm consumers hors MCP) : un caller
-  // passant `preciseOnly: "yes"` aurait `=== true` ⇒ false ⇒ mode hybride
-  // silencieux. Throw `RangeError` cohérent avec `validateCoords`/`validateRadiusKm`
-  // ci-dessus → mappe JSON-RPC `-32602` au boundary MCP (lib reste utilisable
-  // hors MCP avec la même protection).
-  if (input.preciseOnly !== undefined && typeof input.preciseOnly !== "boolean") {
-    throw new RangeError(
-      `[france-data-mcp] getRppsInRadius: preciseOnly doit être boolean (reçu ${JSON.stringify(input.preciseOnly)}).`,
-    );
-  }
+  // V0.12.0 — garde lib publique (npm consumers hors MCP) : cf.
+  // `validatePreciseOnly` (db-helpers) pour le rationale du silent failure.
+  validatePreciseOnly(input.preciseOnly, "getRppsInRadius");
 
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("rpps_in_radius", {

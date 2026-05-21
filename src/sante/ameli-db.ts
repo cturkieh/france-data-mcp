@@ -32,6 +32,7 @@ import {
   formatRpcError,
   trimOrNull,
   validateCoords,
+  validatePreciseOnly,
   validateRadiusKm,
 } from "./db-helpers.js";
 
@@ -219,16 +220,9 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   validateCoords(input.center.lat, input.center.lon);
   validateRadiusKm(input.radiusKm);
   validateTypePsCodes(input.typePsCodes);
-  // Jumeau de la garde `getRppsInRadius` : un caller npm hors MCP passant
-  // `preciseOnly: "yes"` aurait `=== true` ⇒ false ⇒ mode hybride silencieux.
-  // Throw `RangeError` cohérent avec `validateCoords`/`validateRadiusKm`
-  // ci-dessus → mappe JSON-RPC `-32602` au boundary MCP (lib reste protégée
-  // hors MCP).
-  if (input.preciseOnly !== undefined && typeof input.preciseOnly !== "boolean") {
-    throw new RangeError(
-      `[france-data-mcp] getAmeliInRadius: preciseOnly doit être boolean (reçu ${JSON.stringify(input.preciseOnly)}).`,
-    );
-  }
+  // Garde lib publique (npm consumers hors MCP) : cf. `validatePreciseOnly`
+  // (db-helpers) pour le rationale du silent failure.
+  validatePreciseOnly(input.preciseOnly, "getAmeliInRadius");
 
   // `p_precise_only` n'est ajouté à l'appel QUE quand le caller demande
   // explicitement le mode précis (`true`). Raison : la RPC `ameli_in_radius`
@@ -270,7 +264,7 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   // mode hybride (qui inclurait les PS au centroïde commune de la zone).
   if (input.preciseOnly === true && result.count === 0 && result.query_metadata) {
     result.query_metadata.notes.push(
-      "precise_only=true et 0 résultat dans le rayon : il peut exister des PS au centroïde commune dans la zone (geom_source='commune_centroid' exclus de la branche précise). Relancer avec precise_only=false (mode hybride) pour les inclure, ou élargir radius_km.",
+      "precise_only=true et 0 résultat dans le rayon : il peut exister des PS au centroïde commune dans la zone (geom_source='commune_centroid', exclus quand precise_only=true). Relancer avec precise_only=false (mode hybride) pour les inclure, ou élargir radius_km.",
     );
   }
   return result;

@@ -90,6 +90,22 @@ export function validateCoords(lat: number, lon: number): void {
 }
 
 /**
+ * Garde boundary lib publique pour le flag `preciseOnly` des tools radius.
+ * Un caller npm hors MCP (sans le filet `coerceBoolean` du boundary MCP)
+ * passant `preciseOnly: "yes"` aurait `=== true` ⇒ false ⇒ mode hybride
+ * silencieux — exactement le silent failure que la règle projet interdit.
+ * Throw `RangeError` (mappe JSON-RPC `-32602` au boundary MCP). `fnName`
+ * rend le message traçable côté `getRppsInRadius` / `getAmeliInRadius`.
+ */
+export function validatePreciseOnly(value: unknown, fnName: string): void {
+  if (value !== undefined && typeof value !== "boolean") {
+    throw new RangeError(
+      `[france-data-mcp] ${fnName}: preciseOnly doit être boolean (reçu ${JSON.stringify(value)}).`,
+    );
+  }
+}
+
+/**
  * Formats a Supabase RPC error into a single string preserving the postgres
  * code, hint, and details. Losing those fields turned a "permission denied"
  * incident in v0.2.0 into a 30-minute investigation. Always include
