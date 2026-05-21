@@ -64,6 +64,46 @@ V0.13.1 corrige ces 2 cas via une cascade de désambiguïsation enrichie :
   - Garde-fou `score_nom: null` (raison_sociale_ul absente → non disqualifié)
   - Garde-fou Chérest non-régression chemin RPPS direct (verdict ferme préservé)
 
+### Fixed — Gate adresse fallback (prod-validé sur EYLAU 920028487)
+
+Le 1er passage de V0.13.1 (commit `b0be43f`) ne tranchait PAS le cas réel
+EYLAU 920028487 en prod (test live `scripts/test-live-v0131.ts` : verdict
+restait `indetermine` + `ambiguous`, 4 candidats). Cause-racine prouvée par
+dump live des candidats :
+
+- 3 SIRET EYLAU (SIREN 784652026) co-existent à Neuilly : `...070 fermé`
+  + `...419 actif` au 27 Bd Victor Hugo + `...039 actif` au 34 Avenue du
+  Roule (autre site EYLAU à ~150 m, capté par /near_point).
+- Le candidat ...039 (score_adresse 0.568, score_nom 0.6) passait le name
+  filter (`score_nom >= 0.2`) mais l'active succession ne se déclenchait
+  pas (adresse différente du groupe Victor Hugo) → cascade tombait en
+  `by_rpps_signal` (échec : RPPS vide) → `ambiguous`.
+
+**Fix prod-validé** : nouveau gate adresse en étape 0 de
+`disambiguateFallbackCandidates` (seuil `BEST_MATCH_THRESHOLD = 0.6`,
+aligné sur le chemin RPPS direct). Un candidat fallback qui n'atteint pas
+ce seuil n'est PAS considéré pour le best_match (mais reste dans
+`candidates[]` pour audit caller). Élimine SIRET ...039 → 2 candidats au
+27 Bd Victor Hugo → succession déclenche → best_match = SIRET ...419 actif.
+
+Discipline appliquée : **prouver-par-la-prod avant push** (cf. memory
+`prove-rootcause-by-prod`). Le commit initial passait /simplify + /review
+P1+P2 mais le test live a réfuté l'inférence "name filter + succession
+suffisent". Une inférence /review-validée reste une inférence — `b0be43f`
+shippé tel quel aurait raté EYLAU en prod. Le script `scripts/test-live-v0131.ts`
+est conservé pour future référence (suppression possible après confirmation
+prod en V0.13.2+).
+
+- **Test garde-fou** : `Raffinement gate adresse fallback — site même SIREN
+  hors-périmètre écarté du best_match` reproduit exactement le pool prod
+  EYLAU (3 SIRET, dont 1 hors-périmètre adresse) et asserte que le best_match
+  est le SIRET actif Victor Hugo, pas l'Avenue du Roule.
+
+- **Test artificiel "labo/école Franco-Britannique"** aligné : le mock fixait
+  des adresses DINUM divergentes du FINESS fake — l'invariant testé étant le
+  gate NAF (école écartée), les adresses sont maintenant cohérentes avec le
+  FINESS fake (passe le gate adresse 0.6 + reste valide pour le gate NAF).
+
 ### Changed
 
 - **Helper `computeNameScore(finessNomNorm, nomComplet)`** : factorise les

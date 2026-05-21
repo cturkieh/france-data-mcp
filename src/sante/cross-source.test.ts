@@ -466,6 +466,10 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
     // Cas réel : Hôpital Franco-Britannique 4 rue Kléber, 7 entités cohabitent.
     // near_point ramène un labo (8690B) ET une école (8542Z) à la même adresse.
     // Le gate NAF doit éliminer l'école.
+    // V0.13.1 : adresses alignées sur le FINESS fake ("27 BD BIZET 59290
+    // WASQUEHAL") pour passer le gate score_adresse >= 0.6 introduit par le
+    // raffinement prod-validé (cf. cas EYLAU 920028487 — un site DINUM avec
+    // adresse hors-périmètre n'est plus considéré comme best_match).
     vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
     mockNot.mockResolvedValue({ data: [], error: null });
     vi.spyOn(dinum, "searchEntreprises").mockImplementation(async (opts) => {
@@ -480,7 +484,7 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
             etabs: [
               {
                 siret: "50781594200218",
-                adresse: "4 RUE KLEBER 92300 LEVALLOIS",
+                adresse: "27 BD BIZET 59290 WASQUEHAL",
                 actif: true,
                 naf: "8690B",
               },
@@ -494,7 +498,7 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
             etabs: [
               {
                 siret: "11111111100001",
-                adresse: "4 RUE KLEBER 92300 LEVALLOIS",
+                adresse: "27 BD BIZET 59290 WASQUEHAL",
                 actif: true,
                 naf: "8542Z",
               },
@@ -1016,6 +1020,91 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
       expect(result.disambiguation_status).toBe("by_active_succession");
       // Les 3 candidats restent exposés pour audit (timeline + cross-check).
       expect(result.candidates.length).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("Raffinement gate adresse fallback — site même SIREN hors-périmètre (score_adresse < 0.6) écarté du best_match (cas EYLAU prod 920028487)", async () => {
+    // Cas réel prouvé prod : /near_point ramène 3 SIRET EYLAU à Neuilly :
+    //   ...070 fermé 27 Bd Victor Hugo (score adresse 0.897)
+    //   ...419 actif 27 Bd Victor Hugo (score adresse 0.897)
+    //   ...039 actif 34 AVENUE DU ROULE (score adresse 0.568) → AUTRE site
+    // Sans gate adresse fallback, le candidat ...039 polluait la cascade :
+    // name filter le laissait passer (score_nom 0.6 = "EYLAU UNILABS" matche)
+    // mais succession ne se déclenchait pas (adresse différente) → ambiguous.
+    // V0.13.1 prod-fix : un gate `score_adresse >= 0.6` aligné sur BEST_MATCH_THRESHOLD
+    // l'élimine du pool de best_match (mais reste dans candidates[] pour audit).
+    const SIRET_VH_FERME = "78465202600070";
+    const SIRET_VH_ACTIF = "78465202600419";
+    const SIRET_AUTRE_SITE = "78465202600039";
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        raison_sociale: "EYLAU UNILABS",
+        adresse: {
+          voie: "27 BD VICTOR HUGO",
+          code_postal: "92200",
+          ville: "NEUILLY-SUR-SEINE",
+          code_departement: "92",
+          code_insee: "92051",
+        },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 1,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: [
+        {
+          siren: "784652026",
+          nomComplet: "EYLAU UNILABS",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_VH_FERME,
+              adresse: "27 BOULEVARD VICTOR HUGO 92200 NEUILLY-SUR-SEINE",
+              actif: false,
+              dateCreation: "2013-01-01",
+              naf: "8690B",
+            },
+            {
+              siret: SIRET_VH_ACTIF,
+              adresse: "27 BOULEVARD VICTOR HUGO 92200 NEUILLY-SUR-SEINE",
+              actif: true,
+              dateCreation: "2025-09-08",
+              naf: "8690B",
+            },
+            {
+              siret: SIRET_AUTRE_SITE,
+              adresse: "34 AVENUE DU ROULE 92200 NEUILLY-SUR-SEINE",
+              actif: true,
+              dateCreation: "2018-01-01",
+              naf: "8690B",
+            },
+          ],
+        },
+      ],
+    });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({ siren: "784652026", actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // Gate adresse élimine le SIRET ...039 (Avenue du Roule, score < 0.6).
+      // Succession sur les 2 restants → SIRET actif Victor Hugo retenu.
+      expect(result.best_match?.siret).toBe(SIRET_VH_ACTIF);
+      expect(result.disambiguation_status).toBe("by_active_succession");
+      // Audit : tous les candidats restent listés (gate adresse n'élimine que
+      // du best_match, pas de candidates[]).
+      expect(result.candidates.length).toBeGreaterThanOrEqual(3);
+      const autreSite = result.candidates.find((c) => c.siret === SIRET_AUTRE_SITE);
+      expect(autreSite).toBeDefined();
+      expect((autreSite?.score_adresse ?? 1) < 0.6).toBe(true);
     }
   });
 

@@ -974,8 +974,26 @@ function disambiguateFallbackCandidates(
   candidates: SiretCandidate[],
   rppsSirets: string[],
 ): { status: DisambiguationStatus; best_match: SiretCandidate | null } {
-  const [first] = candidates;
-  if (candidates.length === 1 && first) {
+  // Étape 0 — Gate adresse (V0.13.1 prod-prouvé sur FINESS 920028487).
+  // Au sein du rayon /near_point 150 m, DINUM peut ramener plusieurs sites
+  // du même groupe (ex : EYLAU 27 Bd Victor Hugo ET EYLAU 34 Avenue du Roule
+  // à 150 m). Le 2e a score_adresse < 0.6 → ce n'est PAS le site cherché.
+  // Aligné sur `BEST_MATCH_THRESHOLD` du chemin RPPS direct : un candidat
+  // qui n'atteint pas le seuil ne devrait jamais être best_match. La liste
+  // `candidates[]` exposée au caller reste COMPLÈTE (audit / cross-check) ;
+  // seul le best_match est arbitré sur le pool gated.
+  const addressGated = candidates.filter(
+    (c) => c.score_adresse !== null && c.score_adresse >= BEST_MATCH_THRESHOLD,
+  );
+  // Si rien ne passe le gate, on n'a pas matière à départager → ambiguous.
+  // Garde la sémantique V0.13.0 (best_match null) tout en évitant qu'un site
+  // hors-périmètre (avenue du Roule sur cas EYLAU) ne soit choisi par défaut.
+  if (addressGated.length === 0) {
+    return { status: "ambiguous", best_match: null };
+  }
+
+  const [first] = addressGated;
+  if (addressGated.length === 1 && first) {
     return { status: "single_after_gate", best_match: first };
   }
 
@@ -983,9 +1001,9 @@ function disambiguateFallbackCandidates(
   // dont le nom est trop éloigné du libellé FINESS (`score_nom < threshold`,
   // mais SEULEMENT si score_nom est non-null : un score absent ne disqualifie
   // jamais — la donnée n'est pas exploitable et le gate NAF a déjà filtré).
-  // L'étape 1 court-circuite déjà `candidates.length === 1`, donc ici `length`
-  // est ≥ 2 — `nameFiltered.length === 1` suffit pour conclure `by_name_score`.
-  const nameFiltered = candidates.filter(
+  // S'applique sur `addressGated` (étape 0) — les candidats hors périmètre
+  // adresse sont déjà retirés du pool d'arbitrage.
+  const nameFiltered = addressGated.filter(
     (c) => c.score_nom === null || c.score_nom >= NAME_DISQUALIFY_THRESHOLD,
   );
   const [firstNameFiltered] = nameFiltered;
@@ -996,16 +1014,16 @@ function disambiguateFallbackCandidates(
   // Si le name filter n'a pas tranché tout seul, on travaille sur les candidats
   // restants (déjà débruite des hors-sujet). Si tout a été disqualifié (cas
   // limite : tous les candidats avaient un score_nom faible), on reste sur la
-  // liste d'origine pour conserver les étapes suivantes — préserve l'invariant
-  // "ne pas écarter un candidat légitime sur la base d'une donnée incertaine".
-  // Cas pathologique tracé en warn : un gate NAF qui retourne UNIQUEMENT des
-  // hors-sujet nom est anormal et mérite audit ops (cf. P2 /review V0.13.1).
+  // liste address-gated pour conserver les étapes suivantes — préserve
+  // l'invariant "ne pas écarter un candidat légitime sur la base d'une donnée
+  // incertaine". Cas pathologique tracé en warn : un gate NAF qui retourne
+  // UNIQUEMENT des hors-sujet nom est anormal et mérite audit ops.
   if (nameFiltered.length === 0) {
     console.warn(
-      `[france-data-mcp] siret-resolver: name filter eliminated all ${candidates.length} candidates post-gate NAF — fallback sur le pool initial (audit recommandé : gate NAF anormalement permissif ?)`,
+      `[france-data-mcp] siret-resolver: name filter eliminated all ${addressGated.length} address-gated candidates post-gate NAF — fallback sur le pool address-gated (audit recommandé : gate NAF anormalement permissif ?)`,
     );
   }
-  const pool = nameFiltered.length > 0 ? nameFiltered : candidates;
+  const pool = nameFiltered.length > 0 ? nameFiltered : addressGated;
 
   // Étape 3 — Active succession (V0.13.1 Raffinement #3). Si tous les candidats
   // du pool partagent (SIREN, adresse normalisée) ET il y a ≥ 1 actif, on retient
