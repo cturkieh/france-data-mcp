@@ -25,7 +25,9 @@ la migration SQL en prod (après un check EXPLAIN).
 Vérifié : `tsc` + `lint` clean, 1313 tests unit verts, 10/10 tests
 d'intégration Ameli verts, SQL de la migration exécuté en transaction
 `ROLLBACK` sur Supabase local (DROP/CREATE/GRANT/COMMENT OK, signature 7
-params correcte).
+params correcte). Discipline `/simplify` (3 agents) + `/review` P1 (3 agents)
++ P2 (2 agents) passée — verdict **clean** (le `/simplify` a extrait
+`validatePreciseOnly` dans `db-helpers.ts`, partagé avec `getRppsInRadius`).
 
 ## Pourquoi une requête plate et pas le split CTE de RPPS
 
@@ -100,9 +102,8 @@ si le déploiement précédait l'application SQL, le mode hybride continuerait d
 fonctionner — seul `precise_only=true` échouerait tant que la migration n'est
 pas là. Ordre recommandé quand même : migration d'abord, déploiement ensuite.
 
-Avant le `git push` : lancer `/simplify` puis `/review` (P1 + P2) sur le diff
-de la branche — discipline projet pour un `feat` (non faite côté préparation,
-à faire dans la session « demain matin »).
+`/simplify` + `/review` (P1 + P2) ont déjà été passés sur la branche au
+moment de la préparation — verdict clean. Rien à relancer avant le merge.
 
 ## Plan B (si le GATE EXPLAIN est NO-GO)
 
