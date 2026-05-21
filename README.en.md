@@ -79,20 +79,16 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.13.0 — in production.** 35 tools, 4 ingested health sources (FINESS, Ameli, RPPS, CDS) + live INSEE / DINUM / IGN. 1,257 tests, TypeScript strict. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`. **68.5% of RPPS practitioners precisely geolocated** (FINESS building or BAN street) — exposed via per-result `geo_precision` + `precise_only` filter on 4 RPPS tools.
+✅ **v0.13.1 — in production.** 35 tools, 1,263 tests, strict TypeScript. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`. 68.5% of RPPS practitioners precisely geolocated (`precise_only` filter exposed on 4 tools).
 
-**New in v0.13 — Resolver V2**: geographic fallback via DINUM `/near_point` filtered by NAF compatible with the FINESS family, triggered when the V0.7 RPPS pivot fails (labs with no RPPS-declared biologist, EHPADs / pharmacies without site holder, business relocations). Many-to-many NAF gate (`naf-finess-mapping.ts`) preserves the Franco-Britannique safety net (a lab is never matched to a co-located nursing school). Full traceability exposed: `method` / `fallback_reason` / `naf_filter_used` / `disambiguation_status` on `verifier_site_actif` / `historique_etablissement` / `reconcilier_finess_sirene` / `inspect_site`. Bonus: dynamic `geo_precision` label (reflects actual row distribution) + `includeDirigeants` toggle on `entreprises_in_radius` (token-saving for bulk enumeration).
-
-Full history: [CHANGELOG](CHANGELOG.md). Project discipline: prove every root cause against production / official docs BEFORE coding the fix.
+Feature-by-version details: [CHANGELOG](CHANGELOG.md). Project discipline: prove every root cause against production BEFORE coding the fix.
 
 ### Roadmap
 
-- [ ] **Dense-zone timeout fix**: `rpps_in_radius` with `preciseOnly=true` over dense Paris + 1 km radius triggers `57014 statement timeout`. Reproduced in production V0.13. To diagnose via `EXPLAIN ANALYZE` then fix (missing indices or planner hint).
-- [ ] **Ameli address geocoding**: fetch precise BAN coordinates instead of commune centroid on Ameli addresses — bonus 1 from Claude.ai feedback, standalone, high impact.
-- [ ] **Unified RPPS + Ameli professional sheet** (concatenated, not resolved — "concatenated MCP / resolved Geo Intel" doctrine): one practitioner, two sources juxtaposed, divergences exposed to the caller.
-- [ ] **`finess_sirene_coverage_in_radius` matching fix**: IFSI/lab matching via the `naf-finess-mapping.ts` table (table is ready, to be wired into `coverage.ts`).
-- [ ] **Phase 2 — recurring re-geocoding automation**: bounded BAN step inline in the RPPS cron (diff staging → POST BAN on delta → upsert cache). Pending Phase 1 production numbers.
-- [ ] **v1.0+**: DOM-COM support (`code_insee CHAR(5)`), INSEE IRIS (infra-communal demographics), DPC (PS training history).
+- [ ] **Dense-zone timeout** on `rpps_in_radius` `preciseOnly=true` (Paris 1 km) — `EXPLAIN ANALYZE` + index/planner fix.
+- [ ] **Ameli BAN geocoding** (commune centroid → precise street).
+- [ ] **Unified RPPS + Ameli PS sheet** (concatenated, divergences exposed to caller).
+- [ ] **v1.0+**: DOM-COM, INSEE IRIS, DPC.
 
 ---
 
