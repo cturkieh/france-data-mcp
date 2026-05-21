@@ -15,6 +15,7 @@ import {
   type QueryMetadata,
   ameliDeptMetadata,
   ameliRadiusMetadata,
+  refineAmeliGeoPrecisionLabel,
 } from "../core/query-metadata.js";
 import { getAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";
@@ -215,7 +216,21 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   });
 
   if (error) throw new Error(formatRpcError("ameli_in_radius", error));
-  return buildAmeliQueryResult("ameli_in_radius", data, limit, ameliRadiusMetadata(input.radiusKm));
+  const result = buildAmeliQueryResult(
+    "ameli_in_radius",
+    data,
+    limit,
+    ameliRadiusMetadata(input.radiusKm),
+  );
+  // Chantier C 2026-05-21 — raffine l'étiquette globale `geo_precision` selon
+  // la distribution effective des `geo_precision` par-PS (factory pure, voir
+  // jumeau RPPS V0.13 Fix #4). Sans ce raffinage, un caller LLM lit toujours
+  // `centroide_commune_ameli_mixte` même quand 100 % des résultats sont en
+  // `adresse` (sous-estimation pessimiste de la qualité ~77 % post-géocodage).
+  if (result.query_metadata) {
+    result.query_metadata = refineAmeliGeoPrecisionLabel(result.results, result.query_metadata);
+  }
+  return result;
 }
 
 /** List PS by department (+ optional specialty / type filter, optional offset). */
@@ -237,7 +252,20 @@ export async function getAmeliBySpecialiteDept(
   });
 
   if (error) throw new Error(formatRpcError("ameli_by_specialite_dept", error));
-  return buildAmeliQueryResult("ameli_by_specialite_dept", data, limit, ameliDeptMetadata());
+  const result = buildAmeliQueryResult(
+    "ameli_by_specialite_dept",
+    data,
+    limit,
+    ameliDeptMetadata(),
+  );
+  // Chantier C : même raffinage que `getAmeliInRadius` — un listing
+  // départemental peut être 100 % précis ou 100 % centroïde selon le
+  // département (Paris ≠ Mayotte) ; l'étiquette globale doit refléter
+  // la distribution effective post-RPC.
+  if (result.query_metadata) {
+    result.query_metadata = refineAmeliGeoPrecisionLabel(result.results, result.query_metadata);
+  }
+  return result;
 }
 
 // --- internals -------------------------------------------------------------

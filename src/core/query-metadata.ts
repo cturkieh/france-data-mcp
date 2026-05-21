@@ -19,13 +19,39 @@
  *
  * - `lambert93_natif_finess` : coords FINESS DREES (Lambert 93 reprojeté
  *   WGS84 à l'ingestion). Précision adresse ~10 m côté DREES.
- * - `centroide_commune_ameli` : coords Ameli (centroïde commune via
- *   `geo.api.gouv.fr/communes`). Précision ~3 km moyenne — adapté à
- *   l'analyse de densité, PAS au géocodage adresse.
+ * - `centroide_commune_ameli` : @deprecated Chantier C — coords Ameli au
+ *   centroïde commune (~3 km). Remplacé par `centroide_commune_ameli_mixte`
+ *   depuis le 2026-05-21 (77 % des PS Ameli en `geom_source='ban_address'`
+ *   post-cron, donc précision MIXTE par-résultat). Conservé pour rétrocompat
+ *   de tout client qui aurait caché la string `geo_precision` côté
+ *   query_metadata (Claude.ai, Cursor, agents loggant). Ne plus produire
+ *   dans un nouveau call site.
  */
 export type GeoPrecision =
   | "lambert93_natif_finess"
   | "centroide_commune_ameli"
+  /**
+   * Chantier C 2026-05-21 — étiquette par défaut Ameli post-géocodage BAN.
+   * Précision MIXTE par-résultat (lire `geo_precision` PAR PS) : ~77 % en
+   * `adresse` BAN (rue/bâtiment, distance exacte), ~23 % en `centroide_commune`
+   * (~3 km, repli pour adresses non géocodables — DROM, CEDEX, Monaco, etc.).
+   * Symétrique de `centroide_commune_ans_mixte` côté RPPS V0.12.0.
+   */
+  | "centroide_commune_ameli_mixte"
+  /**
+   * Chantier C 2026-05-21 — variante effective de `centroide_commune_ameli_mixte`
+   * quand TOUS les résultats retournés sont en précision adresse (`ban_address`).
+   * Évite que le caller LLM lise une étiquette "mixte" pessimiste quand un
+   * heureux hasard de distribution produit 100 % de précis.
+   */
+  | "centroide_commune_ameli_precis_uniquement"
+  /**
+   * Chantier C 2026-05-21 — variante effective quand TOUS les résultats sont
+   * au centroïde commune. Indique au caller que `distance_km` n'est pas
+   * discriminant intra-commune sur CETTE réponse spécifique (≠ étiquette
+   * mixte qui suggère qu'une part est précise).
+   */
+  | "centroide_commune_ameli_centroide_uniquement"
   | "centroide_commune_ans"
   | "centroide_commune_ans_mixte"
   /**
@@ -87,8 +113,15 @@ export interface QueryMetadata {
 }
 
 const SOURCE_NOTE: Record<GeoPrecision, string> = {
+  /** @deprecated Chantier C 2026-05-21 — Plus aucune RPC Ameli ne produit cet alias ; toutes ont migré vers `centroide_commune_ameli_mixte` (précision hybride par-résultat post-géocodage BAN). Conservé pour rétrocompat de tout client qui aurait caché la string. Ne pas réintroduire dans un nouveau call site. */
   centroide_commune_ameli:
     "Coordonnées Ameli = centroïde commune (~3 km moyenne). Adapté à l'analyse de densité médicale, pas au géocodage adresse.",
+  centroide_commune_ameli_mixte:
+    'Coordonnées Ameli HYBRIDES (Chantier C 2026-05-21) : la précision est MIXTE par résultat — lire `geo_precision` PAR PS. ~77 % sont précis (`"adresse"` BAN rue/bâtiment) avec `distance_km` exacte au m près ; ~23 % restent au centroïde commune (`"centroide_commune"`, ~3 km, `distance_km` non discriminante intra-commune — adresses non géocodables BAN : DROM, Monaco, CEDEX, lieux-dits obscurs). Source : Annuaire santé Ameli, Assurance Maladie (mention obligatoire L.1461-2 CSP).',
+  centroide_commune_ameli_precis_uniquement:
+    "Coordonnées Ameli — variante effective Chantier C 2026-05-21 : TOUS les résultats retournés sur cette requête sont en précision adresse (`ban_address`). `distance_km` est exacte au m près pour chaque PS, classement individuel fiable. Source : Annuaire santé Ameli, Assurance Maladie (mention obligatoire L.1461-2 CSP). NB : la donnée source reste hybride — d'autres PS au centroïde commune existent peut-être dans la zone mais étaient hors rayon ou filtrés.",
+  centroide_commune_ameli_centroide_uniquement:
+    "Coordonnées Ameli — variante effective Chantier C 2026-05-21 : TOUS les résultats retournés sur cette requête sont au centroïde commune (~3 km). `distance_km` n'est PAS discriminante intra-commune (tous les PS d'une même commune ont la même distance au centre du rayon). Source : Annuaire santé Ameli, Assurance Maladie (mention obligatoire L.1461-2 CSP). Pour un classement fiable, élargir radius_km ≥ ~3 km pour capter aussi les PS en précision adresse (~77 % du référentiel post-géocodage BAN).",
   lambert93_natif_finess:
     "FINESS DREES (sync bimestrielle) — référentiel peut avoir 1-2 mois de retard sur le terrain pour les structures émergentes (CPTS récentes, MSP en agrément). Cross-check ARS / Service Public si nécessaire.",
   /** @deprecated V0.12.0 — Plus aucune RPC RPPS ne produit cet alias ; toutes ont migré vers `centroide_commune_ans_mixte` (précision hybride par-résultat). Conservé pour rétrocompat de tout client qui aurait caché la string `geo_precision` côté query_metadata (Claude.ai, Cursor, agents loggant). Ne pas réintroduire dans un nouveau call site. */
@@ -148,7 +181,16 @@ export const CENTROIDE_COMMUNE_RESOLUTION_KM = 3;
  */
 const CENTROID_PRECISIONS = {
   lambert93_natif_finess: false,
-  centroide_commune_ameli: true,
+  centroide_commune_ameli: true, // deprecated Chantier C, plus produit (cf. SOURCE_NOTE)
+  // Chantier C 2026-05-21 : précision MIXTE (~77 % adresse, ~23 % centroïde)
+  // → la branche précise reste fiable, note générique sub-commune trompeuse
+  // (cf. discrimination par-valeur ci-dessus, jumeau RPPS V0.13).
+  centroide_commune_ameli_mixte: false,
+  // Chantier C : 100 % précis effectif, aucune note centroïde nécessaire.
+  centroide_commune_ameli_precis_uniquement: false,
+  // Chantier C : 100 % centroïde effectif, note sub-commune s'applique
+  // aggravée (aucun précis pour élargir).
+  centroide_commune_ameli_centroide_uniquement: true,
   centroide_commune_ans: true, // deprecated, plus produit (cf. SOURCE_NOTE)
   centroide_commune_ans_mixte: false,
   centroide_commune_ans_precis_uniquement: false,
@@ -200,11 +242,114 @@ function buildMetadata(
   return result;
 }
 
-export const ameliRadiusMetadata = (radiusKm?: number): QueryMetadata =>
-  buildMetadata("centroide_commune_ameli", true, radiusKm);
+/**
+ * Métadonnées pour `ameli_in_radius` : depuis Chantier C 2026-05-21 la précision
+ * est MIXTE par-résultat (~77 % `adresse` BAN, ~23 % `centroide_commune` repli).
+ * Étiquette globale = `centroide_commune_ameli_mixte` (initiale, raffinée
+ * post-RPC par `refineAmeliGeoPrecisionLabel` selon la distribution effective).
+ *
+ * À radius_km < CENTROIDE_COMMUNE_RESOLUTION_KM, on ne déclenche PAS la note
+ * générique (la branche précise reste fiable) — on injecte une note nuancée
+ * spécifique au mode hybride Ameli (jumeau de `rppsRadiusMetadata`).
+ */
+export const ameliRadiusMetadata = (radiusKm?: number): QueryMetadata => {
+  const md = buildMetadata("centroide_commune_ameli_mixte", true, radiusKm);
+  if (isShortRadius(radiusKm)) {
+    md.notes.push(
+      `radius_km=${radiusKm} < ${CENTROIDE_COMMUNE_RESOLUTION_KM} km : la branche centroïde commune résiduelle (~23 % des PS Ameli) reste imprécise (TOUS les PS d'une commune passent ou non en bloc, distance_km non discriminante intra-commune). La branche précise (~77 %, geo_precision='adresse') reste fiable. Pour un mix hybride exploitable à ce rayon, garder cet appel ; pour un fallback densité de zone, élargir radius_km ≥ ${CENTROIDE_COMMUNE_RESOLUTION_KM}.`,
+    );
+  }
+  return md;
+};
 
 export const ameliDeptMetadata = (): QueryMetadata =>
-  buildMetadata("centroide_commune_ameli", false);
+  buildMetadata("centroide_commune_ameli_mixte", false);
+
+/**
+ * Shape minimal qu'un row Ameli doit exposer pour être inspecté par
+ * `refineAmeliGeoPrecisionLabel`. Jumeau de `RppsGeoPrecisionRow` — couplage
+ * explicite avec `AmeliResult.geo_precision` (`sante/ameli-db.ts`) sans
+ * dépendance circulaire core/ → sante/.
+ *
+ * NB : la `PerResultGeoPrecision` est partagée RPPS↔Ameli mais Ameli n'émet
+ * que `adresse` et `centroide_commune` (pas de `etablissement_finess` côté
+ * Ameli — pas de FINESS join). Le refine ignore donc la branche
+ * `etablissement_finess` (jamais atteinte). Symétrie de signature avec RPPS
+ * volontairement préservée pour faciliter une future factorisation.
+ */
+export type AmeliGeoPrecisionRow = { geo_precision?: PerResultGeoPrecision | null };
+
+/**
+ * Chantier C 2026-05-21 — raffine l'étiquette globale `geo_precision` Ameli
+ * selon la distribution réelle des `geo_precision` par-résultat. La metadata
+ * initiale (construite par `ameliRadiusMetadata`/`ameliDeptMetadata` avant
+ * exécution RPC) déclare le **contrat** de la requête (`centroide_commune_ameli_mixte`
+ * = "potentiellement mixte"). Une fois les résultats matérialisés, on connaît
+ * la distribution EFFECTIVE et on peut affiner l'étiquette globale pour ne pas
+ * mentir au caller LLM.
+ *
+ * Jumeau STRICT de `refineRppsGeoPrecisionLabel` (V0.13.0 Fix #4). Trois cas :
+ *   - 100 % des rows en `adresse` → `centroide_commune_ameli_precis_uniquement`
+ *   - 100 % des rows en `centroide_commune` → `centroide_commune_ameli_centroide_uniquement`
+ *   - mixte ou 0 row → étiquette initiale inchangée (`mixte`)
+ *
+ * **Factory pure** : retourne un nouveau `QueryMetadata` si raffinage applicable,
+ * sinon `baseMeta` tel quel. Le caller DOIT réassigner.
+ *
+ * **Branche `etablissement_finess`** : ne survient PAS côté Ameli (pas de
+ * FINESS join). Si la RPC en émet un (drift de contrat), on la compte comme
+ * "précis" par sécurité (cohérent avec RPPS où c'est précis) — un warn loud
+ * sortirait si on observait ce cas.
+ */
+export function refineAmeliGeoPrecisionLabel(
+  rows: ReadonlyArray<AmeliGeoPrecisionRow>,
+  baseMeta: QueryMetadata,
+): QueryMetadata {
+  // Ne raffine QUE si la metadata initiale est l'étiquette mixte canonique
+  // Chantier C — sinon le caller utilise déjà une étiquette spécialisée et on
+  // ne doit pas la surcharger silencieusement.
+  if (baseMeta.geo_precision !== "centroide_commune_ameli_mixte") return baseMeta;
+  if (rows.length === 0) return baseMeta;
+  let precisCount = 0;
+  let centroideCount = 0;
+  for (const row of rows) {
+    const p = row.geo_precision;
+    if (p === "adresse" || p === "etablissement_finess") precisCount++;
+    else if (p === "centroide_commune") centroideCount++;
+    else {
+      // Row sans geo_precision typé : drift RPC, mock test, ou row pré-Chantier-C.
+      // On garde l'étiquette mixte par sécurité + warn loud (parité RPPS
+      // refineRppsGeoPrecisionLabel : audit prod ne doit pas rater un drift).
+      console.warn(
+        `[france-data-mcp] refineAmeliGeoPrecisionLabel: row sans geo_precision typé (valeur=${JSON.stringify(p)}) — étiquette mixte préservée par sécurité, drift RPC suspectée si coords non-null.`,
+      );
+      return baseMeta;
+    }
+  }
+  let refinedPrecision: GeoPrecision;
+  if (precisCount === rows.length) {
+    refinedPrecision = "centroide_commune_ameli_precis_uniquement";
+  } else if (centroideCount === rows.length) {
+    refinedPrecision = "centroide_commune_ameli_centroide_uniquement";
+  } else {
+    // Mixte effectif (precisCount > 0 ET centroideCount > 0) → étiquette
+    // initiale conservée (déjà correcte).
+    return baseMeta;
+  }
+  // Drop la note short-radius nuancée Ameli quand on refine vers
+  // `_centroide_uniquement` (la note affirme "branche précise ~77 % fiable"
+  // alors qu'il n'y a AUCUN précis dans le résultat refine — mensonger).
+  // Symétrique du fix RPPS Passe 1 silent-failure-hunter.
+  let trailingNotes = baseMeta.notes.slice(1);
+  if (refinedPrecision === "centroide_commune_ameli_centroide_uniquement") {
+    trailingNotes = trailingNotes.filter((n) => !n.includes("La branche précise"));
+  }
+  return {
+    ...baseMeta,
+    geo_precision: refinedPrecision,
+    notes: [SOURCE_NOTE[refinedPrecision], ...trailingNotes],
+  };
+}
 
 export const finessRadiusMetadata = (): QueryMetadata =>
   buildMetadata("lambert93_natif_finess", true);

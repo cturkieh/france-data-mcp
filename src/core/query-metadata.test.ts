@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CENTROIDE_COMMUNE_RESOLUTION_KM,
+  ameliDeptMetadata,
   ameliRadiusMetadata,
   cdsRadiusMetadata,
   finessRadiusMetadata,
+  refineAmeliGeoPrecisionLabel,
   refineRppsGeoPrecisionLabel,
   rppsRadiusMetadata,
 } from "./query-metadata.js";
@@ -16,13 +18,30 @@ const hasRppsMixteSubCommuneNote = (notes: string[]): boolean =>
     (n) => n.includes("branche centroïde commune résiduelle") && n.includes("precise_only"),
   );
 
+const hasAmeliMixteSubCommuneNote = (notes: string[]): boolean =>
+  notes.some(
+    (n) => n.includes("branche centroïde commune résiduelle") && n.includes("~23 % des PS Ameli"),
+  );
+
 describe("warning radius sub-commune (A2/A4)", () => {
-  it("Ameli/CDS centroïde pur : radius < 3 km → note GÉNÉRIQUE 'FAUX négatif' (TOUS PS d'une commune en bloc)", () => {
-    for (const md of [ameliRadiusMetadata(0.1), cdsRadiusMetadata(2)]) {
-      expect(hasSubCommuneNote(md.notes)).toBe(true);
-      const note = md.notes.find((n) => n.includes("FAUX négatif"));
-      expect(note).toBeDefined();
-    }
+  it("CDS centroïde pur : radius < 3 km → note GÉNÉRIQUE 'FAUX négatif' (TOUS PS d'une commune en bloc)", () => {
+    // Chantier C 2026-05-21 : Ameli n'est plus dans ce bucket — l'étiquette
+    // par défaut a basculé vers `centroide_commune_ameli_mixte` (~77 % adresse
+    // précise) ; cf. test mixte Ameli ci-dessous. CDS reste 100 % centroïde
+    // (CSV CNAM sans coords natives) — la note générique s'applique.
+    const md = cdsRadiusMetadata(2);
+    expect(hasSubCommuneNote(md.notes)).toBe(true);
+    const note = md.notes.find((n) => n.includes("FAUX négatif"));
+    expect(note).toBeDefined();
+  });
+
+  it("Ameli hybride Chantier C : radius < 3 km → note NUANCÉE (branche précise ~77 % fiable, pas la note générique)", () => {
+    const md = ameliRadiusMetadata(2);
+    // Pas la note générique CDS — la branche précise (`adresse`) reste
+    // fiable même à <3km depuis le géocodage BAN.
+    expect(hasSubCommuneNote(md.notes)).toBe(false);
+    // Mais bien la note dédiée mixte Ameli.
+    expect(hasAmeliMixteSubCommuneNote(md.notes)).toBe(true);
   });
 
   it("RPPS hybride V0.12.0 : radius < 3 km → note NUANCÉE (branche précise fiable, pas la note Ameli)", () => {
@@ -34,22 +53,22 @@ describe("warning radius sub-commune (A2/A4)", () => {
   });
 
   it("radius >= 3 km → pas d'avertissement (Ameli ni RPPS)", () => {
-    expect(hasSubCommuneNote(ameliRadiusMetadata(5).notes)).toBe(false);
+    expect(hasAmeliMixteSubCommuneNote(ameliRadiusMetadata(5).notes)).toBe(false);
     expect(hasSubCommuneNote(rppsRadiusMetadata(10).notes)).toBe(false);
     expect(hasRppsMixteSubCommuneNote(rppsRadiusMetadata(10).notes)).toBe(false);
   });
 
   it("borne exacte : radius == 3 km → pas d'avertissement (seuil strict <)", () => {
-    expect(hasSubCommuneNote(ameliRadiusMetadata(CENTROIDE_COMMUNE_RESOLUTION_KM).notes)).toBe(
-      false,
-    );
+    expect(
+      hasAmeliMixteSubCommuneNote(ameliRadiusMetadata(CENTROIDE_COMMUNE_RESOLUTION_KM).notes),
+    ).toBe(false);
     expect(
       hasRppsMixteSubCommuneNote(rppsRadiusMetadata(CENTROIDE_COMMUNE_RESOLUTION_KM).notes),
     ).toBe(false);
   });
 
   it("radius non fourni (undefined) → pas d'avertissement (rétrocompat)", () => {
-    expect(hasSubCommuneNote(ameliRadiusMetadata().notes)).toBe(false);
+    expect(hasAmeliMixteSubCommuneNote(ameliRadiusMetadata().notes)).toBe(false);
     expect(hasRppsMixteSubCommuneNote(rppsRadiusMetadata().notes)).toBe(false);
   });
 
@@ -168,12 +187,15 @@ describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0 (factory pure)", () => 
     expect(refined.notes.some((n) => n.includes("La branche précise"))).toBe(true);
   });
 
-  it("ne touche PAS une étiquette initiale non-mixte (helper RPPS-only)", () => {
-    // Ameli/FINESS/CDS ont leurs propres étiquettes — pas raffinage croisé.
+  it("ne touche PAS une étiquette initiale non-mixte-RPPS (helper RPPS-only)", () => {
+    // Ameli/FINESS/CDS ont leurs propres étiquettes — pas de raffinage croisé.
+    // L'étiquette Ameli a sa propre mixte (`centroide_commune_ameli_mixte`
+    // depuis Chantier C 2026-05-21), gardée par `refineAmeliGeoPrecisionLabel`
+    // (jumeau dédié) ; `refineRppsGeoPrecisionLabel` ne doit JAMAIS la toucher.
     const ameliMeta = ameliRadiusMetadata(5);
     const refined = refineRppsGeoPrecisionLabel([{ geo_precision: "adresse" }], ameliMeta);
     expect(refined).toBe(ameliMeta);
-    expect(refined.geo_precision).toBe("centroide_commune_ameli");
+    expect(refined.geo_precision).toBe("centroide_commune_ameli_mixte");
   });
 
   it("préserve les notes additionnelles (Haversine, short-radius) au-delà de notes[0]", () => {
@@ -204,5 +226,85 @@ describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0 (factory pure)", () => 
     // doit être en notes[0]. Vérifié indirectement par le contenu attendu.
     expect(meta.notes[0]).toContain("HYBRIDES");
     expect(meta.notes[0]).toContain("MIXTE par résultat");
+  });
+});
+
+describe("refineAmeliGeoPrecisionLabel — Chantier C 2026-05-21 (factory pure, jumeau RPPS)", () => {
+  it("100% rows adresse → étiquette 'centroide_commune_ameli_precis_uniquement'", () => {
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: "adresse" }, { geo_precision: "adresse" }],
+      meta,
+    );
+    expect(refined.geo_precision).toBe("centroide_commune_ameli_precis_uniquement");
+    expect(refined.notes[0]).toContain("ban_address");
+  });
+
+  it("100% rows centroide_commune → étiquette 'centroide_commune_ameli_centroide_uniquement'", () => {
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: "centroide_commune" }, { geo_precision: "centroide_commune" }],
+      meta,
+    );
+    expect(refined.geo_precision).toBe("centroide_commune_ameli_centroide_uniquement");
+  });
+
+  it("distribution mixte → étiquette mixte initiale conservée", () => {
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: "centroide_commune" }],
+      meta,
+    );
+    expect(refined).toBe(meta);
+    expect(refined.geo_precision).toBe("centroide_commune_ameli_mixte");
+  });
+
+  it("0 rows → étiquette mixte initiale conservée (rétrocompat)", () => {
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel([], meta);
+    expect(refined).toBe(meta);
+  });
+
+  it("row sans geo_precision typé → warn + étiquette mixte préservée (drift RPC suspectée)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: undefined }],
+      meta,
+    );
+    expect(refined).toBe(meta);
+    const matching = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("refineAmeliGeoPrecisionLabel"),
+    );
+    expect(matching.length).toBeGreaterThanOrEqual(1);
+    warnSpy.mockRestore();
+  });
+
+  it("radius<3 + 100% centroïde → note 'branche précise' filtrée (parité fix RPPS sfh)", () => {
+    const meta = ameliRadiusMetadata(2); // short-radius → note nuancée Ameli injectée
+    expect(meta.notes.some((n) => n.includes("La branche précise"))).toBe(true);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: "centroide_commune" }, { geo_precision: "centroide_commune" }],
+      meta,
+    );
+    expect(refined.geo_precision).toBe("centroide_commune_ameli_centroide_uniquement");
+    // La note mensongère DOIT être filtrée.
+    expect(refined.notes.some((n) => n.includes("La branche précise"))).toBe(false);
+    // Mais l'input n'est pas muté (factory pure).
+    expect(meta.notes.some((n) => n.includes("La branche précise"))).toBe(true);
+  });
+
+  it("ne touche PAS une étiquette initiale non-mixte-Ameli (helper Ameli-only)", () => {
+    // Si le caller passe une étiquette RPPS mixte, le helper Ameli return tel
+    // quel (jumeau symétrique de refineRppsGeoPrecisionLabel).
+    const rppsMeta = rppsRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel([{ geo_precision: "adresse" }], rppsMeta);
+    expect(refined).toBe(rppsMeta);
+    expect(refined.geo_precision).toBe("centroide_commune_ans_mixte");
+  });
+
+  it("ameliDeptMetadata = étiquette mixte initiale (raffinage post-RPC dans ameli-db.ts)", () => {
+    const md = ameliDeptMetadata();
+    expect(md.geo_precision).toBe("centroide_commune_ameli_mixte");
   });
 });

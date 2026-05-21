@@ -56,7 +56,7 @@ gardé par `enrichment-statement-timeout.test.ts` étendu).
 - Gardes-fou étendus : `staging-parity.test.ts` whiteliste explicitement le
   GiST partiel et assert prédicat byte-identique prod ↔ staging-create.
 
-### Added — exposition `geo_precision` au caller MCP
+### Added — exposition `geo_precision` au caller MCP (per-result + global dynamique)
 
 - `ameli_in_radius` et `ameli_by_specialite_dept` retournent `geom_source TEXT`.
 - `RawAmeliRow.geom_source` mappé vers `PerResultGeoPrecision = "adresse" |
@@ -65,6 +65,33 @@ gardé par `enrichment-statement-timeout.test.ts` étendu).
   `"centroide_commune"` conservateur (on ment vers le bas, jamais vers le haut).
 - 3 tests unitaires : HIT BAN, MISS centroïde explicite, RPC pré-migration
   (fallback).
+- **Étiquette globale `query_metadata.geo_precision` dynamique** (parité Fix
+  #4 RPPS V0.13.0) : `ameliRadiusMetadata` / `ameliDeptMetadata` émettent
+  désormais `centroide_commune_ameli_mixte` (vs ancien `centroide_commune_ameli`
+  qui annonçait ~3 km en dur). `refineAmeliGeoPrecisionLabel` raffine
+  post-RPC selon la distribution effective :
+  - 100 % adresse → `centroide_commune_ameli_precis_uniquement`
+  - 100 % centroïde → `centroide_commune_ameli_centroide_uniquement`
+  - mixte → étiquette mixte conservée
+- Note nuancée short-radius (radius<3km) au lieu de la note « FAUX négatif »
+  générique : la branche précise (~77 % des PS Ameli post-géocodage) reste
+  fiable, le caller LLM peut se fier à `distance_km` quand
+  `geo_precision='adresse'`. Validation prod : Paris 500m médecins =
+  `precis_uniquement`, Mayotte 976 = mixte effectif.
+- Ancien `centroide_commune_ameli` marqué `@deprecated` mais conservé pour
+  rétrocompat des clients qui auraient caché la string.
+- Tests dédiés : 9 nouveaux tests `refineAmeliGeoPrecisionLabel` (jumeau
+  exact des tests RPPS Fix #4).
+
+### Fixed — `FORCE_REINGEST=1` câblé côté cron Ameli (asymétrie corrigée)
+
+`scripts/ingest/ameli.ts` ne câblait PAS l'env `FORCE_REINGEST` (alors que
+RPPS oui depuis V0.12.2). Conséquence : après le backfill BAN Ameli, le
+cron court-circuitait sur `same checksum`, le `ban_join` ne tournait jamais.
+Câblage ajouté via `isForceReingestEnv(process.env.FORCE_REINGEST)`,
+strictement aligné sur `rpps.ts:256`. Flag **ponctuel par contrat**
+(`isForceReingestEnv(undefined) === false`) — aucun risque de re-ingest
+automatique à chaque cron.
 
 ### Added — étape `ban_join` dans le cron Ameli (`scripts/ingest/ameli.ts`)
 
