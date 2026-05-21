@@ -791,11 +791,11 @@ describe("entreprises_in_radius — délégation proximité native (P3)", () => 
     expect(result.entreprises[0]?.dirigeants).toHaveLength(2);
   });
 
-  it("Fix #5 — string 'false' NON-strict (sera ignoré, dirigeants restent) — anti-silent-failure", async () => {
-    // Le check `!== false` strict : un caller MCP qui passe la string "false"
-    // (au lieu du boolean) ne doit PAS strip silencieusement les dirigeants —
-    // il doit recevoir le comportement par défaut (preserve). Préfère explicite
-    // boolean dans le schema MCP.
+  it("Fix #5 — string 'false' strip dirigeants (intention respectée via coerceBoolean)", async () => {
+    // V0.13.1 — uniformité avec les autres params booléens (precise_only,
+    // dedupe_by_ps, etc.) qui passent par `coerceBoolean`. Un caller LLM qui
+    // stringifie `"false"` (très fréquent en JSON tool-call) doit voir son
+    // intention respectée — pas silencieusement ignorée.
     vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(resultWithDirigeants);
     const tool = findTool("entreprises_in_radius");
     const result = (await tool?.handler({
@@ -805,7 +805,56 @@ describe("entreprises_in_radius — délégation proximité native (P3)", () => 
       radiusKm: 5,
       includeDirigeants: "false",
     })) as typeof resultWithDirigeants;
-    expect(result.entreprises[0]?.dirigeants).toHaveLength(2);
+    expect(result.entreprises[0]?.dirigeants).toEqual([]);
+  });
+
+  it("Fix #5 — string 'true' / 0 / 1 reconnus (uniforme avec coerceBoolean)", async () => {
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(resultWithDirigeants);
+    const tool = findTool("entreprises_in_radius");
+    // string "true" → boolean true → preserve dirigeants
+    const r1 = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.72,
+      lat: 49.77,
+      radiusKm: 5,
+      includeDirigeants: "true",
+    })) as typeof resultWithDirigeants;
+    expect(r1.entreprises[0]?.dirigeants).toHaveLength(2);
+    // 0 → boolean false → strip
+    const r2 = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.72,
+      lat: 49.77,
+      radiusKm: 5,
+      includeDirigeants: 0,
+    })) as typeof resultWithDirigeants;
+    expect(r2.entreprises[0]?.dirigeants).toEqual([]);
+  });
+
+  it("Fix #5 — input booléen mal typé throw RangeError (anti-silent-failure)", async () => {
+    // Garbage (objet, string non-coerciable) DOIT throw RangeError → mappé
+    // JSON-RPC `-32602 invalid_params` côté boundary MCP. Le caller reçoit un
+    // retour explicite plutôt qu'un comportement silencieusement par défaut.
+    // Cohérent avec `coerceNumber` (test `coerceNumber loud-failure`).
+    const tool = findTool("entreprises_in_radius");
+    await expect(
+      tool?.handler({
+        naf: "8690B",
+        lon: 4.72,
+        lat: 49.77,
+        radiusKm: 5,
+        includeDirigeants: "maybe",
+      }),
+    ).rejects.toThrow(/includeDirigeants/);
+    await expect(
+      tool?.handler({
+        naf: "8690B",
+        lon: 4.72,
+        lat: 49.77,
+        radiusKm: 5,
+        includeDirigeants: { foo: 1 },
+      }),
+    ).rejects.toThrow(/includeDirigeants/);
   });
 });
 

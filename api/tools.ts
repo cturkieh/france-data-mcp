@@ -1009,11 +1009,17 @@ export const TOOLS: McpTool[] = [
       const lat = coerceNumber(args.lat, "lat");
       const radiusKm = coerceNumber(args.radiusKm, "radiusKm");
       const hasCoords = lon !== undefined && lat !== undefined && radiusKm !== undefined;
-      // Strict boolean (vs asBoolean fuzzy) : `includeDirigeants: "false"`
-      // (string) ne doit PAS être interprété comme false par truthiness — sinon
-      // un caller MCP qui colle un input mal typé strippait les dirigeants
-      // alors qu'il croyait obtenir le comportement par défaut.
-      const includeDirigeants = args.includeDirigeants !== false;
+      // V0.13.1 — `coerceBoolean` (uniforme avec `precise_only`, `dedupe_by_ps`,
+      // `include_etudiants`, etc.) : `boolean` / `"true"` / `"false"` / `0`/`1`
+      // sont reconnus ; garbage throw `RangeError` mappé JSON-RPC `-32602`. Un
+      // caller LLM qui stringifie `"false"` voit son intention RESPECTÉE (strip
+      // appliqué), pas silencieusement ignorée. Avant V0.13.1, le strict
+      // `args.includeDirigeants !== false` cassait cette uniformité et provoquait
+      // un silent token-bloat sur les inputs string (corrigé /review Passe 1 P0).
+      // Le retour `undefined` (absent) reste un défaut "inclure dirigeants" via
+      // l'expression `!== false`.
+      const includeDirigeants =
+        coerceBoolean(args.includeDirigeants, "includeDirigeants") !== false;
 
       const opts: Parameters<typeof searchEntreprises>[0] = {};
       if (naf) opts.naf = naf;
