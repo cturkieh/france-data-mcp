@@ -60,10 +60,10 @@ describe("warning radius sub-commune (A2/A4)", () => {
   });
 });
 
-describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0", () => {
+describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0 (factory pure)", () => {
   it("100% rows précis (adresse + etablissement_finess) → étiquette 'precis_uniquement'", () => {
     const meta = rppsRadiusMetadata(5);
-    refineRppsGeoPrecisionLabel(
+    const refined = refineRppsGeoPrecisionLabel(
       [
         { geo_precision: "adresse" },
         { geo_precision: "etablissement_finess" },
@@ -71,53 +71,88 @@ describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0", () => {
       ],
       meta,
     );
-    expect(meta.geo_precision).toBe("centroide_commune_ans_precis_uniquement");
-    expect(meta.notes[0]).toContain("TOUS les résultats");
-    expect(meta.notes[0]).toContain("précision exacte");
+    expect(refined.geo_precision).toBe("centroide_commune_ans_precis_uniquement");
+    expect(refined.notes[0]).toContain("TOUS les résultats");
+    expect(refined.notes[0]).toContain("précision exacte");
+    // Factory pure : l'input n'est PAS muté.
+    expect(meta.geo_precision).toBe("centroide_commune_ans_mixte");
   });
 
   it("100% rows centroïde → étiquette 'centroide_uniquement'", () => {
     const meta = rppsRadiusMetadata(5);
-    refineRppsGeoPrecisionLabel(
+    const refined = refineRppsGeoPrecisionLabel(
       [{ geo_precision: "centroide_commune" }, { geo_precision: "centroide_commune" }],
       meta,
     );
-    expect(meta.geo_precision).toBe("centroide_commune_ans_centroide_uniquement");
-    expect(meta.notes[0]).toContain("centroïde commune");
-    expect(meta.notes[0]).toContain("PAS discriminante");
+    expect(refined.geo_precision).toBe("centroide_commune_ans_centroide_uniquement");
+    expect(refined.notes[0]).toContain("centroïde commune");
+    expect(refined.notes[0]).toContain("PAS discriminante");
   });
 
-  it("mixte (précis + centroïde) → étiquette mixte préservée (comportement V0.12)", () => {
+  it("mixte (précis + centroïde) → retourne baseMeta inchangé (même référence)", () => {
     const meta = rppsRadiusMetadata(5);
-    const initialLabel = meta.geo_precision;
-    refineRppsGeoPrecisionLabel(
+    const refined = refineRppsGeoPrecisionLabel(
       [{ geo_precision: "adresse" }, { geo_precision: "centroide_commune" }],
       meta,
     );
-    expect(meta.geo_precision).toBe(initialLabel);
+    expect(refined).toBe(meta); // factory pure : pas de raffinage = même ref
+    expect(refined.geo_precision).toBe("centroide_commune_ans_mixte");
   });
 
-  it("rows vides → étiquette inchangée (pas de raffinage sur échantillon vide)", () => {
+  it("rows vides → retourne baseMeta inchangé (pas de raffinage sur échantillon vide)", () => {
     const meta = rppsRadiusMetadata(5);
-    const initialLabel = meta.geo_precision;
-    refineRppsGeoPrecisionLabel([], meta);
-    expect(meta.geo_precision).toBe(initialLabel);
+    const refined = refineRppsGeoPrecisionLabel([], meta);
+    expect(refined).toBe(meta);
   });
 
-  it("row sans geo_precision typé → étiquette mixte préservée (garde-fou anti-régression RPC)", () => {
+  it("row sans geo_precision typé → retourne baseMeta inchangé (garde-fou anti-régression RPC)", () => {
     // Si un row n'a pas de `geo_precision` (régression RPC, ancien dump, mock test),
     // on garde l'étiquette mixte par sécurité — affirmer "100% précis" sur un
     // échantillon partiellement typé serait trompeur.
     const meta = rppsRadiusMetadata(5);
-    const initialLabel = meta.geo_precision;
-    refineRppsGeoPrecisionLabel([{ geo_precision: "adresse" }, { geo_precision: undefined }], meta);
-    expect(meta.geo_precision).toBe(initialLabel);
+    const refined = refineRppsGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: undefined }],
+      meta,
+    );
+    expect(refined).toBe(meta);
+    expect(refined.geo_precision).toBe("centroide_commune_ans_mixte");
   });
 
   it("ne touche PAS une étiquette initiale non-mixte (helper RPPS-only)", () => {
     // Ameli/FINESS/CDS ont leurs propres étiquettes — pas raffinage croisé.
     const ameliMeta = ameliRadiusMetadata(5);
-    refineRppsGeoPrecisionLabel([{ geo_precision: "adresse" }], ameliMeta);
-    expect(ameliMeta.geo_precision).toBe("centroide_commune_ameli");
+    const refined = refineRppsGeoPrecisionLabel([{ geo_precision: "adresse" }], ameliMeta);
+    expect(refined).toBe(ameliMeta);
+    expect(refined.geo_precision).toBe("centroide_commune_ameli");
+  });
+
+  it("préserve les notes additionnelles (Haversine, short-radius) au-delà de notes[0]", () => {
+    // Garde-fou /simplify quality P2 : le contrat invariant est `notes[0] = SOURCE_NOTE[X]`,
+    // les notes additionnelles (haversine, short-radius warning) en queue
+    // doivent être préservées par le raffinage. Sans `notes.slice(1)`, on
+    // perdrait les notes append par `buildMetadata` / `rppsRadiusMetadata`.
+    const meta = rppsRadiusMetadata(2); // short-radius → 2 notes (source + nuancée)
+    expect(meta.notes.length).toBeGreaterThanOrEqual(2);
+    const initialTrailingNote = meta.notes[1];
+    const refined = refineRppsGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: "adresse" }],
+      meta,
+    );
+    expect(refined.notes.length).toBe(meta.notes.length);
+    expect(refined.notes[0]).not.toBe(meta.notes[0]); // SOURCE_NOTE remplacée
+    expect(refined.notes[1]).toBe(initialTrailingNote); // queue préservée
+  });
+
+  it("invariant `notes[0]` du contrat avec buildMetadata (SOURCE_NOTE en tête)", () => {
+    // Garde-fou /simplify quality P2 : `refineRppsGeoPrecisionLabel` repose sur
+    // `notes[0] === SOURCE_NOTE[geo_precision_initial]`. Ce test verrouille
+    // l'invariant pour que toute évolution de `buildMetadata` qui insérerait
+    // une autre note prioritaire en tête CASSE explicitement plutôt que de
+    // pourrir silencieusement le raffinage.
+    const meta = rppsRadiusMetadata(5);
+    // L'étiquette initiale est "centroide_commune_ans_mixte" ; sa SOURCE_NOTE
+    // doit être en notes[0]. Vérifié indirectement par le contenu attendu.
+    expect(meta.notes[0]).toContain("HYBRIDES");
+    expect(meta.notes[0]).toContain("MIXTE par résultat");
   });
 });

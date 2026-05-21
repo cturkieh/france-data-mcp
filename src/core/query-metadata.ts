@@ -202,6 +202,14 @@ export const finessByCategorieMetadata = (): QueryMetadata =>
  * spécifique au mode hybride RPPS.
  */
 /**
+ * Shape minimal qu'un row doit exposer pour être inspecté par
+ * `refineRppsGeoPrecisionLabel`. Co-localisé avec le helper pour documenter
+ * le couplage explicite avec `RppsResult` (cf. `sante/rpps-db.ts`) sans
+ * créer de dépendance circulaire `core/` → `sante/`. Réutilisé par les tests.
+ */
+export type RppsGeoPrecisionRow = { geo_precision?: PerResultGeoPrecision | null };
+
+/**
  * **V0.13.0 Fix #4** — raffine l'étiquette globale `geo_precision` selon la
  * distribution réelle des `geo_precision` par-résultat. La métadata initiale
  * (construite par `rppsRadiusMetadata` avant exécution RPC) déclare le
@@ -217,15 +225,25 @@ export const finessByCategorieMetadata = (): QueryMetadata =>
  *     `"centroide_commune_ans_centroide_uniquement"` (sub-cas centroïde-only)
  *   - mixte ou 0 row → étiquette initiale inchangée (`mixte`)
  *
- * Mutation cellulaire pour minimiser les allocations (la metadata est partagée
- * avec la liste des notes côté caller).
+ * **Factory pure** (V0.13 /simplify quality fix) : retourne un NOUVEAU
+ * `QueryMetadata` quand un raffinage est applicable, sinon retourne `baseMeta`
+ * tel quel (même référence). Le caller DOIT réassigner le retour pour profiter
+ * du raffinage. Aligné sur le pattern des autres helpers du module
+ * (`rppsRadiusMetadata` etc. = factories pures).
+ *
+ * **Contrat avec `buildMetadata`** : la SOURCE_NOTE de l'étiquette est
+ * conventionnellement en `notes[0]` (cf. `buildMetadata`). Le raffinage
+ * remplace cette première note par la nouvelle SOURCE_NOTE, et préserve les
+ * notes additionnelles en queue (Haversine, short-radius warning…). Si un
+ * jour `buildMetadata` insère une autre note prioritaire en tête, ce contrat
+ * doit être mis à jour ici aussi. Un test garde-fou verrouille l'invariant.
  *
  * **Pourquoi pas dans `buildListQueryResult`** : la signature générique de ce
  * builder ne connaît rien au shape `RppsResult.geo_precision`. Ce helper est
  * dédié au domaine RPPS (consommé par `rpps-db.ts` `getRppsInRadius`).
  */
 export function refineRppsGeoPrecisionLabel(
-  rows: ReadonlyArray<{ geo_precision?: PerResultGeoPrecision | null }>,
+  rows: ReadonlyArray<RppsGeoPrecisionRow>,
   baseMeta: QueryMetadata,
 ): QueryMetadata {
   // Ne raffine QUE si la metadata initiale est l'étiquette mixte canonique
@@ -235,27 +253,30 @@ export function refineRppsGeoPrecisionLabel(
   if (rows.length === 0) return baseMeta;
   let precisCount = 0;
   let centroideCount = 0;
-  let unknownCount = 0;
   for (const row of rows) {
     const p = row.geo_precision;
     if (p === "adresse" || p === "etablissement_finess") precisCount++;
     else if (p === "centroide_commune") centroideCount++;
-    else unknownCount++;
+    // Row sans geo_precision typé (régression RPC, mock test, ancien dump
+    // pré-V0.12.0) → on garde l'étiquette mixte par sécurité. Un échantillon
+    // partiellement typé ne doit jamais faire affirmer "100 % précis".
+    else return baseMeta;
   }
-  // Si certains rows n'ont PAS de geo_precision typé (régression RPC,
-  // mock test, ancien dump pré-V0.12.0), on garde l'étiquette mixte par
-  // sécurité — un échantillon partiel ne doit pas faire affirmer "100 % précis".
-  if (unknownCount > 0) return baseMeta;
+  let refinedPrecision: GeoPrecision;
   if (precisCount === rows.length) {
-    baseMeta.geo_precision = "centroide_commune_ans_precis_uniquement";
-    baseMeta.notes[0] = SOURCE_NOTE.centroide_commune_ans_precis_uniquement;
+    refinedPrecision = "centroide_commune_ans_precis_uniquement";
   } else if (centroideCount === rows.length) {
-    baseMeta.geo_precision = "centroide_commune_ans_centroide_uniquement";
-    baseMeta.notes[0] = SOURCE_NOTE.centroide_commune_ans_centroide_uniquement;
+    refinedPrecision = "centroide_commune_ans_centroide_uniquement";
+  } else {
+    // Mixte effectif (precisCount > 0 ET centroideCount > 0) → étiquette
+    // initiale conservée (déjà correcte).
+    return baseMeta;
   }
-  // Mixte effectif (precisCount > 0 ET centroideCount > 0) → étiquette
-  // initiale conservée (déjà correcte).
-  return baseMeta;
+  return {
+    ...baseMeta,
+    geo_precision: refinedPrecision,
+    notes: [SOURCE_NOTE[refinedPrecision], ...baseMeta.notes.slice(1)],
+  };
 }
 
 export const rppsRadiusMetadata = (radiusKm?: number): QueryMetadata => {
