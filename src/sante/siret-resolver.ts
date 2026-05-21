@@ -769,8 +769,10 @@ async function tryAddressFallback(args: {
       // « SIREN sans enrichment » (diffusion partielle = info récupérable) de
       // « pas exploré » (vrai silence). Symétrique au pattern V0.7 cascade
       // (lookup INSEE fallback) qui pousse aussi dans dinum_errors. La
-      // `lookupStatus` discrimine la cause (not_found / ambiguous /
-      // config_missing) pour audit ops.
+      // `lookupStatus` discrimine la cause (not_found / ambiguous) pour audit
+      // ops — `config_missing` et `enrichment_failed` ne sont JAMAIS émis par
+      // `getEntrepriseBySiren` (DINUM principal), uniquement par le pipeline
+      // INSEE de la cascade V0.7 (cf. siret-resolver:418/427).
       console.warn(
         `[france-data-mcp] siret-resolver: fallback SIREN ${siren} not_found (${lookup.lookupStatus}): ${lookup.message}`,
       );
