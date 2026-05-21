@@ -661,6 +661,143 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
       expect(result.disambiguation_status).toBe("not_applicable");
     }
   });
+
+  // === Fixtures cas réels (cadrage Resolver V2) ===========================
+  //
+  // Fixture #1 (Eylau VH) : déjà couverte par "RPPS vide + famille labo →
+  //   fallback active, single match retenu (cas Eylau VH)" ci-dessus.
+  // Fixture #4 (groupement) : déjà couverte par "famille 'groupement' (GCS)
+  //   → fallback skip silencieux (fixture #4 garde-fou)" ci-dessus.
+  // Reste à figer : Fixture #2 PMA Chérest (déménagement) et Fixture #3
+  //   non-régression V0.7 explicite.
+
+  it("Fixture #2 — PMA Chérest déménagement détecté (method='mixed')", async () => {
+    // Cas réel : laboratoire PMA déménagé Chérest → Ambroise Paré (Boulogne).
+    // - RPPS pointe encore l'ancien SIRET (siège Chérest, fermé côté SIRENE)
+    // - FINESS DREES a déjà la nouvelle adresse (Ambroise Paré)
+    // - V0.7 : best_match=null car adresse RPPS (Chérest) ≠ adresse FINESS
+    //   (Ambroise Paré) → verdict_site indeterminé → déménagement RATÉ.
+    // - V0.13 : fallback géo /near_point sur les coords FINESS (Ambroise
+    //   Paré) trouve le SIRET au nouvel emplacement → déménagement détecté,
+    //   method="mixed" (RPPS avait un SIRET ET le fallback complète).
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        adresse: {
+          voie: "27 RUE AMBROISE PARE",
+          code_postal: "92100",
+          ville: "BOULOGNE",
+          code_departement: "92",
+          code_insee: "92012",
+        },
+        coords: { lat: 48.842, lon: 2.246 },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+    const SIRET_NEW = "99999999900001";
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => {
+      if (siren === SIRET_A.slice(0, 9)) {
+        return fakeEntrepriseDinum({
+          siren,
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_A,
+              adresse: "RUE CHEREST 75008 PARIS",
+              actif: false,
+              dateCreation: "2010-01-01",
+              naf: "8690B",
+            },
+          ],
+        });
+      }
+      if (siren === "999999999") {
+        return fakeEntrepriseDinum({ siren, actif: true });
+      }
+      return {
+        found: false,
+        key: siren,
+        lookupStatus: "not_found",
+        message: "fixture mock: SIREN absent",
+      };
+    });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 1,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: [
+        {
+          siren: "999999999",
+          nomComplet: "NOUVEAU PMA AMBROISE PARE",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_NEW,
+              adresse: "27 RUE AMBROISE PARE 92100 BOULOGNE",
+              actif: true,
+              dateCreation: "2025-09-01",
+              naf: "8690B",
+            },
+          ],
+        },
+      ],
+    });
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // Le déménagement EST détecté : best_match pointe le nouveau SIRET.
+      expect(result.best_match?.siret).toBe(SIRET_NEW);
+      // method "mixed" : RPPS a fourni un SIRET (l'ancien Chérest) ET le
+      // fallback a complété avec le SIRET au nouvel emplacement.
+      expect(result.method).toBe("mixed");
+      expect(result.fallback_reason).toBe("no_best_match_with_clean_dinum");
+      expect(result.naf_filter_used).toContain("8690B");
+      // Les 2 SIRET (ancien + nouveau) sont exposés au caller pour audit.
+      expect(result.candidates.length).toBeGreaterThanOrEqual(2);
+      expect(result.candidates.find((c) => c.siret === SIRET_A)).toBeDefined();
+      expect(result.candidates.find((c) => c.siret === SIRET_NEW)).toBeDefined();
+    }
+  });
+
+  it("Fixture #3 — non-régression V0.7 (best_match RPPS direct → pas de fallback déclenché)", async () => {
+    // Cas nominal V0.7 préservé : RPPS donne un SIRET dont l'adresse DINUM
+    // matche l'adresse FINESS (score ≥ 0.6) → best_match direct, fallback
+    // jamais tenté. method="rpps", fallback_reason=null, naf_filter_used=[].
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_A.slice(0, 9),
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_A,
+            adresse: "27 BD BIZET 59290 WASQUEHAL",
+            actif: true,
+            dateCreation: "2020-01-01",
+            naf: "8690B",
+          },
+        ],
+      }),
+    );
+    const nearPointSpy = vi.spyOn(dinum, "searchEntreprises");
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_A);
+      expect(result.method).toBe("rpps");
+      expect(result.fallback_reason).toBeNull();
+      expect(result.naf_filter_used).toEqual([]);
+      expect(result.disambiguation_status).toBe("not_applicable");
+      // Garde-fou non-régression : fallback JAMAIS tenté quand V0.7 a réussi.
+      expect(nearPointSpy).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe("diceCoefficient (V0.6.2 — primitive de similarité)", () => {
