@@ -1307,12 +1307,26 @@ describe("densite_professionnels_sante — exemples savoir_faire_code (régressi
 });
 
 describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () => {
-  it("professionnels_in_radius (Ameli) : description rappelle geo_precision centroïde + distance non discriminante", () => {
+  it("professionnels_in_radius (Ameli) : description documente la précision géo HYBRIDE (2 valeurs geo_precision + split ~77/~23 post-Chantier C)", () => {
     const tool = findTool("professionnels_in_radius");
     expect(tool?.description).toMatch(/geo_precision/);
-    // Ameli reste 100 % centroïde commune — l'avertissement intra-commune
-    // s'applique à TOUS les PS, c'est le contrat global du tool.
-    expect(tool?.description).toMatch(/m[êe]me .*commune|ne (pas|discrimine)/i);
+    // Chantier C V0.14.0 — Ameli n'est plus 100 % centroïde commune : ~77 %
+    // des PS sont géocodés à l'adresse BAN. La description DOIT exposer les 2
+    // valeurs canoniques, sinon un LLM lisant la description au tool-discovery
+    // croit les coords Ameli inexploitables et sous-utilise la donnée précise.
+    expect(tool?.description).toContain("adresse");
+    expect(tool?.description).toContain("centroide_commune");
+    // Ameli n'a PAS de FINESS join (≠ RPPS) — la 3e valeur geo_precision RPPS
+    // ne doit jamais être copiée ici (faux contrat de précision au site FINESS).
+    expect(tool?.description).not.toContain("etablissement_finess");
+    // Le split doit rester chiffré (~77 % adresse précise / ~23 % centroïde
+    // résiduel) : un LLM doit savoir que la majorité des coords sont exactes.
+    expect(tool?.description).toMatch(/77\s*%/);
+    expect(tool?.description).toMatch(/23\s*%/);
+    // L'avertissement intra-commune reste pertinent UNIQUEMENT pour la branche
+    // centroïde résiduelle (distance_km non discriminante pour les PS d'une
+    // même commune) — pas pour la branche `adresse` précise.
+    expect(tool?.description).toMatch(/m[êe]me commune|intra-commune/i);
   });
 
   it("professionnels_rpps_in_radius (V0.12.0) : description documente les 3 valeurs geo_precision + narration precise_only", () => {

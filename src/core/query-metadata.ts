@@ -90,8 +90,9 @@ export type GeoPrecision =
  *   zone). Issu de `geom_source='commune_centroid'` en base.
  *
  * RPPS expose les 3 valeurs depuis V0.12.0 (post-PR #23 FINESS join + ban_join
- * keyset). Ameli expose uniquement `centroide_commune`. Le détail source
- * reste dans `query_metadata.geo_precision`.
+ * keyset). Ameli expose `adresse` + `centroide_commune` depuis le Chantier C
+ * V0.14.0 (géocodage BAN — pas de FINESS join côté Ameli, donc jamais
+ * `etablissement_finess`). Le détail source reste dans `query_metadata.geo_precision`.
  */
 export type PerResultGeoPrecision = "adresse" | "etablissement_finess" | "centroide_commune";
 

@@ -4,6 +4,38 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+### Fixed — description périmée `professionnels_in_radius` (suite Chantier C V0.14.0)
+
+V0.14.0 a rendu les coordonnées Ameli HYBRIDES (~77 % adresse BAN précise,
+~23 % centroïde commune) et exposé `geo_precision` PAR résultat — mais la
+**prose de description** du tool `professionnels_in_radius` annonçait toujours
+en dur `geo_precision: "centroide_commune"` et « Précision géo : centroïde
+commune » pour TOUS les PS. Le champ `geo_precision` par-résultat était correct
+depuis V0.14.0 ; seule la description (lue au tool-discovery) était fausse.
+Conséquence : un LLM lisant cette description en concluait que les coords Ameli
+sont inexploitables pour un classement individuel et **sous-utilisait la donnée
+précise** (~77 % du référentiel).
+
+- **Description réécrite** : précision HYBRIDE explicite (split ~77/~23
+  chiffré), les 2 valeurs canoniques `geo_precision` ∈ {`"adresse"`,
+  `"centroide_commune"`} documentées avec leur sémantique respective, consigne
+  « lire `geo_precision` PAR résultat ». Alignée sur le jumeau RPPS
+  `professionnels_rpps_in_radius`, sans la 3ᵉ valeur `etablissement_finess`
+  (pas de FINESS join côté Ameli).
+- **Test garde-fou B5** (`api/tools.test.ts`) mis à jour : intitulé et
+  assertions assumaient l'ancienne sémantique « 100 % centroïde commune ».
+  Vérifie désormais les 2 valeurs `geo_precision`, le split chiffré, l'absence
+  de `etablissement_finess`, et le maintien de l'avertissement intra-commune
+  pour la branche centroïde résiduelle.
+
+`precise_only` côté Ameli reste NON câblé : le GiST PARTIEL
+`annuaire_ameli_geog_precise_gist` existe depuis V0.14.0, mais la RPC
+`ameli_in_radius` n'expose pas encore `p_precise_only` (câblage à faire dans
+une itération dédiée — migration RPC + branche CTE `precise` + schéma tool +
+DB layer + tests, cf. jumeau RPPS `20260520T100000_rpps_in_radius_precise_only.sql`).
+
 ## [0.14.0] — 2026-05-21 (Chantier C : géocodage Ameli — centroïde commune → adresse précise)
 
 ### Added — `geom_source` Ameli + `ban_join` cron Ameli

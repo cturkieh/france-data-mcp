@@ -105,8 +105,9 @@ export interface AmeliQueryResult {
   results: AmeliResult[];
   /**
    * Métadonnées sur la précision géo et le type de distance. Surface au
-   * caller MCP que les coords sont au centroïde commune (~3 km, pas
-   * adresse) et que la distance est haversine (pas routière).
+   * caller MCP la précision géo HYBRIDE depuis le Chantier C V0.14.0 (~77 %
+   * adresse BAN précise, ~23 % centroïde commune ~3 km — lire `geo_precision`
+   * par résultat) et que la distance est haversine (pas routière).
    *
    * Optionnel pour ne pas alourdir les call-sites de mock côté tests —
    * les RPCs de prod (cf. `getAmeliInRadius`/`getAmeliBySpecialiteDept`)
