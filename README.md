@@ -112,15 +112,12 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.13.1 — en production.** 35 tools, 1 263 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`. 68,5 % des PS RPPS géolocalisés précisément (filtre `precise_only` exposé sur 4 tools).
-
-Détail des features par version : [CHANGELOG](CHANGELOG.md). Discipline projet : prouver chaque cause-racine par la prod AVANT de coder le fix.
+✅ **V0.13.3 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-- [ ] **Timeout zone dense** `rpps_in_radius` `preciseOnly=true` (Paris 1 km) — `EXPLAIN ANALYZE` + fix indices / planner.
 - [ ] **Géocodage Ameli BAN** (centroïde commune → rue précise).
-- [ ] **Fiche PS unifiée RPPS + Ameli** (concaténée, divergences exposées au caller).
+- [ ] **Fiche PS unifiée RPPS + Ameli** (concaténée, divergences exposées).
 - [ ] **V1.0+** : DOM-COM, INSEE IRIS, DPC.
 
 ---

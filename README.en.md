@@ -79,15 +79,12 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.13.1 — in production.** 35 tools, 1,263 tests, strict TypeScript. Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observability: Sentry + Axiom + `/healthz`. 68.5% of RPPS practitioners precisely geolocated (`precise_only` filter exposed on 4 tools).
-
-Feature-by-version details: [CHANGELOG](CHANGELOG.md). Project discipline: prove every root cause against production BEFORE coding the fix.
+✅ **v0.13.3 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-- [ ] **Dense-zone timeout** on `rpps_in_radius` `preciseOnly=true` (Paris 1 km) — `EXPLAIN ANALYZE` + index/planner fix.
 - [ ] **Ameli BAN geocoding** (commune centroid → precise street).
-- [ ] **Unified RPPS + Ameli PS sheet** (concatenated, divergences exposed to caller).
+- [ ] **Unified RPPS + Ameli PS sheet** (concatenated, divergences exposed).
 - [ ] **v1.0+**: DOM-COM, INSEE IRIS, DPC.
 
 ---
