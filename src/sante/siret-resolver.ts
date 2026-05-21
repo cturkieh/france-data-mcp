@@ -40,9 +40,10 @@ import {
   diceCoefficient,
   normalizeForCompare,
 } from "./address-match.js";
-import { getEntrepriseBySiren } from "./dinum.js";
+import { type Etablissement, getEntrepriseBySiren, searchEntreprises } from "./dinum.js";
 import type { FinessResult } from "./finess-db.js";
 import { lookupSiretsBySirenViaInsee } from "./insee-sirene.js";
+import { isNafCompatibleWithFamille, nafsForFamille } from "./naf-finess-mapping.js";
 
 /**
  * Origine d'un SIRET candidat. Un même SIRET peut cumuler plusieurs sources
@@ -110,11 +111,16 @@ export type ResolutionMethod = "rpps" | "address_fallback" | "mixed";
  *   garde-fou Franco-Britannique (mieux vaut pas de fallback qu'un mauvais
  *   match). Le `method` reste `"rpps"` dans ce cas, et seul `fallback_reason`
  *   est renseigné pour permettre l'audit.
+ * - `no_finess_coords` : tenté mais impossible — le FINESS source n'a pas
+ *   de coordonnées (`finess.coords === null`). Survient pour les structures
+ *   très anciennes / non géoréférencées par DREES, ou pour les ingestions
+ *   FINESS où le Lambert93 n'a pas pu être reprojeté. Skip silencieux.
  */
 export type FallbackReason =
   | "no_rpps"
   | "no_best_match_with_clean_dinum"
   | "no_naf_mapping_for_famille"
+  | "no_finess_coords"
   | null;
 
 /**
@@ -242,6 +248,17 @@ export interface SiretResolution {
 const BEST_MATCH_THRESHOLD = 0.6;
 
 /**
+ * Rayon du fallback géographique (DINUM `/near_point`) en kilomètres.
+ *
+ * **Valeur 0.150 km (150 m)** verrouillée par le cadrage Resolver V2 (Q2) :
+ * couvre la variance d'adressage SIRENE↔FINESS (numéro de voie, abréviation
+ * de type, géocodage Lambert93 vs WGS84) sans embarquer le voisinage immédiat
+ * (immeubles adjacents = entités économiques distinctes). Ajustable plus tard
+ * selon monitoring des `ambiguous` en prod.
+ */
+const FALLBACK_RADIUS_KM = 0.15;
+
+/**
  * Résout la liste enrichie des SIRET candidats pour un `num_finess`. Le caller
  * fournit le `FinessResult` déjà chargé (économie d'1 RPC) — c'est lui qui
  * détient l'adresse FINESS contre laquelle scorer.
@@ -251,26 +268,14 @@ export async function resolveSiretsForFiness(
   finess: FinessResult,
 ): Promise<SiretResolution> {
   const rppsSirets = await getDistinctSiretsForFinessFromRpps(numFiness);
-  if (rppsSirets.length === 0) {
-    // V0.7-compatible : RPPS vide → résolution vide. La traçabilité V0.13
-    // expose `fallback_reason: "no_rpps"` pour signaler la cause au caller —
-    // le commit suivant (Resolver V2 cœur) branchera ici le fallback géo
-    // quand la famille FINESS a un mapping NAF.
-    return {
-      candidates: [],
-      best_match: null,
-      sirens_explored: [],
-      sirens_actif: {},
-      dinum_errors: [],
-      method: "rpps",
-      fallback_reason: "no_rpps",
-      naf_filter_used: [],
-      disambiguation_status: "not_applicable",
-    };
-  }
+  // V0.13 Resolver V2 : pas d'early return ici. Si RPPS est vide, la cascade
+  // DINUM (boucle vide → no-op) est court-circuitée naturellement, et le
+  // bloc fallback géographique en aval prend le relais — préservant le
+  // chemin causal `fallback_reason: "no_rpps"` exposé au caller LLM.
 
   // Dérive les SIREN distincts depuis les SIRET RPPS (9 premiers chars).
   // Set pour dédupliquer : un SIREN peut avoir plusieurs SIRET RPPS-déclarés.
+  // Vide si rppsSirets vide → pas d'appel DINUM dans la branche V0.7.
   const sirensDistincts = [...new Set(rppsSirets.map((s) => s.slice(0, 9)))];
 
   // Parallélise les lookups DINUM — coût borné (1-3 SIREN en pratique). DINUM
@@ -441,29 +446,64 @@ export async function resolveSiretsForFiness(
     }
   }
 
-  const sorted = [...candidates.values()].sort(compareByScoreDesc);
-  const top = sorted[0];
-  const bestMatch =
-    top && top.score_adresse !== null && top.score_adresse >= BEST_MATCH_THRESHOLD ? top : null;
+  const sortedBeforeFallback = [...candidates.values()].sort(compareByScoreDesc);
+  const topBeforeFallback = sortedBeforeFallback[0];
+  let bestMatch =
+    topBeforeFallback &&
+    topBeforeFallback.score_adresse !== null &&
+    topBeforeFallback.score_adresse >= BEST_MATCH_THRESHOLD
+      ? topBeforeFallback
+      : null;
 
-  // V0.7-compatible : pas de fallback ici, seulement la traçabilité enrichie.
-  // `fallback_reason` est non-null UNIQUEMENT pour expliquer pourquoi on n'a
-  // PAS pu produire de `best_match` malgré une cascade RPPS→DINUM OK — signal
-  // utile au caller LLM, indépendant de la décision de fallback (qui sera
-  // branchée au commit Resolver V2 cœur).
-  const fallbackReason: FallbackReason =
-    bestMatch === null && dinumErrors.length === 0 ? "no_best_match_with_clean_dinum" : null;
+  // === Resolver V2 — fallback géographique conditionnel ====================
+  //
+  // Cadrage Q1 verrouillé : on déclenche le fallback UNIQUEMENT si :
+  //   (1) best_match === null (rien de bon côté RPPS+DINUM cascade)
+  //   (2) dinum_errors.length === 0 (DINUM a répondu sans erreur — on est
+  //       sûr que l'absence est réelle, pas une panne transitoire)
+  //
+  // Sinon : V0.7 strict, pas de fallback. Préserve la sémantique "on n'invente
+  // pas de candidats quand DINUM est en panne" — laissera le caller retry.
+  //
+  // Sirens explorés mutable car le fallback peut en ajouter (SIREN nouveau).
+  const sirensExploredMutable = [...sirensDistincts];
+  let method: ResolutionMethod = "rpps";
+  let fallbackReason: FallbackReason = null;
+  let nafFilterUsed: string[] = [];
+  let disambiguationStatus: DisambiguationStatus = "not_applicable";
+
+  if (bestMatch === null && dinumErrors.length === 0) {
+    const outcome = await tryAddressFallback({
+      finess,
+      rppsSirets,
+      finessAddrNorm,
+      candidates,
+      sirensExplored: sirensExploredMutable,
+      sirensActif,
+      dinumErrors,
+    });
+    method = outcome.method;
+    fallbackReason = outcome.fallback_reason;
+    nafFilterUsed = outcome.naf_filter_used;
+    disambiguationStatus = outcome.disambiguation_status;
+    if (outcome.best_match) bestMatch = outcome.best_match;
+  }
+
+  // Re-tri final : nécessaire car le fallback peut avoir muté `candidates`
+  // (nouveaux SIRET, scores updated). Si pas de fallback, sortedBeforeFallback
+  // était déjà bon — mais ce re-tri est idempotent et négligeable en coût.
+  const sorted = [...candidates.values()].sort(compareByScoreDesc);
 
   return {
     candidates: sorted,
     best_match: bestMatch,
-    sirens_explored: sirensDistincts,
+    sirens_explored: sirensExploredMutable,
     sirens_actif: sirensActif,
     dinum_errors: dinumErrors,
-    method: "rpps",
+    method,
     fallback_reason: fallbackReason,
-    naf_filter_used: [],
-    disambiguation_status: "not_applicable",
+    naf_filter_used: nafFilterUsed,
+    disambiguation_status: disambiguationStatus,
   };
 }
 
@@ -534,6 +574,266 @@ function mergeOrInsertDinumCandidate(
       raison_sociale_ul: nomComplet,
     });
   }
+}
+
+// === Resolver V2 — fallback géographique helpers =============================
+
+/**
+ * Résultat agrégé d'une tentative de fallback géographique. Renvoyé par
+ * `tryAddressFallback` au caller principal qui assemble la `SiretResolution`
+ * finale.
+ */
+interface FallbackOutcome {
+  /** Voir `ResolutionMethod`. Reste `"rpps"` quand le fallback skippe / n'aide pas. */
+  method: ResolutionMethod;
+  /** Voir `FallbackReason`. Toujours renseigné si le fallback a été tenté. */
+  fallback_reason: FallbackReason;
+  /** Voir `SiretResolution.naf_filter_used`. */
+  naf_filter_used: string[];
+  /** Voir `DisambiguationStatus`. */
+  disambiguation_status: DisambiguationStatus;
+  /** Best match recalculé si le fallback a tranché ; sinon `null`. */
+  best_match: SiretCandidate | null;
+}
+
+/**
+ * Tente d'enrichir une résolution RPPS infructueuse par recherche géographique
+ * DINUM `/near_point` filtrée par NAF compatible avec la famille FINESS source.
+ *
+ * **Préconditions** : appelé UNIQUEMENT par `resolveSiretsForFiness` quand
+ * `best_match === null` et `dinum_errors.length === 0` (cf. cadrage Q1). Cette
+ * fonction NE vérifie PAS ces conditions — c'est la responsabilité du caller.
+ *
+ * **Sortie** :
+ *   - skip silencieux (famille `autre` / `DELIBERATELY_NO_NAF` / coords null)
+ *     → `fallback_reason: "no_naf_mapping_for_famille"` ou `"no_finess_coords"`,
+ *     `method: "rpps"`, `naf_filter_used: []`.
+ *   - tenté mais 0 candidat post-gate → `method: "rpps"`,
+ *     `naf_filter_used` rempli (audit), `disambiguation_status: "not_applicable"`.
+ *   - 1 candidat post-gate → `method: "address_fallback"` (ou `"mixed"` si
+ *     RPPS avait des SIRET), `disambiguation_status: "single_after_gate"`,
+ *     `best_match` peuplé.
+ *   - > 1 candidat post-gate, signal RPPS départage → `"by_rpps_signal"`.
+ *   - > 1 candidat ex-aequo → `"ambiguous"`, `best_match: null` exposé pour
+ *     intervention manuelle.
+ *
+ * **Mutations** : enrichit en place la `candidates` Map et les structures
+ * `sirens_explored` / `sirens_actif` / `dinum_errors` pour conserver le
+ * pattern V0.7 (le caller assemble la `SiretResolution` finale à partir de
+ * ces structures partagées).
+ *
+ * @internal Exporté uniquement pour test unitaire (`_tryAddressFallbackForTesting`).
+ */
+async function tryAddressFallback(args: {
+  finess: FinessResult;
+  rppsSirets: string[];
+  finessAddrNorm: string;
+  candidates: Map<string, SiretCandidate>;
+  sirensExplored: string[];
+  sirensActif: Record<string, boolean | null>;
+  dinumErrors: DinumLookupError[];
+}): Promise<FallbackOutcome> {
+  const {
+    finess,
+    rppsSirets,
+    finessAddrNorm,
+    candidates,
+    sirensExplored,
+    sirensActif,
+    dinumErrors,
+  } = args;
+
+  // Garde-fou (1) : coords FINESS manquantes → fallback impossible.
+  if (!finess.coords) {
+    return {
+      method: "rpps",
+      fallback_reason: "no_finess_coords",
+      naf_filter_used: [],
+      disambiguation_status: "not_applicable",
+      best_match: null,
+    };
+  }
+
+  // Garde-fou (2) : famille sans mapping NAF → skip silencieux (Franco-Britannique).
+  const nafs = [...nafsForFamille(finess.categorie.famille)];
+  if (nafs.length === 0) {
+    return {
+      method: "rpps",
+      fallback_reason: "no_naf_mapping_for_famille",
+      naf_filter_used: [],
+      disambiguation_status: "not_applicable",
+      best_match: null,
+    };
+  }
+
+  // Recherche /near_point parallèle, 1 appel DINUM par NAF. `onlyActive: false`
+  // pour capturer aussi les SIRET fermés (cas déménagement à détecter).
+  // Promise.allSettled : un NAF qui plante (rate limit, 5xx) n'invalide pas
+  // les autres — log + continue.
+  const nearPointResults = await Promise.allSettled(
+    nafs.map((naf) =>
+      searchEntreprises({
+        center: finess.coords as { lat: number; lon: number },
+        radiusKm: FALLBACK_RADIUS_KM,
+        naf,
+        onlyActive: false,
+        perPage: 25,
+      }),
+    ),
+  );
+
+  // Dédup des Etablissement par SIRET. Plusieurs NAF peuvent ramener la même
+  // entreprise si DINUM retourne plusieurs activités sur un même siège — on
+  // garde la première occurrence rencontrée (suffisant : on relookup via SIREN
+  // juste après pour les détails enrichis).
+  const fallbackEtabs = new Map<string, Etablissement>();
+  for (let i = 0; i < nearPointResults.length; i++) {
+    const settled = nearPointResults[i];
+    const naf = nafs[i] as string;
+    if (!settled) continue;
+    if (settled.status === "rejected") {
+      const msg = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
+      console.error(
+        `[france-data-mcp] siret-resolver: fallback near_point naf=${naf} for num_finess=${finess.num_finess} failed: ${msg}`,
+      );
+      continue;
+    }
+    for (const ent of settled.value.entreprises) {
+      for (const etab of ent.etablissements) {
+        if (!fallbackEtabs.has(etab.siret)) {
+          fallbackEtabs.set(etab.siret, etab);
+        }
+      }
+    }
+  }
+
+  // Gate d'activité (mode "compatible") : éliminer les SIRET dont le NAF
+  // n'est pas compatible avec la famille FINESS. Filet anti-Franco-Britannique
+  // — un labo doit être rattaché à un FINESS labo, jamais à un IFSI co-localisé.
+  const compatibleEtabs: Etablissement[] = [];
+  for (const etab of fallbackEtabs.values()) {
+    if (isNafCompatibleWithFamille(etab.naf, finess.categorie.famille)) {
+      compatibleEtabs.push(etab);
+    }
+  }
+
+  // Cas trivial : 0 candidat post-gate → fallback tenté mais sans amélioration.
+  // On garde method="rpps" (rien à ajouter aux candidates) mais on expose
+  // naf_filter_used pour audit prod.
+  if (compatibleEtabs.length === 0) {
+    return {
+      method: "rpps",
+      fallback_reason: rppsSirets.length === 0 ? "no_rpps" : "no_best_match_with_clean_dinum",
+      naf_filter_used: nafs,
+      disambiguation_status: "not_applicable",
+      best_match: null,
+    };
+  }
+
+  // Enrichir via lookup SIREN pour récupérer raison sociale UL + sirens_actif.
+  // Permet au caller (verifierSiteActif) de calculer un verdict_groupe propre
+  // sur les candidats fallback, pas seulement verdict_site.
+  const distinctSirens = [...new Set(compatibleEtabs.map((e) => e.siret.slice(0, 9)))];
+  const sirenLookups = await Promise.allSettled(
+    distinctSirens.map(async (siren) => ({ siren, lookup: await getEntrepriseBySiren(siren) })),
+  );
+  const sirenInfo = new Map<string, { actif: boolean | null; nomComplet: string | null }>();
+  for (let i = 0; i < sirenLookups.length; i++) {
+    const siren = distinctSirens[i] as string;
+    const settled = sirenLookups[i];
+    if (!settled) continue;
+    if (settled.status === "rejected") {
+      const msg = settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
+      console.error(
+        `[france-data-mcp] siret-resolver: fallback SIREN enrichment rejected for siren=${siren}: ${msg}`,
+      );
+      dinumErrors.push({ siren, message: `fallback_siren_enrichment: ${msg}`, status: "rejected" });
+      sirenInfo.set(siren, { actif: null, nomComplet: null });
+      continue;
+    }
+    const lookup = settled.value.lookup;
+    if (!lookup.found) {
+      // Pas remonter dans dinum_errors : le candidat existe (DINUM near_point l'a
+      // ramené) mais l'UL parente est en diffusion partielle. Best-effort.
+      console.warn(
+        `[france-data-mcp] siret-resolver: fallback SIREN ${siren} not_found (${lookup.lookupStatus}): ${lookup.message}`,
+      );
+      sirenInfo.set(siren, { actif: null, nomComplet: null });
+      continue;
+    }
+    sirenInfo.set(siren, { actif: lookup.actif, nomComplet: lookup.nomComplet });
+    if (!sirensExplored.includes(siren)) sirensExplored.push(siren);
+    sirensActif[siren] = lookup.actif;
+  }
+
+  // Injecter les candidats fallback dans la Map partagée. Calcule un score
+  // adresse informatif (les SIRET sont déjà géo-proches, score quasi uniforme
+  // — exposé pour debug/audit, PAS utilisé pour discriminer).
+  const fallbackCandidates: SiretCandidate[] = [];
+  for (const etab of compatibleEtabs) {
+    const siren = etab.siret.slice(0, 9);
+    const info = sirenInfo.get(siren);
+    const adresse = etab.adresse?.trim() || null;
+    const score = adresse ? diceCoefficient(finessAddrNorm, normalizeForCompare(adresse)) : null;
+    const existing = candidates.get(etab.siret);
+    if (existing) {
+      // SIRET déjà connu via RPPS (signal RPPS positif) — enrichir, ajouter source.
+      existing.score_adresse = score;
+      existing.actif = etab.actif;
+      existing.adresse_libelle = adresse;
+      existing.date_creation = etab.dateCreation ?? null;
+      if (info?.nomComplet) existing.raison_sociale_ul = info.nomComplet;
+      if (!existing.sources.includes("dinum_address_match")) {
+        existing.sources.push("dinum_address_match");
+      }
+      fallbackCandidates.push(existing);
+    } else {
+      // Nouveau candidat ramené uniquement par le fallback géo.
+      const cand: SiretCandidate = {
+        siret: etab.siret,
+        sources: ["dinum_address_match"],
+        score_adresse: score,
+        actif: etab.actif,
+        adresse_libelle: adresse,
+        date_creation: etab.dateCreation ?? null,
+        raison_sociale_ul: info?.nomComplet ?? null,
+      };
+      candidates.set(etab.siret, cand);
+      fallbackCandidates.push(cand);
+    }
+  }
+
+  // Désambiguïsation :
+  //   1 candidat → single_after_gate
+  //   > 1 candidat ET signal RPPS départage → by_rpps_signal
+  //   > 1 candidat ex-aequo → ambiguous (best_match=null)
+  let disambiguationStatus: DisambiguationStatus;
+  let bestMatch: SiretCandidate | null;
+  if (fallbackCandidates.length === 1) {
+    disambiguationStatus = "single_after_gate";
+    bestMatch = fallbackCandidates[0] as SiretCandidate;
+  } else {
+    const rppsSet = new Set(rppsSirets);
+    const withRppsSignal = fallbackCandidates.filter((c) => rppsSet.has(c.siret));
+    if (withRppsSignal.length === 1) {
+      disambiguationStatus = "by_rpps_signal";
+      bestMatch = withRppsSignal[0] as SiretCandidate;
+    } else {
+      // Soit 0 candidat avec signal RPPS (post-gate sans déclaration PS — cas
+      // typique d'un site purement libéral non agréé), soit > 1 signal RPPS
+      // ex-aequo : on n'a pas de critère propre pour départager → ambiguous.
+      disambiguationStatus = "ambiguous";
+      bestMatch = null;
+    }
+  }
+
+  return {
+    method: rppsSirets.length > 0 ? "mixed" : "address_fallback",
+    fallback_reason: rppsSirets.length === 0 ? "no_rpps" : "no_best_match_with_clean_dinum",
+    naf_filter_used: nafs,
+    disambiguation_status: disambiguationStatus,
+    best_match: bestMatch,
+  };
 }
 
 /**

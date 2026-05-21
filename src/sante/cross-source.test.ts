@@ -126,6 +126,18 @@ beforeEach(() => {
     lookupStatus: "not_found",
     message: "default test mock: DINUM not_found",
   });
+  // Stub DINUM `searchEntreprises` (near_point) par défaut : 0 résultat.
+  // Resolver V2 (V0.13) déclenche le fallback géographique quand best_match
+  // est null + dinum_errors vide. Sans ce stub, les tests qui exercent ce cas
+  // partiraient en I/O réseau réel vers /near_point. Les tests qui exercent
+  // le fallback override via `vi.spyOn(dinum, "searchEntreprises")...`.
+  vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+    total: 0,
+    page: 1,
+    perPage: 25,
+    totalPages: 0,
+    entreprises: [],
+  });
 });
 
 afterEach(() => {
@@ -338,6 +350,256 @@ describe("verifierSiteActif (V0.7.0 — pivot SIRET élargi via DINUM)", () => {
     }
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
+  });
+});
+
+describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
+  /**
+   * Helper : construit un `SearchEntreprisesResult` minimal avec une liste
+   * d'entreprises (chacune avec un seul établissement). Permet aux tests
+   * d'exercer le fallback géographique DINUM `/near_point` sans dupliquer
+   * le shape complet de la réponse.
+   */
+  function fakeNearPointResult(
+    entreprises: Array<{ siren: string; naf?: string; etabs: dinum.Etablissement[] }>,
+  ): Awaited<ReturnType<typeof dinum.searchEntreprises>> {
+    return {
+      total: entreprises.length,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: entreprises.map((e) => ({
+        siren: e.siren,
+        nomComplet: "FAKE NEAR_POINT ENTREPRISE",
+        naf: e.naf,
+        finances: [],
+        dirigeants: [],
+        actif: true,
+        etablissements: e.etabs,
+      })),
+    };
+  }
+
+  it("famille 'groupement' (GCS) → fallback skip silencieux (fixture #4 garde-fou)", async () => {
+    // Décision Q3 cadrage : DELIBERATELY_NO_NAF désactive le fallback. Le
+    // resolver doit JAMAIS appeler near_point pour cette famille.
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        categorie: { code: "696", libelle: "GCS de moyens", famille: "groupement" },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null }); // RPPS vide
+    const nearPointSpy = vi.spyOn(dinum, "searchEntreprises");
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.candidates).toHaveLength(0);
+      expect(result.best_match).toBeNull();
+    }
+    // Garde-fou clé : near_point JAMAIS appelé pour groupement (skip silencieux).
+    expect(nearPointSpy).not.toHaveBeenCalled();
+  });
+
+  it("famille 'autre' (FINESS catégorie non classée) → fallback skip silencieux", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        categorie: { code: "9999", libelle: "Inconnu", famille: "autre" },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    const nearPointSpy = vi.spyOn(dinum, "searchEntreprises");
+
+    await verifierSiteActif(VALID_FINESS);
+    expect(nearPointSpy).not.toHaveBeenCalled();
+  });
+
+  it("coords FINESS null → fallback skip silencieux (fallback_reason='no_finess_coords')", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ coords: null }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    const nearPointSpy = vi.spyOn(dinum, "searchEntreprises");
+
+    await verifierSiteActif(VALID_FINESS);
+    expect(nearPointSpy).not.toHaveBeenCalled();
+  });
+
+  it("RPPS vide + famille labo → fallback active, single match retenu (cas Eylau VH)", async () => {
+    // Cas réel : labo dont aucun biologiste n'a déclaré le site au RPPS.
+    // FINESS = labo, coords présentes, near_point ramène un seul SIRET labo
+    // valide (8690B). Doit produire best_match avec method="address_fallback".
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: "507815942",
+          naf: "8690B",
+          etabs: [
+            {
+              siret: "50781594200218",
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2020-01-01",
+              naf: "8690B",
+            },
+          ],
+        },
+      ]),
+    );
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({ siren: "507815942", actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe("50781594200218");
+      expect(result.verdict_site).toBe("actif");
+      expect(result.verdict_groupe).toBe("actif");
+      expect(result.candidates.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("RPPS vide + co-localisation labo/école → gate écarte l'école (garde-fou Franco-Britannique)", async () => {
+    // Cas réel : Hôpital Franco-Britannique 4 rue Kléber, 7 entités cohabitent.
+    // near_point ramène un labo (8690B) ET une école (8542Z) à la même adresse.
+    // Le gate NAF doit éliminer l'école.
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockImplementation(async (opts) => {
+      // /near_point filtre côté DINUM par activite_principale, donc le mock
+      // doit refléter ça : pour NAF "8690B" → renvoyer le labo (et même
+      // l'école si elle traînait), pour les autres NAF → vide.
+      if (opts.naf === "8690B") {
+        return fakeNearPointResult([
+          {
+            siren: "507815942",
+            naf: "8690B",
+            etabs: [
+              {
+                siret: "50781594200218",
+                adresse: "4 RUE KLEBER 92300 LEVALLOIS",
+                actif: true,
+                naf: "8690B",
+              },
+            ],
+          },
+          {
+            // L'école co-localisée glisse dans la même réponse (cas rare DINUM,
+            // mais on teste le gate côté nous, pas la fiabilité du filtre amont).
+            siren: "111111111",
+            naf: "8542Z",
+            etabs: [
+              {
+                siret: "11111111100001",
+                adresse: "4 RUE KLEBER 92300 LEVALLOIS",
+                actif: true,
+                naf: "8542Z",
+              },
+            ],
+          },
+        ]);
+      }
+      return { total: 0, page: 1, perPage: 25, totalPages: 0, entreprises: [] };
+    });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) =>
+      fakeEntrepriseDinum({ siren, actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // Seul le labo doit être retenu — pas l'école (NAF 8542Z incompatible).
+      expect(result.best_match?.siret).toBe("50781594200218");
+      // Aucun candidat NE DOIT être l'école.
+      expect(result.candidates.find((c) => c.siret === "11111111100001")).toBeUndefined();
+    }
+  });
+
+  it("RPPS vide + 2 labos co-localisés ex-aequo → disambiguation 'ambiguous', best_match null", async () => {
+    // Cas rare mais possible : 2 SIRET labo distincts strictement à la même
+    // adresse (groupes distincts au même bâtiment). Aucun signal RPPS, donc
+    // ambiguïté irréductible.
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: "507815942",
+          naf: "8690B",
+          etabs: [
+            {
+              siret: "50781594200218",
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              naf: "8690B",
+            },
+          ],
+        },
+        {
+          siren: "999999999",
+          naf: "8690B",
+          etabs: [
+            {
+              siret: "99999999900001",
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              naf: "8690B",
+            },
+          ],
+        },
+      ]),
+    );
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) =>
+      fakeEntrepriseDinum({ siren, actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match).toBeNull();
+      // Les 2 candidats restent exposés au caller pour intervention manuelle.
+      expect(result.candidates.length).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it("ne se déclenche PAS quand DINUM est en erreur (Q1 cadrage)", async () => {
+    // Conditions : RPPS donne 1 SIRET, DINUM throw → dinum_errors non-vide.
+    // Le fallback ne doit PAS s'activer (on ne sait pas si l'absence est
+    // réelle ou transitoire). Sémantique V0.7 préservée.
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockRejectedValue(new Error("DINUM HTTP 503"));
+    const nearPointSpy = vi.spyOn(dinum, "searchEntreprises");
+    // Réduire le bruit console pour ce test.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await verifierSiteActif(VALID_FINESS);
+    expect(nearPointSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("ne se déclenche PAS quand RPPS a déjà produit un best_match (cas nominal V0.7)", async () => {
+    // RPPS donne SIRET_A, DINUM match parfait → best_match présent → pas de
+    // fallback (rien à améliorer).
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_A.slice(0, 9),
+        etablissements: [{ siret: SIRET_A, adresse: "27 BD BIZET 59290 WASQUEHAL", actif: true }],
+      }),
+    );
+    const nearPointSpy = vi.spyOn(dinum, "searchEntreprises");
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_A);
+    }
+    expect(nearPointSpy).not.toHaveBeenCalled();
   });
 });
 
