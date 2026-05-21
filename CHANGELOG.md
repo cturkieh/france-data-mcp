@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [0.13.0] — Unreleased
+## [0.13.0] — 2026-05-21
 
 ### Added — Resolver V2 (chantier majeur croisement FINESS↔SIRENE)
 
@@ -94,6 +94,49 @@ rattaché à un IFSI co-localisé).
   verifier), économisant l'appel DINUM gaspillé dans ce cas pathologique
   (latence DREES 1-2 mois). Le warning console reste émis pour le signal
   opérationnel.
+
+### Added — Fix #4 (étiquette `geo_precision` dynamique)
+
+`rpps_in_radius` retournait systématiquement
+`geo_precision: "centroide_commune_ans_mixte"` même quand 100 % des résultats
+étaient en précision exacte (`adresse` BAN ou `etablissement_finess`). Un
+caller LLM lisait l'étiquette globale au lieu d'inspecter chaque row et
+sous-estimait la qualité des données. Bug reporté par Claude.ai lors du test
+utilisateur initial.
+
+- **Nouveau helper `refineRppsGeoPrecisionLabel(rows, baseMeta)`** dans
+  `src/core/query-metadata.ts` (factory pure) qui post-calcule l'étiquette
+  globale selon la distribution effective des rows. 2 nouvelles valeurs
+  `GeoPrecision` :
+  - `centroide_commune_ans_precis_uniquement` (100 % rows précis)
+  - `centroide_commune_ans_centroide_uniquement` (100 % rows centroïde)
+  - Mixte effectif → étiquette `mixte` préservée (comportement V0.12 strict).
+- **`CENTROID_PRECISIONS` converti en `Record<GeoPrecision, boolean>` via
+  `satisfies`** : TS compile-fail si une future valeur de `GeoPrecision`
+  n'est pas classée explicitement (même garde-fou que `SOURCE_NOTE`).
+- **Filtre note `shortRadiusMixed` mensongère** : la note injectée par
+  `rppsRadiusMetadata` quand radius < 3 km dit "la branche précise (~68,5 %)
+  reste fiable, passer `precise_only: true`" — devient MENSONGÈRE après
+  refine vers `_centroide_uniquement` (0 % de précis). Filtrée via la
+  signature `"La branche précise"`. Test garde-fou bidirectionnel.
+- **`console.warn` LOUD sur drift RPC** : row sans `geo_precision` typé
+  (régression RPC, ancien dump pré-V0.12.0) émet un warn
+  `[france-data-mcp]` avant return `baseMeta`. Test garde-fou ajouté.
+
+### Added — Fix #5 (toggle `includeDirigeants` sur `entreprises_in_radius`)
+
+Pour les groupes type Biogroup avec 20+ dirigeants par entité, l'énumération
+volume gonflait inutilement le payload (tokens LLM Geo Intel).
+
+- **Nouveau paramètre `includeDirigeants?: boolean`** (défaut `true`,
+  backward-compat strict V0.12). À `false`, strip côté handler
+  `api/tools.ts` (la lib `searchEntreprises` reste neutre — cohérent avec le
+  découpage `src/` ≠ `api/` de CLAUDE.md).
+- **`coerceBoolean` au lieu d'un strict `!== false`** : un caller LLM qui
+  stringifie `"false"` (très fréquent en JSON tool-call) voit son intention
+  respectée. Uniforme avec les 12+ autres params booléens du fichier
+  (`precise_only`, `dedupe_by_ps`, etc.). Garbage → `RangeError` mappé
+  JSON-RPC `-32602`.
 
 ## [0.12.3] — 2026-05-20
 

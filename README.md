@@ -112,12 +112,18 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.12.3 — en production.** 35 tools, 4 sources santé (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN. 1 206 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`. **68,5 % des PS RPPS géolocalisés précisément** (FINESS bâtiment ou BAN rue) — exposé via `geo_precision` + filtre `precise_only` par-résultat sur 4 tools RPPS.
+✅ **V0.13.0 — en production.** 35 tools, 4 sources santé (FINESS, Ameli, RPPS, CDS) + INSEE / DINUM / IGN. 1 257 tests, TypeScript strict. Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Observabilité Sentry + Axiom + `/healthz`. **68,5 % des PS RPPS géolocalisés précisément** (FINESS bâtiment ou BAN rue) — exposé via `geo_precision` + filtre `precise_only` par-résultat sur 4 tools RPPS.
+
+**Nouveau V0.13 — Resolver V2** : fallback géographique DINUM `/near_point` filtré par NAF compatible quand le pivot RPPS V0.7 échoue (labos sans biologiste RPPS, EHPAD/pharmacies sans titulaire, déménagements). Gate NAF many-to-many (`naf-finess-mapping.ts`) qui préserve le garde-fou Franco-Britannique (un labo ne sera jamais rattaché à un IFSI co-localisé). Traçabilité complète exposée : `method` / `fallback_reason` / `naf_filter_used` / `disambiguation_status` sur les 4 tools `verifier_site_actif` / `historique_etablissement` / `reconcilier_finess_sirene` / `inspect_site`. Bonus : étiquette `geo_precision` dynamique (reflète la distribution réelle des rows) + toggle `includeDirigeants` sur `entreprises_in_radius` (économie tokens en énumération volume).
 
 Historique complet : [CHANGELOG](CHANGELOG.md). Discipline projet : prouver chaque cause-racine par la prod / doc officielle AVANT de coder le fix.
 
 ### Roadmap
 
+- [ ] **Fix timeout zone dense** : `rpps_in_radius` avec `preciseOnly=true` sur Paris dense + 1 km déclenche `57014 statement timeout`. Confirmé en prod V0.13. À diagnostiquer via `EXPLAIN ANALYZE` puis fixer (indices manquants ou hint planner).
+- [ ] **Géocodage Ameli adresses** : récupérer coords précises BAN au lieu du centroïde commune sur les adresses Ameli — bonus 1 du retour Claude.ai, autonome, fort impact.
+- [ ] **Fiche professionnel unifiée RPPS + Ameli** (concaténée, pas résolue — doctrine "concaténé MCP / résolu Geo Intel") : un PS, deux sources juxtaposées, divergences exposées au caller.
+- [ ] **Fix `finess_sirene_coverage_in_radius`** : matching IFSI/labo via la table `naf-finess-mapping.ts` (table prête, à câbler dans `coverage.ts`).
 - [ ] **Phase 2 — automatisation re-géocodage récurrent** : brique BAN inline cron RPPS (diff staging → POST BAN delta → upsert cache). Conditionnée aux chiffres Phase 1.
 - [ ] **V1.0+** : DOM-COM (`code_insee CHAR(5)`), INSEE IRIS (démographie infra-communale), DPC (historique formations PS).
 
