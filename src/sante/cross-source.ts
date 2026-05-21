@@ -32,6 +32,9 @@ import {
 } from "./insee-sirene.js";
 import {
   type DinumLookupError,
+  type DisambiguationStatus,
+  type FallbackReason,
+  type ResolutionMethod,
   type SiretCandidate,
   type SiretResolution,
   resolveSiretsForFiness,
@@ -157,6 +160,30 @@ export interface VerifierSiteActifResult {
    * pour creuser un SIRET ambigu, `historique_etablissement` pour la timeline).
    */
   explication: string;
+  /**
+   * Traçabilité Resolver V2 (V0.13.0) — comment le résultat a été produit.
+   * Cf. `ResolutionMethod` :
+   * - `"rpps"` : pivot RPPS classique V0.7 (pas de fallback)
+   * - `"address_fallback"` : RPPS vide ou tous-sentinelle → fallback DINUM /near_point
+   * - `"mixed"` : RPPS a fourni des SIRET ET le fallback a complété
+   */
+  method: ResolutionMethod;
+  /**
+   * Pourquoi le fallback géo a été déclenché (ou skippé). Cf. `FallbackReason`.
+   * `null` = cas nominal RPPS+DINUM, pas de fallback envisagé.
+   */
+  fallback_reason: FallbackReason;
+  /**
+   * NAF effectivement passés à DINUM `/near_point` côté fallback. Vide si
+   * pas de fallback déclenché. Exposé pour audit + observabilité.
+   */
+  naf_filter_used: string[];
+  /**
+   * Statut de désambiguïsation après gate NAF + signal RPPS. Cf.
+   * `DisambiguationStatus`. `"ambiguous"` = caller doit cross-checker
+   * manuellement (best_match=null, plusieurs candidats listés).
+   */
+  disambiguation_status: DisambiguationStatus;
 }
 
 /**
@@ -210,6 +237,10 @@ export async function verifierSiteActif(
     verdict_site: verdictSite,
     verdict_groupe: verdictGroupe,
     explication: buildVerifierExplication(resolution, verdictSite, verdictGroupe),
+    method: resolution.method,
+    fallback_reason: resolution.fallback_reason,
+    naf_filter_used: resolution.naf_filter_used,
+    disambiguation_status: resolution.disambiguation_status,
   });
 }
 
@@ -228,20 +259,43 @@ function buildVerifierExplication(
   // Suffix DINUM ajouté à toutes les branches : utile même quand le verdict
   // est confirmé (signal de résolution non complète, peut justifier un retry).
   const dinumDiagSuffix = formatDinumDiag(resolution.dinum_errors);
+  // V0.13 Resolver V2 : préfixe la méthode quand un fallback a été utile ou
+  // tenté. Le caller LLM sait que le SIRET ne vient pas du pivot RPPS classique.
+  const methodPrefix = buildMethodPrefix(resolution);
   if (verdictSite === "actif" && best) {
-    return `Site actif côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué actif. Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}.${dinumDiagSuffix}`;
+    return `${methodPrefix}Site actif côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué actif. Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}.${dinumDiagSuffix}`;
   }
   if (verdictSite === "ferme" && best) {
-    return `Site fermé côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué inactif (date_creation: ${best.date_creation ?? "?"}). FINESS DREES probablement en retard sur la fermeture (latence 1-2 mois). Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}. Pour la timeline complète : historique_etablissement(num_finess).${dinumDiagSuffix}`;
+    return `${methodPrefix}Site fermé côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${best.score_adresse?.toFixed(2)}) marqué inactif (date_creation: ${best.date_creation ?? "?"}). FINESS DREES probablement en retard sur la fermeture (latence 1-2 mois). Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}. Pour la timeline complète : historique_etablissement(num_finess).${dinumDiagSuffix}`;
   }
   if (resolution.candidates.length === 0) {
-    return `Aucun SIRET candidat trouvé via RPPS pour ce FINESS — pivot impossible. Cross-check manuel : entreprises_in_radius autour de l'adresse FINESS, ou recherche directe sur recherche-entreprises.api.gouv.fr.${dinumDiagSuffix}`;
+    return `${methodPrefix}Aucun SIRET candidat trouvé pour ce FINESS — pivot RPPS impossible et fallback géo sans résultat (cf. fallback_reason="${resolution.fallback_reason ?? "n/a"}"). Cross-check manuel : entreprises_in_radius autour de l'adresse FINESS, ou recherche directe sur recherche-entreprises.api.gouv.fr.${dinumDiagSuffix}`;
+  }
+  if (resolution.disambiguation_status === "ambiguous") {
+    return `${methodPrefix}Ambigu : ${resolution.candidates.length} candidats matchent la famille FINESS via fallback géo (NAF ${resolution.naf_filter_used.join("/")}) mais aucun signal RPPS pour départager. best_match=null. Intervention manuelle requise — cross-check via etablissement_by_siret sur chaque candidat.${dinumDiagSuffix}`;
   }
   // best_match null mais candidats RPPS présents → l'adresse RPPS-déclarée ne
   // matche pas l'adresse FINESS (cas typique : le PS a déclaré le SIRET du
   // siège, distant du site). Le caller peut investiguer manuellement.
   const sirenCandidates = resolution.sirens_explored.join(", ");
-  return `Indéterminé : ${resolution.candidates.length} SIRET candidat(s) côté RPPS mais aucun ne matche l'adresse FINESS (score adresse < 0.6). SIREN exploré(s) : ${sirenCandidates}. Groupe : ${verdictGroupe}.${dinumDiagSuffix} Cross-check manuel via etablissement_by_siret sur les candidats.`;
+  return `${methodPrefix}Indéterminé : ${resolution.candidates.length} SIRET candidat(s) côté RPPS mais aucun ne matche l'adresse FINESS (score adresse < 0.6). SIREN exploré(s) : ${sirenCandidates}. Groupe : ${verdictGroupe}.${dinumDiagSuffix} Cross-check manuel via etablissement_by_siret sur les candidats.`;
+}
+
+/**
+ * Préfixe LLM-friendly décrivant la méthode utilisée pour résoudre le SIRET.
+ * Vide si method === "rpps" sans fallback (cas nominal V0.7) — pas de bruit.
+ */
+function buildMethodPrefix(resolution: Awaited<ReturnType<typeof resolveSiretsForFiness>>): string {
+  if (resolution.method === "rpps" && resolution.fallback_reason === null) return "";
+  if (resolution.method === "address_fallback") {
+    return `[Resolver V2 : SIRET résolu via fallback géographique DINUM /near_point — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
+  }
+  if (resolution.method === "mixed") {
+    return `[Resolver V2 : RPPS partiel + fallback géo complémentaire — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
+  }
+  // method === "rpps" mais fallback_reason renseigné (skip silencieux ou
+  // tenté sans amélioration). Audit utile pour le caller.
+  return `[Resolver V2 : fallback géo non-applicable (${resolution.fallback_reason})] `;
 }
 
 /**
@@ -509,6 +563,19 @@ export interface HistoriqueEtablissementResult {
    *   absents, retry inutile. Cross-check FINESS / numéro mal formé.
    */
   status: "success" | "partial" | "all_sirene_failed" | "all_sirene_not_found";
+  /**
+   * Traçabilité Resolver V2 (V0.13.0) — comment les SIRET candidats ont été
+   * obtenus. Cf. `VerifierSiteActifResult.method` pour la sémantique. Quand
+   * `method === "address_fallback"` ou `"mixed"`, l'historique de timelines
+   * peut inclure des SIRET trouvés via le fallback géo (audit utile).
+   */
+  method: ResolutionMethod;
+  /** Cf. `VerifierSiteActifResult.fallback_reason`. */
+  fallback_reason: FallbackReason;
+  /** Cf. `VerifierSiteActifResult.naf_filter_used`. */
+  naf_filter_used: string[];
+  /** Cf. `VerifierSiteActifResult.disambiguation_status`. */
+  disambiguation_status: DisambiguationStatus;
 }
 
 export async function historiqueEtablissement(
@@ -578,6 +645,10 @@ export async function historiqueEtablissement(
     siret_timelines: timelines,
     dinum_errors: resolution.dinum_errors,
     status,
+    method: resolution.method,
+    fallback_reason: resolution.fallback_reason,
+    naf_filter_used: resolution.naf_filter_used,
+    disambiguation_status: resolution.disambiguation_status,
   });
 }
 
@@ -682,6 +753,20 @@ export interface ReconciliationResult {
    *   des `not_found` SIRENE → SIRET candidats légitimement absents, retry inutile.
    */
   status: "success" | "partial" | "all_sirene_failed" | "all_sirene_not_found";
+  /**
+   * Traçabilité Resolver V2 (V0.13.0). Cf. `VerifierSiteActifResult.method`
+   * pour la sémantique. Un `"address_fallback"` ici indique que les candidats
+   * réconciliés viennent du fallback géo (signal de qualité — la réconciliation
+   * a déjà passé un gate NAF, donc les scores nom/adresse sont sur des sites
+   * a priori du bon métier).
+   */
+  method: ResolutionMethod;
+  /** Cf. `VerifierSiteActifResult.fallback_reason`. */
+  fallback_reason: FallbackReason;
+  /** Cf. `VerifierSiteActifResult.naf_filter_used`. */
+  naf_filter_used: string[];
+  /** Cf. `VerifierSiteActifResult.disambiguation_status`. */
+  disambiguation_status: DisambiguationStatus;
 }
 
 export async function reconcilierFinessSirene(
@@ -800,6 +885,10 @@ export async function reconcilierFinessSirene(
     skipped,
     dinum_errors: resolution.dinum_errors,
     status,
+    method: resolution.method,
+    fallback_reason: resolution.fallback_reason,
+    naf_filter_used: resolution.naf_filter_used,
+    disambiguation_status: resolution.disambiguation_status,
   });
 }
 

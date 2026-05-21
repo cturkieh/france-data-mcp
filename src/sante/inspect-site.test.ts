@@ -52,6 +52,10 @@ function fakeVerifierFound(
     verdict_site: "actif",
     verdict_groupe: "actif",
     explication: "Site actif côté SIRENE/DINUM (mock test).",
+    method: "rpps",
+    fallback_reason: null,
+    naf_filter_used: [],
+    disambiguation_status: "not_applicable",
     ...overrides,
   };
 }
@@ -126,6 +130,10 @@ function fakeHistoriqueFound(
     siret_timelines: [{ siret: SIRET_BEST, sirene: null, sirene_error: "test mock" }],
     dinum_errors: [],
     status,
+    method: "rpps",
+    fallback_reason: null,
+    naf_filter_used: [],
+    disambiguation_status: "not_applicable",
   };
 }
 

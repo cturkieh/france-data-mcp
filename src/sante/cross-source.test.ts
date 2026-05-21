@@ -601,6 +601,66 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
     }
     expect(nearPointSpy).not.toHaveBeenCalled();
   });
+
+  it("expose method='address_fallback' + naf_filter_used + disambiguation_status quand fallback réussit", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessLookupFound());
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 1,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: [
+        {
+          siren: "507815942",
+          nomComplet: "BIOGROUP NORD",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: "50781594200218",
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              naf: "8690B",
+            },
+          ],
+        },
+      ],
+    });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({ siren: "507815942", actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.method).toBe("address_fallback");
+      expect(result.naf_filter_used).toContain("8690B");
+      expect(result.disambiguation_status).toBe("single_after_gate");
+      expect(result.fallback_reason).toBe("no_rpps");
+      expect(result.explication).toContain("Resolver V2");
+    }
+  });
+
+  it("expose fallback_reason='no_naf_mapping_for_famille' pour groupement (skip silencieux exposé au caller)", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        categorie: { code: "696", libelle: "GCS", famille: "groupement" },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.method).toBe("rpps");
+      expect(result.fallback_reason).toBe("no_naf_mapping_for_famille");
+      expect(result.naf_filter_used).toEqual([]);
+      expect(result.disambiguation_status).toBe("not_applicable");
+    }
+  });
 });
 
 describe("diceCoefficient (V0.6.2 — primitive de similarité)", () => {

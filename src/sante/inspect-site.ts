@@ -33,7 +33,13 @@ import { assertValidNumFiness } from "./db-helpers.js";
 import { getFinessByNumFiness } from "./finess-db.js";
 import { getRppsDansEtablissement } from "./rpps-db.js";
 import type { RppsResult } from "./rpps-db.js";
-import { type DinumLookupError, resolveSiretsForFiness } from "./siret-resolver.js";
+import {
+  type DinumLookupError,
+  type DisambiguationStatus,
+  type FallbackReason,
+  type ResolutionMethod,
+  resolveSiretsForFiness,
+} from "./siret-resolver.js";
 import { SOURCE_LABELS } from "./sources.js";
 
 export interface InspectSiteInput {
@@ -85,6 +91,14 @@ export interface InspectSiteStatutSection {
   explication: string;
   /** Diagnostic SIREN-level si DINUM a partiellement échoué. Vide en succès complet. */
   dinum_errors: DinumLookupError[];
+  /** Traçabilité Resolver V2 (V0.13.0). Cf. `siret-resolver.ts` pour la sémantique. */
+  method: ResolutionMethod;
+  /** Pourquoi le fallback géo a été tenté/skippé. `null` si cas nominal RPPS. */
+  fallback_reason: FallbackReason;
+  /** NAF passés à DINUM /near_point côté fallback. Vide si pas de fallback. */
+  naf_filter_used: string[];
+  /** Statut désambiguïsation post-gate. `"ambiguous"` → caller doit cross-checker. */
+  disambiguation_status: DisambiguationStatus;
 }
 
 export type InspectSiteHistoriqueSection =
@@ -273,6 +287,10 @@ export async function inspectSite(
       candidates_count: verifierLookup.candidates.length,
       explication: verifierLookup.explication,
       dinum_errors: verifierLookup.dinum_errors,
+      method: verifierLookup.method,
+      fallback_reason: verifierLookup.fallback_reason,
+      naf_filter_used: verifierLookup.naf_filter_used,
+      disambiguation_status: verifierLookup.disambiguation_status,
     },
     professionnels: {
       count: rpps.count,
