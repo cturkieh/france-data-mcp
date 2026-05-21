@@ -33,8 +33,37 @@ import {
 import {
   type DinumLookupError,
   type SiretCandidate,
+  type SiretResolution,
   resolveSiretsForFiness,
 } from "./siret-resolver.js";
+
+/**
+ * Contexte partagé entre les 3 outils "vue 360 d'un site santé" (verifier,
+ * historique, reconcilier). Permet à `inspect_site` (qui les compose) de ne
+ * charger qu'UNE SEULE FOIS le FINESS + la cascade RPPS→DINUM (resolveSiretsForFiness)
+ * au lieu de les exécuter en doublon pour chaque sous-appel.
+ *
+ * **Avant V0.13** : `inspect_site` parallélisait 3 sous-appels (Promise.all)
+ * mais chacun re-chargeait FINESS et re-résolvait la cascade — `verifier` et
+ * `historique` exécutaient donc 2× le pivot DINUM. Parallélisé donc 0 surcoût
+ * latence MUR, mais 2× la charge rate-limit DINUM (cf. JSDoc inspect-site V0.10.0).
+ *
+ * **Depuis V0.13** : `inspect_site` charge le contexte une fois et passe
+ * `{ finess, resolution }` aux sous-appels via le param optionnel `preResolved`.
+ * Économie : 1 RPC FINESS + ~600 ms d'appels DINUM par invocation
+ * `inspect_site` (vs V0.10).
+ *
+ * Pour les callers MCP isolés (entreprises_in_radius, etc.), le contexte
+ * reste optionnel : ils continuent à appeler `verifierSiteActif(numFiness)` /
+ * `historiqueEtablissement(numFiness)` sans paramètre additionnel — comportement
+ * V0.10 strict préservé.
+ */
+export interface SiteContext {
+  /** FINESS DREES résolu (résultat de `getFinessByNumFiness`). */
+  finess: Extract<Awaited<ReturnType<typeof getFinessByNumFiness>>, { found: true }>;
+  /** Cascade RPPS → DINUM résolue (résultat de `resolveSiretsForFiness`). */
+  resolution: SiretResolution;
+}
 
 /**
  * Verdict pour `verifier_site_actif`. **V0.7.0 breaking** : on distingue
@@ -147,9 +176,13 @@ export interface VerifierSiteActifResult {
  */
 export async function verifierSiteActif(
   numFiness: string,
+  context?: SiteContext,
 ): Promise<LookupResult<VerifierSiteActifResult>> {
   const trimmed = assertValidNumFiness(numFiness);
-  const finess = await getFinessByNumFiness(trimmed);
+  // V0.13 factorisation : si le caller (inspect_site) fournit un contexte
+  // pré-chargé, on évite 1 RPC FINESS + 1 cascade DINUM redondante. Sinon
+  // comportement V0.10 strict (chargement local).
+  const finess = context?.finess ?? (await getFinessByNumFiness(trimmed));
   if (!finess.found) {
     return lookupNotFound(
       trimmed,
@@ -157,7 +190,7 @@ export async function verifierSiteActif(
     );
   }
 
-  const resolution = await resolveSiretsForFiness(trimmed, finess);
+  const resolution = context?.resolution ?? (await resolveSiretsForFiness(trimmed, finess));
 
   const verdictSite: VerdictSite = verdictFromActif(resolution.best_match?.actif ?? null);
   // SIREN du best_match (SIRET physique) prioritaire ; sinon le premier
@@ -480,9 +513,12 @@ export interface HistoriqueEtablissementResult {
 
 export async function historiqueEtablissement(
   numFiness: string,
+  context?: SiteContext,
 ): Promise<LookupResult<HistoriqueEtablissementResult>> {
   const trimmed = assertValidNumFiness(numFiness);
-  const finess = await getFinessByNumFiness(trimmed);
+  // V0.13 factorisation : context optionnel pour skip les chargements
+  // redondants quand appelé par `inspect_site` (cf. JSDoc `SiteContext`).
+  const finess = context?.finess ?? (await getFinessByNumFiness(trimmed));
   if (!finess.found) {
     return lookupNotFound(
       trimmed,
@@ -490,7 +526,7 @@ export async function historiqueEtablissement(
     );
   }
 
-  const resolution = await resolveSiretsForFiness(trimmed, finess);
+  const resolution = context?.resolution ?? (await resolveSiretsForFiness(trimmed, finess));
   if (resolution.candidates.length === 0) {
     return lookupNotFound(
       trimmed,
