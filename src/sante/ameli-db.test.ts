@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mockRpc = vi.fn();
 vi.mock("../storage/supabase.js", () => ({
   getAnonClient: () => ({ rpc: mockRpc }),
+  // `getAmeliInRadius` passe au client untyped depuis la migration
+  // 20260522T003000 (param RPC `p_precise_only` absent des types générés).
+  getUntypedAnonClient: () => ({ rpc: mockRpc }),
 }));
 
 import { _resetRefineAmeliWarnings } from "../core/query-metadata.js";
@@ -199,6 +202,76 @@ describe("getAmeliInRadius", () => {
       "ameli_in_radius",
       expect.objectContaining({ p_specialite_codes: [], p_type_ps_codes: [] }),
     );
+  });
+
+  it("propage preciseOnly=true au paramètre RPC p_precise_only", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    await getAmeliInRadius({
+      center: { lat: 48.85, lon: 2.35 },
+      radiusKm: 5,
+      preciseOnly: true,
+    });
+    expect(mockRpc).toHaveBeenCalledWith(
+      "ameli_in_radius",
+      expect.objectContaining({ p_precise_only: true }),
+    );
+  });
+
+  // `p_precise_only` est OMIS de l'appel quand le caller ne demande pas le
+  // mode précis → l'appel reste à 6 args, résolvable contre la RPC du schéma
+  // de base (6 params) comme contre la RPC prod (7e param via DEFAULT FALSE).
+  // C'est ce qui garde `ameli-db.integration.test.ts` vert (cf. getAmeliInRadius).
+  it("preciseOnly absent → p_precise_only OMIS de l'appel RPC (compat schéma de base 6-param)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    await getAmeliInRadius({ center: { lat: 48.85, lon: 2.35 }, radiusKm: 5 });
+    const rpcArgs = mockRpc.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(rpcArgs).not.toHaveProperty("p_precise_only");
+  });
+
+  it("preciseOnly=false explicite → p_precise_only OMIS (false = comportement par défaut, inutile à envoyer)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    await getAmeliInRadius({ center: { lat: 48.85, lon: 2.35 }, radiusKm: 5, preciseOnly: false });
+    const rpcArgs = mockRpc.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(rpcArgs).not.toHaveProperty("p_precise_only");
+  });
+
+  // Jumeau RPPS — preciseOnly=true + 0 résultat = ambiguïté zone sans PS
+  // adresse-précise vs rayon trop court. Note metadata explicite pour que le
+  // LLM puisse suggérer le mode hybride (qui inclurait les PS centroïde).
+  it("preciseOnly=true + 0 résultats → note metadata 'precise_only=true et 0 résultat'", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    const out = await getAmeliInRadius({
+      center: { lat: 48.85, lon: 2.35 },
+      radiusKm: 5,
+      preciseOnly: true,
+    });
+    expect(out.count).toBe(0);
+    const notesJoined = out.query_metadata?.notes.join(" ") ?? "";
+    expect(notesJoined).toMatch(/precise_only=true.*0 résultat/);
+    expect(notesJoined).toMatch(/precise_only=false|mode hybride/);
+  });
+
+  it("preciseOnly absent + 0 résultats → PAS de note 'precise_only' (le caller n'a rien exclu)", async () => {
+    mockRpc.mockResolvedValueOnce({ data: [], error: null });
+    const out = await getAmeliInRadius({ center: { lat: 48.85, lon: 2.35 }, radiusKm: 5 });
+    expect(out.count).toBe(0);
+    const notesJoined = out.query_metadata?.notes.join(" ") ?? "";
+    expect(notesJoined).not.toMatch(/precise_only=true.*0 résultat/);
+  });
+
+  // Jumeau getRppsInRadius — caller npm hors MCP (sans coerceBoolean filet)
+  // passant preciseOnly:"yes" doit throw RangeError au boundary lib, pas
+  // retomber silencieusement en hybride.
+  it("preciseOnly typé non-boolean → RangeError au boundary lib (hors MCP)", async () => {
+    await expect(
+      getAmeliInRadius({
+        center: { lat: 48.85, lon: 2.35 },
+        radiusKm: 5,
+        // biome-ignore lint/suspicious/noExplicitAny: simule un caller npm sans filet TS
+        preciseOnly: "yes" as any,
+      }),
+    ).rejects.toThrow(RangeError);
+    expect(mockRpc).not.toHaveBeenCalled();
   });
 });
 

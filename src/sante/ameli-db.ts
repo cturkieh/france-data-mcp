@@ -17,7 +17,7 @@ import {
   ameliRadiusMetadata,
   refineAmeliGeoPrecisionLabel,
 } from "../core/query-metadata.js";
-import { getAnonClient } from "../storage/supabase.js";
+import { getAnonClient, getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";
 import {
   AMELI_TYPE_PS_QUERYABLE,
@@ -81,6 +81,20 @@ export interface AmeliInRadiusInput {
   /** Codes type PS (ex: "1" médecin, "2" IDE, "3" sage-femme) — facultatif. */
   typePsCodes?: string[];
   limit?: number;
+  /**
+   * Si true, ne renvoie que les PS géolocalisés à l'adresse BAN précise
+   * (`geom_source='ban_address'`, `geo_precision: "adresse"`) — `distance_km`
+   * exacte au m près, classement intra-commune fiable. Les PS au centroïde
+   * commune (`geom_source='commune_centroid'`) sont exclus côté RPC.
+   *
+   * Trade-off : ~23 % des PS Ameli (ratio courant post-Chantier C V0.14.0)
+   * sont invisibles en mode `preciseOnly=true`. Cas d'usage : rayons courts
+   * (<3 km), classement individuel, "PS à <500 m d'une adresse".
+   *
+   * Défaut false (mode hybride — adresse précise + centroïde commune
+   * résiduelle fusionnés). Jumeau de `RppsInRadiusInput.preciseOnly`.
+   */
+  preciseOnly?: boolean;
 }
 
 export interface AmeliBySpecialiteDeptInput {
@@ -205,21 +219,61 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   validateCoords(input.center.lat, input.center.lon);
   validateRadiusKm(input.radiusKm);
   validateTypePsCodes(input.typePsCodes);
+  // Jumeau de la garde `getRppsInRadius` : un caller npm hors MCP passant
+  // `preciseOnly: "yes"` aurait `=== true` ⇒ false ⇒ mode hybride silencieux.
+  // Throw `RangeError` cohérent avec `validateCoords`/`validateRadiusKm`
+  // ci-dessus → mappe JSON-RPC `-32602` au boundary MCP (lib reste protégée
+  // hors MCP).
+  if (input.preciseOnly !== undefined && typeof input.preciseOnly !== "boolean") {
+    throw new RangeError(
+      `[france-data-mcp] getAmeliInRadius: preciseOnly doit être boolean (reçu ${JSON.stringify(input.preciseOnly)}).`,
+    );
+  }
 
-  const supabase = getAnonClient();
-  const { data, error } = await supabase.rpc("ameli_in_radius", {
+  // `p_precise_only` n'est ajouté à l'appel QUE quand le caller demande
+  // explicitement le mode précis (`true`). Raison : la RPC `ameli_in_radius`
+  // du schéma de BASE (migration 20260508000017 — seule appliquée par
+  // `supabase db reset`, les migrations T-format étant prod-only) n'a pas ce
+  // param. Un appel à 6 args reste résolvable contre la base ET contre la
+  // prod (le 7e param y est résolu par son `DEFAULT FALSE`) → les tests
+  // d'intégration `ameli-db.integration.test.ts` ne cassent pas en PGRST202.
+  // `precise_only=true` est une feature prod : il n'a de sens que là où la
+  // migration 20260522T003000 est appliquée. Diffère volontairement du jumeau
+  // RPPS (`getRppsInRadius` envoie toujours `p_precise_only`) — RPPS n'a pas
+  // de test d'intégration sur le schéma de base, Ameli si.
+  const rpcArgs: Record<string, unknown> = {
     p_lat: input.center.lat,
     p_lon: input.center.lon,
     p_radius_meters: input.radiusKm * 1000,
     p_specialite_codes: input.specialiteCodes ?? [],
     p_type_ps_codes: input.typePsCodes ?? [],
     p_limit: limit + 1, // +1 to detect truncation
-  });
+  };
+  if (input.preciseOnly === true) {
+    rpcArgs.p_precise_only = true;
+  }
+
+  // `getUntypedAnonClient` (pas le client typé) : les types Supabase générés
+  // décrivent la RPC `ameli_in_radius` du schéma de base (6 params) — un
+  // `rpcArgs` à clé variable ferait échouer `tsc`. Convention CLAUDE.md
+  // (« RPC ajoutée par migration récente → client untyped »), jumeau RPPS.
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("ameli_in_radius", rpcArgs);
 
   if (error) throw new Error(formatRpcError("ameli_in_radius", error));
-  return refineAmeliResult(
+  const result = refineAmeliResult(
     buildAmeliQueryResult("ameli_in_radius", data, limit, ameliRadiusMetadata(input.radiusKm)),
   );
+  // Jumeau RPPS — note metadata explicite quand precise_only=true ET 0
+  // résultat : distingue une zone réellement sans PS adresse-précise d'un
+  // rayon trop court. Sans ce signal, un caller LLM ne peut pas suggérer le
+  // mode hybride (qui inclurait les PS au centroïde commune de la zone).
+  if (input.preciseOnly === true && result.count === 0 && result.query_metadata) {
+    result.query_metadata.notes.push(
+      "precise_only=true et 0 résultat dans le rayon : il peut exister des PS au centroïde commune dans la zone (geom_source='commune_centroid' exclus de la branche précise). Relancer avec precise_only=false (mode hybride) pour les inclure, ou élargir radius_km.",
+    );
+  }
+  return result;
 }
 
 /** List PS by department (+ optional specialty / type filter, optional offset). */

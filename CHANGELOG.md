@@ -30,11 +30,31 @@ précise** (~77 % du référentiel).
   de `etablissement_finess`, et le maintien de l'avertissement intra-commune
   pour la branche centroïde résiduelle.
 
-`precise_only` côté Ameli reste NON câblé : le GiST PARTIEL
-`annuaire_ameli_geog_precise_gist` existe depuis V0.14.0, mais la RPC
-`ameli_in_radius` n'expose pas encore `p_precise_only` (câblage à faire dans
-une itération dédiée — migration RPC + branche CTE `precise` + schéma tool +
-DB layer + tests, cf. jumeau RPPS `20260520T100000_rpps_in_radius_precise_only.sql`).
+### Added — `precise_only` sur `professionnels_in_radius` (Ameli)
+
+`professionnels_in_radius` gagne le paramètre `precise_only` (boolean, défaut
+false) — jumeau du `precise_only` de `professionnels_rpps_in_radius` (V0.12.0).
+À `true` : exclut les PS au centroïde commune, ne renvoie que les ~77 %
+géocodés à l'adresse BAN (`distance_km` exacte au m près) — pour les rayons
+courts (<3 km) et le classement intra-commune.
+
+- Migration `20260522T003000_ameli_in_radius_precise_only.sql` : la RPC
+  `ameli_in_radius` gagne `p_precise_only BOOLEAN DEFAULT FALSE` + la clause
+  `AND (NOT p_precise_only OR geom_source = 'ban_address')`. `false` (défaut)
+  = comportement V0.14.0 inchangé byte-pour-byte. Requête plate conservée
+  (pas le split precise/centroid CTE de RPPS — `annuaire_ameli` est à une
+  échelle où les clusters centroïde résiduels ne déclenchent pas le piège
+  57014 ; raisonnement + GATE EXPLAIN pré-application détaillés dans l'en-tête
+  de la migration et `docs/plans/ameli-precise-only.md`).
+- `getAmeliInRadius` (lib) : champ `preciseOnly?: boolean`, garde `RangeError`
+  sur input non-boolean, note metadata explicite quand `precise_only=true` +
+  0 résultat (suggère le mode hybride). Passe au client Supabase untyped (le
+  param RPC est absent des types générés tant que la migration n'est pas
+  propagée).
+- `professionnels_in_radius` (tool) : schéma `precise_only:boolean`, handler
+  `coerceBoolean`, description enrichie.
+- Tests : propagation RPC, défaut explicite, note 0-résultat, garde lib
+  (`ameli-db.test.ts`) + garde-fou schéma/boundary (`api/tools.test.ts`).
 
 ## [0.14.0] — 2026-05-21 (Chantier C : géocodage Ameli — centroïde commune → adresse précise)
 

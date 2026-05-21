@@ -1327,6 +1327,31 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
     // centroïde résiduelle (distance_km non discriminante pour les PS d'une
     // même commune) — pas pour la branche `adresse` précise.
     expect(tool?.description).toMatch(/m[êe]me commune|intra-commune/i);
+    // Le param `precise_only` doit être NARRÉ (pas juste nommé) : un LLM doit
+    // savoir QUAND l'activer (à true → exclut le centroïde, rayons courts).
+    expect(tool?.description).toMatch(/precise_only/);
+    expect(tool?.description).toMatch(/precise_only.*(true|exclut|recommand)/i);
+  });
+
+  it("professionnels_in_radius : inputSchema expose precise_only:boolean (default false)", () => {
+    const tool = findTool("professionnels_in_radius");
+    const props = tool?.inputSchema.properties as
+      | Record<string, { type: string; description: string; default?: boolean }>
+      | undefined;
+    expect(props?.precise_only?.type).toBe("boolean");
+    expect(props?.precise_only?.default).toBe(false);
+    // La description du param décrit l'EFFET sans re-documenter tout le tool
+    // (anti-drift inter-edits — jumeau du garde-fou RPPS precise_only).
+    const desc = props?.precise_only?.description ?? "";
+    expect(desc, "doit nommer l'action d'exclusion").toMatch(/exclut|exclu/i);
+    expect(desc, "doit nommer ce qui est exclu (centroïde commune, ï accentué OK)").toMatch(
+      /centro[iï]de\s+commune/i,
+    );
+    expect(desc, "doit nommer le gain (distance_km exacte)").toMatch(/distance_km/);
+    expect(desc, "doit expliciter le défaut false").toMatch(/d[ée]faut\s+false/i);
+    expect(desc.length, "anti-rebond drift : param ne doit pas re-documenter le tool").toBeLessThan(
+      300,
+    );
   });
 
   it("professionnels_rpps_in_radius (V0.12.0) : description documente les 3 valeurs geo_precision + narration precise_only", () => {
@@ -1475,6 +1500,37 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
       caughtError = e;
     }
     // Si erreur, ce n'est PAS une RangeError sur precise_only.
+    if (caughtError instanceof RangeError) {
+      expect(caughtError.message).not.toMatch(/precise_only/);
+    }
+  });
+
+  // Jumeau Ameli des 2 tests boundary RPPS ci-dessus — `professionnels_in_radius`
+  // (Ameli) prend `lon`/`lat` à plat (≠ `center` imbriqué côté RPPS).
+  it("professionnels_in_radius : precise_only non reconnu → RangeError au boundary handler (silent failure fermé)", async () => {
+    const tool = findTool("professionnels_in_radius");
+    await expect(
+      tool?.handler({
+        lon: 2.35,
+        lat: 48.85,
+        radius_km: 5,
+        precise_only: "yes",
+      }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it("professionnels_in_radius : precise_only stringifié reconnu (`'true'`/`'1'`) → accepté (compat JSON-RPC)", async () => {
+    // Cohérent avec coerceBoolean : "true"/"1" sont des inputs JSON-RPC
+    // stringifiés courants. On vérifie juste que le boundary handler n'avale
+    // pas — un échec downstream (env DB absent) est acceptable et prouve que
+    // le boundary a passé sans throw RangeError sur precise_only.
+    const tool = findTool("professionnels_in_radius");
+    let caughtError: unknown;
+    try {
+      await tool?.handler({ lon: 2.35, lat: 48.85, radius_km: 5, precise_only: "true" });
+    } catch (e) {
+      caughtError = e;
+    }
     if (caughtError instanceof RangeError) {
       expect(caughtError.message).not.toMatch(/precise_only/);
     }

@@ -1449,7 +1449,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_in_radius",
-    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo HYBRIDE depuis le géocodage BAN (Chantier C) : ~77 % des PS sont géolocalisés à l'adresse précise (rue/bâtiment, \`distance_km\` exacte au m près), ~23 % restent au centroïde commune (~3 km, repli pour adresses non géocodables — DROM, Monaco, CEDEX, lieux-dits). Lire \`geo_precision\` PAR résultat — ne pas présumer une précision uniforme. ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). Chaque PS géolocalisé porte \`geo_precision\` ∈ {\`"adresse"\`, \`"centroide_commune"\`} : \`"adresse"\` = coords BAN précises, \`distance_km\` exacte, classement individuel fiable ; \`"centroide_commune"\` = ~3 km, \`distance_km\` IDENTIQUE pour tous les PS d'une même commune (non discriminante intra-commune — filtre de zone uniquement, pas de classement/choix d'un PS individuel). ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo HYBRIDE depuis le géocodage BAN (Chantier C) : ~77 % des PS sont géolocalisés à l'adresse précise (rue/bâtiment, \`distance_km\` exacte au m près), ~23 % restent au centroïde commune (~3 km, repli pour adresses non géocodables — DROM, Monaco, CEDEX, lieux-dits). Lire \`geo_precision\` PAR résultat — ne pas présumer une précision uniforme. ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). Chaque PS géolocalisé porte \`geo_precision\` ∈ {\`"adresse"\`, \`"centroide_commune"\`} : \`"adresse"\` = coords BAN précises, \`distance_km\` exacte, classement individuel fiable ; \`"centroide_commune"\` = ~3 km, \`distance_km\` IDENTIQUE pour tous les PS d'une même commune (non discriminante intra-commune — filtre de zone uniquement, pas de classement/choix d'un PS individuel). **Param \`precise_only\`** (défaut false) : à true, exclut les PS au centroïde commune et ne renvoie que les ~77 % géocodés à l'adresse BAN (\`distance_km\` exacte) — recommandé pour les rayons courts (<3 km) et le classement intra-commune. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1487,6 +1487,12 @@ export const TOOLS: McpTool[] = [
             "Regrouper les entrées par praticien (nom + prénom + code spécialité) et lister chaque adresse d'exercice dans `sites[]`. Défaut false (comportement V0.4 historique : un PS multi-sites = N entrées).",
           default: false,
         },
+        precise_only: {
+          type: "boolean",
+          description:
+            "Si true, exclut les PS au centroïde commune et ne renvoie que ceux géocodés à l'adresse BAN, à `distance_km` exacte (cf. description du tool pour la sémantique complète). Défaut false.",
+          default: false,
+        },
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
       },
       required: ["lon", "lat"],
@@ -1508,6 +1514,11 @@ export const TOOLS: McpTool[] = [
       if (specialiteCodes) input.specialiteCodes = specialiteCodes;
       if (typePsCodes) input.typePsCodes = typePsCodes;
       if (limit !== undefined) input.limit = limit;
+      // `coerceBoolean` tolère les `"true"`/`1` stringifiés (JSON-RPC) et throw
+      // `RangeError` actionnable sur les inputs non reconnus (`"yes"`, `{}`).
+      // Pattern `!== undefined` identique au handler `professionnels_rpps_in_radius`.
+      const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
+      if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
       const result = await getAmeliInRadius(input);
       return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
         "ameli_ps",
