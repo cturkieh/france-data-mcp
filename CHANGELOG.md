@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Chantier C : géocodage Ameli (centroïde commune → adresse précise)
+## [0.14.0] — 2026-05-21 (Chantier C : géocodage Ameli — centroïde commune → adresse précise)
 
 ### Added — `geom_source` Ameli + `ban_join` cron Ameli
 
