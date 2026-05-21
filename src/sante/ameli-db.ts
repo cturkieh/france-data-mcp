@@ -216,21 +216,9 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   });
 
   if (error) throw new Error(formatRpcError("ameli_in_radius", error));
-  const result = buildAmeliQueryResult(
-    "ameli_in_radius",
-    data,
-    limit,
-    ameliRadiusMetadata(input.radiusKm),
+  return refineAmeliResult(
+    buildAmeliQueryResult("ameli_in_radius", data, limit, ameliRadiusMetadata(input.radiusKm)),
   );
-  // Chantier C 2026-05-21 — raffine l'étiquette globale `geo_precision` selon
-  // la distribution effective des `geo_precision` par-PS (factory pure, voir
-  // jumeau RPPS V0.13 Fix #4). Sans ce raffinage, un caller LLM lit toujours
-  // `centroide_commune_ameli_mixte` même quand 100 % des résultats sont en
-  // `adresse` (sous-estimation pessimiste de la qualité ~77 % post-géocodage).
-  if (result.query_metadata) {
-    result.query_metadata = refineAmeliGeoPrecisionLabel(result.results, result.query_metadata);
-  }
-  return result;
 }
 
 /** List PS by department (+ optional specialty / type filter, optional offset). */
@@ -252,23 +240,34 @@ export async function getAmeliBySpecialiteDept(
   });
 
   if (error) throw new Error(formatRpcError("ameli_by_specialite_dept", error));
-  const result = buildAmeliQueryResult(
-    "ameli_by_specialite_dept",
-    data,
-    limit,
-    ameliDeptMetadata(),
+  return refineAmeliResult(
+    buildAmeliQueryResult("ameli_by_specialite_dept", data, limit, ameliDeptMetadata()),
   );
-  // Chantier C : même raffinage que `getAmeliInRadius` — un listing
-  // départemental peut être 100 % précis ou 100 % centroïde selon le
-  // département (Paris ≠ Mayotte) ; l'étiquette globale doit refléter
-  // la distribution effective post-RPC.
+}
+
+// --- internals -------------------------------------------------------------
+
+/**
+ * Chantier C 2026-05-21 — applique le raffinage `geo_precision` post-RPC
+ * (factory pure, cf. jumeau RPPS V0.13 Fix #4). Centralise les 2 sites Ameli
+ * (radius + dept) pour qu'une dérive du contrat refine ne dérive QUE 1 fois
+ * (simplify H-1 reuse).
+ *
+ * Sans ce raffinage, un caller LLM lit toujours `centroide_commune_ameli_mixte`
+ * même quand 100 % des résultats sont en `adresse` (sous-estimation pessimiste
+ * de la qualité ~77 % post-géocodage BAN).
+ *
+ * Le `if (result.query_metadata)` est de la défense morte rassurante :
+ * `buildListQueryResult` peuple TOUJOURS ce champ (cf. `db-helpers.ts`), le
+ * `?` du type `AmeliQueryResult.query_metadata` n'est là que pour alléger les
+ * mocks de tests (commentaire load-bearing du type, ne pas retirer).
+ */
+function refineAmeliResult(result: AmeliQueryResult): AmeliQueryResult {
   if (result.query_metadata) {
     result.query_metadata = refineAmeliGeoPrecisionLabel(result.results, result.query_metadata);
   }
   return result;
 }
-
-// --- internals -------------------------------------------------------------
 
 function buildAmeliQueryResult(
   rpc: string,

@@ -5,6 +5,7 @@ vi.mock("../storage/supabase.js", () => ({
   getAnonClient: () => ({ rpc: mockRpc }),
 }));
 
+import { _resetRefineAmeliWarnings } from "../core/query-metadata.js";
 import {
   _resetAmeliGeoPrecisionMissingWarning,
   getAmeliBySpecialiteDept,
@@ -39,6 +40,11 @@ const sampleRow = {
 beforeEach(() => {
   mockRpc.mockReset();
   _resetAmeliGeoPrecisionMissingWarning();
+  // Reset des flags 1-shot du module query-metadata (fix /review Passe 1
+  // silent-failure-hunter H-2 : sans ça, un test précédent qui brûle le flag
+  // empêche les tests suivants de vérifier qu'un warn est émis → flakiness
+  // selon l'ordre d'exécution).
+  _resetRefineAmeliWarnings();
 });
 afterEach(() => {
   vi.unstubAllGlobals();

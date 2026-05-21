@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CENTROIDE_COMMUNE_RESOLUTION_KM,
+  _resetRefineAmeliWarnings,
   ameliDeptMetadata,
   ameliRadiusMetadata,
   cdsRadiusMetadata,
@@ -80,6 +81,12 @@ describe("warning radius sub-commune (A2/A4)", () => {
 });
 
 describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0 (factory pure)", () => {
+  // simplify M-4 quality : restore tous les spies en cas d'assertion qui throw
+  // (sinon `vi.spyOn(console, "warn")` reste actif et pollue les tests suivants).
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("100% rows précis (adresse + etablissement_finess) → étiquette 'precis_uniquement'", () => {
     const meta = rppsRadiusMetadata(5);
     const refined = refineRppsGeoPrecisionLabel(
@@ -124,29 +131,72 @@ describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0 (factory pure)", () => 
     expect(refined).toBe(meta);
   });
 
-  it("row sans geo_precision typé → retourne baseMeta inchangé (garde-fou anti-régression RPC)", () => {
-    // Si un row n'a pas de `geo_precision` (régression RPC, ancien dump, mock test),
-    // on garde l'étiquette mixte par sécurité — affirmer "100% précis" sur un
-    // échantillon partiellement typé serait trompeur.
+  it("row coords=null légitime (geo_precision undefined) → SKIP silencieux, PAS de warn drift (fix P1 sfh H-1)", () => {
+    // Bug pré-existant Fix #4 V0.13.0 corrigé par /review Passe 1 du Chantier C :
+    // `toRppsResult` OMET `geo_precision` quand `coords=null` (contrat documenté).
+    // Le helper DOIT skipper ces rows sans warner, sinon faux warn « drift »
+    // mensonger qui brûle le canal d'audit prod pour les VRAIS drifts.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const meta = rppsRadiusMetadata(5);
     const refined = refineRppsGeoPrecisionLabel(
-      [{ geo_precision: "adresse" }, { geo_precision: undefined }],
+      [
+        { geo_precision: "adresse" },
+        { geo_precision: undefined }, // row sans coords, LÉGITIME (skip silencieux)
+        { geo_precision: "adresse" },
+      ],
+      meta,
+    );
+    // 2 rows comptées en adresse, 1 skip → 100% précis sur countedRows → refine.
+    expect(refined.geo_precision).toBe("centroide_commune_ans_precis_uniquement");
+    const driftWarns = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("refineRppsGeoPrecisionLabel"),
+    );
+    expect(driftWarns.length, "PAS de warn pour `undefined` légitime").toBe(0);
+  });
+
+  it("toutes rows sans coords (undefined) → retourne baseMeta (countedRows=0)", () => {
+    const meta = rppsRadiusMetadata(5);
+    const refined = refineRppsGeoPrecisionLabel(
+      [{ geo_precision: undefined }, { geo_precision: undefined }],
       meta,
     );
     expect(refined).toBe(meta);
-    expect(refined.geo_precision).toBe("centroide_commune_ans_mixte");
   });
 
-  it("row sans geo_precision → console.warn LOUD émis (Fix P1 silent-failure-hunter)", () => {
-    // Garde-fou /review Passe 2 silent-failure-hunter : sans ce test, un dev
-    // qui retire le `console.warn` (perçu comme bruit) reste vert et le signal
-    // d'audit prod (drift RPC suspectée) disparaît silencieusement.
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("row geo_precision=null explicite → SKIP comme undefined (fix P2 sfh H-1 type | null)", () => {
+    // Le type `GeoPrecisionRow.geo_precision?: PerResultGeoPrecision | null`
+    // autorise null explicite. Le helper DOIT traiter null à l'identique
+    // d'undefined (skip silencieux) — sinon un futur call-site qui émet null
+    // (ex: DB raw row) déclencherait un faux warn drift mensonger.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const meta = rppsRadiusMetadata(5);
-    refineRppsGeoPrecisionLabel([{ geo_precision: "adresse" }, { geo_precision: undefined }], meta);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("drift RPC suspectée"));
+    const refined = refineRppsGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: null }, { geo_precision: "adresse" }],
+      meta,
+    );
+    expect(refined.geo_precision).toBe("centroide_commune_ans_precis_uniquement");
+    const driftWarns = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("refineRppsGeoPrecisionLabel"),
+    );
+    expect(driftWarns.length, "PAS de warn pour `null` légitime").toBe(0);
+  });
+
+  it("row geo_precision valeur non-canonique (e.g. 'iris') → warn LOUD + baseMeta préservé", () => {
+    // Distinct du cas légitime `undefined` (skippé) : une valeur typée non-canonique
+    // est un VRAI drift contract RPC, on warne loud pour audit prod.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const meta = rppsRadiusMetadata(5);
+    const refined = refineRppsGeoPrecisionLabel(
+      [
+        { geo_precision: "adresse" },
+        // biome-ignore lint/suspicious/noExplicitAny: simulation drift contract typed
+        { geo_precision: "iris" as any },
+      ],
+      meta,
+    );
+    expect(refined).toBe(meta);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("valeur non-canonique"));
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[france-data-mcp]"));
-    warnSpy.mockRestore();
   });
 
   it("radius<3 + 100% rows centroïde → note 'La branche précise' filtrée (Fix P1 anti-mensonge)", () => {
@@ -230,6 +280,13 @@ describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0 (factory pure)", () => 
 });
 
 describe("refineAmeliGeoPrecisionLabel — Chantier C 2026-05-21 (factory pure, jumeau RPPS)", () => {
+  // simplify M-4 quality + reset des flags 1-shot inter-tests (simplify H-2).
+  // Sinon le 1er test qui warne le flag à true bloque les warns des suivants.
+  afterEach(() => {
+    vi.restoreAllMocks();
+    _resetRefineAmeliWarnings();
+  });
+
   it("100% rows adresse → étiquette 'centroide_commune_ameli_precis_uniquement'", () => {
     const meta = ameliRadiusMetadata(5);
     const refined = refineAmeliGeoPrecisionLabel(
@@ -265,19 +322,97 @@ describe("refineAmeliGeoPrecisionLabel — Chantier C 2026-05-21 (factory pure, 
     expect(refined).toBe(meta);
   });
 
-  it("row sans geo_precision typé → warn + étiquette mixte préservée (drift RPC suspectée)", () => {
+  it("row coords=null légitime (geo_precision undefined) → SKIP silencieux, PAS de warn drift (fix P1 sfh H-1)", () => {
+    // Bug pré-existant côté Ameli après Fix #4 RPPS-clone : `toAmeliResult`
+    // OMET `geo_precision` quand `coords=null` (contrat documenté). Le helper
+    // DOIT skipper ces rows sans warner, sinon faux warn drift mensonger qui
+    // brûle le canal 1-shot pour les VRAIS drifts.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const meta = ameliRadiusMetadata(5);
     const refined = refineAmeliGeoPrecisionLabel(
-      [{ geo_precision: "adresse" }, { geo_precision: undefined }],
+      [
+        { geo_precision: "adresse" },
+        { geo_precision: undefined }, // row sans coords, LÉGITIME
+        { geo_precision: "centroide_commune" },
+      ],
+      meta,
+    );
+    // 1 précis + 1 centroïde sur countedRows=2 → mixte effectif préservé.
+    expect(refined).toBe(meta);
+    const driftWarns = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("refineAmeliGeoPrecisionLabel"),
+    );
+    expect(driftWarns.length, "PAS de warn pour `undefined` légitime").toBe(0);
+  });
+
+  it("toutes rows sans coords (undefined) → retourne baseMeta (countedRows=0)", () => {
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: undefined }, { geo_precision: undefined }],
       meta,
     );
     expect(refined).toBe(meta);
-    const matching = warnSpy.mock.calls.filter((args) =>
+  });
+
+  it("row geo_precision=null explicite → SKIP comme undefined (fix P2 sfh H-1 type | null)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: null }, { geo_precision: "adresse" }],
+      meta,
+    );
+    expect(refined.geo_precision).toBe("centroide_commune_ameli_precis_uniquement");
+    const driftWarns = warnSpy.mock.calls.filter((args) =>
       String(args[0]).includes("refineAmeliGeoPrecisionLabel"),
     );
-    expect(matching.length).toBeGreaterThanOrEqual(1);
-    warnSpy.mockRestore();
+    expect(driftWarns.length, "PAS de warn pour `null` légitime").toBe(0);
+  });
+
+  it("row geo_precision valeur non-canonique → warn 1-shot LOUD + baseMeta préservé", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [
+        { geo_precision: "adresse" },
+        // biome-ignore lint/suspicious/noExplicitAny: simulation drift contract typed
+        { geo_precision: "iris" as any },
+      ],
+      meta,
+    );
+    expect(refined).toBe(meta);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("valeur non-canonique"));
+  });
+
+  it("drift non-canonique répété → warn 1-shot module-level (pas de spam log, simplify H-2)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const meta = ameliRadiusMetadata(5);
+    // 5 appels successifs avec drift non-canonique → 1 seul warn doit sortir.
+    for (let i = 0; i < 5; i++) {
+      // biome-ignore lint/suspicious/noExplicitAny: simulation drift contract typed
+      refineAmeliGeoPrecisionLabel([{ geo_precision: "iris" as any }], meta);
+    }
+    const driftWarns = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("valeur non-canonique"),
+    );
+    expect(driftWarns.length).toBe(1);
+  });
+
+  it("row geo_precision='etablissement_finess' inattendu → warn 1-shot + compté précis (simplify H-1)", () => {
+    // Ameli n'a PAS de FINESS join — la RPC ne devrait JAMAIS émettre cette
+    // valeur. Si elle apparaît : drift contract, warn loud 1-shot pour audit,
+    // compté en précis par défense (cohérent avec RPPS).
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const meta = ameliRadiusMetadata(5);
+    const refined = refineAmeliGeoPrecisionLabel(
+      [{ geo_precision: "etablissement_finess" }, { geo_precision: "etablissement_finess" }],
+      meta,
+    );
+    // 100% "précis" (etablissement_finess compté précis) → precis_uniquement.
+    expect(refined.geo_precision).toBe("centroide_commune_ameli_precis_uniquement");
+    const finessWarns = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes('"etablissement_finess" inattendu côté Ameli'),
+    );
+    expect(finessWarns.length).toBe(1);
   });
 
   it("radius<3 + 100% centroïde → note 'branche précise' filtrée (parité fix RPPS sfh)", () => {

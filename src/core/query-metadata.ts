@@ -266,18 +266,34 @@ export const ameliDeptMetadata = (): QueryMetadata =>
   buildMetadata("centroide_commune_ameli_mixte", false);
 
 /**
- * Shape minimal qu'un row Ameli doit exposer pour être inspecté par
- * `refineAmeliGeoPrecisionLabel`. Jumeau de `RppsGeoPrecisionRow` — couplage
- * explicite avec `AmeliResult.geo_precision` (`sante/ameli-db.ts`) sans
- * dépendance circulaire core/ → sante/.
- *
- * NB : la `PerResultGeoPrecision` est partagée RPPS↔Ameli mais Ameli n'émet
- * que `adresse` et `centroide_commune` (pas de `etablissement_finess` côté
- * Ameli — pas de FINESS join). Le refine ignore donc la branche
- * `etablissement_finess` (jamais atteinte). Symétrie de signature avec RPPS
- * volontairement préservée pour faciliter une future factorisation.
+ * Shape minimal qu'un row doit exposer pour être inspecté par les helpers
+ * `refine{Rpps,Ameli}GeoPrecisionLabel`. Type unique partagé — les 2 sources
+ * exposent la MÊME `PerResultGeoPrecision` sur leurs résultats, donc une
+ * shape unique est sémantiquement correcte (simplify M-1 /simplify quality
+ * post-Chantier C). Co-localisé avec les helpers pour documenter le couplage
+ * explicite avec `RppsResult` / `AmeliResult` sans dépendance circulaire
+ * core/ → sante/.
  */
-export type AmeliGeoPrecisionRow = { geo_precision?: PerResultGeoPrecision | null };
+export type GeoPrecisionRow = { geo_precision?: PerResultGeoPrecision | null };
+
+/** @deprecated Utiliser `GeoPrecisionRow` (simplify M-1). Alias rétrocompat. */
+export type AmeliGeoPrecisionRow = GeoPrecisionRow;
+
+/**
+ * Flags 1-shot module-level pour les warns de `refineAmeliGeoPrecisionLabel`
+ * (simplify H-2 quality). Évitent le spam log quand un caller boucle sur
+ * 1000+ datasets driftés. Pattern aligné sur `_ameliGeoPrecisionMissingWarned`
+ * dans `sante/ameli-db.ts` + convention CLAUDE.md « Tests `_resetXForTesting()`
+ * pour tout module avec état partagé ».
+ */
+let _refineAmeliDriftWarned = false;
+let _refineAmeliFinessUnexpectedWarned = false;
+
+/** Test-only — reset les flags 1-shot des warns de raffinage Ameli. */
+export function _resetRefineAmeliWarnings(): void {
+  _refineAmeliDriftWarned = false;
+  _refineAmeliFinessUnexpectedWarned = false;
+}
 
 /**
  * Chantier C 2026-05-21 — raffine l'étiquette globale `geo_precision` Ameli
@@ -297,12 +313,12 @@ export type AmeliGeoPrecisionRow = { geo_precision?: PerResultGeoPrecision | nul
  * sinon `baseMeta` tel quel. Le caller DOIT réassigner.
  *
  * **Branche `etablissement_finess`** : ne survient PAS côté Ameli (pas de
- * FINESS join). Si la RPC en émet un (drift de contrat), on la compte comme
- * "précis" par sécurité (cohérent avec RPPS où c'est précis) — un warn loud
- * sortirait si on observait ce cas.
+ * FINESS join). Si la RPC en émet un (drift de contrat), comptée en précis par
+ * défense (symétrie RPPS) ET warn loud 1-shot pour audit prod (simplify H-1
+ * quality : aligne code → doc, discipline anti-silencieux).
  */
 export function refineAmeliGeoPrecisionLabel(
-  rows: ReadonlyArray<AmeliGeoPrecisionRow>,
+  rows: ReadonlyArray<GeoPrecisionRow>,
   baseMeta: QueryMetadata,
 ): QueryMetadata {
   // Ne raffine QUE si la metadata initiale est l'étiquette mixte canonique
@@ -312,38 +328,71 @@ export function refineAmeliGeoPrecisionLabel(
   if (rows.length === 0) return baseMeta;
   let precisCount = 0;
   let centroideCount = 0;
+  let countedRows = 0;
   for (const row of rows) {
     const p = row.geo_precision;
-    if (p === "adresse" || p === "etablissement_finess") precisCount++;
-    else if (p === "centroide_commune") centroideCount++;
-    else {
-      // Row sans geo_precision typé : drift RPC, mock test, ou row pré-Chantier-C.
-      // On garde l'étiquette mixte par sécurité + warn loud (parité RPPS
-      // refineRppsGeoPrecisionLabel : audit prod ne doit pas rater un drift).
-      console.warn(
-        `[france-data-mcp] refineAmeliGeoPrecisionLabel: row sans geo_precision typé (valeur=${JSON.stringify(p)}) — étiquette mixte préservée par sécurité, drift RPC suspectée si coords non-null.`,
-      );
+    if (p === undefined || p === null) {
+      // Row LÉGITIME sans coords : `toAmeliResult` OMET `geo_precision` quand
+      // `coords=null` (contrat documenté `AmeliResult.geo_precision?`). Ce
+      // n'est PAS un drift RPC — skip silencieux. Le type
+      // `GeoPrecisionRow.geo_precision?: ... | null` autorise les 2 formes
+      // (omission OU null explicite) ; on les traite à l'identique.
+      // Fix Passe 1+2 silent-failure-hunter H-1 — bug pré-existant côté RPPS
+      // Fix #4 V0.13.0, fixé en parallèle ici.
+      continue;
+    }
+    if (p === "adresse") {
+      precisCount++;
+      countedRows++;
+    } else if (p === "etablissement_finess") {
+      // Drift contract Ameli : la RPC ne devrait JAMAIS émettre cette valeur
+      // (pas de FINESS join côté Ameli). Compté en précis par symétrie RPPS,
+      // warn loud 1-shot pour audit prod (simplify H-1 quality).
+      precisCount++;
+      countedRows++;
+      if (!_refineAmeliFinessUnexpectedWarned) {
+        _refineAmeliFinessUnexpectedWarned = true;
+        console.warn(
+          `[france-data-mcp] refineAmeliGeoPrecisionLabel: row.geo_precision="etablissement_finess" inattendu côté Ameli (pas de FINESS join — drift contract RPC suspectée). Compté en précis par défense, audit la RPC ameli_in_radius / ameli_by_specialite_dept.`,
+        );
+      }
+    } else if (p === "centroide_commune") {
+      centroideCount++;
+      countedRows++;
+    } else {
+      // Valeur typée NON canonique (e.g. "iris", "foo") : VRAI drift contract.
+      // Warn loud 1-shot module-level (simplify H-2 quality : anti-spam si
+      // caller boucle). On garde l'étiquette mixte par sécurité.
+      if (!_refineAmeliDriftWarned) {
+        _refineAmeliDriftWarned = true;
+        console.warn(
+          `[france-data-mcp] refineAmeliGeoPrecisionLabel: row.geo_precision avec valeur non-canonique (=${JSON.stringify(p)}) — étiquette mixte préservée par sécurité, drift contract RPC suspectée.`,
+        );
+      }
       return baseMeta;
     }
   }
-  let refinedPrecision: GeoPrecision;
-  if (precisCount === rows.length) {
-    refinedPrecision = "centroide_commune_ameli_precis_uniquement";
-  } else if (centroideCount === rows.length) {
-    refinedPrecision = "centroide_commune_ameli_centroide_uniquement";
-  } else {
-    // Mixte effectif (precisCount > 0 ET centroideCount > 0) → étiquette
-    // initiale conservée (déjà correcte).
+  // Tous skippés (toutes les rows sans coords/sans geo_precision) → mixte initial.
+  if (countedRows === 0) return baseMeta;
+  if (precisCount !== countedRows && centroideCount !== countedRows) {
+    // Mixte effectif (precisCount > 0 ET centroideCount > 0 sur les rows
+    // countées). Early return AVANT l'allocation `notes.slice(1)`.
     return baseMeta;
   }
+  const refinedPrecision: GeoPrecision =
+    precisCount === countedRows
+      ? "centroide_commune_ameli_precis_uniquement"
+      : "centroide_commune_ameli_centroide_uniquement";
   // Drop la note short-radius nuancée Ameli quand on refine vers
   // `_centroide_uniquement` (la note affirme "branche précise ~77 % fiable"
   // alors qu'il n'y a AUCUN précis dans le résultat refine — mensonger).
-  // Symétrique du fix RPPS Passe 1 silent-failure-hunter.
-  let trailingNotes = baseMeta.notes.slice(1);
-  if (refinedPrecision === "centroide_commune_ameli_centroide_uniquement") {
-    trailingNotes = trailingNotes.filter((n) => !n.includes("La branche précise"));
-  }
+  // Symétrique du fix RPPS Passe 1 silent-failure-hunter. `const` ternaire
+  // pour immutabilité claire (simplify M-3 quality).
+  const initialTrailing = baseMeta.notes.slice(1);
+  const trailingNotes =
+    refinedPrecision === "centroide_commune_ameli_centroide_uniquement"
+      ? initialTrailing.filter((n) => !n.includes("La branche précise"))
+      : initialTrailing;
   return {
     ...baseMeta,
     geo_precision: refinedPrecision,
@@ -366,13 +415,8 @@ export const finessByCategorieMetadata = (): QueryMetadata =>
  * générique (la branche précise reste fiable) — on injecte une note nuancée
  * spécifique au mode hybride RPPS.
  */
-/**
- * Shape minimal qu'un row doit exposer pour être inspecté par
- * `refineRppsGeoPrecisionLabel`. Co-localisé avec le helper pour documenter
- * le couplage explicite avec `RppsResult` (cf. `sante/rpps-db.ts`) sans
- * créer de dépendance circulaire `core/` → `sante/`. Réutilisé par les tests.
- */
-export type RppsGeoPrecisionRow = { geo_precision?: PerResultGeoPrecision | null };
+/** @deprecated Utiliser `GeoPrecisionRow` (simplify M-1 Chantier C). Alias rétrocompat. */
+export type RppsGeoPrecisionRow = GeoPrecisionRow;
 
 /**
  * **V0.13.0 Fix #4** — raffine l'étiquette globale `geo_precision` selon la
@@ -418,33 +462,45 @@ export function refineRppsGeoPrecisionLabel(
   if (rows.length === 0) return baseMeta;
   let precisCount = 0;
   let centroideCount = 0;
+  let countedRows = 0;
   for (const row of rows) {
     const p = row.geo_precision;
-    if (p === "adresse" || p === "etablissement_finess") precisCount++;
-    else if (p === "centroide_commune") centroideCount++;
-    else {
-      // Row sans geo_precision typé (régression RPC, mock test, ancien dump
-      // pré-V0.12.0) → on garde l'étiquette mixte par sécurité. Un échantillon
-      // partiellement typé ne doit jamais faire affirmer "100 % précis".
-      //
-      // Fix P1 /review Passe 1 silent-failure-hunter : warne LOUD pour
-      // distinguer cette branche (drift RPC suspecte) du cas légitime "mixte
-      // effective" — sans ce signal, un audit prod ne peut pas détecter une
-      // régression sur le contrat de la RPC `rpps_in_radius`.
+    if (p === undefined || p === null) {
+      // Row LÉGITIME sans coords : `toRppsResult` OMET `geo_precision` quand
+      // `coords=null` (contrat documenté `RppsResult.geo_precision?`). Le
+      // type `GeoPrecisionRow.geo_precision?: ... | null` autorise les 2
+      // formes (omission OU null explicite) ; on les traite à l'identique.
+      // Fix Passe 1+2 silent-failure-hunter H-1 du chantier C suivi : bug
+      // pré-existant Fix #4 V0.13.0 qui confondait null-geom légitime avec
+      // drift contract → warn loud mensonger sur rows à coords NULL en prod.
+      continue;
+    }
+    if (p === "adresse" || p === "etablissement_finess") {
+      precisCount++;
+      countedRows++;
+    } else if (p === "centroide_commune") {
+      centroideCount++;
+      countedRows++;
+    } else {
+      // Valeur typée NON canonique (e.g. "iris", "foo") : VRAI drift contract
+      // → warn LOUD pour audit prod (ne PAS confondre avec le cas légitime
+      // null-geom skippé plus haut).
       console.warn(
-        `[france-data-mcp] refineRppsGeoPrecisionLabel: row sans geo_precision typé (valeur=${JSON.stringify(p)}) — étiquette mixte préservée par sécurité, drift RPC suspectée si coords non-null.`,
+        `[france-data-mcp] refineRppsGeoPrecisionLabel: row.geo_precision avec valeur non-canonique (=${JSON.stringify(p)}) — étiquette mixte préservée par sécurité, drift contract RPC suspectée.`,
       );
       return baseMeta;
     }
   }
+  // Tous skippés (toutes les rows sans coords) → mixte initial.
+  if (countedRows === 0) return baseMeta;
   let refinedPrecision: GeoPrecision;
-  if (precisCount === rows.length) {
+  if (precisCount === countedRows) {
     refinedPrecision = "centroide_commune_ans_precis_uniquement";
-  } else if (centroideCount === rows.length) {
+  } else if (centroideCount === countedRows) {
     refinedPrecision = "centroide_commune_ans_centroide_uniquement";
   } else {
-    // Mixte effectif (precisCount > 0 ET centroideCount > 0) → étiquette
-    // initiale conservée (déjà correcte).
+    // Mixte effectif (precisCount > 0 ET centroideCount > 0 sur countedRows)
+    // → étiquette initiale conservée (déjà correcte).
     return baseMeta;
   }
   // Fix P1 /review Passe 1 silent-failure-hunter : si on refine vers
