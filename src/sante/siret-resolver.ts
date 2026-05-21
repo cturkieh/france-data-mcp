@@ -131,8 +131,11 @@ export type FallbackReason =
  * - `not_applicable` : pas de fallback déclenché (method === `"rpps"`) OU
  *   fallback déclenché mais 0 candidat retenu après gate NAF. Le caller ne
  *   doit pas interpréter ce statut comme une qualité de match.
- * - `single_after_gate` : 1 seul candidat après gate d'activité — pas
- *   d'ambiguïté à arbitrer.
+ * - `single_after_gate` : 1 seul candidat après gate d'activité ET gate
+ *   adresse (`score_adresse >= BEST_MATCH_THRESHOLD`, V0.13.1) — pas
+ *   d'ambiguïté à arbitrer. **Note V0.13.1** : si le fallback ramène N
+ *   candidats dont N-1 sont hors-périmètre adresse (cas EYLAU prod), ils
+ *   sont écartés du best_match (mais restent dans `candidates[]` pour audit).
  * - `by_name_score` : > 1 candidat après gate, départage par disqualification
  *   d'au moins 1 candidat dont le score nom est trop faible (`< NAME_DISQUALIFY_THRESHOLD`).
  *   **V0.13.1 (Raffinement #2)** : permet d'écarter un candidat hors-sujet
@@ -275,6 +278,24 @@ export interface SiretResolution {
 
 /** Seuil au-dessus duquel un score d'adresse Dice est considéré comme un match physique du site. */
 const BEST_MATCH_THRESHOLD = 0.6;
+
+/**
+ * Un candidat n'est éligible best_match que si son `score_adresse` atteint
+ * `BEST_MATCH_THRESHOLD`. `null` (donnée manquante côté DINUM/INSEE) n'est
+ * PAS un candidat valide pour best_match — mais il reste exposé dans
+ * `candidates[]` pour audit caller.
+ *
+ * **V0.13.1** : factorise les 3 call-sites historiques de ce gate :
+ * (1) `resolveSiretsForFiness` ligne ~510 (chemin RPPS direct, `bestMatch`
+ * initial), (2) `disambiguateFallbackCandidates` étape 0 (gate adresse
+ * fallback prod-validé sur FINESS 920028487), et (3) implicitement
+ * `mergeOrInsertDinumCandidate` qui n'insère un nouveau candidat DINUM que
+ * sous ce seuil. Centraliser le predicat évite que les 3 sites divergent
+ * silencieusement si on ajuste le seuil ou la sémantique `null`.
+ */
+function meetsBestMatchAddressGate(c: { score_adresse: number | null }): boolean {
+  return c.score_adresse !== null && c.score_adresse >= BEST_MATCH_THRESHOLD;
+}
 
 /**
  * Seuil sous lequel un candidat est disqualifié par son score nom dans le
@@ -508,11 +529,7 @@ export async function resolveSiretsForFiness(
   const sortedBeforeFallback = [...candidates.values()].sort(compareByScoreDesc);
   const topBeforeFallback = sortedBeforeFallback[0];
   let bestMatch =
-    topBeforeFallback &&
-    topBeforeFallback.score_adresse !== null &&
-    topBeforeFallback.score_adresse >= BEST_MATCH_THRESHOLD
-      ? topBeforeFallback
-      : null;
+    topBeforeFallback && meetsBestMatchAddressGate(topBeforeFallback) ? topBeforeFallback : null;
 
   // === Resolver V2 — fallback géographique conditionnel ====================
   //
@@ -978,17 +995,23 @@ function disambiguateFallbackCandidates(
   // Au sein du rayon /near_point 150 m, DINUM peut ramener plusieurs sites
   // du même groupe (ex : EYLAU 27 Bd Victor Hugo ET EYLAU 34 Avenue du Roule
   // à 150 m). Le 2e a score_adresse < 0.6 → ce n'est PAS le site cherché.
-  // Aligné sur `BEST_MATCH_THRESHOLD` du chemin RPPS direct : un candidat
-  // qui n'atteint pas le seuil ne devrait jamais être best_match. La liste
-  // `candidates[]` exposée au caller reste COMPLÈTE (audit / cross-check) ;
-  // seul le best_match est arbitré sur le pool gated.
-  const addressGated = candidates.filter(
-    (c) => c.score_adresse !== null && c.score_adresse >= BEST_MATCH_THRESHOLD,
-  );
+  // Helper partagé `meetsBestMatchAddressGate` (V0.13.1 factorisation) : un
+  // candidat qui n'atteint pas le seuil ne devrait jamais être best_match.
+  // La liste `candidates[]` exposée au caller reste COMPLÈTE (audit /
+  // cross-check) ; seul le best_match est arbitré sur le pool gated.
+  const addressGated = candidates.filter(meetsBestMatchAddressGate);
   // Si rien ne passe le gate, on n'a pas matière à départager → ambiguous.
   // Garde la sémantique V0.13.0 (best_match null) tout en évitant qu'un site
   // hors-périmètre (avenue du Roule sur cas EYLAU) ne soit choisi par défaut.
+  // Warn symétrique du « name filter eliminated all » plus bas (P0 /review
+  // V0.13.1 silent-failure-hunter) : signal d'audit ops sur un cas pathologique
+  // (gate NAF a laissé passer N candidats, tous hors-périmètre adresse —
+  // soit coords FINESS imprécises, soit rayon /near_point trop large, soit
+  // gate NAF anormalement permissif).
   if (addressGated.length === 0) {
+    console.warn(
+      `[france-data-mcp] siret-resolver: address gate eliminated all ${candidates.length} fallback candidates (score_adresse < ${BEST_MATCH_THRESHOLD}) — ambiguous returned (audit recommandé : coords FINESS imprécises ? rayon /near_point trop large ? gate NAF anormalement permissif ?)`,
+    );
     return { status: "ambiguous", best_match: null };
   }
 
