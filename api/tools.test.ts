@@ -724,6 +724,89 @@ describe("entreprises_in_radius — délégation proximité native (P3)", () => 
     await tool?.handler({ naf: "8690B", departement: "08" });
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ naf: "8690B", departement: "08" }));
   });
+
+  // === V0.13.0 Fix #5 — toggle includeDirigeants =============================
+
+  const resultWithDirigeants = {
+    total: 1,
+    page: 1,
+    perPage: 10,
+    totalPages: 1,
+    entreprises: [
+      {
+        siren: "507815942",
+        nomComplet: "BIOGROUP NORD",
+        naf: "8690B",
+        finances: [],
+        dirigeants: [
+          { nom: "DURAND", prenoms: "JEAN", fonction: "PRESIDENT" },
+          { nom: "MARTIN", prenoms: "ANNE", fonction: "DIRIGEANT" },
+        ],
+        actif: true,
+        etablissements: [],
+      },
+    ],
+  };
+
+  it("Fix #5 — includeDirigeants=false strip la liste dirigeants côté handler", async () => {
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(resultWithDirigeants);
+    const tool = findTool("entreprises_in_radius");
+    const result = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.72,
+      lat: 49.77,
+      radiusKm: 5,
+      includeDirigeants: false,
+    })) as typeof resultWithDirigeants;
+    expect(result.entreprises[0]?.dirigeants).toEqual([]);
+    // Reste du shape inchangé.
+    expect(result.entreprises[0]?.siren).toBe("507815942");
+    expect(result.entreprises[0]?.naf).toBe("8690B");
+    expect(result.total).toBe(1);
+  });
+
+  it("Fix #5 — includeDirigeants par défaut true (backward-compat V0.12)", async () => {
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(resultWithDirigeants);
+    const tool = findTool("entreprises_in_radius");
+    // Param omis → dirigeants exposés (comportement V0.12 préservé).
+    const result = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.72,
+      lat: 49.77,
+      radiusKm: 5,
+    })) as typeof resultWithDirigeants;
+    expect(result.entreprises[0]?.dirigeants).toHaveLength(2);
+  });
+
+  it("Fix #5 — includeDirigeants=true explicite préserve la liste", async () => {
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(resultWithDirigeants);
+    const tool = findTool("entreprises_in_radius");
+    const result = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.72,
+      lat: 49.77,
+      radiusKm: 5,
+      includeDirigeants: true,
+    })) as typeof resultWithDirigeants;
+    expect(result.entreprises[0]?.dirigeants).toHaveLength(2);
+  });
+
+  it("Fix #5 — string 'false' NON-strict (sera ignoré, dirigeants restent) — anti-silent-failure", async () => {
+    // Le check `!== false` strict : un caller MCP qui passe la string "false"
+    // (au lieu du boolean) ne doit PAS strip silencieusement les dirigeants —
+    // il doit recevoir le comportement par défaut (preserve). Préfère explicite
+    // boolean dans le schema MCP.
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(resultWithDirigeants);
+    const tool = findTool("entreprises_in_radius");
+    const result = (await tool?.handler({
+      naf: "8690B",
+      lon: 4.72,
+      lat: 49.77,
+      radiusKm: 5,
+      includeDirigeants: "false",
+    })) as typeof resultWithDirigeants;
+    expect(result.entreprises[0]?.dirigeants).toHaveLength(2);
+  });
 });
 
 describe("coerceNumber loud-failure (silent default guard)", () => {

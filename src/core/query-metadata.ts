@@ -28,6 +28,21 @@ export type GeoPrecision =
   | "centroide_commune_ameli"
   | "centroide_commune_ans"
   | "centroide_commune_ans_mixte"
+  /**
+   * V0.13.0 — variante effective de `centroide_commune_ans_mixte` quand TOUS
+   * les résultats retournés sont en précision exacte (`adresse` BAN ou
+   * `etablissement_finess`). Évite que le caller LLM lise une étiquette
+   * globale "mixte" pessimiste quand le filtre `precise_only=true` (ou un
+   * heureux hasard de distribution) a produit 100 % de précis. Source : ANS.
+   */
+  | "centroide_commune_ans_precis_uniquement"
+  /**
+   * V0.13.0 — variante effective quand TOUS les résultats sont au centroïde
+   * commune. Indique au caller que `distance_km` n'est pas discriminant
+   * intra-commune sur CETTE réponse spécifique (≠ étiquette globale mixte
+   * qui suggère qu'une part est précise). Source : ANS.
+   */
+  | "centroide_commune_ans_centroide_uniquement"
   | "centroide_commune_cds"
   | "structure_finess";
 
@@ -81,6 +96,10 @@ const SOURCE_NOTE: Record<GeoPrecision, string> = {
     "Coordonnées RPPS/ANS = centroïde commune (~3 km moyenne). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour une précision adresse, croiser num_finess avec etablissement_by_finess.",
   centroide_commune_ans_mixte:
     'Coordonnées RPPS HYBRIDES (V0.12.0) : la précision est MIXTE par résultat — lire `geo_precision` PAR PS. ~68,5 % sont précis (`"adresse"` BAN rue/bâtiment ou `"etablissement_finess"` site FINESS joint via num_finess) avec `distance_km` exacte ; ~31,5 % restent au centroïde commune (`"centroide_commune"`, ~3 km, `distance_km` non discriminante intra-commune). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour FORCER 100 % de résultats précis (rayons courts <3 km, classement individuel), passer `precise_only: true` côté tool radius.',
+  centroide_commune_ans_precis_uniquement:
+    "Coordonnées RPPS — variante effective V0.13.0 : TOUS les résultats retournés sur cette requête sont en précision exacte (`adresse` BAN ou `etablissement_finess`). `distance_km` est exacte au mètre près pour chaque PS retourné, classement individuel fiable. Source : Annuaire Santé ANS — Licence Ouverte v2.0. NB : la donnée source reste hybride (mixte) — d'autres PS au centroïde commune existent peut-être dans la zone mais étaient hors rayon ou filtrés par `precise_only: true`.",
+  centroide_commune_ans_centroide_uniquement:
+    "Coordonnées RPPS — variante effective V0.13.0 : TOUS les résultats retournés sur cette requête sont au centroïde commune (~3 km). `distance_km` n'est PAS discriminante intra-commune (tous les PS d'une même commune ont la même distance au centre du rayon). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour un classement fiable, pivoter via FINESS (etablissement_by_finess) ou élargir radius_km au-delà de ~3 km pour capter aussi les PS précis.",
   structure_finess:
     "Liste rattachée à un FINESS site. Le mode_exercice révèle la nature du lien (libéral / salarié). Couverture RPPS quand le PS l'a déclaré ; salariés CH/CHU/cliniques bien couverts.",
   centroide_commune_cds:
@@ -182,6 +201,63 @@ export const finessByCategorieMetadata = (): QueryMetadata =>
  * générique (la branche précise reste fiable) — on injecte une note nuancée
  * spécifique au mode hybride RPPS.
  */
+/**
+ * **V0.13.0 Fix #4** — raffine l'étiquette globale `geo_precision` selon la
+ * distribution réelle des `geo_precision` par-résultat. La métadata initiale
+ * (construite par `rppsRadiusMetadata` avant exécution RPC) déclare le
+ * **contrat** de la requête (`centroide_commune_ans_mixte` = "potentiellement
+ * mixte"). Une fois les résultats matérialisés, on connaît la distribution
+ * EFFECTIVE et on peut affiner l'étiquette globale pour ne pas mentir au
+ * caller LLM (qui prend des décisions basées sur cette étiquette).
+ *
+ * Trois cas après inspection :
+ *   - 100 % des rows en `adresse` ou `etablissement_finess` →
+ *     `"centroide_commune_ans_precis_uniquement"` (sub-cas précis-only de mixte)
+ *   - 100 % des rows en `centroide_commune` →
+ *     `"centroide_commune_ans_centroide_uniquement"` (sub-cas centroïde-only)
+ *   - mixte ou 0 row → étiquette initiale inchangée (`mixte`)
+ *
+ * Mutation cellulaire pour minimiser les allocations (la metadata est partagée
+ * avec la liste des notes côté caller).
+ *
+ * **Pourquoi pas dans `buildListQueryResult`** : la signature générique de ce
+ * builder ne connaît rien au shape `RppsResult.geo_precision`. Ce helper est
+ * dédié au domaine RPPS (consommé par `rpps-db.ts` `getRppsInRadius`).
+ */
+export function refineRppsGeoPrecisionLabel(
+  rows: ReadonlyArray<{ geo_precision?: PerResultGeoPrecision | null }>,
+  baseMeta: QueryMetadata,
+): QueryMetadata {
+  // Ne raffine QUE si la metadata initiale est l'étiquette mixte canonique
+  // V0.12.0 — sinon le caller utilise déjà une étiquette spécialisée et on
+  // ne doit pas la surcharger silencieusement.
+  if (baseMeta.geo_precision !== "centroide_commune_ans_mixte") return baseMeta;
+  if (rows.length === 0) return baseMeta;
+  let precisCount = 0;
+  let centroideCount = 0;
+  let unknownCount = 0;
+  for (const row of rows) {
+    const p = row.geo_precision;
+    if (p === "adresse" || p === "etablissement_finess") precisCount++;
+    else if (p === "centroide_commune") centroideCount++;
+    else unknownCount++;
+  }
+  // Si certains rows n'ont PAS de geo_precision typé (régression RPC,
+  // mock test, ancien dump pré-V0.12.0), on garde l'étiquette mixte par
+  // sécurité — un échantillon partiel ne doit pas faire affirmer "100 % précis".
+  if (unknownCount > 0) return baseMeta;
+  if (precisCount === rows.length) {
+    baseMeta.geo_precision = "centroide_commune_ans_precis_uniquement";
+    baseMeta.notes[0] = SOURCE_NOTE.centroide_commune_ans_precis_uniquement;
+  } else if (centroideCount === rows.length) {
+    baseMeta.geo_precision = "centroide_commune_ans_centroide_uniquement";
+    baseMeta.notes[0] = SOURCE_NOTE.centroide_commune_ans_centroide_uniquement;
+  }
+  // Mixte effectif (precisCount > 0 ET centroideCount > 0) → étiquette
+  // initiale conservée (déjà correcte).
+  return baseMeta;
+}
+
 export const rppsRadiusMetadata = (radiusKm?: number): QueryMetadata => {
   const md = buildMetadata("centroide_commune_ans_mixte", true, radiusKm);
   if (isShortRadius(radiusKm)) {

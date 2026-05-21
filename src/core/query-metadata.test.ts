@@ -4,6 +4,7 @@ import {
   ameliRadiusMetadata,
   cdsRadiusMetadata,
   finessRadiusMetadata,
+  refineRppsGeoPrecisionLabel,
   rppsRadiusMetadata,
 } from "./query-metadata.js";
 
@@ -56,5 +57,67 @@ describe("warning radius sub-commune (A2/A4)", () => {
     // finessRadiusMetadata n'accepte pas radiusKm : la précision adresse ne
     // souffre pas du piège centroïde. Aucune note sous-commune possible.
     expect(hasSubCommuneNote(finessRadiusMetadata().notes)).toBe(false);
+  });
+});
+
+describe("refineRppsGeoPrecisionLabel — Fix #4 V0.13.0", () => {
+  it("100% rows précis (adresse + etablissement_finess) → étiquette 'precis_uniquement'", () => {
+    const meta = rppsRadiusMetadata(5);
+    refineRppsGeoPrecisionLabel(
+      [
+        { geo_precision: "adresse" },
+        { geo_precision: "etablissement_finess" },
+        { geo_precision: "adresse" },
+      ],
+      meta,
+    );
+    expect(meta.geo_precision).toBe("centroide_commune_ans_precis_uniquement");
+    expect(meta.notes[0]).toContain("TOUS les résultats");
+    expect(meta.notes[0]).toContain("précision exacte");
+  });
+
+  it("100% rows centroïde → étiquette 'centroide_uniquement'", () => {
+    const meta = rppsRadiusMetadata(5);
+    refineRppsGeoPrecisionLabel(
+      [{ geo_precision: "centroide_commune" }, { geo_precision: "centroide_commune" }],
+      meta,
+    );
+    expect(meta.geo_precision).toBe("centroide_commune_ans_centroide_uniquement");
+    expect(meta.notes[0]).toContain("centroïde commune");
+    expect(meta.notes[0]).toContain("PAS discriminante");
+  });
+
+  it("mixte (précis + centroïde) → étiquette mixte préservée (comportement V0.12)", () => {
+    const meta = rppsRadiusMetadata(5);
+    const initialLabel = meta.geo_precision;
+    refineRppsGeoPrecisionLabel(
+      [{ geo_precision: "adresse" }, { geo_precision: "centroide_commune" }],
+      meta,
+    );
+    expect(meta.geo_precision).toBe(initialLabel);
+  });
+
+  it("rows vides → étiquette inchangée (pas de raffinage sur échantillon vide)", () => {
+    const meta = rppsRadiusMetadata(5);
+    const initialLabel = meta.geo_precision;
+    refineRppsGeoPrecisionLabel([], meta);
+    expect(meta.geo_precision).toBe(initialLabel);
+  });
+
+  it("row sans geo_precision typé → étiquette mixte préservée (garde-fou anti-régression RPC)", () => {
+    // Si un row n'a pas de `geo_precision` (régression RPC, ancien dump, mock test),
+    // on garde l'étiquette mixte par sécurité — affirmer "100% précis" sur un
+    // échantillon partiellement typé serait trompeur.
+    const meta = rppsRadiusMetadata(5);
+    const initialLabel = meta.geo_precision;
+    refineRppsGeoPrecisionLabel([{ geo_precision: "adresse" }, { geo_precision: undefined }], meta);
+    expect(meta.geo_precision).toBe(initialLabel);
+  });
+
+  it("ne touche PAS une étiquette initiale non-mixte (helper RPPS-only)", () => {
+    // Ameli/FINESS/CDS ont leurs propres étiquettes — pas raffinage croisé.
+    const ameliMeta = ameliRadiusMetadata(5);
+    refineRppsGeoPrecisionLabel([{ geo_precision: "adresse" }], ameliMeta);
+    expect(ameliMeta.geo_precision).toBe("centroide_commune_ameli");
   });
 });
