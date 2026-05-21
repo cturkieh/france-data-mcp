@@ -133,6 +133,16 @@ export type FallbackReason =
  *   doit pas interpréter ce statut comme une qualité de match.
  * - `single_after_gate` : 1 seul candidat après gate d'activité — pas
  *   d'ambiguïté à arbitrer.
+ * - `by_name_score` : > 1 candidat après gate, départage par disqualification
+ *   d'au moins 1 candidat dont le score nom est trop faible (`< NAME_DISQUALIFY_THRESHOLD`).
+ *   **V0.13.1 (Raffinement #2)** : permet d'écarter un candidat hors-sujet
+ *   (cas type CHOUAIEB sur FINESS EYLAU) que le gate NAF seul ne peut éliminer.
+ * - `by_active_succession` : > 1 candidat après gate, tous appartiennent au
+ *   MÊME SIREN à la MÊME adresse, ≥ 1 actif → on retient le SIRET actif.
+ *   **V0.13.1 (Raffinement #3)** : succession temporelle de SIRET (l'un fermé,
+ *   un nouveau ouvert) — pas une ambiguïté d'entreprise, juste une réorganisation
+ *   administrative. Cas type FINESS 920028487 EYLAU UNILABS (SIRET ...070 fermé +
+ *   SIRET ...419 ouvert 2025-09-08, même SIREN 784652026, même adresse).
  * - `by_rpps_signal` : > 1 candidat après gate, départage par présence d'un
  *   SIRET côté RPPS (le PS l'avait déclaré → signal de confiance).
  * - `ambiguous` : > 1 candidat ex-aequo après gate ET signal RPPS épuisé.
@@ -142,6 +152,8 @@ export type FallbackReason =
 export type DisambiguationStatus =
   | "not_applicable"
   | "single_after_gate"
+  | "by_name_score"
+  | "by_active_succession"
   | "by_rpps_signal"
   | "ambiguous";
 
@@ -157,6 +169,23 @@ export interface SiretCandidate {
    * variations de saisie, < 0.5 = adresses distinctes.
    */
   score_adresse: number | null;
+  /**
+   * Score Sørensen-Dice 0..1 entre la raison sociale FINESS et la raison sociale
+   * de l'unité légale côté SIRENE/DINUM (`raison_sociale_ul`). `null` quand
+   * `raison_sociale_ul` est absent (RPPS-only sans cross-vérification DINUM).
+   *
+   * **V0.13.1 — sous-score nom (Raffinement #2)** : permet d'écarter les
+   * candidats hors-sujet quand le scoring d'adresse seul est insuffisant — cas
+   * type : FINESS 920028487 EYLAU labo Victor Hugo. Le fallback géo ramène le
+   * SIRET CHOUAIEB (PMA voisine, score adresse identique à 0.9) que le gate NAF
+   * ne peut éliminer (NAF 8690B compatible). Le score nom (~0.04 vs ~0.97 pour
+   * EYLAU UNILABS) permet de le disqualifier dans la désambiguïsation.
+   *
+   * Exposé pour audit/traçabilité — pas utilisé comme critère principal du
+   * `best_match` (qui reste piloté par `score_adresse`), mais comme tie-breaker
+   * et comme gate de disqualification dans `tryAddressFallback`.
+   */
+  score_nom: number | null;
   /**
    * État administratif SIRENE de l'établissement (champ DINUM `actif`).
    * `null` quand le SIRET vient uniquement de RPPS et n'a pas été cross-vérifié.
@@ -248,6 +277,24 @@ export interface SiretResolution {
 const BEST_MATCH_THRESHOLD = 0.6;
 
 /**
+ * Seuil sous lequel un candidat est disqualifié par son score nom dans le
+ * fallback géographique (Raffinement #2 V0.13.1). Très bas (0.2) à dessein :
+ *
+ * - `> 0.2` : laisse passer les vrais sites même en cas de M&A (raison sociale
+ *   FINESS "DIAGNOVIE" vs SIRENE "BIOGROUP NORD" Dice ~0.1 — mais ce cas est
+ *   protégé par le chemin RPPS, le fallback géo n'est pas déclenché).
+ * - `< 0.2` : élimine les co-locataires NAF-compatibles dont la raison sociale
+ *   n'a aucun rapport (cas type CHOUAIEB 0.04 sur EYLAU labo Victor Hugo).
+ *
+ * Appliqué UNIQUEMENT dans `tryAddressFallback` (fallback géo) — jamais sur le
+ * chemin RPPS direct où le signal métier "le PS a déclaré ce SIRET" prime sur
+ * tout scoring textuel. Un candidat avec `score_nom === null` (raison_sociale_ul
+ * absente) n'est PAS disqualifié : l'absence de donnée ne doit pas écarter un
+ * candidat légitime ramené par le gate NAF.
+ */
+const NAME_DISQUALIFY_THRESHOLD = 0.2;
+
+/**
  * Rayon du fallback géographique (DINUM `/near_point`) en kilomètres.
  *
  * **Valeur 0.150 km (150 m)** verrouillée par le cadrage Resolver V2 (Q2) :
@@ -291,6 +338,10 @@ export async function resolveSiretsForFiness(
   // établissements DINUM par SIREN). Pas critique en latency mais évite le
   // gaspillage trivial.
   const finessAddrNorm = normalizeForCompare(buildFinessAdresseLibelle(finess));
+  // V0.13.1 (Raffinement #2) : même hoist pour la raison sociale FINESS. Sert
+  // au calcul du `score_nom` dans `mergeOrInsertDinumCandidate` et au gate
+  // nom du fallback géo.
+  const finessNomNorm = normalizeForCompare(finess.raison_sociale);
   const candidates = new Map<string, SiretCandidate>();
   const dinumErrors: SiretResolution["dinum_errors"] = [];
   const sirensActif: Record<string, boolean | null> = Object.fromEntries(
@@ -302,6 +353,7 @@ export async function resolveSiretsForFiness(
       siret,
       sources: ["rpps"],
       score_adresse: null,
+      score_nom: null,
       actif: null,
       adresse_libelle: null,
       date_creation: null,
@@ -337,7 +389,13 @@ export async function resolveSiretsForFiness(
     }
     sirensActif[siren] = lookup.actif;
     for (const etab of lookup.etablissements) {
-      mergeOrInsertDinumCandidate(candidates, etab, finessAddrNorm, lookup.nomComplet);
+      mergeOrInsertDinumCandidate(
+        candidates,
+        etab,
+        finessAddrNorm,
+        finessNomNorm,
+        lookup.nomComplet,
+      );
     }
   }
 
@@ -440,6 +498,7 @@ export async function resolveSiretsForFiness(
             dateCreation: etabSirene.dateCreation ?? undefined,
           },
           finessAddrNorm,
+          finessNomNorm,
           etabSirene.raisonSocialeUniteLegale,
         );
       }
@@ -477,6 +536,7 @@ export async function resolveSiretsForFiness(
       finess,
       rppsSirets,
       finessAddrNorm,
+      finessNomNorm,
       candidates,
       sirensExplored: sirensExploredMutable,
       sirensActif,
@@ -507,14 +567,43 @@ export async function resolveSiretsForFiness(
   };
 }
 
-/** Tri primaire : score décroissant ; les `null` en queue (donnée incomplète). */
+/**
+ * Tri primaire des candidats SIRET.
+ *
+ * 1. `score_adresse` décroissant ; les `null` en queue (donnée incomplète).
+ * 2. **Tie-breaker V0.13.1** : si `score_adresse` est ex-aequo (même bâtiment),
+ *    `score_nom` décroissant prime — un candidat dont le nom matche le libellé
+ *    FINESS doit remonter au-dessus d'un co-locataire NAF-compatible sans lien
+ *    nom. Pas appliqué comme disqualifier global (cf. `NAME_DISQUALIFY_THRESHOLD`
+ *    réservé au fallback) — juste comme ordre stable. Les `null` en queue.
+ * 3. Dernier tie-break déterministe : SIRET ascendant (utile pour les snapshots
+ *    de tests qui s'appuient sur l'ordre quand 2 scores sont strictement égaux).
+ */
 function compareByScoreDesc(a: SiretCandidate, b: SiretCandidate): number {
-  const sa = a.score_adresse;
-  const sb = b.score_adresse;
-  if (sa === null && sb === null) return 0;
-  if (sa === null) return 1;
-  if (sb === null) return -1;
-  return sb - sa;
+  const adresseDiff = compareNullableDesc(a.score_adresse, b.score_adresse);
+  if (adresseDiff !== 0) return adresseDiff;
+  const nomDiff = compareNullableDesc(a.score_nom, b.score_nom);
+  if (nomDiff !== 0) return nomDiff;
+  return a.siret.localeCompare(b.siret);
+}
+
+/** Tri descendant tolérant aux `null` (en queue). 0 si égalité ou les 2 null. */
+function compareNullableDesc(a: number | null, b: number | null): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return b - a;
+}
+
+/**
+ * Calcule le score Dice nom FINESS ↔ raison sociale UL. Retourne `null` si
+ * `nomComplet` est absent — l'absence ne disqualifie pas un candidat (cf.
+ * `NAME_DISQUALIFY_THRESHOLD`). Factorise les 2 sites de calcul historiques
+ * (`mergeOrInsertDinumCandidate` + bloc d'injection des candidats fallback)
+ * pour garantir que la règle « pas de nomComplet → pas de score » ne dérive pas.
+ */
+function computeNameScore(finessNomNorm: string, nomComplet: string | null): number | null {
+  return nomComplet ? diceCoefficient(finessNomNorm, normalizeForCompare(nomComplet)) : null;
 }
 
 /**
@@ -538,10 +627,14 @@ function mergeOrInsertDinumCandidate(
   candidates: Map<string, SiretCandidate>,
   etab: { siret: string; adresse?: string; actif: boolean; dateCreation?: string },
   finessAddrNorm: string,
+  finessNomNorm: string,
   nomComplet: string | null = null,
 ): void {
   const adresse = etab.adresse?.trim() || null;
   const score = adresse ? diceCoefficient(finessAddrNorm, normalizeForCompare(adresse)) : null;
+  // V0.13.1 (Raffinement #2) : score nom factorisé via `computeNameScore` —
+  // garantit la sémantique partagée avec le bloc d'injection fallback.
+  const scoreNom = computeNameScore(finessNomNorm, nomComplet);
   const existing = candidates.get(etab.siret);
   if (existing) {
     existing.adresse_libelle = adresse;
@@ -553,6 +646,7 @@ function mergeOrInsertDinumCandidate(
     // par une null (si plusieurs passages, garder la première valeur trouvée).
     if (nomComplet !== null) {
       existing.raison_sociale_ul = nomComplet;
+      existing.score_nom = scoreNom;
     }
     if (
       score !== null &&
@@ -568,6 +662,7 @@ function mergeOrInsertDinumCandidate(
       siret: etab.siret,
       sources: ["dinum_address_match"],
       score_adresse: score,
+      score_nom: scoreNom,
       actif: etab.actif,
       adresse_libelle: adresse,
       date_creation: etab.dateCreation ?? null,
@@ -628,6 +723,7 @@ async function tryAddressFallback(args: {
   finess: FinessResult;
   rppsSirets: string[];
   finessAddrNorm: string;
+  finessNomNorm: string;
   candidates: Map<string, SiretCandidate>;
   sirensExplored: string[];
   sirensActif: Record<string, boolean | null>;
@@ -637,6 +733,7 @@ async function tryAddressFallback(args: {
     finess,
     rppsSirets,
     finessAddrNorm,
+    finessNomNorm,
     candidates,
     sirensExplored,
     sirensActif,
@@ -806,6 +903,7 @@ async function tryAddressFallback(args: {
     const resolvedNomComplet = info?.nomComplet ?? nearPointNomComplet;
     const adresse = etab.adresse?.trim() || null;
     const score = adresse ? diceCoefficient(finessAddrNorm, normalizeForCompare(adresse)) : null;
+    const scoreNom = computeNameScore(finessNomNorm, resolvedNomComplet);
     const existing = candidates.get(etab.siret);
     if (existing) {
       // SIRET déjà connu via RPPS (signal RPPS positif) — enrichir, ajouter source.
@@ -813,7 +911,10 @@ async function tryAddressFallback(args: {
       existing.actif = etab.actif;
       existing.adresse_libelle = adresse;
       existing.date_creation = etab.dateCreation ?? null;
-      if (resolvedNomComplet) existing.raison_sociale_ul = resolvedNomComplet;
+      if (resolvedNomComplet) {
+        existing.raison_sociale_ul = resolvedNomComplet;
+        existing.score_nom = scoreNom;
+      }
       if (!existing.sources.includes("dinum_address_match")) {
         existing.sources.push("dinum_address_match");
       }
@@ -824,6 +925,7 @@ async function tryAddressFallback(args: {
         siret: etab.siret,
         sources: ["dinum_address_match"],
         score_adresse: score,
+        score_nom: scoreNom,
         actif: etab.actif,
         adresse_libelle: adresse,
         date_creation: etab.dateCreation ?? null,
@@ -834,37 +936,119 @@ async function tryAddressFallback(args: {
     }
   }
 
-  // Désambiguïsation :
-  //   1 candidat → single_after_gate
-  //   > 1 candidat ET signal RPPS départage → by_rpps_signal
-  //   > 1 candidat ex-aequo → ambiguous (best_match=null)
-  let disambiguationStatus: DisambiguationStatus;
-  let bestMatch: SiretCandidate | null;
-  if (fallbackCandidates.length === 1) {
-    disambiguationStatus = "single_after_gate";
-    bestMatch = fallbackCandidates[0] as SiretCandidate;
-  } else {
-    const rppsSet = new Set(rppsSirets);
-    const withRppsSignal = fallbackCandidates.filter((c) => rppsSet.has(c.siret));
-    if (withRppsSignal.length === 1) {
-      disambiguationStatus = "by_rpps_signal";
-      bestMatch = withRppsSignal[0] as SiretCandidate;
-    } else {
-      // Soit 0 candidat avec signal RPPS (post-gate sans déclaration PS — cas
-      // typique d'un site purement libéral non agréé), soit > 1 signal RPPS
-      // ex-aequo : on n'a pas de critère propre pour départager → ambiguous.
-      disambiguationStatus = "ambiguous";
-      bestMatch = null;
-    }
-  }
+  // Désambiguïsation cascade :
+  //   1. 1 candidat → single_after_gate
+  //   2. Name filter (V0.13.1 Raffinement #2) : disqualifie les candidats dont
+  //      score_nom < NAME_DISQUALIFY_THRESHOLD (non-null seulement).
+  //      Si ≥ 1 candidat disqualifié ET 1 seul reste → by_name_score.
+  //   3. Active succession (V0.13.1 Raffinement #3) : tous les candidats
+  //      restants partagent même SIREN + même adresse normalisée, ≥ 1 actif
+  //      → retenir l'actif le plus récent → by_active_succession.
+  //   4. Signal RPPS : 1 seul candidat dans la liste RPPS-déclarée → by_rpps_signal.
+  //   5. Sinon → ambiguous (best_match=null).
+  const disamb = disambiguateFallbackCandidates(fallbackCandidates, rppsSirets);
 
   return {
     method: rppsSirets.length > 0 ? "mixed" : "address_fallback",
     fallback_reason: rppsSirets.length === 0 ? "no_rpps" : "no_best_match_with_clean_dinum",
     naf_filter_used: nafs,
-    disambiguation_status: disambiguationStatus,
-    best_match: bestMatch,
+    disambiguation_status: disamb.status,
+    best_match: disamb.best_match,
   };
+}
+
+/**
+ * Cascade de désambiguïsation pour les candidats post-gate NAF du fallback géo.
+ * Sortie : statut + best_match (ou null si ambigu). Logique linéaire, chaque
+ * étape suivante n'est essayée que si la précédente n'a pas tranché.
+ *
+ * **V0.13.1** : 2 nouvelles étapes intermédiaires entre `single_after_gate` et
+ * `by_rpps_signal` — `by_name_score` (Raffinement #2 : disqualifier les
+ * candidats hors-sujet par score nom) et `by_active_succession` (Raffinement
+ * #3 : départager une succession temporelle de SIRET du même SIREN à la même
+ * adresse). Préserve strictement les cas pré-V0.13.1 (test "RPPS vide + 2 labos
+ * co-localisés ex-aequo → ambiguous" = 2 SIREN distincts → succession rule ne
+ * s'applique pas → reste ambiguous).
+ */
+function disambiguateFallbackCandidates(
+  candidates: SiretCandidate[],
+  rppsSirets: string[],
+): { status: DisambiguationStatus; best_match: SiretCandidate | null } {
+  const [first] = candidates;
+  if (candidates.length === 1 && first) {
+    return { status: "single_after_gate", best_match: first };
+  }
+
+  // Étape 2 — Name filter (V0.13.1 Raffinement #2). Disqualifie les candidats
+  // dont le nom est trop éloigné du libellé FINESS (`score_nom < threshold`,
+  // mais SEULEMENT si score_nom est non-null : un score absent ne disqualifie
+  // jamais — la donnée n'est pas exploitable et le gate NAF a déjà filtré).
+  // L'étape 1 court-circuite déjà `candidates.length === 1`, donc ici `length`
+  // est ≥ 2 — `nameFiltered.length === 1` suffit pour conclure `by_name_score`.
+  const nameFiltered = candidates.filter(
+    (c) => c.score_nom === null || c.score_nom >= NAME_DISQUALIFY_THRESHOLD,
+  );
+  const [firstNameFiltered] = nameFiltered;
+  if (nameFiltered.length === 1 && firstNameFiltered) {
+    return { status: "by_name_score", best_match: firstNameFiltered };
+  }
+
+  // Si le name filter n'a pas tranché tout seul, on travaille sur les candidats
+  // restants (déjà débruite des hors-sujet). Si tout a été disqualifié (cas
+  // limite : tous les candidats avaient un score_nom faible), on reste sur la
+  // liste d'origine pour conserver les étapes suivantes — préserve l'invariant
+  // "ne pas écarter un candidat légitime sur la base d'une donnée incertaine".
+  // Cas pathologique tracé en warn : un gate NAF qui retourne UNIQUEMENT des
+  // hors-sujet nom est anormal et mérite audit ops (cf. P2 /review V0.13.1).
+  if (nameFiltered.length === 0) {
+    console.warn(
+      `[france-data-mcp] siret-resolver: name filter eliminated all ${candidates.length} candidates post-gate NAF — fallback sur le pool initial (audit recommandé : gate NAF anormalement permissif ?)`,
+    );
+  }
+  const pool = nameFiltered.length > 0 ? nameFiltered : candidates;
+
+  // Étape 3 — Active succession (V0.13.1 Raffinement #3). Si tous les candidats
+  // du pool partagent (SIREN, adresse normalisée) ET il y a ≥ 1 actif, on retient
+  // l'actif. Cas type : succession temporelle 1 SIRET fermé + 1 SIRET actif au
+  // même siège (cas FINESS 920028487 EYLAU UNILABS).
+  const [firstPool, ...restPool] = pool;
+  if (firstPool && restPool.length >= 1) {
+    // Truthy plutôt que `=== null` strict : si le type `adresse_libelle` est
+    // élargi un jour à `string | null | undefined`, ce guard reste safe et ne
+    // throw pas via `normalizeForCompare(undefined)`. Robustesse type-future.
+    const groupKey = (c: SiretCandidate) =>
+      `${c.siret.slice(0, 9)}|${c.adresse_libelle ? normalizeForCompare(c.adresse_libelle) : ""}`;
+    const firstKey = groupKey(firstPool);
+    const allSameGroup = pool.every((c) => groupKey(c) === firstKey);
+    if (allSameGroup) {
+      const actifs = pool.filter((c) => c.actif === true);
+      // Si plusieurs actifs (rare : 2 SIRET actifs même siège), prendre le
+      // plus récent par date_creation pour reproduire la sémantique "le
+      // dernier vivant". Tie-break SIRET asc pour déterminisme quand les 2
+      // ont `date_creation === null` (cas pathologique : 2 actifs sans date,
+      // on retourne le plus petit SIRET → snapshots stables).
+      actifs.sort((a, b) => {
+        const dateDiff = (b.date_creation ?? "").localeCompare(a.date_creation ?? "");
+        return dateDiff !== 0 ? dateDiff : a.siret.localeCompare(b.siret);
+      });
+      const [bestActif] = actifs;
+      if (bestActif) {
+        return { status: "by_active_succession", best_match: bestActif };
+      }
+    }
+  }
+
+  // Étape 4 — Signal RPPS : un seul candidat du pool a été déclaré côté RPPS.
+  const rppsSet = new Set(rppsSirets);
+  const withRppsSignal = pool.filter((c) => rppsSet.has(c.siret));
+  const [rppsBest] = withRppsSignal;
+  if (withRppsSignal.length === 1 && rppsBest) {
+    return { status: "by_rpps_signal", best_match: rppsBest };
+  }
+
+  // Étape 5 — Ambigu : aucun critère propre pour départager. best_match=null,
+  // caller doit cross-checker manuellement.
+  return { status: "ambiguous", best_match: null };
 }
 
 /**

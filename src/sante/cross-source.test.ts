@@ -794,6 +794,337 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
     errSpy.mockRestore();
   });
 
+  // === V0.13.1 — Raffinements #2 & #3 (sous-score nom + succession SIRET) ====
+  //
+  // Cas réel reproductible documenté en prod : FINESS 920028487 LBM EYLAU
+  // UNILABS Victor Hugo. Labo dont les biologistes ne sont pas RPPS-déclarés
+  // → chemin fallback géo. /near_point ramène à la même adresse :
+  //   - SIRET ...070 EYLAU UNILABS (fermé, ouvert 2013)
+  //   - SIRET ...419 EYLAU UNILABS (actif, ouvert 2025-09-08, succession)
+  //   - SIRET 93354857000029 CHOUAIEB (PMA voisine, NAF 8690B compatible)
+  //
+  // Avant V0.13.1 : 3 candidats post-gate NAF → ambiguous. Caller bloqué.
+  // Après V0.13.1 : CHOUAIEB écarté par score nom, EYLAU départage par
+  // succession SIRET → best_match = SIRET actif.
+
+  it("Raffinement #2 — score nom écarte un co-locataire NAF-compatible hors-sujet (cas CHOUAIEB)", async () => {
+    const SIRET_EYLAU = "78465202600419";
+    const SIRET_CHOUAIEB = "93354857000029";
+    // Le SIREN enrichment (getEntrepriseBySiren) est PRIORITAIRE sur le
+    // nomComplet near_point dans le resolver — donc le mock doit fournir le
+    // bon `nomComplet` par SIREN, sinon les 2 candidats héritent du
+    // "BIOGROUP NORD" par défaut du helper et le name filter ne discrimine plus.
+    const NOM_PAR_SIREN: Record<string, string> = {
+      [SIRET_EYLAU.slice(0, 9)]: "EYLAU UNILABS",
+      [SIRET_CHOUAIEB.slice(0, 9)]: "CHOUAIEB MARC",
+    };
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "EYLAU UNILABS" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null }); // RPPS vide
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 2,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: [
+        {
+          siren: SIRET_EYLAU.slice(0, 9),
+          nomComplet: "EYLAU UNILABS",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_EYLAU,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2025-09-08",
+              naf: "8690B",
+            },
+          ],
+        },
+        {
+          siren: SIRET_CHOUAIEB.slice(0, 9),
+          // Raison sociale strictement disjointe d'EYLAU UNILABS → Dice ~0.
+          nomComplet: "CHOUAIEB MARC",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_CHOUAIEB,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2018-01-01",
+              naf: "8690B",
+            },
+          ],
+        },
+      ],
+    });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => ({
+      ...fakeEntrepriseDinum({ siren, actif: true }),
+      nomComplet: NOM_PAR_SIREN[siren] ?? "BIOGROUP NORD",
+    }));
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_EYLAU);
+      expect(result.disambiguation_status).toBe("by_name_score");
+      // CHOUAIEB doit rester listé dans candidates (donnée brute exposée au
+      // caller — la disqualification concerne le best_match, pas la liste).
+      expect(result.candidates.find((c) => c.siret === SIRET_CHOUAIEB)).toBeDefined();
+      // Le candidat disqualifié a bien un score_nom faible (audit).
+      const chouaieb = result.candidates.find((c) => c.siret === SIRET_CHOUAIEB);
+      expect(chouaieb?.score_nom).not.toBeNull();
+      expect(chouaieb?.score_nom ?? 1).toBeLessThan(0.2);
+    }
+  });
+
+  it("Raffinement #3 — succession SIRET fermé+actif au même SIREN/adresse → retient l'actif", async () => {
+    const SIRET_FERME = "78465202600070";
+    const SIRET_ACTIF = "78465202600419";
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "EYLAU UNILABS" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 1,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: [
+        {
+          siren: "784652026",
+          nomComplet: "EYLAU UNILABS",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_FERME,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2013-01-01",
+              naf: "8690B",
+            },
+            {
+              siret: SIRET_ACTIF,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2025-09-08",
+              naf: "8690B",
+            },
+          ],
+        },
+      ],
+    });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({ siren: "784652026", actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_ACTIF);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.disambiguation_status).toBe("by_active_succession");
+      // Le SIRET fermé reste exposé dans candidates (timeline auditable).
+      expect(result.candidates.find((c) => c.siret === SIRET_FERME)).toBeDefined();
+      expect(result.candidates.find((c) => c.siret === SIRET_FERME)?.actif).toBe(false);
+    }
+  });
+
+  it("Raffinements #2 + #3 combinés — cas EYLAU Victor Hugo (3 candidats : 2 EYLAU + 1 CHOUAIEB)", async () => {
+    const SIRET_EYLAU_FERME = "78465202600070";
+    const SIRET_EYLAU_ACTIF = "78465202600419";
+    const SIRET_CHOUAIEB = "93354857000029";
+    const NOM_PAR_SIREN: Record<string, string> = {
+      "784652026": "EYLAU UNILABS",
+      [SIRET_CHOUAIEB.slice(0, 9)]: "CHOUAIEB MARC",
+    };
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "EYLAU UNILABS" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 2,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: [
+        {
+          siren: "784652026",
+          nomComplet: "EYLAU UNILABS",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_EYLAU_FERME,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2013-01-01",
+              naf: "8690B",
+            },
+            {
+              siret: SIRET_EYLAU_ACTIF,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2025-09-08",
+              naf: "8690B",
+            },
+          ],
+        },
+        {
+          siren: SIRET_CHOUAIEB.slice(0, 9),
+          nomComplet: "CHOUAIEB MARC",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_CHOUAIEB,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2018-01-01",
+              naf: "8690B",
+            },
+          ],
+        },
+      ],
+    });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => ({
+      ...fakeEntrepriseDinum({ siren, actif: true }),
+      nomComplet: NOM_PAR_SIREN[siren] ?? "BIOGROUP NORD",
+    }));
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // CHOUAIEB éliminé par name filter, puis EYLAU départagé par succession.
+      // Statut final = by_active_succession (la dernière étape déclenchée prime).
+      expect(result.best_match?.siret).toBe(SIRET_EYLAU_ACTIF);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.disambiguation_status).toBe("by_active_succession");
+      // Les 3 candidats restent exposés pour audit (timeline + cross-check).
+      expect(result.candidates.length).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("Raffinement #2 garde-fou — name filter NE disqualifie PAS un candidat avec score_nom null (raison_sociale_ul absente)", async () => {
+    // Cas limite : near_point ramène un SIRET dont DINUM ne fournit pas de
+    // nomComplet ET dont le SIREN n'est pas résoluble. Le score_nom est null
+    // → ne doit PAS écarter le candidat (l'absence ≠ disqualification).
+    const SIRET_SANS_NOM = "78465202600218";
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "EYLAU UNILABS" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue({
+      total: 1,
+      page: 1,
+      perPage: 25,
+      totalPages: 1,
+      entreprises: [
+        {
+          siren: SIRET_SANS_NOM.slice(0, 9),
+          // nomComplet absent côté entreprise et SIREN lookup fail → score_nom null.
+          nomComplet: "",
+          naf: "8690B",
+          finances: [],
+          dirigeants: [],
+          actif: true,
+          etablissements: [
+            {
+              siret: SIRET_SANS_NOM,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              naf: "8690B",
+            },
+          ],
+        },
+      ],
+    });
+    // SIREN lookup not_found → pas de nomComplet via cette voie non plus.
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue({
+      found: false,
+      key: SIRET_SANS_NOM.slice(0, 9),
+      lookupStatus: "not_found",
+      message: "test: SIREN absent",
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      // 1 candidat seul, score_nom null mais retenu (single_after_gate, pas écarté).
+      expect(result.best_match?.siret).toBe(SIRET_SANS_NOM);
+      // Assertion explicite : l'invariant "score_nom null = non disqualifié"
+      // doit être traçable côté audit, pas juste implicite via le statut.
+      expect(result.best_match?.score_nom).toBeNull();
+      expect(result.disambiguation_status).toBe("single_after_gate");
+      // P1 /review silent-failure-hunter : un SIREN lookup `not_found` doit
+      // être tracé dans `dinum_errors` pour observabilité ops — sinon un
+      // démantèlement futur du branch `if (!lookup.found)` resterait silencieux.
+      expect(
+        result.dinum_errors.some(
+          (e) => e.siren === SIRET_SANS_NOM.slice(0, 9) && e.status === "not_found",
+        ),
+      ).toBe(true);
+    }
+    // Le `console.warn` est attendu (SIREN not_found) — assertion explicite
+    // valide à la fois l'invariant ops ET le motif "warn pas error" V0.13.
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("Raffinement non-régression — chemin RPPS direct, SIRET fermé reste best_match (cas Chérest)", async () => {
+    // Garde-fou /review P1 quality : `compareByScoreDesc` ajoute un tie-break
+    // `score_nom` puis `siret asc` SUR LE TRI GLOBAL (pas juste fallback).
+    // Vérifie qu'un site dont le SIRET physique est FERMÉ (cas Chérest 920028685)
+    // reste best_match via le chemin RPPS direct, sans que le tie-break ne
+    // l'écarte au profit d'un actif au même score adresse. Le PS a déclaré le
+    // SIRET en RPPS → c'est l'invariant load-bearing à préserver.
+    const SIRET_FERME_RPPS = "78465202600218";
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "PMA CHEREST" }),
+    );
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_FERME_RPPS }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_FERME_RPPS.slice(0, 9),
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_FERME_RPPS,
+            adresse: "27 BD BIZET 59290 WASQUEHAL",
+            actif: false,
+            dateCreation: "2010-01-01",
+            naf: "8690B",
+          },
+        ],
+      }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_FERME_RPPS);
+      expect(result.verdict_site).toBe("ferme");
+      // Path RPPS direct : pas de fallback déclenché, statut not_applicable.
+      expect(result.method).toBe("rpps");
+      expect(result.disambiguation_status).toBe("not_applicable");
+    }
+  });
+
   it("Fixture #3 — non-régression V0.7 (best_match RPPS direct → pas de fallback déclenché)", async () => {
     // Cas nominal V0.7 préservé : RPPS donne un SIRET dont l'adresse DINUM
     // matche l'adresse FINESS (score ≥ 0.6) → best_match direct, fallback

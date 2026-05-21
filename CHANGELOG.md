@@ -4,6 +4,88 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — V0.13.1 (Raffinements désambiguïsation Resolver V2)
+
+### Added — Sous-score nom + succession SIRET dans `verifier_site_actif`
+
+Le fallback géo V0.13.0 (DINUM `/near_point` + gate NAF) tranchait sur
+score d'adresse seul : insuffisant pour 2 cas observés en prod sur FINESS
+920028487 (LBM EYLAU UNILABS Victor Hugo, chemin fallback car biologistes
+non RPPS-déclarés) :
+
+1. **Co-locataire NAF-compatible hors-sujet** — un cabinet PMA (CHOUAIEB,
+   SIRET 93354857000029, NAF 8690B) à la même adresse passait le gate NAF
+   et créait une ambiguïté `disambiguation_status: "ambiguous"` alors que
+   sa raison sociale n'avait aucun rapport avec le labo EYLAU.
+
+2. **Succession temporelle de SIRET** — deux SIRET du même SIREN 784652026
+   EYLAU UNILABS à la même adresse (27 Bd Victor Hugo), l'un fermé (...070,
+   ouvert 2013), l'autre actif (...419, ouvert 2025-09-08). Pas une
+   ambiguïté d'entreprise — juste une réorganisation administrative.
+
+V0.13.1 corrige ces 2 cas via une cascade de désambiguïsation enrichie :
+
+- **Nouveau champ `score_nom: number | null`** sur `SiretCandidate` (type
+  public exposé via `verifier_site_actif.candidates[]` /
+  `inspect_site.statut_site` / `reconcilier_finess_sirene.candidates[]`).
+  Score Sørensen-Dice nom FINESS ↔ raison sociale UL (`raison_sociale_ul`).
+  `null` quand `raison_sociale_ul` absent (RPPS-only sans cross-vérification
+  DINUM) — l'absence ne disqualifie pas.
+
+- **Constante `NAME_DISQUALIFY_THRESHOLD = 0.2`** appliquée uniquement dans
+  `tryAddressFallback` (jamais sur le chemin RPPS direct où le signal métier
+  prime). Seuil très bas pour préserver les cas M&A (rebranding type
+  DIAGNOVIE → BIOGROUP NORD, Dice ~0.1 mais protégé par le chemin RPPS).
+
+- **2 nouveaux variants `DisambiguationStatus`** :
+  - `"by_name_score"` : ≥ 1 candidat disqualifié par score nom, 1 seul reste
+  - `"by_active_succession"` : > 1 candidat post-gate partagent (SIREN,
+    adresse normalisée), ≥ 1 actif → on retient l'actif le plus récent
+    (`date_creation` desc, tie-break SIRET asc pour déterminisme)
+
+- **Cascade 5 étapes factorisée** dans `disambiguateFallbackCandidates`
+  (helper privé) : `single_after_gate` → `by_name_score` → `by_active_succession`
+  → `by_rpps_signal` → `ambiguous`. Préserve strictement les cas pré-V0.13.1
+  (test "2 labos co-localisés ex-aequo → ambiguous" reste vert).
+
+- **Tie-breaker sur `compareByScoreDesc`** : tri `score_adresse desc → score_nom desc
+  → siret asc` pour stabilité des snapshots quand 2 candidats ont des scores
+  d'adresse identiques. N'affecte pas les cas single-candidat (Chérest 920028685
+  ferme, Franco-Britannique 920000643 actif : non-régressions gardées par tests).
+
+- **`console.warn` audit ops** quand le name filter élimine TOUS les
+  candidats post-gate NAF (cas pathologique : gate NAF anormalement
+  permissif). Préfixe `[france-data-mcp]` conforme convention lib OSS.
+
+- **5 nouveaux tests** dans `cross-source.test.ts > "Resolver V2 fallback géo"` :
+  - Raffinement #2 : CHOUAIEB hors-sujet écarté par score nom
+  - Raffinement #3 : succession SIRET fermé+actif retient l'actif
+  - Cas combiné EYLAU Victor Hugo (3 candidats : 2 EYLAU + 1 CHOUAIEB)
+  - Garde-fou `score_nom: null` (raison_sociale_ul absente → non disqualifié)
+  - Garde-fou Chérest non-régression chemin RPPS direct (verdict ferme préservé)
+
+### Changed
+
+- **Helper `computeNameScore(finessNomNorm, nomComplet)`** : factorise les
+  2 sites historiques de calcul score nom (`mergeOrInsertDinumCandidate` +
+  bloc d'injection fallback). Garantit la sémantique partagée "nomComplet
+  absent → score null" sans dérive.
+
+- **Helper `compareNullableDesc(a, b)`** : factorise le tri descendant
+  null-tolérant (nulls en queue). Utilisé 2× dans `compareByScoreDesc`
+  pour la double comparaison `score_adresse` puis `score_nom`.
+
+- **Helper `disambiguateFallbackCandidates(candidates, rppsSirets)`** :
+  extraction de la cascade 5 étapes hors de `tryAddressFallback` (était
+  ~25 lignes inline, devient ~50 lignes lisibles avec invariants explicites).
+
+### Type contract (note)
+
+`SiretCandidate.score_nom` est **un champ requis** (non-optionnel) ajouté
+au type public exporté. Les consommateurs npm qui construisent un littéral
+`SiretCandidate` voient un break TS strict. Lib en V0.x (semver libre) →
+acceptable mais documenté.
+
 ## [0.13.0] — 2026-05-21
 
 ### Added — Resolver V2 (chantier majeur croisement FINESS↔SIRENE)
