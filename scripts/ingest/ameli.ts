@@ -2,6 +2,8 @@ import "./load-env.js";
 import * as fs from "node:fs";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
+import { parseRpcCount, withTimeout } from "../../src/core/index.js";
+import { missingRpcHint } from "../../src/core/retry-transient.js";
 import {
   type CommuneIndex,
   type IndexedCommune,
@@ -18,9 +20,11 @@ import {
   getNonEmpty,
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
+  isForceReingestEnv,
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
+  runKeysetRpc,
   shortCircuitIfSameChecksum,
   writeIngestLogFailureFallback,
   writeIngestLogSuccessSafe,
@@ -53,6 +57,39 @@ const MAX_ROWS = 600_000;
 
 const BATCH_SIZE = 500;
 
+/**
+ * Rows par lot `ban_join` (keyset). Aligné sur le pattern RPPS prouvé prod
+ * (`docs/plans/ban-join.md` §3.2 : ~4,8 s/lot constant début↔fin). Le volume
+ * Ameli (~462 K vs ~2,23 M RPPS) tient largement dans le budget
+ * `statement_timeout='55s'` de `ingest_apply_ameli_ban_join_batch` avec ce
+ * lotissement (~46 lots × ~1 s/lot estimé Ameli, à valider en prod).
+ */
+const BAN_JOIN_BATCH_SIZE = 10_000;
+
+/**
+ * Borne ANTI-HANG des lectures RPC (`ameli_measure_ban_to_geocode`). Un
+ * `supabase.rpc()` brut sur socket figé pendrait jusqu'au kill GitHub Actions
+ * sans `partial` ni trace `ingest_log`. 60 s : large pour un COUNT/DISTINCT
+ * server-side (statement_timeout fonction 55 s) sans laisser un hang réel non
+ * borné. Aligné sur `RPC_READ_TIMEOUT_MS` RPPS.
+ */
+const RPC_READ_TIMEOUT_MS = 60_000;
+
+/**
+ * Borne ANTI-HANG par lot de `runKeysetRpc` au step `ban_join`. 120 s : large
+ * au-dessus d'un lot légitime (statement_timeout serveur 55 s + réseau), borne
+ * un socket figé. Aligné sur `RPC_BATCH_TIMEOUT_MS` RPPS.
+ */
+const RPC_BATCH_TIMEOUT_MS = 120_000;
+
+/**
+ * Borne ANTI-HANG de la RPC fail-loud `ingest_analyze_ameli_staging`. ANALYZE
+ * : statement_timeout serveur côté Postgres + marge réseau. Aligné sur
+ * `RPC_ANALYZE_TIMEOUT_MS` RPPS (un hang sur cette RPC tuerait tout le cron
+ * sans `partial` car elle est fail-loud).
+ */
+const RPC_ANALYZE_TIMEOUT_MS = 120_000;
+
 /** Distinct (cp,ville) keys tracked in the unmatched top-N report (memory bound). */
 const SAMPLE_CAP = 200;
 
@@ -75,6 +112,45 @@ const UNMATCHED_LOCALITY_THRESHOLD = 0.08;
  * regression.
  */
 const STRUCTURAL_FAIL_THRESHOLD = 0.01;
+
+/**
+ * Helper local fail-loud + anti-hang pour les RPC sans payload (ANALYZE).
+ * Dupliqué à dessein de `rpps.ts:callRpcFailLoud` — même rationale que
+ * `AMELI_TRANSIENT_REBUILD_CODES` (ne PAS modifier rpps.ts code critique
+ * stabilisé pour factoriser un helper court ; factorisation = dette mineure
+ * si `/simplify` la juge nécessaire). Préfixe log `[ameli]` au lieu de
+ * `[rpps]` — sinon byte-identique.
+ *
+ * Un `supabase.rpc()` brut sur socket figé pendrait jusqu'au kill GitHub
+ * Actions sans `partial` ni `ingest_log`. `TimeoutError` (socket figé) OU
+ * `{ error }` PostgREST → `IngestError("validate")` fail-loud.
+ */
+async function callRpcFailLoud(
+  supabase: SupabaseClient,
+  rpcName: string,
+  timeoutMs: number,
+  errPrefix: string,
+): Promise<void> {
+  let res: Awaited<ReturnType<typeof supabase.rpc>>;
+  try {
+    res = await withTimeout(supabase.rpc(rpcName), timeoutMs, rpcName);
+  } catch (e) {
+    if (e instanceof Error && e.name === "TimeoutError") {
+      console.error(
+        `[france-data-mcp][ameli] ${rpcName} timed out after ${timeoutMs}ms — anti-silent-hang bound, failing loud`,
+      );
+      throw new IngestError(
+        "validate",
+        `${errPrefix}: timed out after ${timeoutMs}ms (anti-silent-hang bound)`,
+      );
+    }
+    console.error(`[france-data-mcp][ameli] ${rpcName} threw a non-timeout error, re-raising`);
+    throw e;
+  }
+  if (res.error) {
+    throw new IngestError("validate", `${errPrefix}: ${res.error.message}`);
+  }
+}
 
 interface AmeliStagingRow {
   nom: string;
@@ -127,7 +203,24 @@ async function main(): Promise<void> {
     log.csv_size_bytes = downloaded.sizeBytes;
     log.csv_sha256 = downloaded.sha256;
 
-    if (await shortCircuitIfSameChecksum(log, lastSha, downloaded.sha256, "ameli")) return;
+    // FORCE_REINGEST (input `force` du workflow_dispatch / env locale) →
+    // bypass du short-circuit checksum, marque `log.forced=true` (cf.
+    // CLAUDE.md V0.12.2 « marqueur forced dans ingest_log »). Sémantique
+    // détaillée + tolérance "1"/"true" : JSDoc de isForceReingestEnv.
+    // Chantier C 2026-05-21 : câblage manquant côté Ameli (asymétrie avec
+    // RPPS rpps.ts:256). Sans ça, après backfill BAN, le ban_join du cron
+    // ne tournerait JAMAIS tant que le CSV Ameli reste byte-identique
+    // — bloquant pour appliquer le cache enrichi.
+    if (
+      await shortCircuitIfSameChecksum(
+        log,
+        lastSha,
+        downloaded.sha256,
+        "ameli",
+        isForceReingestEnv(process.env.FORCE_REINGEST),
+      )
+    )
+      return;
 
     // 2. PRE-VALIDATE
     await preValidateFile(downloaded.filePath, {
@@ -261,6 +354,174 @@ async function main(): Promise<void> {
           `Unmatched-locality rate ${fmt(unmatchedRate)} above ${fmt(UNMATCHED_LOCALITY_THRESHOLD)} — likely INSEE commune drift; refresh geo.api.gouv index or update Ameli source`,
         );
       }
+    }
+
+    // 5b. ANALYZE STAGING — stats fraîches après le bulk INSERT (~462 K rows
+    // dans une table fraîchement CREATE). Sans ça le planner attaque la
+    // jointure cache (5d) aveugle → seq scan plein de geocoded_addresses par
+    // batch → 57014 en zone dense (gotcha CLAUDE.md RPPS C2). Pratique
+    // Postgres canonique « bulk INSERT puis ANALYZE avant de requêter ».
+    // Fail-loud : un ANALYZE qui throw signale une régression grave
+    // (statement_timeout server-side dépassé, lock contesté) — ne pas swap.
+    await callRpcFailLoud(
+      supabase,
+      "ingest_analyze_ameli_staging",
+      RPC_ANALYZE_TIMEOUT_MS,
+      "Failed to ANALYZE annuaire_ameli_staging before ban_join",
+    );
+
+    // 5c. PHASE 1 MESURE — chiffre le delta BAN à chaque cron pour dimensionner
+    // la future automatisation (Phase 2, cf. backlog). BEST-EFFORT : un échec
+    // (timeout, RPC absente, contrat cassé) → warn + log NULL + persistence du
+    // message dans `log.error_message` (audit trail DB, pas seulement console).
+    // Mesuré pre-ban_join. Locales préservent une mesure partielle (#1 reste
+    // posé si #2 throw). Réutilise les colonnes ingest_log ajoutées par
+    // 20260520T000000 (partagées Ameli/RPPS, source distingue).
+    let eligibleDistinct: number | null = null;
+    let toGeocodeDistinct: number | null = null;
+    let measureFailedReason: string | null = null;
+    try {
+      const { data: deltaData, error: deltaErr } = await withTimeout(
+        supabase.rpc("ameli_measure_ban_to_geocode", {
+          p_source_table: "annuaire_ameli_staging",
+        }),
+        RPC_READ_TIMEOUT_MS,
+        "ameli_measure_ban_to_geocode",
+      );
+      if (deltaErr) {
+        measureFailedReason = `BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}`;
+        console.warn(`[france-data-mcp][ameli] ${measureFailedReason}`);
+      } else {
+        const row = (
+          deltaData as Array<{
+            eligible_distinct: number | string;
+            to_geocode_distinct: number | string;
+          }> | null
+        )?.[0];
+        eligibleDistinct = parseRpcCount(
+          row?.eligible_distinct,
+          "ameli_measure_ban_to_geocode.eligible_distinct",
+        );
+        toGeocodeDistinct = parseRpcCount(
+          row?.to_geocode_distinct,
+          "ameli_measure_ban_to_geocode.to_geocode_distinct",
+        );
+        console.log(
+          `[france-data-mcp][ameli] BAN delta measure: ${eligibleDistinct} distinct eligible addresses in staging, ${toGeocodeDistinct} not yet in cache (Phase 2 size)`,
+        );
+      }
+    } catch (err) {
+      // Couvre TimeoutError (légitime best-effort) + Error de parseRpcCount
+      // (contract regression structurel) + TypeError programmer-bug. Persiste
+      // le message dans log.error_message pour audit DB — sinon Phase 2 serait
+      // dimensionnée sur des NULL sans signal opérationnel (cf. silent-failure
+      // hunter H-3 Passe 1). console.error (pas warn) car couvre la classe
+      // structurelle indistinguable du timeout best-effort à ce niveau —
+      // l'audit DB tranche post-mortem.
+      measureFailedReason = `BAN delta measurement failed (best-effort, run continues): ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      console.error(`[france-data-mcp][ameli] ${measureFailedReason}`);
+    }
+    log.ban_eligible_distinct = eligibleDistinct;
+    log.ban_to_geocode_distinct = toGeocodeDistinct;
+    if (measureFailedReason !== null) {
+      log.error_message = log.error_message
+        ? `${log.error_message}; ${measureFailedReason}`
+        : measureFailedReason;
+    }
+
+    // 5d. BAN_JOIN — pose ensembliste du cache `geocoded_addresses` (partagé
+    // avec RPPS, rempli par `ban-backfill.mjs` hors cron) dans
+    // `annuaire_ameli_staging`. Jumeau STRICT du step 5c RPPS, prédicat
+    // éligibilité simplifié (Ameli n'a pas de FINESS join → un seul état non
+    // précis = `commune_centroid` AND adresse NOT NULL). Curseur KEYSET (cf.
+    // docs/plans/ban-join.md §3.2 — sentinelle re-scan quadratique → 57014
+    // fin de parcours prouvé prod RPPS ; keyset linéaire constant).
+    //
+    // `expectedTotal = stats.inserted` (borne SÛRE pour `maxIterations`) : la
+    // RPC itère keyset, le filtre WHERE narrow côté SQL mais la borne JS doit
+    // couvrir l'extrême haut. Un over-estimate ne pénalise pas (loop sort sur
+    // `last_id IS NULL` page vide terminale).
+    //
+    // Skip si `eligibleDistinct=0` (cas dégénéré). `eligibleDistinct=null`
+    // (mesure cassée) NE skip PAS — on tente le ban_join (il convergera vite
+    // si table effectivement vide d'éligibles).
+    if (eligibleDistinct !== 0) {
+      const { totalApplied: banApplied, iterations: banIterations } = await runKeysetRpc(
+        supabase,
+        "ingest_apply_ameli_ban_join_batch",
+        { p_limit: BAN_JOIN_BATCH_SIZE },
+        stats.inserted,
+        RPC_BATCH_TIMEOUT_MS,
+      );
+      console.log(
+        `[france-data-mcp][ameli][ban_join] ${banApplied} posed in ${banIterations} batches (eligible_distinct=${eligibleDistinct ?? "n/a"})`,
+      );
+      // Sentinelle de cohérence (≠ RPPS evaluateBanJoinOutcome : pattern
+      // « warn-only, l'opérateur décide » au lieu de `partial`, divergence
+      // SÉMANTIQUE assumée — RPPS bloque l'audit DB sur 0-posé, Ameli reste
+      // success+warn car le repli commune_centroid sert encore l'utilisateur
+      // pendant l'enquête). MAIS on persiste `log.error_message` (audit DB)
+      // et `log.status='partial'` quand la mesure ne sait rien (eligibleDistinct
+      // null ET 0 posé = double opacité). Cf. silent-failure hunter C-1/C-2/C-3.
+      if (banApplied === 0) {
+        const { count: cacheAccepted, error: cacheErr } = await supabase
+          .from("geocoded_addresses")
+          .select("address_key", { count: "exact", head: true })
+          .eq("accepted", true);
+        let outcomeMessage: string | null = null;
+        let shouldMarkPartial = false;
+
+        // ORDRE D'ÉVALUATION (review P2 F1) : `eligibleDistinct === null`
+        // (mesure cassée) prime sur `cacheErr` — sinon une cascade
+        // « mesure cassée + cache sanity cassée » serait warn-only alors
+        // qu'elle représente une TRIPLE opacité (mesure morte + ban_join 0
+        // + cache inaudible) qui mérite `partial`. Le message inclut le
+        // détail du cacheErr quand applicable, sans inversion silencieuse.
+        const cacheTail = cacheErr
+          ? `; cache sanity also failed: ${cacheErr.message}`
+          : `; cache has ${cacheAccepted ?? 0} accepted entries`;
+
+        if (eligibleDistinct === null) {
+          // Mesure cassée + 0 posé : double opacité (triple si cacheErr).
+          // partial → signal ops dans ingest_log (≠ message éphémère console).
+          outcomeMessage = `ban_join posed 0 rows AND measure failed → eligibility unknown${cacheTail}`;
+          shouldMarkPartial = true;
+        } else if (eligibleDistinct > 0 && cacheErr) {
+          // Mesure dit éligibles + cache illisible + 0 posé : parity break
+          // POSSIBLE mais on ne peut pas le confirmer (cache muet).
+          // partial : on signale qu'on n'a pas pu prouver la légitimité.
+          outcomeMessage = `ban_join posed 0 rows; ${eligibleDistinct} eligible measured but cache sanity unverifiable: ${cacheErr.message}`;
+          shouldMarkPartial = true;
+        } else if (eligibleDistinct > 0 && (cacheAccepted ?? 0) > 0) {
+          // Mesure dit éligibles + cache rempli + 0 posé = parity break suspect.
+          outcomeMessage = `ban_join posed 0 rows but ${eligibleDistinct} distinct eligible + ${cacheAccepted} accepted cache — suspect parity break or empty intersection`;
+          shouldMarkPartial = true;
+        } else if (eligibleDistinct > 0) {
+          // eligibleDistinct > 0 + cacheErr false + cacheAccepted=0 : cache
+          // vide légitime, backfill jamais lancé. Warn-only (état attendu
+          // pré-backfill, le cron continue normalement avec repli centroïde).
+          outcomeMessage =
+            "ban_join posed 0 rows: cache geocoded_addresses has 0 accepted entries — backfill never ran or wiped";
+        } else if (cacheErr) {
+          // eligibleDistinct === 0 (skip ban_join déjà décidé plus haut) ne
+          // tombe pas ici. Cas restant : `eligibleDistinct === 0` est filtré
+          // par `if (eligibleDistinct !== 0)`. Donc inatteignable.
+          // Pour le défensive : `cacheErr` seul sans contexte mesure → warn.
+          outcomeMessage = `ban_join posed 0 rows; cache sanity check failed (non-blocking): ${cacheErr.message}`;
+        }
+
+        if (outcomeMessage !== null) {
+          console.warn(`[france-data-mcp][ameli][ban_join] ${outcomeMessage}`);
+          log.error_message = log.error_message
+            ? `${log.error_message}; ${outcomeMessage}`
+            : outcomeMessage;
+          if (shouldMarkPartial) log.status = "partial";
+        }
+      }
+    } else {
+      console.log("[france-data-mcp][ameli][ban_join] 0 eligible addresses (measure), skipped");
     }
 
     // 6. ATOMIC SWAP

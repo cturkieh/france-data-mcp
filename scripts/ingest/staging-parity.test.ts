@@ -144,17 +144,95 @@ describe("staging-create est un superset des index prod (annuaire_ameli)", () =>
 
     // Defense "fail loud" : ce garde-fou ne compare QUE la liste de colonnes
     // clé. Un index partiel (`WHERE ...`) ou couvrant (`INCLUDE (...)`) sur
-    // annuaire_ameli normaliserait à la même clé que sa version sans
-    // clause → collision silencieuse (prod ≠ staging mais test vert). Aucun
-    // index actuel n'utilise WHERE/INCLUDE ; si un futur en introduit un, ce
-    // test échoue ICI pour forcer l'upgrade du garde-fou AVANT le merge.
+    // annuaire_ameli normaliserait à la même clé que sa version sans clause
+    // → collision silencieuse (prod ≠ staging mais test vert). Plutôt que
+    // bloquer TOUT WHERE/INCLUDE, on whitelist les index connus dont la
+    // clause est gardée par une assertion DÉDIÉE plus bas (forme positive).
+    // Tout NOUVEL index `(... WHERE ...)` ou `(... INCLUDE ...)` non
+    // whitelisté échoue ici pour forcer l'auteur à ajouter sa garde dédiée
+    // AVANT de merger.
     const sql = allMigrationsSql();
-    const richIndex =
-      /create\s+(?:unique\s+)?index\b[^;]*?\bon\s+(?:public\.)?annuaire_ameli\b[^;]*?\b(where|include)\b/i;
+    const richIndexRe =
+      /create\s+(?:unique\s+)?index\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)[^;]*?\bon\s+(?:public\.)?annuaire_ameli\b[^;]*?\b(where|include)\b[^;]*;/gi;
+    /**
+     * Index rich (WHERE/INCLUDE) connus + audités. CHACUN exige une assertion
+     * dédiée plus bas qui compare la clause prod ↔ staging-create. Ajouter à
+     * cette liste = engagement à écrire la garde correspondante.
+     */
+    const KNOWN_RICH_AMELI_INDEXES = new Set([
+      "annuaire_ameli_geog_precise_gist", // Chantier C — prédicat ban_address (garde-fou dédié ci-dessous)
+    ]);
+    const unknownRich = [...sql.matchAll(richIndexRe)]
+      .map((m) => m[1])
+      .filter((name) => !KNOWN_RICH_AMELI_INDEXES.has(name));
     expect(
-      richIndex.test(sql),
-      "Un index annuaire_ameli utilise WHERE/INCLUDE : indexColumnLists ne compare que la clé → upgrade staging-parity (capturer la clause) avant de merger ce nouvel index.",
-    ).toBe(false);
+      unknownRich,
+      `Index annuaire_ameli avec WHERE/INCLUDE non whitelistés : ${unknownRich.join(", ")} — indexColumnLists ne compare que la clé → ajouter à KNOWN_RICH_AMELI_INDEXES + écrire la garde dédiée comparant la clause prod ↔ staging-create AVANT de merger.`,
+    ).toEqual([]);
+  });
+
+  it("tout GiST annuaire_ameli_staging(geog) PARTIEL porte le prédicat `geom_source = 'ban_address'`", () => {
+    // Chantier C 2026-05-21 — symétrique du garde-fou RPPS (ci-dessous) :
+    // un GiST partiel `annuaire_ameli_geog_precise_gist` posé sur la prod
+    // doit avoir son JUMEAU staging-create avec un prédicat byte-identique.
+    // Sinon le RENAME du swap reverte le partiel staging en index "anonyme"
+    // sans clause → la branche `precise` future des tools radius perdrait
+    // son index → 57014 zone dense (cluster co-localisé au centroïde
+    // commune, même classe de bug que RPPS 2026-05-19).
+    //
+    // ≠ assertion RPPS : Ameli a 2 GiST geog en staging (le global hérité
+    // V0.4 phase 1 + le partiel Chantier C). On asserte la présence du
+    // partiel ET son prédicat, on ne demande PAS que TOUT GiST geog soit
+    // partiel (le global reste légitime tant que le backfill BAN n'a pas
+    // peuplé majoritairement le partiel).
+    //
+    // Lecteur STRICT du module + `stripComments: true` (silent-failure
+    // hunter M-3 Passe 1) : ferme le faux vert « prédicat en commentaire
+    // `-- CREATE INDEX ... WHERE geom_source = 'ban_address';` » qu'un
+    // mainteneur pourrait introduire en croyant doc inoffensive — le
+    // lecteur lâche local le matcherait comme une vraie ligne.
+    const stagingBody = latestFunctionBodyStrict(
+      allMigrationsSql(),
+      "ingest_create_annuaire_ameli_staging",
+      { stripComments: true },
+    );
+    expect(
+      stagingBody.length,
+      "def ingest_create_annuaire_ameli_staging introuvable via le lecteur STRICT — garde-fou inerte, investiguer AVANT de merger.",
+    ).toBeGreaterThan(0);
+
+    const partialPredicate = /where\s+geom_source\s+=\s+'ban_address'/i;
+    const geogGistOnStaging =
+      /create\s+index\s+(?:if\s+not\s+exists\s+)?([a-z_][a-z0-9_]*)\s+on\s+(?:public\.)?annuaire_ameli_staging\s+using\s+gist\s*\(\s*geog\s*\)([^;]*);/gi;
+    const matches = [...stagingBody.matchAll(geogGistOnStaging)];
+
+    const precise = matches.filter((m) => m[1] === "annuaire_ameli_staging_geog_precise_gist");
+    expect(
+      precise.length,
+      "ingest_create_annuaire_ameli_staging ne crée PAS l'index `annuaire_ameli_staging_geog_precise_gist` → la branche precise des tools radius perdra son index au prochain swap.",
+    ).toBe(1);
+    expect(
+      partialPredicate.test(precise[0][2]),
+      `annuaire_ameli_staging_geog_precise_gist SANS le prédicat partiel \`WHERE geom_source = 'ban_address'\` → swap le transforme en GiST global → la branche precise ramène le cluster commune_centroid → 57014 zone dense. Trouvé : ${precise[0][0].replace(/\s+/g, " ").trim()}`,
+    ).toBe(true);
+
+    // Parité consommateur croisée : la migration prod (20260521T100000) et la
+    // staging-create doivent porter le MÊME prédicat. Capture le prédicat sur
+    // chaque côté puis compare normalisé.
+    const prodSql = allMigrationsSql();
+    const prodGistRe =
+      /create\s+index\s+(?:if\s+not\s+exists\s+)?annuaire_ameli_geog_precise_gist\s+on\s+(?:public\.)?annuaire_ameli\s+using\s+gist\s*\(\s*geog\s*\)([^;]*);/i;
+    const prodMatch = prodSql.match(prodGistRe);
+    expect(
+      prodMatch,
+      "Migration prod `annuaire_ameli_geog_precise_gist` introuvable → la branche precise des tools radius n'a aucun index spatial → 57014 zone dense.",
+    ).not.toBeNull();
+
+    const normalize = (s: string) => s.replace(/\s+/g, " ").toLowerCase().trim();
+    expect(
+      normalize(prodMatch?.[1] ?? ""),
+      "Prédicat de `annuaire_ameli_geog_precise_gist` divergent entre prod et staging-create → swap perdra le prédicat → re-régression 57014.",
+    ).toBe(normalize(precise[0][2]));
   });
 });
 

@@ -6,6 +6,7 @@ vi.mock("../storage/supabase.js", () => ({
 }));
 
 import {
+  _resetAmeliGeoPrecisionMissingWarning,
   getAmeliBySpecialiteDept,
   getAmeliInRadius,
   listAmeliSpecialites,
@@ -37,6 +38,7 @@ const sampleRow = {
 
 beforeEach(() => {
   mockRpc.mockReset();
+  _resetAmeliGeoPrecisionMissingWarning();
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -80,6 +82,46 @@ describe("getAmeliInRadius", () => {
     const out = await getAmeliInRadius({ center: { lat: 49.77, lon: 4.72 }, radiusKm: 5 });
     expect(out.results[0]?.coords).toBeNull();
     expect(out.results[0]?.geo_precision).toBeUndefined();
+  });
+
+  it("Chantier C — geom_source='ban_address' → geo_precision='adresse'", async () => {
+    // RPC post-20260521T103000 expose geom_source. Une row BAN-géocodée doit
+    // remonter `adresse` (≠ centroide_commune ~3 km) sinon le caller LLM tire
+    // de mauvaises conclusions sur les distances.
+    mockRpc.mockResolvedValue({
+      data: [{ ...sampleRow, geom_source: "ban_address" }],
+      error: null,
+    });
+    const out = await getAmeliInRadius({ center: { lat: 49.77, lon: 4.72 }, radiusKm: 5 });
+    expect(out.results[0]?.geo_precision).toBe("adresse");
+  });
+
+  it("Chantier C — geom_source='commune_centroid' explicite → geo_precision='centroide_commune'", async () => {
+    mockRpc.mockResolvedValue({
+      data: [{ ...sampleRow, geom_source: "commune_centroid" }],
+      error: null,
+    });
+    const out = await getAmeliInRadius({ center: { lat: 49.77, lon: 4.72 }, radiusKm: 5 });
+    expect(out.results[0]?.geo_precision).toBe("centroide_commune");
+  });
+
+  it("Chantier C — fallback centroide_commune + warn 1-shot quand geom_source absent (RPC pré-migration)", async () => {
+    // Fenêtre transitoire code↔migration : sampleRow ne porte pas
+    // `geom_source` → fallback `centroide_commune` (mentir vers le bas, jamais
+    // vers le haut). MAIS doit émettre 1× un warn console pour signaler à
+    // l'opérateur que le chantier C est INVISIBLE côté tools (silent-failure
+    // hunter H-2 Passe 1).
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockRpc.mockResolvedValue({ data: [sampleRow, sampleRow], error: null });
+    const out = await getAmeliInRadius({ center: { lat: 49.77, lon: 4.72 }, radiusKm: 5 });
+    expect(out.results[0]?.geo_precision).toBe("centroide_commune");
+    expect(out.results[1]?.geo_precision).toBe("centroide_commune");
+    // 1-shot : même 2 rows sans geom_source → 1 seul warn (pas spam).
+    const matching = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("[ameli-db] RPC returned a row without `geom_source`"),
+    );
+    expect(matching.length, "1 warn 1-shot attendu pour le fallback geom_source").toBe(1);
+    warnSpy.mockRestore();
   });
 
   it("flags truncation when RPC returns limit+1 rows", async () => {

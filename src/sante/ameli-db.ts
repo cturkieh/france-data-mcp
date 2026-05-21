@@ -281,6 +281,49 @@ interface RawAmeliRow {
   telephone: string | null;
   geom: { type: "Point"; coordinates: [number, number] } | null;
   distance_meters?: number | null;
+  /**
+   * Chantier C 2026-05-21 — exposé par les RPC depuis 20260521T103000.
+   * Absent (`undefined`) quand la RPC n'a pas encore été redéployée (fenêtre
+   * code↔migration) → on retombe sur `centroide_commune` AVEC un warn 1-shot
+   * (cf. `ameliGeoPrecisionFromSource`).
+   */
+  geom_source?: "commune_centroid" | "ban_address";
+}
+
+/**
+ * Émis 1× par module load quand on détecte une row dont `geom_source` est
+ * absent — signal que la RPC `ameli_in_radius`/`ameli_by_specialite_dept`
+ * tourne en version pré-`20260521T103000` (migration pas encore appliquée),
+ * OU drift de contrat. SANS ce signal, le chantier C est totalement INVISIBLE
+ * côté tools MCP (fallback `centroide_commune` masque le ban_address réel en
+ * base) — silent-failure-hunter H-2 Passe 1.
+ *
+ * Module-level flag réinitialisable par `_resetAmeliGeoPrecisionWarning` (test).
+ */
+let _ameliGeoPrecisionMissingWarned = false;
+
+/** Test-only — reset le flag du warn 1-shot fallback geo_precision. */
+export function _resetAmeliGeoPrecisionMissingWarning(): void {
+  _ameliGeoPrecisionMissingWarned = false;
+}
+
+/**
+ * Mappe `RawAmeliRow.geom_source` vers le type public `PerResultGeoPrecision`.
+ * `undefined` (RPC pré-20260521T103000) ou valeur drift retombe sur
+ * `centroide_commune` (mentir vers le bas, jamais vers le haut). 1ʳᵉ
+ * occurrence d'un `undefined` non-attendu → console.warn (fail-loud signal).
+ */
+function ameliGeoPrecisionFromSource(
+  source: RawAmeliRow["geom_source"],
+): "adresse" | "centroide_commune" {
+  if (source === "ban_address") return "adresse";
+  if (source === undefined && !_ameliGeoPrecisionMissingWarned) {
+    _ameliGeoPrecisionMissingWarned = true;
+    console.warn(
+      "[france-data-mcp][ameli-db] RPC returned a row without `geom_source` — RPC pre-20260521T103000 OR contract drift; all coords fall back to centroide_commune until fixed",
+    );
+  }
+  return "centroide_commune";
 }
 
 function toAmeliResult(row: RawAmeliRow): AmeliResult {
@@ -311,7 +354,7 @@ function toAmeliResult(row: RawAmeliRow): AmeliResult {
     },
     coords,
     distance_km: distance,
-    ...(coords ? { geo_precision: "centroide_commune" as const } : {}),
+    ...(coords ? { geo_precision: ameliGeoPrecisionFromSource(row.geom_source) } : {}),
     telephone: trimOrNull(row.telephone),
     conventions: {
       secteur_code: row.secteur_conventionnel_code,

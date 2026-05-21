@@ -4,6 +4,108 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — Chantier C : géocodage Ameli (centroïde commune → adresse précise)
+
+### Added — `geom_source` Ameli + `ban_join` cron Ameli
+
+Les 4 tools Ameli (`professionnels_in_radius`, `professionnels_par_specialite_dept`,
+`centres_sante_in_radius`, `centres_sante_by_finess`) servaient des coordonnées
+au **centroïde commune** (~3 km). Le tri par distance et les recherches en
+rayon court étaient inutilisables en zone dense (Paris notamment) — même
+classe de bug que côté RPPS pré-V0.12 (`ban_join`). Cf. plan détaillé
+`docs/plans/ameli-geocoding.md`.
+
+**Cadrage prouvé prod 2026-05-21** : sur 462 668 PS Ameli, 100 % ont les 3
+segments de clé (adresse + CP + INSEE) → tous géocodables. Le cache
+`geocoded_addresses` partagé avec RPPS contient déjà 295 660 entries
+acceptées dont **33 % matchent un échantillon Ameli aléatoire** → ~150 K PS
+seront géocodés **immédiatement** à la 1ʳᵉ application, sans backfill BAN
+préalable. Option A (cache partagé) retenue contre Option B (cache dédié) —
+zéro migration cache, croissance organique. Cf. `docs/plans/ameli-geocoding.md`
+§ « Décision Option A ».
+
+**Architecture** : clone fidèle du pattern `ban_join` keyset RPPS prouvé prod
+(1 065 291 rows posés run #13). Les 3 RPC du pipeline Ameli sont des jumeaux
+stricts des RPC RPPS, prédicat éligibilité simplifié (`commune_centroid AND
+adresse IS NOT NULL` — pas de FINESS join côté Ameli) :
+
+- `ingest_analyze_ameli_staging()` : `ANALYZE` post-bulk-INSERT, avant le
+  `ban_join` (sans stats fraîches, la jointure cache peut basculer en seq
+  scan plein → 57014 zone dense).
+- `ingest_apply_ameli_ban_join_batch(p_after, p_limit)` : `UPDATE` ensembliste
+  cache → staging, curseur keyset (jamais sentinelle — cf. gotcha CLAUDE.md).
+- `ameli_measure_ban_to_geocode()` : observabilité best-effort, logge le delta
+  cache dans `ingest_log.ban_eligible_distinct` + `ban_to_geocode_distinct`
+  (réutilise les colonnes RPPS 20260520T000000, partagées via `source`).
+
+Toutes en `SET statement_timeout='55s'` (< cap passerelle PostgREST 60 s,
+gardé par `enrichment-statement-timeout.test.ts` étendu).
+
+### Added — colonne `annuaire_ameli.geom_source` + GiST PARTIEL ban_address
+
+- `ALTER TABLE annuaire_ameli ADD COLUMN geom_source TEXT NOT NULL DEFAULT
+  'commune_centroid' CHECK (… IN ('commune_centroid', 'ban_address'))`.
+- `CREATE INDEX annuaire_ameli_geog_precise_gist ON annuaire_ameli USING GIST
+  (geog) WHERE geom_source = 'ban_address'` — jumeau de `rpps_geog_precise_gist`,
+  prêt pour la future branche `precise` des tools radius (un GiST global ferait
+  remonter le cluster co-localisé `commune_centroid` → 57014 zone dense,
+  gotcha CLAUDE.md prouvé prod RPPS 2026-05-19).
+- `ingest_create_annuaire_ameli_staging()` mirrore prod ↔ staging : 9 index
+  (5 base + 2 composites V0.4.1 + 1 covering V0.9.4 + 1 GiST partiel
+  Chantier C). Sans ce miroir, le RENAME du swap reverte le partiel.
+- Gardes-fou étendus : `staging-parity.test.ts` whiteliste explicitement le
+  GiST partiel et assert prédicat byte-identique prod ↔ staging-create.
+
+### Added — exposition `geo_precision` au caller MCP
+
+- `ameli_in_radius` et `ameli_by_specialite_dept` retournent `geom_source TEXT`.
+- `RawAmeliRow.geom_source` mappé vers `PerResultGeoPrecision = "adresse" |
+  "centroide_commune"` (jamais "centroide_commune" quand la coord est BAN).
+- Fenêtre transitoire code↔migration : `geom_source` absent → fallback
+  `"centroide_commune"` conservateur (on ment vers le bas, jamais vers le haut).
+- 3 tests unitaires : HIT BAN, MISS centroïde explicite, RPC pré-migration
+  (fallback).
+
+### Added — étape `ban_join` dans le cron Ameli (`scripts/ingest/ameli.ts`)
+
+3 sous-steps insérés entre `validate coherence` et `atomic swap` :
+
+1. **5b** `ingest_analyze_ameli_staging` (fail-loud)
+2. **5c** `ameli_measure_ban_to_geocode` (best-effort, logue dans `ingest_log`)
+3. **5d** `runKeysetRpc("ingest_apply_ameli_ban_join_batch", …)` — pattern
+   keyset rodé prod RPPS
+
+Aucun appel BAN API dans le cron (dead-end prouvé : `CREATE INDEX` lourd ou
+géocodage synchrone via PostgREST = cap passerelle 60 s structurel). Le cron
+**applique seulement** le cache existant. Le re-remplissage du cache reste
+manuel (`ban-backfill.mjs` adapté Ameli, hors cron — même dette que RPPS).
+
+### Backfill manuel post-merge (action ops requise)
+
+Pour viser un hit rate immédiat > 80 % au lieu de 33 % à la 1ʳᵉ application,
+lancer `ban-backfill.mjs` adapté Ameli après merge (~52 min pour ~313 K
+adresses, hors cron). Décrit en P1 du backlog (Phase 2 BAN automatisation).
+
+### Migrations (à appliquer manuellement via dashboard SQL editor)
+
+- `20260521T100000_ameli_geom_source.sql`
+- `20260521T101000_ingest_create_annuaire_ameli_staging_with_geom_source.sql`
+- `20260521T102000_ameli_ban_join_and_measure.sql`
+- `20260521T103000_ameli_rpc_expose_geom_source.sql`
+
+Naming T-format → CLI Supabase SAUTE (cf. gotcha CLAUDE.md V0.12.3). Le
+fichier consolidé `dist/cadrage/apply-prod.sql` permet de coller les 4 en
+une seule passe.
+
+### Acceptance prod (post-application)
+
+- `SELECT count(*) FROM annuaire_ameli WHERE geom_source = 'ban_address'` →
+  ~150 K immédiat (hit rate 33 % cache existant), ≥ 350 K post-backfill.
+- `professionnels_in_radius` Paris 500 m profession=`10` : distances variées
+  (pas toutes ~3 km), `geo_precision='adresse'` dominant.
+- Cron Ameli complet < 65 min.
+- `ingest_log` : `ban_eligible_distinct` + `ban_to_geocode_distinct` non NULL.
+
 ## [0.13.3] — 2026-05-21 (KNN GiST sur `rpps_in_radius` — fix timeout zone dense)
 
 ### Fixed — Timeout `professionnels_rpps_in_radius` en zone dense (chantier A backlog)

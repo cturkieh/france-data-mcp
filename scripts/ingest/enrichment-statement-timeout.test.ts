@@ -213,3 +213,46 @@ describe("rpps_measure_ban_to_geocode — statement_timeout fonction ≤ 55s (pa
     expect(secs as number).toBeLessThanOrEqual(55);
   });
 });
+
+// Chantier C 2026-05-21 — pipeline ban_join Ameli. Mêmes invariants que RPPS
+// (budget service_role→authenticator 8s, cap passerelle PostgREST 60s) — un
+// `SET statement_timeout` manquant ou >55s recasse le cron Ameli hebdo en
+// 57014 silencieux. Garde le quad de RPC du pipeline aligné.
+const AMELI_BANJOIN = "ingest_apply_ameli_ban_join_batch";
+const AMELI_MEASURE = "ameli_measure_ban_to_geocode";
+const AMELI_ANALYZE = "ingest_analyze_ameli_staging";
+
+/**
+ * Helper file-local (simplify M1 Passe 1) — assert `SET statement_timeout`
+ * présent + ≤ 55s sur une RPC. Extrait quand la 7e occurrence (ENRICH +
+ * ANALYZE_RPPS + BANJOIN + MEASURE + 3 Ameli) a justifié l'abstraction.
+ */
+function expectStatementTimeoutBound(fn: string, errCtx: string): void {
+  const def = latestFunctionDef(fn);
+  expect(def.length, `def ${fn} introuvable dans les migrations`).toBeGreaterThan(0);
+  expect(
+    def,
+    `${fn} n'a pas de SET statement_timeout fonction → hérite du budget service_role→authenticator 8s → ${errCtx}`,
+  ).toMatch(/set\s+statement_timeout/i);
+  const secs = timeoutSeconds(def);
+  expect(
+    secs,
+    `SET statement_timeout absent/illisible dans ${fn} (attendu '<n>s' | '<n>min' | …)`,
+  ).not.toBeNull();
+  expect(secs as number).toBeGreaterThan(0);
+  expect(
+    secs as number,
+    `statement_timeout=${secs}s : doit être >0 et ≤55s (>60s = coupé par la passerelle PostgREST en timeout opaque avant le 57014 propre)`,
+  ).toBeLessThanOrEqual(55);
+}
+
+describe("Chantier C — RPC Ameli statement_timeout fonction ≤ 55s (parité RPPS)", () => {
+  for (const fn of [AMELI_BANJOIN, AMELI_MEASURE, AMELI_ANALYZE]) {
+    it(`${fn} a SET statement_timeout ≤ 55s`, () => {
+      expectStatementTimeoutBound(
+        fn,
+        "57014 déterministe sur le cron Ameli hebdo (cf. classe de bug fix C RPPS 2026-05-18)",
+      );
+    });
+  }
+});
