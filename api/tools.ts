@@ -960,7 +960,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "entreprises_in_radius",
     description:
-      "Recherche d'entreprises françaises avec filtres NAF, code postal, département ou rayon géographique. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.\n\nDeux modes EXCLUSIFs (endpoints DINUM distincts) : (1) proximité — `lat`+`lon`+`radiusKm` (optionnellement + `naf`), résolu nativement via `/near_point` ; (2) administratif — `q` (texte libre) et/ou `naf` + `codePostal`/`departement`, via `/search`. La recherche de proximité ne supporte PAS `q` ni `codePostal`/`departement` (combinaison rejetée avec une erreur explicite : choisir un seul mode). `radiusKm` borné à 50 km.",
+      "Recherche d'entreprises françaises avec filtres NAF, code postal, département ou rayon géographique. Couvre tous secteurs (santé via NAF 8690B, 4773Z, 8710A, 8621Z, etc.). Source : DINUM Recherche Entreprises (SIRENE + RNE). Renvoie CA, dirigeants, tranches d'effectif et dates de création.\n\nDeux modes EXCLUSIFs (endpoints DINUM distincts) : (1) proximité — `lat`+`lon`+`radiusKm` (optionnellement + `naf`), résolu nativement via `/near_point` ; (2) administratif — `q` (texte libre) et/ou `naf` + `codePostal`/`departement`, via `/search`. La recherche de proximité ne supporte PAS `q` ni `codePostal`/`departement` (combinaison rejetée avec une erreur explicite : choisir un seul mode). `radiusKm` borné à 50 km.\n\n**Réduction de payload (V0.13)** : `includeDirigeants: false` strip la liste des dirigeants RNE de chaque entreprise du résultat — utile en énumération volume (Geo Intel) où les dirigeants ne sont pas exploités et où les groupes type Biogroup peuvent en lister 20+ par entité (gonflement inutile du payload). Défaut `true` pour préserver le contrat V0.12 (backward-compat strict).",
     inputSchema: {
       type: "object",
       properties: {
@@ -984,6 +984,12 @@ export const TOOLS: McpTool[] = [
           default: 10,
         },
         page: { type: "number", description: "Page (1-indexed).", default: 1 },
+        includeDirigeants: {
+          type: "boolean",
+          description:
+            "Inclure la liste des dirigeants RNE dans chaque entreprise (défaut true). `false` strip `dirigeants: []` côté handler — utile en énumération volume où les dirigeants ne sont pas exploités (économie de tokens, groupes type Biogroup peuvent lister 20+ dirigeants par entité).",
+          default: true,
+        },
       },
     },
     outputSchema: DINUM_QUERY_OUTPUT_SCHEMA,
@@ -1003,6 +1009,17 @@ export const TOOLS: McpTool[] = [
       const lat = coerceNumber(args.lat, "lat");
       const radiusKm = coerceNumber(args.radiusKm, "radiusKm");
       const hasCoords = lon !== undefined && lat !== undefined && radiusKm !== undefined;
+      // V0.13.1 — `coerceBoolean` (uniforme avec `precise_only`, `dedupe_by_ps`,
+      // `include_etudiants`, etc.) : `boolean` / `"true"` / `"false"` / `0`/`1`
+      // sont reconnus ; garbage throw `RangeError` mappé JSON-RPC `-32602`. Un
+      // caller LLM qui stringifie `"false"` voit son intention RESPECTÉE (strip
+      // appliqué), pas silencieusement ignorée. Avant V0.13.1, le strict
+      // `args.includeDirigeants !== false` cassait cette uniformité et provoquait
+      // un silent token-bloat sur les inputs string (corrigé /review Passe 1 P0).
+      // Le retour `undefined` (absent) reste un défaut "inclure dirigeants" via
+      // l'expression `!== false`.
+      const includeDirigeants =
+        coerceBoolean(args.includeDirigeants, "includeDirigeants") !== false;
 
       const opts: Parameters<typeof searchEntreprises>[0] = {};
       if (naf) opts.naf = naf;
@@ -1015,7 +1032,18 @@ export const TOOLS: McpTool[] = [
         opts.center = { lon, lat };
         opts.radiusKm = radiusKm;
       }
-      return searchEntreprises(opts);
+      const result = await searchEntreprises(opts);
+      if (!includeDirigeants) {
+        // Strip côté handler (vs côté lib `searchEntreprises`) : la lib reste
+        // strictement neutre (retourne ce que DINUM expose). Le toggle est un
+        // contrat MCP, pas un comportement de la primitive — cohérent avec
+        // le découpage src/ (lib OSS) ≠ api/ (endpoint hosted) de CLAUDE.md.
+        return {
+          ...result,
+          entreprises: result.entreprises.map((e) => ({ ...e, dirigeants: [] })),
+        };
+      }
+      return result;
     },
   },
   {

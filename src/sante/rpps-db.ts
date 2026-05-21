@@ -24,6 +24,7 @@ import { metersToKm } from "../core/numbers.js";
 import {
   type PerResultGeoPrecision,
   type QueryMetadata,
+  refineRppsGeoPrecisionLabel,
   rppsDeptMetadata,
   rppsEtablissementMetadata,
   rppsRadiusMetadata,
@@ -497,6 +498,19 @@ export async function getRppsInRadius(input: RppsInRadiusInput): Promise<RppsQue
     limit,
     rppsRadiusMetadata(input.radiusKm),
   );
+  // V0.13.0 Fix #4 — raffine l'étiquette globale `geo_precision` selon la
+  // distribution effective des `geo_precision` par-PS. Sans ce raffinage,
+  // un caller LLM lisait toujours `centroide_commune_ans_mixte` même quand
+  // 100 % des résultats étaient en `adresse` / `etablissement_finess` (sous-
+  // estimation pessimiste de la qualité — bug rapporté par Claude.ai test).
+  //
+  // `refineRppsGeoPrecisionLabel` est une factory pure (V0.13 /simplify quality) :
+  // on doit RÉASSIGNER son retour pour propager le raffinage. Si aucun
+  // raffinage applicable (mixte / 0 row / unknown), elle retourne `baseMeta`
+  // tel quel — coût zéro.
+  if (result.query_metadata) {
+    result.query_metadata = refineRppsGeoPrecisionLabel(result.results, result.query_metadata);
+  }
   // V0.12.0 — note metadata explicite quand precise_only=true ET 0 résultat :
   // distingue (a) zone désertique légitime de (b) régression GiST partielle
   // (cf. CLAUDE.md gotcha rpps-in-radius-57014-partial-gist-decouple). Sans
