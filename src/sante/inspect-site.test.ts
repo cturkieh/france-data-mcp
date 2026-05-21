@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../storage/supabase.js", () => ({
   // Les sous-tools mockés ne touchent jamais le client : un stub minimal suffit.
@@ -7,8 +7,10 @@ vi.mock("../storage/supabase.js", () => ({
 }));
 
 import * as crossSource from "./cross-source.js";
+import * as finessDb from "./finess-db.js";
 import { inspectSite } from "./inspect-site.js";
 import * as rppsDb from "./rpps-db.js";
+import * as siretResolver from "./siret-resolver.js";
 
 const VALID_FINESS = "590048997";
 const SIRET_BEST = "50781594200218";
@@ -50,6 +52,10 @@ function fakeVerifierFound(
     verdict_site: "actif",
     verdict_groupe: "actif",
     explication: "Site actif côté SIRENE/DINUM (mock test).",
+    method: "rpps",
+    fallback_reason: null,
+    naf_filter_used: [],
+    disambiguation_status: "not_applicable",
     ...overrides,
   };
 }
@@ -66,6 +72,44 @@ function fakeRppsResult(
       geo_precision: "structure_finess",
       notes: ["mock test inspect-site"],
     },
+  };
+}
+
+function fakeFinessFound(): Extract<
+  Awaited<ReturnType<typeof finessDb.getFinessByNumFiness>>,
+  { found: true }
+> {
+  return {
+    found: true,
+    lookupStatus: "found",
+    num_finess: VALID_FINESS,
+    raison_sociale: "DIAGNOVIE LBM",
+    categorie: { code: "611", libelle: "LBM", famille: "labo" },
+    adresse: {
+      voie: "27 BD BIZET",
+      code_postal: "59290",
+      ville: "WASQUEHAL",
+      code_departement: "59",
+      code_insee: "59646",
+    },
+    coords: { lat: 50.67, lon: 3.13 },
+    distance_km: null,
+    telephone: "03 20 05 15 00",
+    email: null,
+  };
+}
+
+function fakeResolutionEmpty(): siretResolver.SiretResolution {
+  return {
+    candidates: [],
+    best_match: null,
+    sirens_explored: [],
+    sirens_actif: {},
+    dinum_errors: [],
+    method: "rpps",
+    fallback_reason: "no_rpps",
+    naf_filter_used: [],
+    disambiguation_status: "not_applicable",
   };
 }
 
@@ -86,6 +130,10 @@ function fakeHistoriqueFound(
     siret_timelines: [{ siret: SIRET_BEST, sirene: null, sirene_error: "test mock" }],
     dinum_errors: [],
     status,
+    method: "rpps",
+    fallback_reason: null,
+    naf_filter_used: [],
+    disambiguation_status: "not_applicable",
   };
 }
 
@@ -108,20 +156,23 @@ describe("inspectSite — validation input", () => {
 });
 
 describe("inspectSite — propagation lookup et composition", () => {
-  it("propage lookupNotFound quand verifierSiteActif retourne not_found (FINESS absent)", async () => {
-    vi.spyOn(crossSource, "verifierSiteActif").mockResolvedValue({
+  // V0.13 : inspect_site charge directement FINESS + resolution avant de
+  // passer le contexte à verifier/historique. Mocks par défaut pour que les
+  // tests "happy path" n'aient pas à les répéter ; les tests qui veulent
+  // l'inverse (FINESS absent) override.
+  beforeEach(() => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(fakeFinessFound());
+    vi.spyOn(siretResolver, "resolveSiretsForFiness").mockResolvedValue(fakeResolutionEmpty());
+  });
+
+  it("propage lookupNotFound quand FINESS DREES est absent (bail-out V0.13 amont)", async () => {
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue({
       found: false,
       key: VALID_FINESS,
       lookupStatus: "not_found",
       message: "FINESS introuvable (mock test)",
     });
     vi.spyOn(rppsDb, "getRppsDansEtablissement").mockResolvedValue(fakeRppsResult(0));
-    vi.spyOn(crossSource, "historiqueEtablissement").mockResolvedValue({
-      found: false,
-      key: VALID_FINESS,
-      lookupStatus: "not_found",
-      message: "ignored",
-    });
 
     const result = await inspectSite({ numFiness: VALID_FINESS });
     expect(result.found).toBe(false);
@@ -236,19 +287,32 @@ describe("inspectSite — propagation lookup et composition", () => {
     expect(rppsSpy).toHaveBeenCalledWith({ numFiness: VALID_FINESS, limit: 25 });
   });
 
-  it("lance les 3 sous-appels en parallèle (Promise.all, pas séquentiel)", async () => {
+  it("V0.13 — 2 phases parallélisées : (finess+rpps) puis (verifier+historique)", async () => {
+    // Architecture post-V0.13 :
+    //  Phase A : `getFinessByNumFiness` + `getRppsDansEtablissement` en parallèle
+    //  Phase B : `verifierSiteActif(context)` + `historiqueEtablissement(context)`
+    //  en parallèle (avec contexte pré-chargé → 0 appel DINUM redondant)
+    //
+    // Le test vérifie le parallélisme intra-phase pour les 2 phases.
     const order: string[] = [];
-    vi.spyOn(crossSource, "verifierSiteActif").mockImplementation(async () => {
-      order.push("verifier:start");
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockImplementation(async () => {
+      order.push("finess:start");
       await new Promise((r) => setTimeout(r, 10));
-      order.push("verifier:end");
-      return fakeVerifierFound();
+      order.push("finess:end");
+      return fakeFinessFound();
     });
     vi.spyOn(rppsDb, "getRppsDansEtablissement").mockImplementation(async () => {
       order.push("rpps:start");
       await new Promise((r) => setTimeout(r, 10));
       order.push("rpps:end");
       return fakeRppsResult(0);
+    });
+    vi.spyOn(siretResolver, "resolveSiretsForFiness").mockResolvedValue(fakeResolutionEmpty());
+    vi.spyOn(crossSource, "verifierSiteActif").mockImplementation(async () => {
+      order.push("verifier:start");
+      await new Promise((r) => setTimeout(r, 10));
+      order.push("verifier:end");
+      return fakeVerifierFound();
     });
     vi.spyOn(crossSource, "historiqueEtablissement").mockImplementation(async () => {
       order.push("historique:start");
@@ -259,11 +323,38 @@ describe("inspectSite — propagation lookup et composition", () => {
 
     await inspectSite({ numFiness: VALID_FINESS });
 
-    // Les 3 starts précèdent les 3 ends → preuve de parallélisme.
-    const startIndices = ["verifier:start", "rpps:start", "historique:start"].map((s) =>
-      order.indexOf(s),
-    );
-    const endIndices = ["verifier:end", "rpps:end", "historique:end"].map((s) => order.indexOf(s));
-    expect(Math.max(...startIndices)).toBeLessThan(Math.min(...endIndices));
+    // Phase A : finess + rpps parallèles (starts avant ends respectifs).
+    const finessStart = order.indexOf("finess:start");
+    const rppsStart = order.indexOf("rpps:start");
+    const finessEnd = order.indexOf("finess:end");
+    const rppsEnd = order.indexOf("rpps:end");
+    expect(Math.max(finessStart, rppsStart)).toBeLessThan(Math.min(finessEnd, rppsEnd));
+
+    // Phase B : verifier + historique parallèles.
+    const verifStart = order.indexOf("verifier:start");
+    const histStart = order.indexOf("historique:start");
+    const verifEnd = order.indexOf("verifier:end");
+    const histEnd = order.indexOf("historique:end");
+    expect(Math.max(verifStart, histStart)).toBeLessThan(Math.min(verifEnd, histEnd));
+
+    // Ordre inter-phase : phase B commence APRÈS la fin de phase A (finess
+    // doit être chargé pour bâtir le contexte).
+    expect(Math.min(verifStart, histStart)).toBeGreaterThan(finessEnd);
+  });
+
+  it("V0.13 — factorisation : resolveSiretsForFiness appelé UNE SEULE FOIS (vs 2× en V0.10)", async () => {
+    // Régression non-régression : avant V0.13, `verifier` + `historique`
+    // re-résolvaient chacun la cascade DINUM → 2 appels par inspect_site.
+    // Maintenant : 1 appel partagé via SiteContext (économie ~600 ms +
+    // moitié de la charge rate-limit DINUM par invocation).
+    const resolveSpy = vi
+      .spyOn(siretResolver, "resolveSiretsForFiness")
+      .mockResolvedValue(fakeResolutionEmpty());
+    vi.spyOn(rppsDb, "getRppsDansEtablissement").mockResolvedValue(fakeRppsResult(0));
+    vi.spyOn(crossSource, "verifierSiteActif").mockResolvedValue(fakeVerifierFound());
+    vi.spyOn(crossSource, "historiqueEtablissement").mockResolvedValue(fakeHistoriqueFound());
+
+    await inspectSite({ numFiness: VALID_FINESS });
+    expect(resolveSpy).toHaveBeenCalledTimes(1);
   });
 });

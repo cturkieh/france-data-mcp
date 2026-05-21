@@ -65,6 +65,28 @@ export {
 } from "./finess-categories.js";
 
 export {
+  nafsForFamille,
+  isNafCompatibleWithFamille,
+  DELIBERATELY_NO_NAF,
+} from "./naf-finess-mapping.js";
+
+/**
+ * Types Resolver V2 (V0.13.0) — exposés pour les callers npm qui veulent
+ * typer un consommateur de `verifierSiteActif` / `historiqueEtablissement` /
+ * `reconcilierFinessSirene` / `inspectSite` (tous renvoient désormais les
+ * champs `method` / `fallback_reason` / `naf_filter_used` / `disambiguation_status`).
+ */
+export type {
+  ResolutionMethod,
+  FallbackReason,
+  DisambiguationStatus,
+  SiretCandidate,
+  SiretCandidateSource,
+  SiretResolution,
+  DinumLookupError,
+} from "./siret-resolver.js";
+
+export {
   getFinessInRadius,
   getFinessByCategorie,
   getFinessByNumFiness,

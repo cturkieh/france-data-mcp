@@ -25,13 +25,21 @@
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import {
   type HistoriqueEtablissementResult,
+  type SiteContext,
   historiqueEtablissement,
   verifierSiteActif,
 } from "./cross-source.js";
 import { assertValidNumFiness } from "./db-helpers.js";
+import { getFinessByNumFiness } from "./finess-db.js";
 import { getRppsDansEtablissement } from "./rpps-db.js";
 import type { RppsResult } from "./rpps-db.js";
-import type { DinumLookupError } from "./siret-resolver.js";
+import {
+  type DinumLookupError,
+  type DisambiguationStatus,
+  type FallbackReason,
+  type ResolutionMethod,
+  resolveSiretsForFiness,
+} from "./siret-resolver.js";
 import { SOURCE_LABELS } from "./sources.js";
 
 export interface InspectSiteInput {
@@ -83,6 +91,14 @@ export interface InspectSiteStatutSection {
   explication: string;
   /** Diagnostic SIREN-level si DINUM a partiellement échoué. Vide en succès complet. */
   dinum_errors: DinumLookupError[];
+  /** Traçabilité Resolver V2 (V0.13.0). Cf. `siret-resolver.ts` pour la sémantique. */
+  method: ResolutionMethod;
+  /** Pourquoi le fallback géo a été tenté/skippé. `null` si cas nominal RPPS. */
+  fallback_reason: FallbackReason;
+  /** NAF passés à DINUM /near_point côté fallback. Vide si pas de fallback. */
+  naf_filter_used: string[];
+  /** Statut désambiguïsation post-gate. `"ambiguous"` → caller doit cross-checker. */
+  disambiguation_status: DisambiguationStatus;
 }
 
 export type InspectSiteHistoriqueSection =
@@ -182,18 +198,18 @@ function buildHistoriqueSection(
 }
 
 /**
- * Agrège la vue 360 d'un site santé en 1 call. Parallélise les 3 sous-appels
- * via `Promise.all` (gain p95 ~3× sur le pire cas séquentiel).
+ * Agrège la vue 360 d'un site santé en 1 call. **V0.13.0** : factorise la
+ * cascade RPPS→DINUM (`SiteContext`) au lieu de l'exécuter en doublon dans
+ * `verifierSiteActif` + `historiqueEtablissement` — économie d'1 RPC FINESS
+ * et de 1× la charge rate-limit DINUM par invocation (~600 ms gratuits côté
+ * budget API publique). Parallélise ensuite les 3 sous-appels via `Promise.all`.
  *
  * **Comportement échec** : `LookupResult.notFound` si le `num_finess` n'existe
  * pas dans FINESS DREES. Pas de fallback partiel : si l'un des 3 sous-appels
  * fail (DINUM down, INSEE timeout), l'exception remonte. Le caller MCP retentera ;
  * ne pas masquer une panne derrière un panorama incomplet (cf. lessons V0.8.1).
  *
- * **Limitations connues V0.10.0** :
- * - Pivot RPPS→DINUM exécuté en double (verifier + historique partagent la
- *   cascade). Parallélisé via Promise.all → pas de surcoût latence, mais 2×
- *   la charge rate-limit DINUM par inspect_site. Optimisation différée à V0.11+.
+ * **Limitations** :
  * - `professionnels.sample` ne filtre pas par catégorie — le LLM peut affiner
  *   via `rpps_dans_etablissement` direct si besoin.
  */
@@ -203,25 +219,47 @@ export async function inspectSite(
   const trimmed = assertValidNumFiness(input.numFiness);
   const rppsLimit = clampRppsLimit(input.rppsLimit);
 
-  const [verifierLookup, rpps, historiqueLookup] = await Promise.all([
-    verifierSiteActif(trimmed),
+  // === V0.13 factorisation cascade (FINESS + RPPS→DINUM résolu une fois) =====
+  //
+  // Pré-charge en parallèle de la query RPPS (qui ne dépend ni de FINESS ni
+  // de DINUM). Si FINESS n'existe pas → bail-out canonique sans avoir
+  // déclenché de cascade DINUM inutile. Sinon → résolution unique passée aux
+  // 2 sous-appels via `SiteContext`.
+  const [finessLookup, rpps] = await Promise.all([
+    getFinessByNumFiness(trimmed),
     getRppsDansEtablissement({ numFiness: trimmed, limit: rppsLimit }),
-    historiqueEtablissement(trimmed),
   ]);
 
-  // Si FINESS DREES n'a pas ce num_finess, `verifier` est `not_found`. On
-  // bail-out sur ce signal canonique. MAIS `getRppsDansEtablissement` ne
-  // dépend PAS de FINESS (il query la table rpps directement) : un site
-  // peut être absent de FINESS DREES (latence 1-2 mois) tout en ayant des
-  // PS déclarés RPPS. Logguer cette désync inter-référentiels plutôt que de
-  // la perdre derrière le not_found — signal utile (FINESS en retard sur RPPS).
-  if (!verifierLookup.found) {
+  if (!finessLookup.found) {
+    // Désync inter-référentiels : FINESS DREES absent mais PS RPPS rattachés
+    // (cas typique des structures émergentes — DREES 1-2 mois de retard sur
+    // RPPS mensuel). Logger plutôt que de masquer derrière `not_found`.
     if (rpps.count > 0) {
       console.warn(
         `[france-data-mcp] inspect_site(${trimmed}): FINESS DREES not_found mais ${rpps.count}+ PS RPPS rattachés — désync référentiels (FINESS probablement en retard sur RPPS).`,
       );
     }
-    return lookupNotFound(trimmed, verifierLookup.message);
+    return lookupNotFound(trimmed, finessLookup.message);
+  }
+
+  // Cascade unique RPPS → DINUM (+ fallback géo V0.13 si éligible).
+  const resolution = await resolveSiretsForFiness(trimmed, finessLookup);
+  const context: SiteContext = { finess: finessLookup, resolution };
+
+  const [verifierLookup, historiqueLookup] = await Promise.all([
+    verifierSiteActif(trimmed, context),
+    historiqueEtablissement(trimmed, context),
+  ]);
+
+  // V0.13 : la désync FINESS-absent / PS-RPPS-présents a été déplacée en
+  // amont (avant la cascade) pour ne pas gaspiller un appel DINUM dans ce
+  // cas. Ici, `verifierLookup` est garanti `found: true` car on lui a passé
+  // un `context` avec `finess.found === true`. Le narrowing TS reste utile
+  // mais comme invariant fail-loud, pas comme branche métier.
+  if (!verifierLookup.found) {
+    throw new Error(
+      `inspect_site: invariant violation — verifierSiteActif a retourné not_found avec un context.finess.found===true (num_finess=${trimmed}). Régression contractuelle à investiguer.`,
+    );
   }
 
   // `historique` peut être `not_found` alors que `verifier` est `found`.
@@ -249,6 +287,10 @@ export async function inspectSite(
       candidates_count: verifierLookup.candidates.length,
       explication: verifierLookup.explication,
       dinum_errors: verifierLookup.dinum_errors,
+      method: verifierLookup.method,
+      fallback_reason: verifierLookup.fallback_reason,
+      naf_filter_used: verifierLookup.naf_filter_used,
+      disambiguation_status: verifierLookup.disambiguation_status,
     },
     professionnels: {
       count: rpps.count,
