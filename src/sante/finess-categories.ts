@@ -44,10 +44,14 @@ export const FINESS_CATEGORIES = {
   "604": "Communautés professionnelles territoriales de santé (CPTS)",
 
   // ─── PHARMACIE / BIO / IMAGERIE ───────────────────────────────────────
+  "610": "Laboratoire d'Analyses",
   "611": "Laboratoire de Biologie Médicale",
+  "612": "Autre Laboratoire de Biologie Médicale sans FSE",
   "619": "Cabinet d'imagerie médicale",
   "620": "Pharmacie d'Officine",
   "627": "Propharmacie",
+  "628": "Pharmacie Minière",
+  "629": "Pharmacie Mutualiste",
 
   // ─── PERSONNES ÂGÉES — hébergement ────────────────────────────────────
   "500": "Etablissement d'hébergement pour personnes âgées dépendantes (EHPAD)",
@@ -134,6 +138,7 @@ export const FINESS_CATEGORIES = {
   "636": "Centre de soins et de prévention",
 
   // ─── GROUPEMENTS ──────────────────────────────────────────────────────
+  "695": "Groupement de coopération sanitaire de moyens - Exploitant",
   "696": "Groupement de coopération sanitaire de moyens",
   "697": "Groupement de coopération sanitaire — Etablissement de santé",
 
@@ -218,9 +223,9 @@ export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> 
   dialyse: ["141", "146"],
   ambulatoire: ["124"],
   // Bio / pharma / imagerie
-  labo: ["611"],
+  labo: ["610", "611", "612"],
   imagerie: ["619"],
-  pharmacie: ["620", "627"],
+  pharmacie: ["620", "627", "628", "629"],
   // Pluri-pro
   msp_cpts: ["603", "604"],
   // Personnes âgées
@@ -244,7 +249,7 @@ export const FINESS_FAMILY_CODES: Record<FinessFamilleQuery, readonly string[]> 
   // Prévention / santé publique
   prevention_sante: ["132", "142", "143", "266", "347", "636"],
   // Groupements
-  groupement: ["696", "697"],
+  groupement: ["695", "696", "697"],
 } as const;
 
 const FAMILY_BY_CODE: ReadonlyMap<string, FinessFamilleQuery> = new Map<string, FinessFamilleQuery>(
