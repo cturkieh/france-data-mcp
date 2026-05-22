@@ -1675,6 +1675,7 @@ describe("perimetre wiring professionnels", () => {
       results: [],
     });
     const tool = findTool("professionnels_in_radius");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({ lon: 2.35, lat: 48.85 })) as Record<string, unknown>;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("liberal_conventionne");
   });
@@ -1686,6 +1687,7 @@ describe("perimetre wiring professionnels", () => {
       results: [],
     });
     const tool = findTool("professionnels_rpps_in_radius");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({
       center: { lat: 48.85, lon: 2.35 },
       radius_km: 5,
@@ -1711,6 +1713,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       results: [],
     });
     const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({ lon: 2.35, lat: 48.85 })) as Record<string, unknown>;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
     expect(out?.count).toBe(7);
@@ -1723,6 +1726,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       results: [],
     });
     const tool = findTool("etablissements_finess_by_categorie");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({ categorie: "labo" })) as Record<string, unknown>;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
     expect(out?.count).toBe(4);
@@ -1734,6 +1738,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
     >;
     vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce(mocked);
     const tool = findTool("densite_etablissements_sante");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
       string,
       unknown
@@ -1748,6 +1753,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
     >;
     vi.spyOn(densite, "densiteProfessionnelsSante").mockResolvedValueOnce(mocked);
     const tool = findTool("densite_professionnels_sante");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({ code_dept: "59" })) as Record<string, unknown>;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
     expect(out?.zone).toEqual({ densite: 45.6 });
@@ -1759,6 +1765,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
     >;
     vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce(mocked);
     const tool = findTool("panorama_sante_territoire");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({ code_insee: "59009" })) as Record<string, unknown>;
     // Panorama reçoit `finessFamillePerimetre` (volet établissements) → lentille
     // catégorie, PAS registre_complet.
@@ -1772,6 +1779,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
     >;
     vi.spyOn(coverage, "getCoverageFinessVsSireneInRadius").mockResolvedValueOnce(mocked);
     const tool = findTool("finess_sirene_coverage_in_radius");
+    expect(tool).toBeDefined();
     const out = (await tool?.handler({ lon: 2.35, lat: 48.85, naf: "8690B" })) as Record<
       string,
       unknown
