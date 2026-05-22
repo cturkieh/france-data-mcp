@@ -44,6 +44,7 @@ import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { inspectSite } from "../src/sante/inspect-site.js";
 import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
+import { type Perimetre, RPPS_PERIMETRE, finessFamillePerimetre } from "../src/sante/perimetre.js";
 import {
   buildCategorieCodes,
   getRppsById,
@@ -219,6 +220,21 @@ const READ_ONLY_TIME_VARYING_ANNOTATIONS: McpToolAnnotations = {
 };
 
 /**
+ * Injecte le descripteur de lentille `perimetre` dans la sortie d'un tool de
+ * comptage. Jumeau de `withFreshness` — métadonnée de présentation ajoutée au
+ * boundary, la couche lib reste pure. Cf. cadrage completude-lentilles-sources.
+ *
+ * Exporté pour le test unitaire pur (`api/tools.test.ts`) — le câblage
+ * handler-level est couvert par les tests d'intégration.
+ */
+export function withPerimetre<T extends object>(
+  result: T,
+  perimetre: Perimetre,
+): T & { perimetre: Perimetre } {
+  return { ...result, perimetre };
+}
+
+/**
  * Patterns `outputSchema` réutilisables (spec MCP 2025-06-18 §6.3) déclarés
  * une fois et référencés par les 25 tools. Format JSON Schema standard.
  *
@@ -250,6 +266,25 @@ const LOOKUP_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
   },
   required: ["found", "lookupStatus"],
 };
+
+/**
+ * Fragment de schéma pour le champ `perimetre` (lentille de source) injecté par
+ * `withPerimetre`. Optionnel : ajouté aux `properties` des schémas de comptage,
+ * jamais au tableau `required`.
+ */
+const PERIMETRE_OUTPUT_SCHEMA = {
+  type: "object",
+  description:
+    "Lentille de la source : ce que le comptage inclut/exclut. " +
+    "Lire `completeness_note` et la restituer au lecteur final.",
+  properties: {
+    source: { type: "string" },
+    lens: { type: "string" },
+    compte: { type: "string" },
+    exclut: { type: "string" },
+    completeness_note: { type: "string" },
+  },
+} as const;
 
 const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -283,6 +318,7 @@ const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
       type: "object",
       description: "Fraîcheur des sources (présent si `include_freshness: true`).",
     },
+    perimetre: PERIMETRE_OUTPUT_SCHEMA,
   },
   required: ["count", "results"],
 };
@@ -371,6 +407,7 @@ const COVERAGE_OUTPUT_SCHEMA: Record<string, unknown> = {
       description:
         "Statut typé du calcul (toujours présent). `computed` = calcul nominal (finess_sites peut être 0 sur rayon vide). `scope_empty_unknown_naf` = NAF non mappé, court-circuit (corriger le NAF ou compléter naf-finess-mapping). `scope_empty_familles_incompatible` = `familles` toutes incompatibles avec le NAF (réviser le couple ou omettre `familles` pour auto-derive). Le `caveats[]` reste exposé en parallèle pour lecture humaine — ce champ fait foi pour le routage.",
     },
+    perimetre: PERIMETRE_OUTPUT_SCHEMA,
   },
   required: [
     "finess_sites",
@@ -1262,7 +1299,10 @@ export const TOOLS: McpTool[] = [
       };
       if (familles) input.familles = familles;
       if (limit !== undefined) input.limit = limit;
-      return withFreshness(await getFinessInRadius(input), args.include_freshness, ["finess"]);
+      const result = withFreshness(await getFinessInRadius(input), args.include_freshness, [
+        "finess",
+      ]);
+      return withPerimetre(result, finessFamillePerimetre(familles ?? undefined));
     },
   },
   {
@@ -1310,7 +1350,10 @@ export const TOOLS: McpTool[] = [
       if (departement) input.departement = departement;
       if (codeInsee) input.code_insee = codeInsee;
       if (limit !== undefined) input.limit = limit;
-      return withFreshness(await getFinessByCategorie(input), args.include_freshness, ["finess"]);
+      const result = withFreshness(await getFinessByCategorie(input), args.include_freshness, [
+        "finess",
+      ]);
+      return withPerimetre(result, finessFamillePerimetre([famille]));
     },
   },
   {
@@ -1922,7 +1965,9 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       }
       const compareNational = coerceBoolean(args.compare_national, "compare_national");
       if (compareNational === true) input.compareNational = true;
-      return densiteProfessionnelsSante(input);
+      // Source effective : RPPS (count) croisé INSEE Melodi (population).
+      const result = await densiteProfessionnelsSante(input);
+      return withPerimetre(result, RPPS_PERIMETRE);
     },
   },
   {
@@ -1971,7 +2016,8 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       };
       const compareNational = coerceBoolean(args.compare_national, "compare_national");
       if (compareNational === true) input.compareNational = true;
-      return densiteEtablissementsSante(input);
+      const result = await densiteEtablissementsSante(input);
+      return withPerimetre(result, finessFamillePerimetre([famille]));
     },
   },
   {
@@ -2007,7 +2053,10 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       // (fix /review V0.9 — anti-pattern "zéro catch silencieux").
       const familles = parseFamilles(args.finess_familles);
       if (familles !== undefined) input.finessFamilles = familles;
-      return panoramaSanteTerritoire(input);
+      // Volet établissements = lentille la plus exposée ; un seul `perimetre`
+      // racine, les sous-objets densité ne sont pas sur-décorés.
+      const result = await panoramaSanteTerritoire(input);
+      return withPerimetre(result, finessFamillePerimetre(familles));
     },
   },
   {
@@ -2263,7 +2312,8 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         maxUnitesLegales,
       };
       if (familles) input.familles = familles;
-      return getCoverageFinessVsSireneInRadius(input);
+      const result = await getCoverageFinessVsSireneInRadius(input);
+      return withPerimetre(result, finessFamillePerimetre(familles ?? undefined));
     },
   },
 ];

@@ -4,10 +4,17 @@ import * as crossSource from "../src/sante/cross-source.js";
 import * as finessDb from "../src/sante/finess-db.js";
 import * as dinum from "../src/sante/index.js";
 import * as inseeSirene from "../src/sante/insee-sirene.js";
+import { finessFamillePerimetre } from "../src/sante/perimetre.js";
 import * as rppsDb from "../src/sante/rpps-db.js";
 import * as ingestLog from "../src/storage/ingest-log.js";
 import * as geocode from "../src/territoire/geocode.js";
-import { TOOLS, categorieCodesFromArgs, deptFromCommune, findTool } from "./tools.js";
+import {
+  TOOLS,
+  categorieCodesFromArgs,
+  deptFromCommune,
+  findTool,
+  withPerimetre,
+} from "./tools.js";
 
 describe("deptFromCommune", () => {
   it("extrait le département pour la métropole standard", () => {
@@ -1651,4 +1658,29 @@ describe("exemples code_insee PLM corrigés (régression P2)", () => {
       expect(d).toMatch(/indisponible|non supporté|RangeError/i);
     });
   }
+});
+
+describe("withPerimetre (helper de câblage)", () => {
+  it("ajoute le champ perimetre sans muter les autres clés du résultat", () => {
+    const result = { count: 3, results: [] };
+    const perimetre = finessFamillePerimetre(["labo"]);
+    const out = withPerimetre(result, perimetre);
+    expect(out).toEqual({ count: 3, results: [], perimetre });
+    expect(out.count).toBe(3);
+    expect(out.perimetre).toBe(perimetre);
+  });
+
+  it("ne mute pas l'objet d'entrée (retourne une copie)", () => {
+    const result = { count: 1, results: [{ id: 1 }] };
+    const out = withPerimetre(result, finessFamillePerimetre(undefined));
+    expect(out).not.toBe(result);
+    expect(result).not.toHaveProperty("perimetre");
+  });
+
+  it("propage le descripteur famille-aware tel quel (note + lens)", () => {
+    const perimetre = finessFamillePerimetre(["labo"]);
+    const out = withPerimetre({ count: 0, results: [] }, perimetre);
+    expect(out.perimetre.lens).toBe("categorie_dominante");
+    expect(out.perimetre.completeness_note).toMatch(/hospitali/i);
+  });
 });
