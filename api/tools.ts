@@ -44,7 +44,12 @@ import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { inspectSite } from "../src/sante/inspect-site.js";
 import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
-import { type Perimetre, RPPS_PERIMETRE, finessFamillePerimetre } from "../src/sante/perimetre.js";
+import {
+  AMELI_PERIMETRE,
+  type Perimetre,
+  RPPS_PERIMETRE,
+  finessFamillePerimetre,
+} from "../src/sante/perimetre.js";
 import {
   buildCategorieCodes,
   getRppsById,
@@ -1563,9 +1568,12 @@ export const TOOLS: McpTool[] = [
       const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
       if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
       const result = await getAmeliInRadius(input);
-      return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
-        "ameli_ps",
-      ]);
+      return withPerimetre(
+        await withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
+          "ameli_ps",
+        ]),
+        AMELI_PERIMETRE,
+      );
     },
   },
   {
@@ -1630,9 +1638,12 @@ export const TOOLS: McpTool[] = [
       if (offset !== undefined) input.offset = offset;
       try {
         const result = await getAmeliBySpecialiteDept(input);
-        return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
-          "ameli_ps",
-        ]);
+        return withPerimetre(
+          await withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
+            "ameli_ps",
+          ]),
+          AMELI_PERIMETRE,
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[france-data-mcp] ameli_query_failed: ${message}`);
@@ -1801,7 +1812,10 @@ Filtres : \`profession_codes\` (ex: \`["10"]\` Médecin, \`["60"]\` Infirmier), 
       // côté lib, `input.preciseOnly === true` strict reste sûr).
       const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
       if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
-      return withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]);
+      return withPerimetre(
+        await withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]),
+        RPPS_PERIMETRE,
+      );
     },
   },
   {
@@ -1861,7 +1875,12 @@ Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
-      return withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, ["rpps"]);
+      return withPerimetre(
+        await withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, [
+          "rpps",
+        ]),
+        RPPS_PERIMETRE,
+      );
     },
   },
   {

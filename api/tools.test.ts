@@ -1660,6 +1660,37 @@ describe("exemples code_insee PLM corrigés (régression P2)", () => {
   }
 });
 
+describe("perimetre wiring professionnels", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("professionnels_in_radius expose perimetre.lens === 'liberal_conventionne' (AMELI_PERIMETRE)", async () => {
+    vi.spyOn(ameliDb, "getAmeliInRadius").mockResolvedValueOnce({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    const tool = findTool("professionnels_in_radius");
+    const out = (await tool?.handler({ lon: 2.35, lat: 48.85 })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("liberal_conventionne");
+  });
+
+  it("professionnels_rpps_in_radius expose perimetre.lens === 'registre_complet' (RPPS_PERIMETRE)", async () => {
+    vi.spyOn(rppsDb, "getRppsInRadius").mockResolvedValueOnce({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    const tool = findTool("professionnels_rpps_in_radius");
+    const out = (await tool?.handler({
+      center: { lat: 48.85, lon: 2.35 },
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
+  });
+});
+
 describe("withPerimetre (helper de câblage)", () => {
   it("ajoute le champ perimetre sans muter les autres clés du résultat", () => {
     const result = { count: 3, results: [] };
