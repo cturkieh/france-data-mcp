@@ -16,10 +16,13 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   `panorama_sante_territoire`, `finess_sirene_coverage_in_radius`,
   `professionnels_in_radius`, `professionnels_par_specialite_dept`,
   `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`.
-- **fix(finess)** : 5 codes catégorie vivants en prod mais non catalogués
+- Note de lentille dans les descriptions des tools FINESS famille.
+
+### Fixed — codes catégorie FINESS manquants au catalogue
+
+- Catalogue FINESS : 5 codes catégorie vivants en prod mais non répertoriés
   ajoutés — `610`/`612` (labos autonomes → famille `labo`), `628`/`629`
   (pharmacies → `pharmacie`), `695` (GCS → `groupement`).
-- Note de lentille dans les descriptions des tools FINESS famille.
 
 Réf : `docs/plans/completude-lentilles-sources.md`.
 
