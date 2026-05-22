@@ -92,11 +92,8 @@ export const AMELI_PERIMETRE: Perimetre = {
 export const RPPS_PERIMETRE: Perimetre = {
   source: "RPPS / Annuaire santé ANS",
   lens: "registre_complet",
-  compte:
-    "Professionnels de santé enregistrés, tous modes d'exercice " + "(libéral, salarié, mixte).",
-  exclut:
-    "Rien par construction — mais `mode_exercice` est non renseigné sur " + "~16 % des fiches.",
+  compte: "Professionnels de santé enregistrés, tous modes d'exercice (libéral, salarié, mixte).",
+  exclut: "Rien par construction — mais `mode_exercice` est non renseigné sur ~16 % des fiches.",
   completeness_note:
-    "Source la plus complète pour dénombrer une population de professionnels " +
-    "sur un territoire.",
+    "Source la plus complète pour dénombrer une population de professionnels sur un territoire.",
 };

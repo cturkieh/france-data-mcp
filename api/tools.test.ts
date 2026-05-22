@@ -1818,6 +1818,60 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
     expect(out?.coverage_ratio).toBe(0.5);
   });
+
+  it("finess_sirene_coverage_in_radius — perimetre reflète l'auto-derive NAF→familles (pas 'tous')", async () => {
+    // Cas nominal : caller omet `familles`, la lib auto-dérive depuis le NAF
+    // (ex. 8690B → ['labo']) et l'expose dans `familles_auto_derivees`. Le
+    // handler DOIT consommer ce champ pour que `perimetre.compte` reflète
+    // le scope réellement compté — sinon surdéclaration silencieuse (même
+    // bug que panorama V0.17, commit e306104).
+    const mocked = {
+      finess_sites: 7,
+      sirene_sirets: 9,
+      matched_count: 6,
+      coverage_ratio: 0.86,
+      matched_samples: [],
+      finess_only_samples: [],
+      sirene_only_samples: [],
+      methodology: "...",
+      caveats: [],
+      coverage_status: "ok",
+      familles_auto_derivees: ["labo"],
+    } as unknown as Awaited<ReturnType<typeof coverage.getCoverageFinessVsSireneInRadius>>;
+    vi.spyOn(coverage, "getCoverageFinessVsSireneInRadius").mockResolvedValueOnce(mocked);
+    const tool = findTool("finess_sirene_coverage_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ lon: 2.35, lat: 48.85, naf: "8690B" })) as Record<
+      string,
+      unknown
+    >;
+    const perimetre = out?.perimetre as Record<string, unknown>;
+    expect(perimetre?.compte).toContain("labo");
+    expect(perimetre?.compte).not.toMatch(/tous/i);
+  });
+
+  it("panorama_sante_territoire avec finess_familles=[] expose perimetre.lens === 'registre_complet'", async () => {
+    // Special-case : `finess_familles: []` désactive le volet FINESS (la lib
+    // retourne `etablissementsParFamille: []`) → le panorama ne décrit plus
+    // que population + densités RPPS, donc `perimetre` doit basculer sur
+    // RPPS_PERIMETRE (pas annoncer une lentille FINESS vide).
+    const mocked = {
+      codeInsee: "59350",
+      niveau: "commune",
+      niveauEtablissements: "indisponible",
+      densitesProfessionnels: { medecins: null, infirmiers: null, pharmaciens: null },
+      etablissementsParFamille: [],
+      sources: [],
+    } as unknown as Awaited<ReturnType<typeof panorama.panoramaSanteTerritoire>>;
+    vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce(mocked);
+    const tool = findTool("panorama_sante_territoire");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      code_insee: "59350",
+      finess_familles: [],
+    })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
+  });
 });
 
 describe("withPerimetre (helper de câblage)", () => {

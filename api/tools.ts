@@ -2082,17 +2082,15 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       // (fix /review V0.9 — anti-pattern "zéro catch silencieux").
       const familles = parseFamilles(args.finess_familles);
       if (familles !== undefined) input.finessFamilles = familles;
-      // Volet établissements = lentille la plus exposée ; un seul `perimetre`
-      // racine, les sous-objets densité ne sont pas sur-décorés.
       const result = await panoramaSanteTerritoire(input);
       // `perimetre` doit décrire les familles réellement comptées :
       //  - finess_familles omis  → la lib compte DEFAULT_FAMILLES
       //  - finess_familles = []  → volet FINESS désactivé (panorama = population + densités RPPS)
       //  - finess_familles = [...] → ces familles
-      const perimetre =
-        familles !== undefined && familles.length === 0
-          ? RPPS_PERIMETRE
-          : finessFamillePerimetre(familles ?? DEFAULT_FAMILLES);
+      const finessVoletDesactive = familles?.length === 0;
+      const perimetre = finessVoletDesactive
+        ? RPPS_PERIMETRE
+        : finessFamillePerimetre(familles ?? DEFAULT_FAMILLES);
       return withPerimetre(result, perimetre);
     },
   },
@@ -2350,7 +2348,13 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       };
       if (familles) input.familles = familles;
       const result = await getCoverageFinessVsSireneInRadius(input);
-      return withPerimetre(result, finessFamillePerimetre(familles));
+      // Le scope FINESS réellement appliqué = familles caller, sinon auto-derive
+      // NAF→familles exposé par la lib (familles_auto_derivees). Sans cette
+      // résolution, perimetre.compte annoncerait "tous" alors que finess_sites
+      // ne compte qu'un sous-ensemble — surdéclaration silencieuse, exactement
+      // le bug qu'on a corrigé sur panorama (commit e306104).
+      const effectiveFamilles = familles ?? result.familles_auto_derivees ?? undefined;
+      return withPerimetre(result, finessFamillePerimetre(effectiveFamilles));
     },
   },
 ];
