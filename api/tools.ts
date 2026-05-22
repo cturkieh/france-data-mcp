@@ -619,6 +619,14 @@ const FAMILLES_LIST = FINESS_FAMILLE_INPUTS.join(", ");
 const FINESS_RS_TRUNCATION_NOTE =
   "Note : `raison_sociale` provient du dump DREES qui abrège les libellés longs (~38 car. max, ex 'CERBALLIANCE HA' pour 'CERBALLIANCE HAZEBROUCK'). Pour le nom légal complet, cross-check via SIREN/SIRET (entreprise_by_siren / etablissement_by_siret).";
 
+const FINESS_FAMILLE_LENS_NOTE =
+  "Lentille : un filtre `familles` compte les établissements par leur " +
+  "catégorie FINESS *principale*. Les activités hébergées dans un site " +
+  "d'une autre catégorie (ex. plateau de biologie d'un hôpital sous " +
+  "`famille=labo`) ne sont pas comptées — voir le champ `perimetre` de la " +
+  "réponse. La famille `imagerie` renvoie le plus souvent 0 résultat " +
+  "(FINESS ne répertorie pas les cabinets d'imagerie).";
+
 /** Garde de typage : valide qu'une string est une famille FINESS queryable. */
 function asFinessFamille(v: unknown): FinessFamilleQuery | undefined {
   if (typeof v !== "string") return undefined;
@@ -1259,7 +1267,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_in_radius",
-    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
+    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1312,7 +1320,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_by_categorie",
-    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
+    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
