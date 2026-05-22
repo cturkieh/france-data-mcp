@@ -7,7 +7,13 @@ describe("finessFamillePerimetre", () => {
     expect(p.source).toMatch(/FINESS/);
     expect(p.lens).toBe("categorie_dominante");
     expect(p.compte).toMatch(/tous/i);
+    expect(p.exclut.length).toBeGreaterThan(0);
     expect(p.completeness_note.length).toBeGreaterThan(0);
+  });
+
+  it("famille liste vide → traité comme 'tous'", () => {
+    expect(finessFamillePerimetre([]).compte).toMatch(/tous/i);
+    expect(finessFamillePerimetre([]).compte).toBe(finessFamillePerimetre(undefined).compte);
   });
 
   it("famille labo → rider sur les plateaux hospitaliers", () => {
