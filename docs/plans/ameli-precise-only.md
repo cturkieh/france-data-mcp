@@ -9,8 +9,8 @@
 `professionnels_in_radius` (Ameli) gagne `precise_only` (boolean, défaut
 false). À `true` : exclut les PS au centroïde commune, ne renvoie que les
 ~77 % géocodés à l'adresse BAN (`distance_km` exacte au m près). Tout le code
-est prêt sur la branche ; il reste **une seule action manuelle** : appliquer
-la migration SQL en prod (après un check EXPLAIN).
+est prêt et revu sur la branche, le GATE EXPLAIN est passé. Il reste **une
+seule action manuelle** : appliquer la migration SQL en prod, puis merger.
 
 ## Ce qui est déjà fait sur la branche
 
@@ -18,67 +18,63 @@ la migration SQL en prod (après un check EXPLAIN).
 |---|---|
 | `supabase/migrations/20260522T003000_ameli_in_radius_precise_only.sql` | RPC `ameli_in_radius` + `p_precise_only BOOLEAN DEFAULT FALSE` |
 | `src/sante/ameli-db.ts` | `AmeliInRadiusInput.preciseOnly`, `getAmeliInRadius` propage le param |
+| `src/sante/db-helpers.ts` | helper `validatePreciseOnly` (partagé avec `getRppsInRadius`) |
 | `api/tools.ts` | schéma `precise_only` + handler + description du tool |
 | `api/tools.test.ts`, `src/sante/ameli-db.test.ts` | tests (propagation, garde, note 0-résultat, schéma, boundary) |
 | `CHANGELOG.md` | entrée `### Added` sous `[Unreleased]` |
 
 Vérifié : `tsc` + `lint` clean, 1313 tests unit verts, 10/10 tests
-d'intégration Ameli verts, SQL de la migration exécuté en transaction
-`ROLLBACK` sur Supabase local (DROP/CREATE/GRANT/COMMENT OK, signature 7
-params correcte). Discipline `/simplify` (3 agents) + `/review` P1 (3 agents)
-+ P2 (2 agents) passée — verdict **clean** (le `/simplify` a extrait
-`validatePreciseOnly` dans `db-helpers.ts`, partagé avec `getRppsInRadius`).
+d'intégration Ameli verts. Migration exécutée en transaction `ROLLBACK` sur
+Supabase local — fonction appelée dans les 2 modes (hybride + precise), SQL
+dynamique parsé/planifié/exécuté, conformité `RETURNS TABLE` OK. Discipline
+`/simplify` (3 agents) + `/review` P1 (3 agents) + P2 (2 agents) passée —
+verdict **clean**.
 
-## Pourquoi une requête plate et pas le split CTE de RPPS
+## Pourquoi `RETURN QUERY EXECUTE format(...)` et pas une requête statique
 
-`rpps_in_radius` a dû éclater en CTE `precise` + CTE `centroid` + matview
-`rpps_commune_centroids` parce que RPPS pré-V0.12 avait 2,2 M lignes TOUTES au
-centroïde commune (cluster Paris ~77 K lignes co-localisées → timeout 57014).
-`annuaire_ameli` est à une autre échelle : ~462 K lignes, ~77 % déjà en
-adresse BAN précise depuis le Chantier C, les ~23 % résiduels au centroïde
-répartis sur ~35 K communes (pire cluster ≈ quelques milliers de lignes). La
-requête plate `ameli_in_radius` actuelle absorbe déjà ces clusters en prod.
-`precise_only=true` n'ajoute qu'un filtre `geom_source` qui RÉDUIT le travail.
+Le filtre `geom_source = 'ban_address'` doit être un **littéral** dans le SQL
+pour que le planner puisse élire le GiST PARTIEL
+`annuaire_ameli_geog_precise_gist`. Deux pièges écartés :
 
-## ⚠️ GATE — check EXPLAIN AVANT d'appliquer la migration
+1. **Condition paramétrée** (`NOT p_precise_only OR geom_source = ...`) : sous
+   un generic plan plpgsql, le placeholder rend le partiel inéligible.
+2. **`RETURN QUERY` statique** : met le plan en cache, peut basculer en generic
+   plan après ~5 appels.
 
-`annuaire_ameli` porte à la fois un GiST global (`annuaire_ameli_geog_gist`)
-et le GiST partiel (`annuaire_ameli_geog_precise_gist`). C'est la config qui a
-causé les 57014 RPPS (le planner peut préférer le global et reléguer
-`geom_source` en Filter post-index). Le risque est faible à l'échelle Ameli
-mais **non prouvé** — discipline projet : prouver par la prod avant
-d'appliquer.
+Dans les deux cas → repli sur le GiST GLOBAL `annuaire_ameli_geog_gist` +
+Filter post-index → en zone dense le bbox ramène le cluster co-localisé
+`commune_centroid` → timeout 57014 (piège prouvé prod RPPS, gotchas CLAUDE.md).
 
-**Étape 1 — exécuter ce EXPLAIN dans le SQL editor Supabase** (zone Paris
-centre dense, rayon 1 km, branche précise) :
+La parade : `RETURN QUERY EXECUTE format(...)` — chaque appel re-planifié en
+custom plan (jamais de generic plan), et le fragment `%s` injecte le littéral
+`AND geom_source = 'ban_address'` quand `precise_only`. Même pattern que la
+fonction voisine `ameli_by_specialite_dept`.
 
-```sql
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT a.id,
-       ST_Distance(a.geog, ST_SetSRID(ST_MakePoint(2.3522, 48.8566), 4326)::geography) AS d
-FROM annuaire_ameli a
-WHERE a.geog IS NOT NULL
-  AND ST_DWithin(a.geog, ST_SetSRID(ST_MakePoint(2.3522, 48.8566), 4326)::geography, 1000)
-  AND a.geom_source = 'ban_address'
-ORDER BY a.geog <-> ST_SetSRID(ST_MakePoint(2.3522, 48.8566), 4326)::geography
-LIMIT 100;
-```
+Pas besoin du chantier lourd RPPS (split CTE + matview `ameli_commune_centroids`
++ DROP du GiST global) : `annuaire_ameli` ~462 K lignes dont ~77 % en adresse
+BAN, clusters centroïde résiduels ~25-75× plus petits que RPPS.
 
-**Critères GO (les trois doivent être vrais)** :
-- `Execution Time` < ~500 ms (le rôle `anon` a un `statement_timeout` de 3 s) ;
-- un `Index Scan` GiST (`annuaire_ameli_geog_precise_gist` OU
-  `annuaire_ameli_geog_gist`), PAS un `Seq Scan` ;
-- pas de `Rows Removed by Filter` à 6 chiffres.
+## GATE EXPLAIN — ✅ PASSÉ le 2026-05-22
 
-**Si GO** → étape 2. **Si NO-GO** (seq scan, ou temps qui explose, ou filtre
-qui jette des centaines de milliers de lignes) → NE PAS appliquer, voir
-« Plan B » plus bas.
+Exécuté en prod (Paris centre, rayon 1 km). Résultats :
 
-**Étape 2 — appliquer la migration** : coller le contenu de
+| Chemin | Index élu | Execution Time | Verdict |
+|---|---|---|---|
+| precise (`geom_source = 'ban_address'`) | `annuaire_ameli_geog_precise_gist` (partiel) | 149 ms (cache froid) | **GO** |
+| hybride (sans filtre) | `annuaire_ameli_geog_gist` (global) | 52 ms | référence OK |
+
+Les 3 critères GO remplis : temps < 500 ms (20× sous le budget `anon` 3 s),
+Index Scan GiST (le PARTIEL pour le chemin précis — le 57014 ne se déclenche
+pas), aucun `Rows Removed by Filter`. Le 149 ms est du cache froid (le GiST
+partiel n'avait jamais été interrogé) — plus rapide à chaud.
+
+## Application — ce qu'il reste à faire
+
+**Étape 1 — appliquer la migration** : coller le contenu de
 `supabase/migrations/20260522T003000_ameli_in_radius_precise_only.sql` dans le
-SQL editor Supabase et exécuter.
+SQL editor Supabase (projet france-data) et exécuter.
 
-**Étape 3 — smoke test prod** :
+**Étape 2 — smoke test prod** :
 
 ```sql
 -- hybride (défaut) : doit renvoyer un mélange ban_address / commune_centroid
@@ -87,7 +83,7 @@ SELECT geom_source, count(*) FROM ameli_in_radius(48.8566, 2.3522, 2000, '{}', '
 SELECT geom_source, count(*) FROM ameli_in_radius(48.8566, 2.3522, 2000, '{}', '{}', 50, true) GROUP BY 1;
 ```
 
-## Après la migration — déployer le code
+**Étape 3 — déployer le code** :
 
 ```
 git checkout main
@@ -95,22 +91,18 @@ git merge feat/ameli-precise-only
 git push            # déclenche CI + déploiement Vercel
 ```
 
-Le code est sûr à déployer UNIQUEMENT après la migration : `getAmeliInRadius`
-n'envoie `p_precise_only` que quand un caller passe `precise_only=true` (un
-appel hybride reste à 6 args, compatible avec ou sans la migration). Donc même
-si le déploiement précédait l'application SQL, le mode hybride continuerait de
-fonctionner — seul `precise_only=true` échouerait tant que la migration n'est
-pas là. Ordre recommandé quand même : migration d'abord, déploiement ensuite.
+Ordre : migration d'abord, déploiement ensuite. Le code reste de toute façon
+sûr — `getAmeliInRadius` n'envoie `p_precise_only` que quand un caller passe
+`precise_only=true` ; un appel hybride reste à 6 args, compatible avec ou sans
+la migration.
 
-`/simplify` + `/review` (P1 + P2) ont déjà été passés sur la branche au
-moment de la préparation — verdict clean. Rien à relancer avant le merge.
+`/simplify` + `/review` (P1 + P2) déjà passés — rien à relancer avant le merge.
 
-## Plan B (si le GATE EXPLAIN est NO-GO)
+## Si un jour le chemin précis régresse (Plan B)
 
 Cloner le pattern RPPS complet : matview `ameli_commune_centroids` (1 ligne /
 commune) + `ameli_in_radius` restructurée en `precise` (GiST partiel) UNION
 ALL `centroid` (matview + CROSS JOIN LATERAL) + DROP du GiST global +
-`ingest_create_annuaire_ameli_staging` mis à jour + parité staging. C'est le
-chantier lourd documenté pour RPPS dans les gotchas de `CLAUDE.md`
-(`20260516T050000`, `20260520T100000`). À ne faire que si la requête plate ne
-tient pas — improbable à l'échelle Ameli, mais tracé ici par sécurité.
+`ingest_create_annuaire_ameli_staging` mis à jour + parité staging. Chantier
+lourd documenté pour RPPS dans `CLAUDE.md` (`20260516T050000`,
+`20260520T100000`). Non nécessaire au vu du GATE — tracé par sécurité.

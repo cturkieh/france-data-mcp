@@ -39,13 +39,16 @@ géocodés à l'adresse BAN (`distance_km` exacte au m près) — pour les rayon
 courts (<3 km) et le classement intra-commune.
 
 - Migration `20260522T003000_ameli_in_radius_precise_only.sql` : la RPC
-  `ameli_in_radius` gagne `p_precise_only BOOLEAN DEFAULT FALSE` + la clause
-  `AND (NOT p_precise_only OR geom_source = 'ban_address')`. `false` (défaut)
-  = comportement V0.14.0 inchangé byte-pour-byte. Requête plate conservée
-  (pas le split precise/centroid CTE de RPPS — `annuaire_ameli` est à une
-  échelle où les clusters centroïde résiduels ne déclenchent pas le piège
-  57014 ; raisonnement + GATE EXPLAIN pré-application détaillés dans l'en-tête
-  de la migration et `docs/plans/ameli-precise-only.md`).
+  `ameli_in_radius` gagne `p_precise_only BOOLEAN DEFAULT FALSE`. Corps réécrit
+  en `RETURN QUERY EXECUTE format(...)` (même pattern que
+  `ameli_by_specialite_dept`) : le fragment `%s` injecte le LITTÉRAL
+  `AND geom_source = 'ban_address'` quand precise_only, et `EXECUTE` force un
+  custom plan à chaque appel. Sans ça, un generic plan plpgsql rendrait le
+  GiST partiel `annuaire_ameli_geog_precise_gist` inéligible → repli GiST
+  global + Filter → 57014 en zone dense (piège prouvé prod RPPS). `false`
+  (défaut) = comportement V0.14.0 inchangé. GATE EXPLAIN prod passé le
+  2026-05-22 (149 ms précis / 52 ms hybride, Index Scan partiel confirmé).
+  Détail : en-tête de la migration + `docs/plans/ameli-precise-only.md`.
 - `getAmeliInRadius` (lib) : champ `preciseOnly?: boolean`, garde `RangeError`
   sur input non-boolean, note metadata explicite quand `precise_only=true` +
   0 résultat (suggère le mode hybride). Passe au client Supabase untyped (le
