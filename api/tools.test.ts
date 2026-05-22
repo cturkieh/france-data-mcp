@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as ameliDb from "../src/sante/ameli-db.js";
+import * as coverage from "../src/sante/coverage.js";
 import * as crossSource from "../src/sante/cross-source.js";
+import * as densite from "../src/sante/densite.js";
 import * as finessDb from "../src/sante/finess-db.js";
 import * as dinum from "../src/sante/index.js";
 import * as inseeSirene from "../src/sante/insee-sirene.js";
+import * as panorama from "../src/sante/panorama.js";
 import { finessFamillePerimetre } from "../src/sante/perimetre.js";
 import * as rppsDb from "../src/sante/rpps-db.js";
 import * as ingestLog from "../src/storage/ingest-log.js";
@@ -1688,6 +1691,93 @@ describe("perimetre wiring professionnels", () => {
       radius_km: 5,
     })) as Record<string, unknown>;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
+  });
+});
+
+describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
+  // Couverture handler-level des tools câblés en Task 3. Verrouille que
+  // `perimetre` survit jusqu'à la sortie du handler — un `await` manquant
+  // avant `withFreshness` spreadait une Promise et jetait `perimetre`
+  // silencieusement (bug latent des 2 tools FINESS). Chaque test asserte
+  // AUSSI une clé de données pour catcher l'inverse (perte du payload).
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("etablissements_finess_in_radius expose perimetre + préserve count", async () => {
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 7,
+      truncated: false,
+      results: [],
+    });
+    const tool = findTool("etablissements_finess_in_radius");
+    const out = (await tool?.handler({ lon: 2.35, lat: 48.85 })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
+    expect(out?.count).toBe(7);
+  });
+
+  it("etablissements_finess_by_categorie expose perimetre + préserve count", async () => {
+    vi.spyOn(finessDb, "getFinessByCategorie").mockResolvedValueOnce({
+      count: 4,
+      truncated: false,
+      results: [],
+    });
+    const tool = findTool("etablissements_finess_by_categorie");
+    const out = (await tool?.handler({ categorie: "labo" })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
+    expect(out?.count).toBe(4);
+  });
+
+  it("densite_etablissements_sante expose perimetre + préserve le payload", async () => {
+    const mocked = { zone: { densite: 12.3 } } as Awaited<
+      ReturnType<typeof densite.densiteEtablissementsSante>
+    >;
+    vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce(mocked);
+    const tool = findTool("densite_etablissements_sante");
+    const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
+      string,
+      unknown
+    >;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
+    expect(out?.zone).toEqual({ densite: 12.3 });
+  });
+
+  it("densite_professionnels_sante expose perimetre + préserve le payload", async () => {
+    const mocked = { zone: { densite: 45.6 } } as Awaited<
+      ReturnType<typeof densite.densiteProfessionnelsSante>
+    >;
+    vi.spyOn(densite, "densiteProfessionnelsSante").mockResolvedValueOnce(mocked);
+    const tool = findTool("densite_professionnels_sante");
+    const out = (await tool?.handler({ code_dept: "59" })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
+    expect(out?.zone).toEqual({ densite: 45.6 });
+  });
+
+  it("panorama_sante_territoire expose perimetre + préserve le payload", async () => {
+    const mocked = { codeInsee: "59009" } as Awaited<
+      ReturnType<typeof panorama.panoramaSanteTerritoire>
+    >;
+    vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce(mocked);
+    const tool = findTool("panorama_sante_territoire");
+    const out = (await tool?.handler({ code_insee: "59009" })) as Record<string, unknown>;
+    // Panorama reçoit `finessFamillePerimetre` (volet établissements) → lentille
+    // catégorie, PAS registre_complet.
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
+    expect(out?.codeInsee).toBe("59009");
+  });
+
+  it("finess_sirene_coverage_in_radius expose perimetre + préserve le payload", async () => {
+    const mocked = { coverage_ratio: 0.5 } as Awaited<
+      ReturnType<typeof coverage.getCoverageFinessVsSireneInRadius>
+    >;
+    vi.spyOn(coverage, "getCoverageFinessVsSireneInRadius").mockResolvedValueOnce(mocked);
+    const tool = findTool("finess_sirene_coverage_in_radius");
+    const out = (await tool?.handler({ lon: 2.35, lat: 48.85, naf: "8690B" })) as Record<
+      string,
+      unknown
+    >;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
+    expect(out?.coverage_ratio).toBe(0.5);
   });
 });
 

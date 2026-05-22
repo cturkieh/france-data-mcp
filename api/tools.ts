@@ -1304,7 +1304,7 @@ export const TOOLS: McpTool[] = [
       };
       if (familles) input.familles = familles;
       if (limit !== undefined) input.limit = limit;
-      const result = withFreshness(await getFinessInRadius(input), args.include_freshness, [
+      const result = await withFreshness(await getFinessInRadius(input), args.include_freshness, [
         "finess",
       ]);
       return withPerimetre(result, finessFamillePerimetre(familles));
@@ -1355,9 +1355,11 @@ export const TOOLS: McpTool[] = [
       if (departement) input.departement = departement;
       if (codeInsee) input.code_insee = codeInsee;
       if (limit !== undefined) input.limit = limit;
-      const result = withFreshness(await getFinessByCategorie(input), args.include_freshness, [
-        "finess",
-      ]);
+      const result = await withFreshness(
+        await getFinessByCategorie(input),
+        args.include_freshness,
+        ["finess"],
+      );
       return withPerimetre(result, finessFamillePerimetre([famille]));
     },
   },
