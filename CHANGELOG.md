@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.15.0] — 2026-05-22 (precise_only Ameli + fix description geo_precision)
 
 ### Fixed — description périmée `professionnels_in_radius` (suite Chantier C V0.14.0)
 
