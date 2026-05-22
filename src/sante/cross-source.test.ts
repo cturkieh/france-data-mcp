@@ -1013,8 +1013,11 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
     const result = await verifierSiteActif(VALID_FINESS);
     expect(result.found).toBe(true);
     if (result.found) {
-      // CHOUAIEB éliminé par name filter, puis EYLAU départagé par succession.
-      // Statut final = by_active_succession (la dernière étape déclenchée prime).
+      // CHOUAIEB éliminé par name filter, puis EYLAU départagé par succession
+      // même-SIREN → by_active_succession. V0.16 : ces fixtures n'ont pas de
+      // coordonnées (`point`) → l'étape « actif prime » (qui exige une distance
+      // géo prouvée) ne s'active pas et le comportement V0.13.1 est préservé
+      // tel quel — `isColocated` retourne false sans `distance_finess_m`.
       expect(result.best_match?.siret).toBe(SIRET_EYLAU_ACTIF);
       expect(result.verdict_site).toBe("actif");
       expect(result.disambiguation_status).toBe("by_active_succession");
@@ -1247,6 +1250,204 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
       expect(result.disambiguation_status).toBe("not_applicable");
       // Garde-fou non-régression : fallback JAMAIS tenté quand V0.7 a réussi.
       expect(nearPointSpy).not.toHaveBeenCalled();
+    }
+  });
+
+  // === V0.16 — fix succession M&A (« actif prime » + co-localisation géo) ====
+
+  it("V0.16 Mécanisme A — chemin RPPS sur SIREN racheté : L1 déclenche le fallback, le repreneur actif d'un autre SIREN est retenu", async () => {
+    // Reproduction Neuilly Sablons (FINESS 920026770). RPPS pointe l'ancien
+    // SIREN (exploitant racheté) dont tous les SIRET sont fermés. Le repreneur
+    // actif appartient à un AUTRE SIREN — invisible du pivot RPPS. L1 (V0.16)
+    // déclenche le fallback géo qui le découvre ; « actif prime » le retient.
+    const SIRET_ANCIEN = "42371781800235";
+    const SIRET_REPRENEUR = "40309320600726";
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "LBM BPO-BIOEPINE SITE NEUILLY SABLONS" }),
+    );
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_ANCIEN }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => {
+      if (siren === SIRET_ANCIEN.slice(0, 9)) {
+        return fakeEntrepriseDinum({
+          siren,
+          actif: false,
+          etablissements: [
+            {
+              siret: SIRET_ANCIEN,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2017-07-27",
+              naf: "8690B",
+            },
+          ],
+        });
+      }
+      return fakeEntrepriseDinum({ siren, actif: true });
+    });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_ANCIEN.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_ANCIEN,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2017-07-27",
+              naf: "8690B",
+              point: { lat: 50.67, lon: 3.13 },
+            },
+          ],
+        },
+        {
+          siren: SIRET_REPRENEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_REPRENEUR,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2018-12-21",
+              naf: "8690B",
+              point: { lat: 50.67005, lon: 3.13 },
+            },
+          ],
+        },
+      ]),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_REPRENEUR);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.method).toBe("mixed");
+      expect(result.fallback_reason).toBe("best_match_ferme");
+      expect(result.succession.detected).toBe(true);
+      expect(result.succession.exploitants_precedents.map((c) => c.siret)).toContain(SIRET_ANCIEN);
+    }
+  });
+
+  it("V0.16 Mécanisme B — RPPS vide, fallback géo : le repreneur actif co-localisé prime sur l'ancien fermé malgré un score nom faible", async () => {
+    // Reproduction Pont de Neuilly (FINESS 920026341). RPPS vide → fallback géo.
+    // near_point ramène l'ancien fermé (score nom élevé : le libellé FINESS
+    // porte encore l'ancienne enseigne) ET le repreneur actif (score nom
+    // faible). Avant V0.16 le name filter gardait l'ancien fermé. « Actif
+    // prime », placé avant le name filter, retient le repreneur.
+    const SIRET_ANCIEN = "42371781800227";
+    const SIRET_REPRENEUR = "40309320600718";
+    const NOM_PAR_SIREN: Record<string, string> = {
+      [SIRET_ANCIEN.slice(0, 9)]: "BIO EPINE",
+      [SIRET_REPRENEUR.slice(0, 9)]: "BIOGROUP PARIS OUEST",
+    };
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "BIOEPINE" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_ANCIEN.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_ANCIEN,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2017-07-27",
+              naf: "8690B",
+              point: { lat: 50.67, lon: 3.13 },
+            },
+          ],
+        },
+        {
+          siren: SIRET_REPRENEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_REPRENEUR,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2018-12-21",
+              naf: "8690B",
+              point: { lat: 50.67004, lon: 3.13 },
+            },
+          ],
+        },
+      ]),
+    );
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => ({
+      ...fakeEntrepriseDinum({ siren, actif: siren === SIRET_REPRENEUR.slice(0, 9) }),
+      nomComplet: NOM_PAR_SIREN[siren] ?? "BIOGROUP NORD",
+    }));
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_REPRENEUR);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.disambiguation_status).toBe("by_active_succession");
+      expect(result.succession.detected).toBe(true);
+    }
+  });
+
+  it("V0.16 garde-fou faux positif inverse — un site vraiment fermé reste « ferme », un labo actif voisin à > 50 m n'est pas promu", async () => {
+    // Le FINESS pointe un site fermé. Un autre labo actif est dans le rayon
+    // /near_point mais à une autre adresse (numéro de voie distinct, ~110 m :
+    // score Dice élevé MAIS distance > COLOCATION_RADIUS_M). La distance géo,
+    // et non le Dice, l'écarte : il ne devient pas best_match.
+    const SIRET_FERME = "42371781800300";
+    const SIRET_VOISIN_ACTIF = "99999999900001";
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "LBM DIAGNOVIE" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_FERME.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_FERME,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2010-01-01",
+              naf: "8690B",
+              point: { lat: 50.67, lon: 3.13 },
+            },
+          ],
+        },
+        {
+          siren: SIRET_VOISIN_ACTIF.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_VOISIN_ACTIF,
+              adresse: "29 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2015-01-01",
+              naf: "8690B",
+              point: { lat: 50.670988, lon: 3.13 },
+            },
+          ],
+        },
+      ]),
+    );
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) =>
+      fakeEntrepriseDinum({ siren, actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_FERME);
+      expect(result.verdict_site).toBe("ferme");
+      expect(result.succession.detected).toBe(false);
+      // Le voisin actif lointain reste exposé dans candidates[] (audit) mais
+      // n'est jamais best_match.
+      expect(result.candidates.some((c) => c.siret === SIRET_VOISIN_ACTIF)).toBe(true);
     }
   });
 });

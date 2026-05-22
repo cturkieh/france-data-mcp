@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cadrage fix — verifier_site_actif : faux « fermé » sur sites repris</title>
+<style>
+  :root{
+    --marine:#0b2e4f; --marine2:#14385f; --bleu:#1d6fd6; --bleu-pale:#e8f1fc;
+    --bg:#eef2f6; --card:#ffffff; --ink:#1a2a3a; --muted:#5b6b7d;
+    --rouge:#c0271a; --rouge-pale:#fbe9e7; --vert:#16794c; --vert-pale:#e6f4ec;
+    --ambre:#b06f00; --ambre-pale:#fdf3e0; --bord:#dce4ec;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.6;font-size:15px;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px;}
+  /* Header */
+  header{background:linear-gradient(135deg,var(--marine),var(--marine2));color:#fff;
+    padding:48px 24px 40px;margin-bottom:36px;}
+  .header-inner{max-width:1080px;margin:0 auto;padding:0 24px;}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:#8fb9e6;font-weight:700;margin-bottom:10px;}
+  h1{font-size:30px;line-height:1.25;font-weight:800;margin-bottom:18px;max-width:780px;}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;}
+  .chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);
+    padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:600;color:#dce9f7;}
+  .chip.p1{background:var(--rouge);border-color:var(--rouge);color:#fff;}
+  /* Sections */
+  section{margin-bottom:34px;}
+  h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--bleu);
+    font-weight:800;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  h2 .num{background:var(--bleu);color:#fff;width:24px;height:24px;border-radius:6px;
+    display:inline-flex;align-items:center;justify-content:center;font-size:13px;
+    letter-spacing:0;flex-shrink:0;}
+  h3{font-size:16px;font-weight:700;margin:18px 0 8px;color:var(--marine);}
+  p{margin-bottom:10px;}
+  /* Card */
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;
+    padding:22px 24px;box-shadow:0 1px 3px rgba(11,46,79,.05);}
+  .card + .card{margin-top:14px;}
+  .grid{display:grid;gap:14px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  .g3{grid-template-columns:1fr 1fr 1fr;}
+  @media(max-width:720px){.g2,.g3{grid-template-columns:1fr;}}
+  /* Exec summary */
+  .summary{background:var(--marine);color:#eaf1f8;border:none;}
+  .summary h3{color:#fff;}
+  .summary strong{color:#fff;}
+  .summary .pill{display:inline-block;background:var(--vert);color:#fff;
+    padding:3px 10px;border-radius:6px;font-size:12.5px;font-weight:700;}
+  /* Tables */
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0;}
+  th{background:var(--bleu-pale);color:var(--marine);text-align:left;
+    padding:9px 12px;font-weight:700;font-size:12.5px;text-transform:uppercase;
+    letter-spacing:.03em;border-bottom:2px solid #cfe0f3;}
+  td{padding:9px 12px;border-bottom:1px solid var(--bord);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  code{background:#eef2f6;border:1px solid var(--bord);border-radius:4px;
+    padding:1px 5px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;
+    color:var(--marine);}
+  /* Badges */
+  .bad{color:var(--rouge);font-weight:700;}
+  .good{color:var(--vert);font-weight:700;}
+  .badge{display:inline-block;padding:2px 9px;border-radius:5px;font-size:12px;
+    font-weight:700;white-space:nowrap;}
+  .b-ferme{background:var(--rouge-pale);color:var(--rouge);}
+  .b-actif{background:var(--vert-pale);color:var(--vert);}
+  /* Callout */
+  .callout{border-left:4px solid var(--bleu);background:var(--bleu-pale);
+    padding:16px 20px;border-radius:0 10px 10px 0;}
+  .callout.warn{border-color:var(--ambre);background:var(--ambre-pale);}
+  .callout.danger{border-color:var(--rouge);background:var(--rouge-pale);}
+  .callout .lbl{font-weight:800;font-size:12px;text-transform:uppercase;
+    letter-spacing:.07em;display:block;margin-bottom:5px;}
+  .callout.warn .lbl{color:var(--ambre);}
+  .callout.danger .lbl{color:var(--rouge);}
+  .callout .lbl{color:var(--bleu);}
+  /* Mechanism flow */
+  .flow{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
+  .step{display:flex;gap:12px;align-items:flex-start;}
+  .step .dot{background:var(--bleu);color:#fff;width:22px;height:22px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+    flex-shrink:0;margin-top:1px;}
+  .step.fail .dot{background:var(--rouge);}
+  .step .txt{font-size:13.5px;}
+  /* Option cards */
+  .opt{border:1px solid var(--bord);border-radius:12px;padding:20px;background:#fff;}
+  .opt.reco{border:2px solid var(--vert);box-shadow:0 4px 14px rgba(22,121,76,.12);}
+  .opt-head{display:flex;justify-content:space-between;align-items:flex-start;
+    margin-bottom:8px;gap:8px;}
+  .opt-head .name{font-weight:800;font-size:15px;color:var(--marine);}
+  .opt .tag{font-size:11px;font-weight:800;padding:3px 9px;border-radius:5px;
+    text-transform:uppercase;letter-spacing:.04em;}
+  .tag-reco{background:var(--vert);color:#fff;}
+  .tag-defer{background:var(--ambre-pale);color:var(--ambre);}
+  .tag-out{background:#eef2f6;color:var(--muted);}
+  .opt .er{font-size:12.5px;color:var(--muted);margin-top:8px;}
+  /* Timeline plan */
+  .lot{display:flex;gap:14px;padding:12px 0;border-bottom:1px solid var(--bord);}
+  .lot:last-child{border-bottom:none;}
+  .lot .id{background:var(--marine);color:#fff;font-weight:800;font-size:12.5px;
+    padding:4px 10px;border-radius:6px;height:fit-content;flex-shrink:0;min-width:42px;
+    text-align:center;}
+  .lot .body{flex:1;}
+  .lot .body .t{font-weight:700;color:var(--marine);font-size:14px;}
+  .wt{font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;text-transform:uppercase;}
+  .wt-l{background:var(--vert-pale);color:var(--vert);}
+  .wt-m{background:var(--ambre-pale);color:var(--ambre);}
+  .wt-h{background:var(--rouge-pale);color:var(--rouge);}
+  /* Decision list */
+  .dec{counter-reset:d;}
+  .dec .item{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--bord);}
+  .dec .item:last-child{border-bottom:none;}
+  .dec .item::before{counter-increment:d;content:counter(d);
+    background:var(--bleu);color:#fff;width:26px;height:26px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;font-weight:800;
+    font-size:13px;flex-shrink:0;}
+  .reco-inline{color:var(--vert);font-weight:700;}
+  ul.clean{list-style:none;margin:6px 0;}
+  ul.clean li{padding-left:20px;position:relative;margin-bottom:5px;font-size:14px;}
+  ul.clean li::before{content:"▸";color:var(--bleu);position:absolute;left:0;font-weight:700;}
+  footer{text-align:center;color:var(--muted);font-size:12.5px;margin-top:40px;
+    padding-top:20px;border-top:1px solid var(--bord);}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="kicker">france-data-mcp · cadrage de correction</div>
+    <h1>Faux « fermé » sur les sites de santé repris (M&amp;A)</h1>
+    <div class="meta">
+      <span class="chip p1">● Sévérité P1 — faux négatif silencieux</span>
+      <span class="chip">Base V0.15.0</span>
+      <span class="chip">22 mai 2026</span>
+      <span class="chip">Document de décision — aucun code écrit</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- 1. RESUME -->
+  <section>
+    <h2><span class="num">1</span> Résumé exécutif</h2>
+    <div class="card summary">
+      <p><code style="background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.25)">verifier_site_actif</code>
+      et 3 autres tools déclarent <strong>« fermés » des sites en réalité actifs</strong>,
+      dès qu'un site a changé d'exploitant (rachat / M&amp;A). Bug
+      <strong>confirmé et reproduit en production</strong> sur les 2 cas signalés.</p>
+      <div class="grid g3" style="margin-top:16px">
+        <div>
+          <h3>Cause</h3>
+          <p style="font-size:13.5px;color:#cdddec">Le moteur de résolution SIRET
+          choisit le « meilleur » SIRET d'une adresse <strong>sans jamais que le
+          statut <em>actif</em> ne compte</strong>.</p>
+        </div>
+        <div>
+          <h3>Portée</h3>
+          <p style="font-size:13.5px;color:#cdddec">Défaut du moteur partagé →
+          <strong>4 tools</strong>, <strong>toutes les familles FINESS</strong>.
+          Structurel, pas anecdotique.</p>
+        </div>
+        <div>
+          <h3>Reco</h3>
+          <p style="font-size:13.5px;color:#cdddec"><span class="pill">Option A</span>
+          correction ciblée + champ <code style="background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.25)">succession</code>.
+          <strong>Pas de migration DB.</strong></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. PREUVE -->
+  <section>
+    <h2><span class="num">2</span> Le bug — preuve prod</h2>
+    <div class="card">
+      <p>Appels réels sur l'endpoint de production, 22 mai 2026 :</p>
+      <table>
+        <thead><tr><th>Site</th><th>FINESS</th><th>Verdict du tool</th><th>Réalité SIRENE / DINUM</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Neuilly Sablons — 3 R Garnier</td>
+            <td><code>920026770</code></td>
+            <td><span class="badge b-ferme">ferme ❌</span></td>
+            <td><code>40309320600726</code> <span class="good">BIOGROUP PARIS OUEST — actif</span> (créé 2018)</td>
+          </tr>
+          <tr>
+            <td>Pont de Neuilly — 85 av Ch. de Gaulle</td>
+            <td><code>920026341</code></td>
+            <td><span class="badge b-ferme">ferme ❌</span></td>
+            <td><code>40309320600718</code> <span class="good">BIOGROUP PARIS OUEST — actif</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout" style="margin-top:14px">
+        <span class="lbl">Vérification indépendante</span>
+        DINUM <code>/near_point</code> sur 3 Rue Garnier : 4 sociétés s'y sont
+        succédé — LABO ANALY MEDIC (1986) → LABORATOIRE ZANA → BIO EPINE (2017)
+        → <strong>BIOGROUP PARIS OUEST (2018, actif)</strong>. Le site fonctionne.
+      </div>
+    </div>
+  </section>
+
+  <!-- 3. CAUSE -->
+  <section>
+    <h2><span class="num">3</span> Cause-racine — deux mécanismes</h2>
+    <p style="margin-bottom:14px;color:var(--muted);font-size:14px">
+      Le moteur produit une liste <code>candidates[]</code> et désigne un
+      <code>best_match</code> — choisi <strong>par ressemblance d'adresse seule</strong>.
+      Le statut <code>actif</code> n'entre nulle part dans la sélection.</p>
+    <div class="grid g2">
+      <div class="card">
+        <h3>Mécanisme A — chemin RPPS <span style="font-weight:400;color:var(--muted);font-size:13px">(Neuilly Sablons)</span></h3>
+        <div class="flow">
+          <div class="step"><span class="dot">1</span><span class="txt">Le moteur part des SIRET déclarés dans RPPS par les professionnels.</span></div>
+          <div class="step"><span class="dot">2</span><span class="txt">Ces déclarations pointent encore vers l'<strong>ancienne</strong> société (BIO EPINE).</span></div>
+          <div class="step"><span class="dot">3</span><span class="txt">DINUM ne liste que les établissements de ce SIREN → l'ancien, fermé, devient <code>best_match</code>.</span></div>
+          <div class="step fail"><span class="dot">✕</span><span class="txt">Le filet géographique <strong>n'est jamais armé</strong> (il l'est seulement si <code>best_match === null</code>).</span></div>
+        </div>
+        <div class="callout danger" style="margin-top:12px">
+          <span class="lbl">Conséquence</span>
+          Le SIRET du repreneur n'est <strong>jamais découvert</strong> — absent
+          même de <code>candidates[]</code>.
+        </div>
+      </div>
+      <div class="card">
+        <h3>Mécanisme B — fallback géo <span style="font-weight:400;color:var(--muted);font-size:13px">(Pont de Neuilly)</span></h3>
+        <div class="flow">
+          <div class="step"><span class="dot">1</span><span class="txt">RPPS vide → le fallback géographique <strong>est</strong> armé.</span></div>
+          <div class="step"><span class="dot">2</span><span class="txt"><code>/near_point</code> découvre bien Biogroup actif (présent dans <code>candidates[]</code>).</span></div>
+          <div class="step fail"><span class="dot">✕</span><span class="txt"><strong>Tri d'adresse</strong> : « 85 AV » (fermé) score 1.00 vs « 85 AVENUE » (Biogroup) 0.94.</span></div>
+          <div class="step fail"><span class="dot">✕</span><span class="txt"><strong>Name filter</strong> : FINESS dit encore « BIOEPINE » → Biogroup jugé « hors-sujet » et disqualifié.</span></div>
+        </div>
+        <div class="callout danger" style="margin-top:12px">
+          <span class="lbl">Conséquence</span>
+          Le repreneur est vu… puis <strong>activement rejeté</strong> par deux filtres.
+        </div>
+      </div>
+    </div>
+    <div class="callout warn" style="margin-top:14px">
+      <span class="lbl">Défaut central</span>
+      Le statut <code>actif</code> n'est jamais un critère. La règle de succession
+      existante n'opère que dans le fallback géo <em>et</em> exige le même SIREN —
+      or un rachat = changement d'unité légale. Pire : le name filter
+      <strong>favorise l'ancien exploitant</strong>, car FINESS conserve l'ancienne
+      enseigne. Un commentaire du code affirme ce cas « protégé » — la prod le réfute.
+    </div>
+  </section>
+
+  <!-- 4. PORTEE -->
+  <section>
+    <h2><span class="num">4</span> Portée — pourquoi corriger dans le MCP</h2>
+    <div class="card">
+      <p><strong>4 tools touchés</strong> — tout consommateur du moteur :
+      <code>verifier_site_actif</code> · <code>historique_etablissement</code> ·
+      <code>reconcilier_finess_sirene</code> · <code>inspect_site</code>.</p>
+      <p><strong>Toutes les familles consolidées</strong> : pharmacies (transferts
+      de licence), EHPAD (Emeis, Korian, DomusVi), imagerie, cliniques MCO (Ramsay,
+      Elsan, Vivalto), labos. <strong>Ce n'est pas un défaut « labo ».</strong></p>
+      <table style="margin-top:12px">
+        <thead><tr><th>Question</th><th>Qui répond</th><th>Nature</th><th>État</th></tr></thead>
+        <tbody>
+          <tr><td>« Ce site est-il actif ? »</td><td><strong>MCP</strong></td><td>Réparer un <strong>fait faux</strong></td><td><span class="bad">à corriger</span></td></tr>
+          <tr><td>« Quels SIRET se sont succédé ici ? »</td><td><strong>MCP</strong></td><td>Fait brut</td><td><span style="color:var(--ambre);font-weight:700">partiel</span></td></tr>
+          <tr><td>« Le site A a-t-il été racheté par B ? »</td><td><strong>Geo Intel</strong></td><td>Interprétation M&amp;A</td><td>hors MCP — volontaire</td></tr>
+        </tbody>
+      </table>
+      <div class="callout" style="margin-top:14px">
+        <span class="lbl">Frontière MCP / Geo Intel respectée</span>
+        Corriger le verdict actif/fermé répare un <em>fait faux</em> — pas de
+        l'interprétation. Exposer la succession de SIRET = fait brut. Le mot
+        « rachat » reste à Geo Intel. Geo Intel <strong>consomme</strong> le MCP
+        sans re-vérifier SIRENE : un fait faux en entrée corrompt tout l'étage aval.
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. INSIGHT -->
+  <section>
+    <h2><span class="num">5</span> Insight de conception</h2>
+    <div class="card">
+      <h3>Le bon critère de co-localisation = la distance géographique</h3>
+      <p>Le <code>score_adresse</code> (Dice textuel) <strong>ne discrimine pas le
+      numéro de voie</strong>. Preuve prod : le voisin <em>SOPHIE ALLALI</em> au
+      <strong>48</strong> av Ch. de Gaulle obtient <code>0.8958</code> — quasi aussi
+      haut que le vrai repreneur au <strong>85</strong>. Le Dice noie le numéro de
+      rue dans les bigrammes communs.</p>
+      <div class="callout">
+        <span class="lbl">Le bon juge</span>
+        La <strong>distance GPS</strong> point DINUM ↔ coords FINESS. Disponible
+        (<code>Etablissement.point</code> via <code>/near_point</code>,
+        <code>finess.coords</code> déjà utilisé). Vérifié prod : Biogroup au 3 R
+        Garnier est à <strong>~2 m</strong> du FINESS — co-localisation
+        indiscutable. Un voisin de rue : 50–250 m. Le Dice reste un signal
+        secondaire de repli.
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. LEVIERS -->
+  <section>
+    <h2><span class="num">6</span> Leviers de correction</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>#</th><th>Levier</th><th>Effet</th></tr></thead>
+        <tbody>
+          <tr><td><strong>L1</strong></td><td>Armer le fallback géo aussi quand le <code>best_match</code> trouvé est <strong>fermé</strong></td><td>Rend le repreneur <strong>visible</strong> (corrige Mécanisme A)</td></tr>
+          <tr><td><strong>L2</strong></td><td><strong>« Actif prime »</strong> : <code>best_match</code> = candidat actif, NAF-compatible, co-localisé (distance géo)</td><td>Cœur du fix — corrige les 2 mécanismes</td></tr>
+          <tr><td><strong>L3</strong></td><td>Statut actif <strong>avant</strong> le name filter ; le name filter ne départage plus qu'entre candidats de même statut</td><td>Empêche le name filter de tuer un actif ; préserve son utilité (cas EYLAU)</td></tr>
+          <tr><td><strong>L4</strong></td><td>Exposer un champ <code>succession</code> : exploitant actif + SIRET fermés co-localisés</td><td>Matière brute pour Geo Intel (Niveau 2)</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top:10px;font-size:13px;color:var(--muted)">L1 + L2 + L3
+      forment un tout indissociable.</p>
+    </div>
+  </section>
+
+  <!-- 7. OPTIONS -->
+  <section>
+    <h2><span class="num">7</span> Options</h2>
+    <div class="grid g3">
+      <div class="opt reco">
+        <div class="opt-head"><span class="name">Option A</span><span class="tag tag-reco">Recommandée</span></div>
+        <p style="font-size:13.5px">Correction ciblée du moteur — L1+L2+L3+L4.
+        Sélection <code>best_match</code> unifiée RPPS + fallback.</p>
+        <div class="er"><strong>Effort</strong> moyen · 2 fichiers + tests<br>
+        <strong>Risque</strong> maîtrisé · <strong>Pas de migration DB</strong></div>
+      </div>
+      <div class="opt">
+        <div class="opt-head"><span class="name">Option B</span><span class="tag tag-defer">À différer</span></div>
+        <p style="font-size:13.5px">Option A + normalisation des abréviations de
+        voie (<code>AV→AVENUE</code>…) dans <code>address-match</code>.</p>
+        <div class="er"><strong>Gain</strong> améliore tout le MCP<br>
+        <strong>Coût</strong> surface large · non nécessaire ici → chantier séparé</div>
+      </div>
+      <div class="opt">
+        <div class="opt-head"><span class="name">Option C</span><span class="tag tag-out">Hors scope</span></div>
+        <p style="font-size:13.5px">Refonte « résolution par adresse d'abord » —
+        abandon du pivot RPPS.</p>
+        <div class="er"><strong>Coût</strong> gros refactor, régressions,
+        coût DINUM systématique<br><strong>Verdict</strong> à reconsidérer seulement si A insuffisante</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. PLAN -->
+  <section>
+    <h2><span class="num">8</span> Plan d'implémentation — Option A</h2>
+    <div class="card">
+      <div class="lot"><span class="id">L0</span><div class="body"><span class="t">Calibrage prod</span> <span class="wt wt-l">léger</span><br><span style="font-size:13.5px">Mesurer la distance géo repreneurs vs voisins sur un échantillon. Fixer le seuil de co-localisation (~30–40 m). Doctrine <em>prove-by-prod</em>.</span></div></div>
+      <div class="lot"><span class="id">L1</span><div class="body"><span class="t">Armement fallback</span> <span class="wt wt-l">léger</span><br><span style="font-size:13.5px">Élargir la condition : <code>best_match === null || best_match.actif === false</code>.</span></div></div>
+      <div class="lot"><span class="id">L2</span><div class="body"><span class="t">Sélection unifiée</span> <span class="wt wt-h">lourd</span><br><span style="font-size:13.5px">Fonction de choix <code>best_match</code> commune : NAF → co-localisation géo → actif prioritaire → départage récence/nom/RPPS.</span></div></div>
+      <div class="lot"><span class="id">L3</span><div class="body"><span class="t">Réordonnancement</span> <span class="wt wt-m">moyen</span><br><span style="font-size:13.5px">Généraliser <code>by_active_succession</code> (sans contrainte SIREN, via distance géo). Statut actif avant le name filter.</span></div></div>
+      <div class="lot"><span class="id">L4</span><div class="body"><span class="t">Champ <code>succession</code></span> <span class="wt wt-m">moyen</span><br><span style="font-size:13.5px">Exploitant actif retenu + <code>exploitants_precedents[]</code> (SIRET fermés + dates). MAJ de l'explication LLM — sans le mot « rachat ».</span></div></div>
+      <div class="lot"><span class="id">L5</span><div class="body"><span class="t">Tests</span> <span class="wt wt-m">moyen</span><br><span style="font-size:13.5px">Unitaires + intégration (cf. § 9).</span></div></div>
+      <div class="lot"><span class="id">L6</span><div class="body"><span class="t">Docs</span> <span class="wt wt-l">léger</span><br><span style="font-size:13.5px">CHANGELOG, CLAUDE.md (gotcha + corriger le commentaire faux), README, mémoire.</span></div></div>
+      <div class="lot"><span class="id">L7</span><div class="body"><span class="t">Discipline + release</span> <span class="wt wt-m">moyen</span><br><span style="font-size:13.5px">/simplify, /review P1+P2, typecheck+lint+test, validation prod sur 84 FINESS « BIOEPINE » + échantillon vrais fermés.</span></div></div>
+      <p style="margin-top:14px;font-size:13px;color:var(--muted)">Déploiement = simple
+      push de code (npm + Vercel). <strong>Aucune migration SQL.</strong> Ordre global :
+      1 session de développement focalisée, discipline post-fix incluse.</p>
+    </div>
+  </section>
+
+  <!-- 9. RISQUES + TESTS -->
+  <section>
+    <h2><span class="num">9</span> Risques &amp; stratégie de test</h2>
+    <div class="grid g2">
+      <div class="card">
+        <h3>Risques &amp; mitigations</h3>
+        <table>
+          <thead><tr><th>Risque</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Faux positif inverse</strong> (vrai fermé déclaré actif via un voisin)</td><td>Distance géo stricte, pas le Dice. Seuil calibré L0. Gate NAF conservé.</td></tr>
+            <tr><td>Régression cas EYLAU (V0.13.1)</td><td>Name filter conservé — départage entre actifs. Test de non-régression obligatoire.</td></tr>
+            <tr><td>Candidat sans coordonnées</td><td>Repli sur le Dice. Les actifs « succession » viennent de <code>/near_point</code> → coords présentes.</td></tr>
+            <tr><td>Surcoût DINUM</td><td>Borné, caché côté serveur. Acceptable.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Cas de test</h3>
+        <table>
+          <thead><tr><th>Cas</th><th>Attendu</th></tr></thead>
+          <tbody>
+            <tr><td>Neuilly Sablons (Méca. A)</td><td><span class="badge b-actif">actif</span></td></tr>
+            <tr><td>Pont de Neuilly (Méca. B)</td><td><span class="badge b-actif">actif</span></td></tr>
+            <tr><td>EYLAU (non-régression)</td><td>inchangé</td></tr>
+            <tr><td>Site vraiment fermé</td><td><span class="badge b-ferme">ferme</span> préservé</td></tr>
+            <tr><td>Voisin actif autre bâtiment</td><td>non promu <code>best_match</code></td></tr>
+            <tr><td>Champ <code>succession</code></td><td>actif + précédents listés</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10. DECISIONS -->
+  <section>
+    <h2><span class="num">10</span> Décisions à acter</h2>
+    <div class="card">
+      <div class="dec">
+        <div class="item"><div><strong>Option A validée ?</strong> &nbsp;<span class="reco-inline">Reco : oui</span> — B et C écartées / différées.</div></div>
+        <div class="item"><div><strong>Champ <code>succession</code> exposé dès ce fix ?</strong> &nbsp;<span class="reco-inline">Reco : oui</span> — c'est la matière Niveau 2 dont Geo Intel a besoin, coût marginal.</div></div>
+        <div class="item"><div><strong>Seuil de co-localisation</strong> : calibrage L0 sur données prod, ou valeur imposée d'emblée ? &nbsp;<span class="reco-inline">Reco : calibrage L0.</span></div></div>
+        <div class="item"><div><strong>Release</strong> dédiée (V0.15.1 / V0.16.0) ou groupée avec d'autres travaux ?</div></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    france-data-mcp · cadrage <code>verifier-site-actif-succession-fix</code> ·
+    archive technique : le <code>.md</code> jumeau · 22 mai 2026
+  </footer>
+
+</div>
+</body>
+</html>

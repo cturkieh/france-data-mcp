@@ -37,6 +37,7 @@ import {
   type ResolutionMethod,
   type SiretCandidate,
   type SiretResolution,
+  type SiteSuccession,
   resolveSiretsForFiness,
 } from "./siret-resolver.js";
 
@@ -184,6 +185,14 @@ export interface VerifierSiteActifResult {
    * manuellement (best_match=null, plusieurs candidats listés).
    */
   disambiguation_status: DisambiguationStatus;
+  /**
+   * Trace de succession d'exploitants sur le site (V0.16). `detected: true`
+   * quand le `best_match` est un SIRET actif co-localisé avec ≥ 1 SIRET fermé
+   * (ancien exploitant) — site repris. `exploitants_precedents` liste ces
+   * SIRET fermés. Fait brut : le tool ne qualifie PAS la succession de
+   * « rachat » (cf. `SiteSuccession`) — c'est au caller de le faire.
+   */
+  succession: SiteSuccession;
 }
 
 /**
@@ -249,6 +258,7 @@ export async function verifierSiteActif(
     fallback_reason: resolution.fallback_reason,
     naf_filter_used: resolution.naf_filter_used,
     disambiguation_status: resolution.disambiguation_status,
+    succession: resolution.succession,
   });
 }
 
@@ -267,6 +277,17 @@ function buildVerifierExplication(
   // Suffix DINUM ajouté à toutes les branches : utile même quand le verdict
   // est confirmé (signal de résolution non complète, peut justifier un retry).
   const dinumDiagSuffix = formatDinumDiag(resolution.dinum_errors);
+  // Suffix succession (V0.16) : quand le best_match actif a écarté ≥ 1 SIRET
+  // fermé co-localisé, on expose la trace au caller LLM / Geo Intel. Le mot
+  // « rachat » n'est PAS employé — c'est une interprétation, pas un fait brut.
+  const succ = resolution.succession;
+  let successionSuffix = "";
+  if (succ.detected) {
+    const precedents = succ.exploitants_precedents
+      .map((c) => `SIRET ${c.siret}${c.raison_sociale_ul ? ` (${c.raison_sociale_ul})` : ""}`)
+      .join(", ");
+    successionSuffix = ` Site repris : ${succ.exploitants_precedents.length} exploitant(s) précédent(s) co-localisé(s) et fermé(s) — ${precedents}. Succession de SIRET au même point : croiser avec l'enseigne pour qualifier (rachat / réorganisation interne).`;
+  }
   // V0.13 Resolver V2 : préfixe la méthode quand un fallback a été utile ou
   // tenté. Le caller LLM sait que le SIRET ne vient pas du pivot RPPS classique.
   const methodPrefix = buildMethodPrefix(resolution);
@@ -277,7 +298,7 @@ function buildVerifierExplication(
   const scoreDisplay = (s: number | null): string =>
     s === null ? "n/a (fallback géo)" : s.toFixed(2);
   if (verdictSite === "actif" && best) {
-    return `${methodPrefix}Site actif côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${scoreDisplay(best.score_adresse)}) marqué actif. Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}.${dinumDiagSuffix}`;
+    return `${methodPrefix}Site actif côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${scoreDisplay(best.score_adresse)}) marqué actif. Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}.${successionSuffix}${dinumDiagSuffix}`;
   }
   if (verdictSite === "ferme" && best) {
     return `${methodPrefix}Site fermé côté SIRENE/DINUM : SIRET ${best.siret} (score adresse ${scoreDisplay(best.score_adresse)}) marqué inactif (date_creation: ${best.date_creation ?? "?"}). FINESS DREES probablement en retard sur la fermeture (latence 1-2 mois). Groupe (SIREN ${best.siret.slice(0, 9)}) : ${verdictGroupe}. Pour la timeline complète : historique_etablissement(num_finess).${dinumDiagSuffix}`;

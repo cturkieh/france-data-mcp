@@ -4,6 +4,53 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.16.0] — 2026-05-22 (fix succession M&A — verifier_site_actif)
+
+### Fixed — faux verdict « fermé » sur les sites de santé repris (M&A)
+
+`verifier_site_actif` — et les 3 tools partageant le resolver SIRET
+(`historique_etablissement`, `reconcilier_finess_sirene`, `inspect_site`) —
+déclarait « fermé » des sites en réalité actifs dès lors qu'ils avaient changé
+d'exploitant (rachat). Faux négatif silencieux, prouvé prod sur 2 labos de
+Neuilly-sur-Seine repris par Biogroup (ex-BioÉpine). Défaut structurel : touche
+toutes les familles FINESS où il y a de la consolidation (pharmacies, EHPAD,
+imagerie, cliniques).
+
+Cause-racine : le moteur de résolution SIRET (`resolveSiretsForFiness`)
+choisissait le `best_match` d'une adresse par ressemblance d'adresse seule — le
+statut `actif` n'était jamais un critère. Quand un ancien SIRET fermé et un
+repreneur actif coexistaient au même point, l'ancien fermé l'emportait.
+
+- **L1** — le fallback géographique `/near_point` est désormais armé aussi
+  quand le `best_match` trouvé est FERMÉ (avant : seulement quand aucun
+  best_match). Sans ça, un repreneur actif d'un autre SIREN restait invisible
+  du pivot RPPS.
+- **L2 / L3** — refonte de la cascade de désambiguïsation : étape « actif
+  prime » placée AVANT le name filter. Quand ≥ 1 candidat actif est co-localisé
+  avec le FINESS, le `best_match` est arbitré parmi les actifs ; les SIRET
+  fermés du site restent dans `candidates[]` (timeline) mais ne sont plus
+  best_match-éligibles.
+- **Co-localisation par distance géodésique** (nouvelle primitive
+  `core/geo-distance.ts` — haversine) plutôt que par score d'adresse Dice : le
+  Dice ne discrimine pas le numéro de voie. Seuil 50 m, calibré prod.
+- **Garde-fou faux positif inverse** : un site réellement fermé reste
+  « fermé » — un voisin actif à une autre adresse (> 50 m) n'est jamais promu.
+
+### Added — champ `succession` sur `verifier_site_actif`
+
+Nouveau champ `succession` (`{ detected, exploitants_precedents[] }`) : trace
+brute des SIRET fermés co-localisés avec le repreneur actif retenu. Matière
+pour un caller d'analyse M&A — le tool ne qualifie PAS la succession de
+« rachat » (interprétation, hors du périmètre « faits bruts » du MCP).
+
+### Validation prod
+
+Prouvé sur l'endpoint de production : les 2 labos de Neuilly basculent
+« fermé » → « actif », un échantillon de 10 sites « BioÉpine » donne 10/10
+« actif », un site réellement fermé (PMA Chérest) reste « fermé ». Cf.
+`scripts/test-live-v016-succession.ts` et le cadrage
+`docs/plans/verifier-site-actif-succession-fix.md`.
+
 ## [0.15.0] — 2026-05-22 (precise_only Ameli + fix description geo_precision)
 
 ### Fixed — description périmée `professionnels_in_radius` (suite Chantier C V0.14.0)

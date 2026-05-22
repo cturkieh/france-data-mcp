@@ -83,6 +83,7 @@ export type {
   SiretCandidate,
   SiretCandidateSource,
   SiretResolution,
+  SiteSuccession,
   DinumLookupError,
 } from "./siret-resolver.js";
 

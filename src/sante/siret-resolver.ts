@@ -34,6 +34,8 @@
  * typiquement 1, rarement 2-3). DINUM gère son propre cache + rate limit.
  */
 
+import { haversineMeters } from "../core/geo-distance.js";
+import type { Coordinates } from "../core/types.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
 import {
   buildFinessAdresseLibelle,
@@ -115,12 +117,17 @@ export type ResolutionMethod = "rpps" | "address_fallback" | "mixed";
  *   de coordonnées (`finess.coords === null`). Survient pour les structures
  *   très anciennes / non géoréférencées par DREES, ou pour les ingestions
  *   FINESS où le Lambert93 n'a pas pu être reprojeté. Skip silencieux.
+ * - `best_match_ferme` : le pivot RPPS a bien produit un `best_match`, mais
+ *   il est FERMÉ. Le fallback géo a été déclenché pour chercher un repreneur
+ *   actif co-localisé (succession / M&A) — V0.16. Distinct de
+ *   `no_best_match_with_clean_dinum` : ici il y a un best_match, juste fermé.
  */
 export type FallbackReason =
   | "no_rpps"
   | "no_best_match_with_clean_dinum"
   | "no_naf_mapping_for_famille"
   | "no_finess_coords"
+  | "best_match_ferme"
   | null;
 
 /**
@@ -173,6 +180,18 @@ export interface SiretCandidate {
    */
   score_adresse: number | null;
   /**
+   * Distance géodésique en mètres entre les coordonnées FINESS et le point GPS
+   * SIRENE/DINUM de cet établissement (haversine). `null` quand le point GPS du
+   * SIRET est absent (origine RPPS pure, fallback INSEE sans coords) ou que le
+   * FINESS lui-même n'a pas de coordonnées.
+   *
+   * **V0.16** — juge de co-localisation « même bâtiment » (cf. `COLOCATION_RADIUS_M`).
+   * Renseigné pour les candidats passés par le fallback géo `/near_point` (qui
+   * fournit toujours `point`). Plus fiable que `score_adresse` pour trancher
+   * « même site » : le Dice textuel ne discrimine pas le numéro de voie.
+   */
+  distance_finess_m: number | null;
+  /**
    * Score Sørensen-Dice 0..1 entre la raison sociale FINESS et la raison sociale
    * de l'unité légale côté SIRENE/DINUM (`raison_sociale_ul`). `null` quand
    * `raison_sociale_ul` est absent (RPPS-only sans cross-vérification DINUM).
@@ -209,6 +228,32 @@ export interface SiretCandidate {
    * disponible sans nouvel appel à `/siret/{siret}`.
    */
   raison_sociale_ul: string | null;
+}
+
+/**
+ * Trace de succession d'exploitants sur un site (V0.16). Quand le `best_match`
+ * d'une résolution est un SIRET actif co-localisé avec un ou plusieurs SIRET
+ * fermés, le site a probablement changé d'exploitant (réorganisation interne,
+ * déménagement, rachat / M&A).
+ *
+ * Fait BRUT exposé au caller (Geo Intel) : le resolver ne qualifie PAS la
+ * succession de « rachat ». Co-localisation + chronologie de SIRET ≠ preuve
+ * juridique de cession. Le caller croise avec sa connaissance des enseignes.
+ */
+export interface SiteSuccession {
+  /**
+   * `true` quand `best_match` est actif ET ≥ 1 SIRET fermé est co-localisé
+   * avec lui (distance géo ≤ `COLOCATION_RADIUS_M`). Signale un site repris.
+   */
+  detected: boolean;
+  /**
+   * SIRET fermés co-localisés avec le `best_match` — les exploitants précédents
+   * du site, triés par `date_creation` décroissante. Les SIRET sans
+   * `date_creation` sont placés en fin, ordonnés par SIRET croissant (ordre
+   * déterministe — l'absence de date n'est PAS comblée par une valeur
+   * inventée). Vide quand `detected` est `false`.
+   */
+  exploitants_precedents: SiretCandidate[];
 }
 
 export interface SiretResolution {
@@ -274,10 +319,34 @@ export interface SiretResolution {
    * une intervention manuelle est requise pour trancher.
    */
   disambiguation_status: DisambiguationStatus;
+  /**
+   * Trace de succession d'exploitants sur le site (V0.16). `detected: true`
+   * quand le `best_match` est un SIRET actif co-localisé avec ≥ 1 SIRET fermé.
+   * Fait brut pour le caller (Geo Intel) — cf. `SiteSuccession`.
+   */
+  succession: SiteSuccession;
 }
 
 /** Seuil au-dessus duquel un score d'adresse Dice est considéré comme un match physique du site. */
 const BEST_MATCH_THRESHOLD = 0.6;
+
+/**
+ * Rayon de co-localisation « même bâtiment » en mètres (V0.16 — fix succession
+ * M&A). Deux établissements SIRENE dont les points GPS sont à ≤ `COLOCATION_RADIUS_M`
+ * des coordonnées FINESS sont considérés sur LE MÊME site physique.
+ *
+ * **Valeur 50 m** calibrée sur prod (cf. `docs/plans/verifier-site-actif-succession-fix.md`,
+ * lot L0) : un SIRET repreneur mesuré à 0,2 / 1,3 / 17 m du FINESS (le 17 m =
+ * bruit du double géocodage Lambert93 DREES vs BAN DINUM) ; un voisin de rue
+ * (autre numéro de voie) à ~110 m. 50 m = large marge au-dessus du pire
+ * repreneur, bien en dessous d'un voisin.
+ *
+ * Pourquoi la distance géo et pas le score d'adresse Dice : le Dice ne
+ * discrimine PAS le numéro de voie (prouvé prod — un voisin au n°48 d'une
+ * avenue score 0,90 contre le n°85 du FINESS). La distance GPS est le seul
+ * juge fiable de « même site ».
+ */
+const COLOCATION_RADIUS_M = 50;
 
 /**
  * Un candidat n'est éligible best_match que si son `score_adresse` atteint
@@ -301,11 +370,18 @@ function meetsBestMatchAddressGate(c: { score_adresse: number | null }): boolean
  * Seuil sous lequel un candidat est disqualifié par son score nom dans le
  * fallback géographique (Raffinement #2 V0.13.1). Très bas (0.2) à dessein :
  *
- * - `> 0.2` : laisse passer les vrais sites même en cas de M&A (raison sociale
- *   FINESS "DIAGNOVIE" vs SIRENE "BIOGROUP NORD" Dice ~0.1 — mais ce cas est
- *   protégé par le chemin RPPS, le fallback géo n'est pas déclenché).
+ * - `> 0.2` : ne disqualifie pas un candidat dont le nom ressemble, même de
+ *   loin, au libellé FINESS.
  * - `< 0.2` : élimine les co-locataires NAF-compatibles dont la raison sociale
  *   n'a aucun rapport (cas type CHOUAIEB 0.04 sur EYLAU labo Victor Hugo).
+ *
+ * **V0.16** : le name filter s'applique APRÈS l'étape « actif prime » de
+ * `disambiguateFallbackCandidates` — il ne départage donc plus que des
+ * candidats de même statut d'activité et ne peut PLUS écarter un repreneur
+ * actif au profit d'un ancien exploitant fermé. L'hypothèse pré-V0.16 « un
+ * M&A est protégé par le chemin RPPS, le fallback n'est pas déclenché » était
+ * FAUSSE — réfutée prod (Neuilly Sablons / Pont de Neuilly : RPPS vide ⇒
+ * fallback déclenché ⇒ name filter actif sur le repreneur).
  *
  * Appliqué UNIQUEMENT dans `tryAddressFallback` (fallback géo) — jamais sur le
  * chemin RPPS direct où le signal métier "le PS a déclaré ce SIRET" prime sur
@@ -374,6 +450,7 @@ export async function resolveSiretsForFiness(
       siret,
       sources: ["rpps"],
       score_adresse: null,
+      distance_finess_m: null,
       score_nom: null,
       actif: null,
       adresse_libelle: null,
@@ -533,13 +610,15 @@ export async function resolveSiretsForFiness(
 
   // === Resolver V2 — fallback géographique conditionnel ====================
   //
-  // Cadrage Q1 verrouillé : on déclenche le fallback UNIQUEMENT si :
-  //   (1) best_match === null (rien de bon côté RPPS+DINUM cascade)
-  //   (2) dinum_errors.length === 0 (DINUM a répondu sans erreur — on est
-  //       sûr que l'absence est réelle, pas une panne transitoire)
+  // On déclenche le fallback /near_point si :
+  //   (1) best_match === null (rien de bon côté RPPS+DINUM cascade), OU
+  //       best_match.actif === false (L1 V0.16 — best_match fermé : on cherche
+  //       un repreneur actif co-localisé, cf. fix succession M&A) ;
+  //   (2) dinum_errors.length === 0 (DINUM a répondu sans erreur — on est sûr
+  //       que l'absence est réelle, pas une panne transitoire).
   //
-  // Sinon : V0.7 strict, pas de fallback. Préserve la sémantique "on n'invente
-  // pas de candidats quand DINUM est en panne" — laissera le caller retry.
+  // Sinon : pas de fallback. Préserve la sémantique "on n'invente pas de
+  // candidats quand DINUM est en panne" — laissera le caller retry.
   //
   // Sirens explorés mutable car le fallback peut en ajouter (SIREN nouveau).
   const sirensExploredMutable = [...sirensDistincts];
@@ -548,9 +627,10 @@ export async function resolveSiretsForFiness(
   let nafFilterUsed: string[] = [];
   let disambiguationStatus: DisambiguationStatus = "not_applicable";
 
-  if (bestMatch === null && dinumErrors.length === 0) {
+  if ((bestMatch === null || bestMatch.actif === false) && dinumErrors.length === 0) {
     const outcome = await tryAddressFallback({
       finess,
+      triggeredByClosedBestMatch: bestMatch !== null,
       rppsSirets,
       finessAddrNorm,
       finessNomNorm,
@@ -581,6 +661,40 @@ export async function resolveSiretsForFiness(
     fallback_reason: fallbackReason,
     naf_filter_used: nafFilterUsed,
     disambiguation_status: disambiguationStatus,
+    succession: buildSuccession(bestMatch, sorted),
+  };
+}
+
+/**
+ * Dérive la trace de succession d'exploitants d'un site (V0.16). Une succession
+ * est « détectée » quand le `best_match` retenu est un SIRET ACTIF et qu'au
+ * moins un SIRET FERMÉ est co-localisé avec lui — l'ancien exploitant du site.
+ *
+ * Le prédicat de co-localisation est `isColocated` (distance géo prouvée ≤
+ * `COLOCATION_RADIUS_M`) — strictement le même que celui de l'arbitrage du
+ * best_match : un fermé sans `distance_finess_m` n'est jamais inscrit comme
+ * exploitant précédent (on n'invente pas une co-localisation que Geo Intel
+ * interprétera).
+ */
+function buildSuccession(
+  bestMatch: SiretCandidate | null,
+  allCandidates: SiretCandidate[],
+): SiteSuccession {
+  if (!bestMatch || bestMatch.actif !== true) {
+    return { detected: false, exploitants_precedents: [] };
+  }
+  const exploitantsPrecedents = allCandidates
+    .filter((c) => c.siret !== bestMatch.siret && c.actif === false && isColocated(c))
+    .sort((a, b) => {
+      // Tri chronologique décroissant ; tie-break SIRET ascendant pour un ordre
+      // DÉTERMINISTE quand `date_creation` est absente — l'absence de date n'est
+      // pas comblée par une valeur inventée, juste ordonnée stablement.
+      const dateDiff = (b.date_creation ?? "").localeCompare(a.date_creation ?? "");
+      return dateDiff !== 0 ? dateDiff : a.siret.localeCompare(b.siret);
+    });
+  return {
+    detected: exploitantsPrecedents.length > 0,
+    exploitants_precedents: exploitantsPrecedents,
   };
 }
 
@@ -679,6 +793,10 @@ function mergeOrInsertDinumCandidate(
       siret: etab.siret,
       sources: ["dinum_address_match"],
       score_adresse: score,
+      // Distance géo non calculée sur le chemin DINUM principal : seul le
+      // fallback géo (qui pilote la désambiguïsation par co-localisation)
+      // en a besoin, et il la renseigne lui-même via la branche `existing`.
+      distance_finess_m: null,
       score_nom: scoreNom,
       actif: etab.actif,
       adresse_libelle: adresse,
@@ -738,6 +856,12 @@ interface FallbackOutcome {
  */
 async function tryAddressFallback(args: {
   finess: FinessResult;
+  /**
+   * `true` quand le fallback est déclenché parce que le pivot RPPS a produit
+   * un `best_match` mais FERMÉ (L1 V0.16). Sert à exposer `fallback_reason:
+   * "best_match_ferme"` plutôt que `"no_best_match_with_clean_dinum"`.
+   */
+  triggeredByClosedBestMatch: boolean;
   rppsSirets: string[];
   finessAddrNorm: string;
   finessNomNorm: string;
@@ -748,6 +872,7 @@ async function tryAddressFallback(args: {
 }): Promise<FallbackOutcome> {
   const {
     finess,
+    triggeredByClosedBestMatch,
     rppsSirets,
     finessAddrNorm,
     finessNomNorm,
@@ -767,6 +892,10 @@ async function tryAddressFallback(args: {
       best_match: null,
     };
   }
+  // Coords FINESS garanties non-null ici — capturées en const pour préserver
+  // le narrowing TypeScript à travers les `await` qui suivent (le narrowing
+  // d'une propriété d'objet est perdu après un point de suspension).
+  const finessCoords: Coordinates = finess.coords;
 
   // Garde-fou (2) : famille sans mapping NAF → skip silencieux (Franco-Britannique).
   const nafs = [...nafsForFamille(finess.categorie.famille)];
@@ -780,6 +909,15 @@ async function tryAddressFallback(args: {
     };
   }
 
+  // Raison de fallback « de base » partagée par les returns post-near_point :
+  // `best_match_ferme` quand L1 (V0.16) a déclenché le fallback sur un best_match
+  // fermé, sinon la sémantique V0.13 (no_rpps / no_best_match_with_clean_dinum).
+  const baseFallbackReason: FallbackReason = triggeredByClosedBestMatch
+    ? "best_match_ferme"
+    : rppsSirets.length === 0
+      ? "no_rpps"
+      : "no_best_match_with_clean_dinum";
+
   // Recherche /near_point parallèle, 1 appel DINUM par NAF. `onlyActive: false`
   // pour capturer aussi les SIRET fermés (cas déménagement à détecter).
   // Promise.allSettled : un NAF qui plante (rate limit, 5xx) n'invalide pas
@@ -787,7 +925,7 @@ async function tryAddressFallback(args: {
   const nearPointResults = await Promise.allSettled(
     nafs.map((naf) =>
       searchEntreprises({
-        center: finess.coords as { lat: number; lon: number },
+        center: finessCoords,
         radiusKm: FALLBACK_RADIUS_KM,
         naf,
         onlyActive: false,
@@ -849,7 +987,7 @@ async function tryAddressFallback(args: {
   if (compatibleEtabs.length === 0) {
     return {
       method: "rpps",
-      fallback_reason: rppsSirets.length === 0 ? "no_rpps" : "no_best_match_with_clean_dinum",
+      fallback_reason: baseFallbackReason,
       naf_filter_used: nafs,
       disambiguation_status: "not_applicable",
       best_match: null,
@@ -903,9 +1041,10 @@ async function tryAddressFallback(args: {
     sirensActif[siren] = lookup.actif;
   }
 
-  // Injecter les candidats fallback dans la Map partagée. Calcule un score
-  // adresse informatif (les SIRET sont déjà géo-proches, score quasi uniforme
-  // — exposé pour debug/audit, PAS utilisé pour discriminer).
+  // Injecter les candidats fallback dans la Map partagée. Calcule :
+  //  - `score` Dice adresse : signal secondaire (exposé pour audit) ;
+  //  - `distance` géo FINESS↔point DINUM : juge de co-localisation V0.16, le
+  //    seul fiable pour trancher « même bâtiment » (cf. `COLOCATION_RADIUS_M`).
   //
   // Fix P2 code-reviewer : si l'enrichment SIREN a échoué, on retombe sur le
   // `nomComplet` que DINUM /near_point avait DÉJÀ fourni (capté dans
@@ -921,10 +1060,15 @@ async function tryAddressFallback(args: {
     const adresse = etab.adresse?.trim() || null;
     const score = adresse ? diceCoefficient(finessAddrNorm, normalizeForCompare(adresse)) : null;
     const scoreNom = computeNameScore(finessNomNorm, resolvedNomComplet);
+    // `etab.point` est fourni par /near_point quand l'adresse SIRENE est
+    // géocodée — quasi toujours. `null` (distance) si absent → la cascade de
+    // désambiguïsation retombe sur le score Dice pour ce candidat.
+    const distance = etab.point != null ? haversineMeters(finessCoords, etab.point) : null;
     const existing = candidates.get(etab.siret);
     if (existing) {
       // SIRET déjà connu via RPPS (signal RPPS positif) — enrichir, ajouter source.
       existing.score_adresse = score;
+      existing.distance_finess_m = distance;
       existing.actif = etab.actif;
       existing.adresse_libelle = adresse;
       existing.date_creation = etab.dateCreation ?? null;
@@ -942,6 +1086,7 @@ async function tryAddressFallback(args: {
         siret: etab.siret,
         sources: ["dinum_address_match"],
         score_adresse: score,
+        distance_finess_m: distance,
         score_nom: scoreNom,
         actif: etab.actif,
         adresse_libelle: adresse,
@@ -953,21 +1098,34 @@ async function tryAddressFallback(args: {
     }
   }
 
-  // Désambiguïsation cascade :
-  //   1. 1 candidat → single_after_gate
-  //   2. Name filter (V0.13.1 Raffinement #2) : disqualifie les candidats dont
-  //      score_nom < NAME_DISQUALIFY_THRESHOLD (non-null seulement).
-  //      Si ≥ 1 candidat disqualifié ET 1 seul reste → by_name_score.
-  //   3. Active succession (V0.13.1 Raffinement #3) : tous les candidats
-  //      restants partagent même SIREN + même adresse normalisée, ≥ 1 actif
-  //      → retenir l'actif le plus récent → by_active_succession.
-  //   4. Signal RPPS : 1 seul candidat dans la liste RPPS-déclarée → by_rpps_signal.
+  // Garde-fou observabilité (V0.16) : si AUCUN candidat fallback n'a de point
+  // GPS, l'étape « actif prime » (qui exige une distance prouvée) est
+  // inopérante — le fix succession serait silencieusement désactivé. Signale
+  // pour audit ops (cause probable : DINUM /near_point ne fournit plus `point`).
+  if (
+    fallbackCandidates.length >= 2 &&
+    fallbackCandidates.every((c) => c.distance_finess_m === null)
+  ) {
+    console.warn(
+      `[france-data-mcp] siret-resolver: fallback géo num_finess=${finess.num_finess} — ${fallbackCandidates.length} candidats mais AUCUN point GPS : étape de co-localisation V0.16 inopérante, arbitrage retombé sur Dice/nom (audit : DINUM /near_point fournit-il encore \`point\` ?)`,
+    );
+  }
+
+  // Désambiguïsation cascade (V0.16 — « actif prime ») :
+  //   0. Gate adresse grossier → addressGated. Vide → ambiguous. 1 → single.
+  //   1. ACTIF PRIME : s'il existe ≥ 1 candidat ACTIF co-localisé (distance géo
+  //      ≤ COLOCATION_RADIUS_M), le pool d'arbitrage est restreint à ces actifs
+  //      co-localisés — les SIRET fermés du site sont écartés du best_match
+  //      (ils restent dans candidates[] pour la timeline). 1 actif → tranché.
+  //   2. Name filter : disqualifie les candidats au score_nom trop faible.
+  //   3. Active succession même SIREN : départage une réorganisation interne.
+  //   4. Signal RPPS : 1 seul candidat RPPS-déclaré.
   //   5. Sinon → ambiguous (best_match=null).
   const disamb = disambiguateFallbackCandidates(fallbackCandidates, rppsSirets);
 
   return {
     method: rppsSirets.length > 0 ? "mixed" : "address_fallback",
-    fallback_reason: rppsSirets.length === 0 ? "no_rpps" : "no_best_match_with_clean_dinum",
+    fallback_reason: baseFallbackReason,
     naf_filter_used: nafs,
     disambiguation_status: disamb.status,
     best_match: disamb.best_match,
@@ -975,99 +1133,138 @@ async function tryAddressFallback(args: {
 }
 
 /**
+ * Un candidat est « co-localisé » avec le FINESS s'il occupe le même site
+ * physique : distance géodésique ≤ `COLOCATION_RADIUS_M` (V0.16) — le seul juge
+ * fiable, le Dice textuel ne discrimine pas le numéro de voie.
+ *
+ * Un candidat sans `distance_finess_m` (point GPS absent) n'est **pas** présumé
+ * co-localisé : faute de preuve géographique, l'étape « actif prime » ne
+ * l'accélère pas. Il n'est pas écarté pour autant — il reste dans
+ * `candidates[]` ET dans la cascade name/RPPS classique, qui peut toujours le
+ * retenir. Choix conservateur : interdit qu'un candidat actif sans position
+ * prouvée promeuve un verdict « actif » sur un site possiblement fermé (garde-
+ * fou faux positif inverse). En pratique les candidats du fallback viennent de
+ * `/near_point` (recherche PAR proximité) → ils ont quasi toujours un point ;
+ * le cas `null` est un cas-limite, pas le cas nominal.
+ */
+function isColocated(c: SiretCandidate): boolean {
+  return c.distance_finess_m !== null && c.distance_finess_m <= COLOCATION_RADIUS_M;
+}
+
+/**
  * Cascade de désambiguïsation pour les candidats post-gate NAF du fallback géo.
  * Sortie : statut + best_match (ou null si ambigu). Logique linéaire, chaque
- * étape suivante n'est essayée que si la précédente n'a pas tranché.
+ * étape n'est essayée que si la précédente n'a pas tranché.
  *
- * **V0.13.1** : 2 nouvelles étapes intermédiaires entre `single_after_gate` et
- * `by_rpps_signal` — `by_name_score` (Raffinement #2 : disqualifier les
- * candidats hors-sujet par score nom) et `by_active_succession` (Raffinement
- * #3 : départager une succession temporelle de SIRET du même SIREN à la même
- * adresse). Préserve strictement les cas pré-V0.13.1 (test "RPPS vide + 2 labos
- * co-localisés ex-aequo → ambiguous" = 2 SIREN distincts → succession rule ne
- * s'applique pas → reste ambiguous).
+ * **V0.16 — « actif prime » (fix succession M&A).** Étape pivot ajoutée AVANT
+ * le name filter : si ≥ 1 candidat ACTIF est co-localisé avec le FINESS
+ * (cf. `isColocated`), le pool d'arbitrage du best_match est restreint à ces
+ * actifs co-localisés. Les SIRET fermés du site (ancien exploitant) ne sont
+ * alors plus best_match-éligibles — ils restent dans `candidates[]` pour la
+ * timeline / succession.
+ *
+ * Pourquoi AVANT le name filter : le libellé FINESS conserve l'ancienne
+ * enseigne (latence DREES). Un repreneur dont la raison sociale ne ressemble
+ * plus au libellé FINESS serait sinon disqualifié par son score nom au profit
+ * de l'ancien exploitant fermé — régression M&A prouvée prod (Neuilly Sablons /
+ * Pont de Neuilly, cf. `docs/plans/verifier-site-actif-succession-fix.md`).
+ *
+ * Garde-fou faux positif inverse : on ne promeut un actif QUE s'il est
+ * réellement co-localisé (distance géo). Un voisin actif du même métier à une
+ * autre adresse (numéro de voie distinct) n'est pas promu. Et plusieurs actifs
+ * co-localisés de SIREN distincts = entreprises concurrentes, pas une
+ * succession → l'étape 1 ne tranche pas (la cascade name/RPPS continue, sinon
+ * `ambiguous`). Préserve le test "2 labos co-localisés ex-aequo → ambiguous".
  */
 function disambiguateFallbackCandidates(
   candidates: SiretCandidate[],
   rppsSirets: string[],
 ): { status: DisambiguationStatus; best_match: SiretCandidate | null } {
-  // Étape 0 — Gate adresse (V0.13.1 prod-prouvé sur FINESS 920028487).
-  // Au sein du rayon /near_point 150 m, DINUM peut ramener plusieurs sites
-  // du même groupe (ex : EYLAU 27 Bd Victor Hugo ET EYLAU 34 Avenue du Roule
-  // à 150 m). Le 2e a score_adresse < 0.6 → ce n'est PAS le site cherché.
-  // Helper partagé `meetsBestMatchAddressGate` (V0.13.1 factorisation) : un
-  // candidat qui n'atteint pas le seuil ne devrait jamais être best_match.
-  // La liste `candidates[]` exposée au caller reste COMPLÈTE (audit /
-  // cross-check) ; seul le best_match est arbitré sur le pool gated.
+  // Étape 0 — Gate adresse grossier (V0.13.1 prod-prouvé sur FINESS 920028487).
+  // Au sein du rayon /near_point, DINUM peut ramener plusieurs sites ; ceux au
+  // score_adresse < BEST_MATCH_THRESHOLD ne sont PAS le site cherché. La liste
+  // candidates[] exposée au caller reste COMPLÈTE (audit) ; seul le best_match
+  // est arbitré sur le pool gated.
   const addressGated = candidates.filter(meetsBestMatchAddressGate);
-  // Si rien ne passe le gate, on n'a pas matière à départager → ambiguous.
-  // Garde la sémantique V0.13.0 (best_match null) tout en évitant qu'un site
-  // hors-périmètre (avenue du Roule sur cas EYLAU) ne soit choisi par défaut.
-  // Warn symétrique du « name filter eliminated all » plus bas (P0 /review
-  // V0.13.1 silent-failure-hunter) : signal d'audit ops sur un cas pathologique
-  // (gate NAF a laissé passer N candidats, tous hors-périmètre adresse —
-  // soit coords FINESS imprécises, soit rayon /near_point trop large, soit
-  // gate NAF anormalement permissif).
   if (addressGated.length === 0) {
     console.warn(
       `[france-data-mcp] siret-resolver: address gate eliminated all ${candidates.length} fallback candidates (score_adresse < ${BEST_MATCH_THRESHOLD}) — ambiguous returned (audit recommandé : coords FINESS imprécises ? rayon /near_point trop large ? gate NAF anormalement permissif ?)`,
     );
     return { status: "ambiguous", best_match: null };
   }
+  const [firstGated] = addressGated;
+  if (addressGated.length === 1 && firstGated) {
+    return { status: "single_after_gate", best_match: firstGated };
+  }
 
-  const [first] = addressGated;
-  if (addressGated.length === 1 && first) {
-    return { status: "single_after_gate", best_match: first };
+  // Étape 1 — ACTIF PRIME (V0.16). Si ≥ 1 candidat actif est co-localisé avec
+  // le FINESS, le site est exploité : le pool d'arbitrage est restreint aux
+  // actifs co-localisés. `succession` = vrai s'il y avait aussi ≥ 1 fermé
+  // co-localisé écarté (ancien exploitant) — détermine le statut retourné.
+  const colocated = addressGated.filter(isColocated);
+  const colocatedActifs = colocated.filter((c) => c.actif === true);
+  let pool = addressGated;
+  let succession = false;
+  if (colocatedActifs.length > 0) {
+    pool = colocatedActifs;
+    succession = colocated.some((c) => c.actif === false);
+  } else if (colocated.length > 0) {
+    // Aucun actif co-localisé, mais ≥ 1 candidat co-localisé (site fermé ou
+    // statut inconnu) : on restreint quand même le pool aux co-localisés pour
+    // qu'un voisin actif lointain (autre bâtiment, dans le rayon /near_point)
+    // ne pollue pas l'arbitrage du best_match — garde-fou faux positif
+    // inverse : un site vraiment fermé ne doit jamais basculer en « actif ».
+    pool = colocated;
+  }
+  const [firstPool] = pool;
+  if (pool.length === 1 && firstPool) {
+    return {
+      status: succession ? "by_active_succession" : "single_after_gate",
+      best_match: firstPool,
+    };
   }
 
   // Étape 2 — Name filter (V0.13.1 Raffinement #2). Disqualifie les candidats
   // dont le nom est trop éloigné du libellé FINESS (`score_nom < threshold`,
   // mais SEULEMENT si score_nom est non-null : un score absent ne disqualifie
-  // jamais — la donnée n'est pas exploitable et le gate NAF a déjà filtré).
-  // S'applique sur `addressGated` (étape 0) — les candidats hors périmètre
-  // adresse sont déjà retirés du pool d'arbitrage.
-  const nameFiltered = addressGated.filter(
+  // jamais). S'applique sur le pool courant — déjà restreint aux actifs
+  // co-localisés si l'étape 1 a réduit sans trancher.
+  const nameFiltered = pool.filter(
     (c) => c.score_nom === null || c.score_nom >= NAME_DISQUALIFY_THRESHOLD,
   );
   const [firstNameFiltered] = nameFiltered;
   if (nameFiltered.length === 1 && firstNameFiltered) {
     return { status: "by_name_score", best_match: firstNameFiltered };
   }
-
-  // Si le name filter n'a pas tranché tout seul, on travaille sur les candidats
-  // restants (déjà débruite des hors-sujet). Si tout a été disqualifié (cas
-  // limite : tous les candidats avaient un score_nom faible), on reste sur la
-  // liste address-gated pour conserver les étapes suivantes — préserve
-  // l'invariant "ne pas écarter un candidat légitime sur la base d'une donnée
-  // incertaine". Cas pathologique tracé en warn : un gate NAF qui retourne
-  // UNIQUEMENT des hors-sujet nom est anormal et mérite audit ops.
+  // Si tout a été disqualifié (cas limite : tous les candidats au score_nom
+  // faible), on reste sur le pool courant — ne pas écarter un candidat
+  // légitime sur une donnée incertaine. Cas pathologique tracé en warn.
   if (nameFiltered.length === 0) {
     console.warn(
-      `[france-data-mcp] siret-resolver: name filter eliminated all ${addressGated.length} address-gated candidates post-gate NAF — fallback sur le pool address-gated (audit recommandé : gate NAF anormalement permissif ?)`,
+      `[france-data-mcp] siret-resolver: name filter eliminated all ${pool.length} candidates post-gate — fallback sur le pool courant (audit recommandé : gate NAF anormalement permissif ?)`,
     );
   }
-  const pool = nameFiltered.length > 0 ? nameFiltered : addressGated;
+  const pool2 = nameFiltered.length > 0 ? nameFiltered : pool;
 
-  // Étape 3 — Active succession (V0.13.1 Raffinement #3). Si tous les candidats
-  // du pool partagent (SIREN, adresse normalisée) ET il y a ≥ 1 actif, on retient
-  // l'actif. Cas type : succession temporelle 1 SIRET fermé + 1 SIRET actif au
-  // même siège (cas FINESS 920028487 EYLAU UNILABS).
-  const [firstPool, ...restPool] = pool;
-  if (firstPool && restPool.length >= 1) {
+  // Étape 3 — Active succession même SIREN (V0.13.1 Raffinement #3). Si tous
+  // les candidats du pool partagent (SIREN, adresse normalisée) ET il y a ≥ 1
+  // actif, on retient l'actif le plus récent. Cas : réorganisation interne
+  // d'un groupe (plusieurs SIRET actifs au même siège) — distinct du M&A
+  // inter-SIREN, déjà tranché à l'étape 1.
+  const [firstPool2, ...restPool2] = pool2;
+  if (firstPool2 && restPool2.length >= 1) {
     // Truthy plutôt que `=== null` strict : si le type `adresse_libelle` est
     // élargi un jour à `string | null | undefined`, ce guard reste safe et ne
     // throw pas via `normalizeForCompare(undefined)`. Robustesse type-future.
     const groupKey = (c: SiretCandidate) =>
       `${c.siret.slice(0, 9)}|${c.adresse_libelle ? normalizeForCompare(c.adresse_libelle) : ""}`;
-    const firstKey = groupKey(firstPool);
-    const allSameGroup = pool.every((c) => groupKey(c) === firstKey);
+    const firstKey = groupKey(firstPool2);
+    const allSameGroup = pool2.every((c) => groupKey(c) === firstKey);
     if (allSameGroup) {
-      const actifs = pool.filter((c) => c.actif === true);
-      // Si plusieurs actifs (rare : 2 SIRET actifs même siège), prendre le
-      // plus récent par date_creation pour reproduire la sémantique "le
-      // dernier vivant". Tie-break SIRET asc pour déterminisme quand les 2
-      // ont `date_creation === null` (cas pathologique : 2 actifs sans date,
-      // on retourne le plus petit SIRET → snapshots stables).
+      const actifs = pool2.filter((c) => c.actif === true);
+      // Plusieurs actifs (rare : 2 SIRET actifs même siège) → le plus récent
+      // par date_creation. Tie-break SIRET asc pour déterminisme quand les
+      // dates sont absentes (snapshots de tests stables).
       actifs.sort((a, b) => {
         const dateDiff = (b.date_creation ?? "").localeCompare(a.date_creation ?? "");
         return dateDiff !== 0 ? dateDiff : a.siret.localeCompare(b.siret);
@@ -1081,7 +1278,7 @@ function disambiguateFallbackCandidates(
 
   // Étape 4 — Signal RPPS : un seul candidat du pool a été déclaré côté RPPS.
   const rppsSet = new Set(rppsSirets);
-  const withRppsSignal = pool.filter((c) => rppsSet.has(c.siret));
+  const withRppsSignal = pool2.filter((c) => rppsSet.has(c.siret));
   const [rppsBest] = withRppsSignal;
   if (withRppsSignal.length === 1 && rppsBest) {
     return { status: "by_rpps_signal", best_match: rppsBest };

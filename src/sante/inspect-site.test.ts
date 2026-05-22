@@ -32,6 +32,7 @@ function fakeVerifierFound(
         siret: SIRET_BEST,
         sources: ["rpps", "dinum_address_match"],
         score_adresse: 0.85,
+        distance_finess_m: 12,
         score_nom: 0.92,
         actif: true,
         adresse_libelle: "27 BD BIZET 59290 WASQUEHAL",
@@ -43,6 +44,7 @@ function fakeVerifierFound(
       siret: SIRET_BEST,
       sources: ["rpps", "dinum_address_match"],
       score_adresse: 0.85,
+      distance_finess_m: 12,
       score_nom: 0.92,
       actif: true,
       adresse_libelle: "27 BD BIZET 59290 WASQUEHAL",
@@ -58,6 +60,7 @@ function fakeVerifierFound(
     fallback_reason: null,
     naf_filter_used: [],
     disambiguation_status: "not_applicable",
+    succession: { detected: false, exploitants_precedents: [] },
     ...overrides,
   };
 }
@@ -112,6 +115,7 @@ function fakeResolutionEmpty(): siretResolver.SiretResolution {
     fallback_reason: "no_rpps",
     naf_filter_used: [],
     disambiguation_status: "not_applicable",
+    succession: { detected: false, exploitants_precedents: [] },
   };
 }
 
