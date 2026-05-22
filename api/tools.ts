@@ -232,7 +232,7 @@ const READ_ONLY_TIME_VARYING_ANNOTATIONS: McpToolAnnotations = {
  * Exporté pour le test unitaire pur (`api/tools.test.ts`) — le câblage
  * handler-level est couvert par les tests d'intégration.
  */
-export function withPerimetre<T extends object>(
+export function withPerimetre<T extends object & { then?: never }>(
   result: T,
   perimetre: Perimetre,
 ): T & { perimetre: Perimetre } {
@@ -2085,7 +2085,15 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       // Volet établissements = lentille la plus exposée ; un seul `perimetre`
       // racine, les sous-objets densité ne sont pas sur-décorés.
       const result = await panoramaSanteTerritoire(input);
-      return withPerimetre(result, finessFamillePerimetre(familles));
+      // `perimetre` doit décrire les familles réellement comptées :
+      //  - finess_familles omis  → la lib compte DEFAULT_FAMILLES
+      //  - finess_familles = []  → volet FINESS désactivé (panorama = population + densités RPPS)
+      //  - finess_familles = [...] → ces familles
+      const perimetre =
+        familles !== undefined && familles.length === 0
+          ? RPPS_PERIMETRE
+          : finessFamillePerimetre(familles ?? DEFAULT_FAMILLES);
+      return withPerimetre(result, perimetre);
     },
   },
   {

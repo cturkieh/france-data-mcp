@@ -1680,6 +1680,19 @@ describe("perimetre wiring professionnels", () => {
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("liberal_conventionne");
   });
 
+  it("professionnels_par_specialite_dept expose perimetre.lens === 'liberal_conventionne' (AMELI_PERIMETRE)", async () => {
+    vi.spyOn(ameliDb, "getAmeliBySpecialiteDept").mockResolvedValueOnce({
+      count: 3,
+      truncated: false,
+      results: [],
+    });
+    const tool = findTool("professionnels_par_specialite_dept");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ departement: "59" })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("liberal_conventionne");
+    expect(out?.count).toBe(3);
+  });
+
   it("professionnels_rpps_in_radius expose perimetre.lens === 'registre_complet' (RPPS_PERIMETRE)", async () => {
     vi.spyOn(rppsDb, "getRppsInRadius").mockResolvedValueOnce({
       count: 0,
@@ -1693,6 +1706,19 @@ describe("perimetre wiring professionnels", () => {
       radius_km: 5,
     })) as Record<string, unknown>;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
+  });
+
+  it("professionnels_rpps_par_dept expose perimetre.lens === 'registre_complet' (RPPS_PERIMETRE)", async () => {
+    vi.spyOn(rppsDb, "getRppsParSpecialiteDept").mockResolvedValueOnce({
+      count: 5,
+      truncated: false,
+      results: [],
+    });
+    const tool = findTool("professionnels_rpps_par_dept");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ departement: "59" })) as Record<string, unknown>;
+    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
+    expect(out?.count).toBe(5);
   });
 });
 
@@ -1769,8 +1795,13 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
     const out = (await tool?.handler({ code_insee: "59009" })) as Record<string, unknown>;
     // Panorama reçoit `finessFamillePerimetre` (volet établissements) → lentille
     // catégorie, PAS registre_complet.
-    expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
+    const perimetre = out?.perimetre as Record<string, unknown>;
+    expect(perimetre?.lens).toBe("categorie_dominante");
     expect(out?.codeInsee).toBe("59009");
+    // Fix A : sur le chemin par défaut (finess_familles omis), la lib compte
+    // DEFAULT_FAMILLES — le `compte` doit refléter ces familles précises, pas
+    // annoncer « tous les établissements FINESS » (sur-comptage silencieux).
+    expect(perimetre?.compte).not.toMatch(/tous/i);
   });
 
   it("finess_sirene_coverage_in_radius expose perimetre + préserve le payload", async () => {
