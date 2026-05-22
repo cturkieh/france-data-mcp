@@ -24,6 +24,26 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   ajoutés — `610`/`612` (labos autonomes → famille `labo`), `628`/`629`
   (pharmacies → `pharmacie`), `695` (GCS → `groupement`).
 
+### Fixed — exactitude du champ `perimetre` (revue pré-release)
+
+- **`await withFreshness` manquant** — sur `etablissements_finess_in_radius` +
+  `etablissements_finess_by_categorie` le pattern `const result = withFreshness(...)`
+  (sans `await`) spreadait une `Promise` dans `withPerimetre`, qui jetait
+  silencieusement le champ `perimetre` à l'unwrap du thenable. Corrigé +
+  contrainte de type durcie (`withPerimetre<T extends object & { then?: never }>`)
+  pour transformer ce bug en erreur de compilation.
+- **`panorama_sante_territoire`** — le `perimetre` annonçait « Tous les
+  établissements FINESS » alors que la lib ne compte que `DEFAULT_FAMILLES`
+  (sur-comptage silencieux). `perimetre` reflète désormais les familles
+  réellement comptées ; cas `finess_familles: []` bascule sur `RPPS_PERIMETRE`
+  (volet FINESS désactivé).
+- **`finess_sirene_coverage_in_radius`** — même classe de bug : appel sans
+  `familles` → la lib auto-dérive depuis le NAF (`familles_auto_derivees`),
+  mais le `perimetre` annonçait « Tous les établissements FINESS ». Résolu en
+  consommant `result.familles_auto_derivees`.
+- **+10 tests handler-level** verrouillent la présence et l'exactitude de
+  `perimetre` sur les 10 tools concernés (couverture désormais complète).
+
 Réf : `docs/plans/completude-lentilles-sources.md`.
 
 ## [0.16.0] — 2026-05-22 (fix succession M&A — verifier_site_actif)
