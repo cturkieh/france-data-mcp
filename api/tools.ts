@@ -1302,7 +1302,7 @@ export const TOOLS: McpTool[] = [
       const result = withFreshness(await getFinessInRadius(input), args.include_freshness, [
         "finess",
       ]);
-      return withPerimetre(result, finessFamillePerimetre(familles ?? undefined));
+      return withPerimetre(result, finessFamillePerimetre(familles));
     },
   },
   {
@@ -2313,7 +2313,7 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par Ã
       };
       if (familles) input.familles = familles;
       const result = await getCoverageFinessVsSireneInRadius(input);
-      return withPerimetre(result, finessFamillePerimetre(familles ?? undefined));
+      return withPerimetre(result, finessFamillePerimetre(familles));
     },
   },
 ];
