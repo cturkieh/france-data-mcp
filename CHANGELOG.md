@@ -4,6 +4,25 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.17.0] — 2026-05-22 (Phase 1 — transparence des lentilles de source)
+
+### Added — champ `perimetre` sur les tools de comptage/densité
+
+- **Champ `perimetre`** sur les tools de comptage/densité (FINESS, Ameli, RPPS) :
+  déclare explicitement la lentille de la source (ce qui est compté/exclu) pour
+  empêcher un undercount lu comme un chiffre territorial réel. Tools concernés :
+  `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`,
+  `densite_etablissements_sante`, `densite_professionnels_sante`,
+  `panorama_sante_territoire`, `finess_sirene_coverage_in_radius`,
+  `professionnels_in_radius`, `professionnels_par_specialite_dept`,
+  `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`.
+- **fix(finess)** : 5 codes catégorie vivants en prod mais non catalogués
+  ajoutés — `610`/`612` (labos autonomes → famille `labo`), `628`/`629`
+  (pharmacies → `pharmacie`), `695` (GCS → `groupement`).
+- Note de lentille dans les descriptions des tools FINESS famille.
+
+Réf : `docs/plans/completude-lentilles-sources.md`.
+
 ## [0.16.0] — 2026-05-22 (fix succession M&A — verifier_site_actif)
 
 ### Fixed — faux verdict « fermé » sur les sites de santé repris (M&A)
