@@ -14,6 +14,7 @@ import {
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
   preValidateFile,
+  rebuildHostedActivities,
   runAndRecordCanary,
   runIfMain,
   shortCircuitIfSameChecksum,
@@ -295,8 +296,21 @@ async function main(): Promise<void> {
     // le swap. Si l'un disparaît, on logue dans `canary_failures` sans rollback.
     await runAndRecordCanary(supabase, "finess", log, "finess");
 
-    // SUCCESS
-    log.status = "success";
+    // 5c. REBUILD `finess_hosted_activities` post-swap (Phase 2 — chantier
+    // « Complétude territoriale & lentilles »). La matview JOIN `finess` ET
+    // `rpps` → suit l'OID de la table swappée → DOIT être rebuilt (jamais
+    // REFRESH). Hook symétrique côté RPPS dans `scripts/ingest/rpps.ts`.
+    // Politique d'erreur (partial sans throw, couche secondaire) dans
+    // `rebuildHostedActivities` (`./shared.js`).
+    await rebuildHostedActivities(supabase, log, "finess");
+
+    // SUCCESS — IMPORTANT : préserver un éventuel `status: "partial"` posé
+    // par `rebuildHostedActivities` (échec de la couche secondaire = dégradation
+    // bénigne ; le cron FINESS principal a réussi). NE PAS écraser
+    // silencieusement avec "success" — même pattern défensif que rpps.ts.
+    if (log.status !== "partial") {
+      log.status = "success";
+    }
     log.finished_at = new Date().toISOString();
     await writeIngestLogSuccessSafe(log, "finess");
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;

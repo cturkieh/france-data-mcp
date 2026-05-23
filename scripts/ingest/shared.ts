@@ -1024,3 +1024,65 @@ export async function insertStagingBatchWithRetry<TRow extends object>(
     lastErr,
   );
 }
+
+/**
+ * Concatène `msg` à `log.error_message` en PRÉSERVANT l'existant (`a; b`).
+ * Un échec/note antérieur ne doit jamais être écrasé silencieusement
+ * (observabilité background : l'audit `ingest_log` doit cumuler les causes).
+ *
+ * Extrait de `rpps.ts` en Phase 2 / Tâche 3 — partagé maintenant entre les
+ * call-sites `rpps.ts` (ban_join + rebuildRppsMatviews) et `finess.ts`
+ * (rebuildHostedActivities post-swap FINESS).
+ */
+export function appendLogMessage(log: IngestLogEntry, msg: string): void {
+  const prev = log.error_message ? `${log.error_message}; ` : "";
+  log.error_message = `${prev}${msg}`;
+}
+
+/**
+ * Rebuild de la matview `finess_hosted_activities` post-swap. Appelée depuis
+ * DEUX crons (Phase 2 « Complétude territoriale & lentilles ») :
+ *   - cron RPPS (`rpps.ts > rebuildRppsMatviews`) : la matview JOIN `rpps` →
+ *     un swap RPPS la désynchronise (gotcha OID matview).
+ *   - cron FINESS (`finess.ts > main`) : la matview JOIN `finess` AUSSI →
+ *     un swap FINESS la désynchronise SYMÉTRIQUEMENT.
+ *
+ * Politique d'erreur : la couche hosted est SECONDAIRE (3 tools de complétude
+ * territoriale dérivés ; les tools core RPPS/FINESS ne la consomment pas).
+ * Tout échec — TRANSITOIRE OU STRUCTUREL — est dégradé en `partial` SANS
+ * throw. Le cron principal a déjà réussi (table prod peuplée) ; on ne veut
+ * surtout pas marquer `failed`+`exit(1)` un run par ailleurs sain. La matview
+ * hosted restera collée à son OID précédent (ou aura été détruite si 2 crons
+ * consécutifs échouent → les tools la consommant répondront 42P01 LOUD côté
+ * serveur), et le prochain cron du MÊME source rattrape.
+ *
+ * Discriminant vs `ingest_rebuild_rpps_matviews` (qui throw sur structurel,
+ * « LOUD ») : ici une matview cassée ne fait pas tomber un tool RPPS core →
+ * pas la même criticité. Voir tests `rpps-hosted-rebuild.test.ts` et
+ * `finess-hosted-rebuild.test.ts`.
+ *
+ * Le `prefix` (`"rpps"` / `"finess"`) distingue la source dans les logs
+ * stderr (audit visuel GitHub Actions) — la RPC appelée est la même.
+ */
+export async function rebuildHostedActivities(
+  supabase: SupabaseClient,
+  log: IngestLogEntry,
+  prefix: IngestStderrPrefix,
+): Promise<void> {
+  const start = Date.now();
+  const { error } = await supabase.rpc("ingest_rebuild_finess_hosted_activities");
+  const elapsedMs = Date.now() - start;
+  if (error) {
+    const code = (error as { code?: string }).code;
+    const message = (error as { message?: string }).message ?? String(error);
+    const detail = `post-swap finess_hosted_activities rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
+    console.error(`[${prefix}] ${detail} — couche secondaire, dégradé en partial`);
+    log.status = "partial";
+    appendLogMessage(
+      log,
+      `post-swap finess_hosted_activities rebuild (${code ?? "no-code"}): ${message}`,
+    );
+    return;
+  }
+  console.log(`[${prefix}] ingest_rebuild_finess_hosted_activities OK in ${elapsedMs}ms`);
+}

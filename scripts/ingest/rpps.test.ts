@@ -269,7 +269,12 @@ function makeSupabaseStub(rpcImpl: (name: string, args: unknown) => { error: unk
 // l'ancienne matview) ; structurel → throw IngestError → failed+exit(1).
 // Durcissement vs l'ancien refresh-only qui avalait 42P01 (trou /review).
 describe("rebuildRppsMatviews", () => {
-  it("appelle ingest_rebuild_rpps_matviews UNE fois (reconstruction atomique des 3, pas une boucle REFRESH)", async () => {
+  it("appelle ingest_rebuild_rpps_matviews UNE fois (reconstruction atomique des 3, pas une boucle REFRESH), puis chaîne le rebuild Phase 2 finess_hosted_activities", async () => {
+    // Phase 2 (2026-05-23) : chaînage hosted_activities ajouté SÉQUENTIELLEMENT
+    // après rpps_matviews. Ordre load-bearing (rpps PUIS hosted) gardé en
+    // détail dans `rpps-hosted-rebuild.test.ts`. Ici on vérifie juste la
+    // co-présence des 2 appels en chemin nominal (le contrat d'unicité de
+    // rpps_matviews "1 fois, pas une boucle REFRESH" reste préservé).
     const names: string[] = [];
     const supabase = makeSupabaseStub((name) => {
       names.push(name);
@@ -279,7 +284,10 @@ describe("rebuildRppsMatviews", () => {
 
     await rebuildRppsMatviews(supabase, log);
 
-    expect(names).toEqual(["ingest_rebuild_rpps_matviews"]);
+    expect(names).toEqual([
+      "ingest_rebuild_rpps_matviews",
+      "ingest_rebuild_finess_hosted_activities",
+    ]);
     expect(log.status).toBe("success");
     expect(log.error_message).toBeUndefined();
   });

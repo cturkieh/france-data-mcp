@@ -4,6 +4,7 @@ import * as coverage from "../src/sante/coverage.js";
 import * as crossSource from "../src/sante/cross-source.js";
 import * as densite from "../src/sante/densite.js";
 import * as finessDb from "../src/sante/finess-db.js";
+import * as hostedActivities from "../src/sante/hosted-activities.js";
 import * as dinum from "../src/sante/index.js";
 import * as inseeSirene from "../src/sante/insee-sirene.js";
 import * as panorama from "../src/sante/panorama.js";
@@ -151,6 +152,16 @@ describe("etablissements_finess_by_categorie (MCP tool)", () => {
     const spy = vi
       .spyOn(finessDb, "getFinessByCategorie")
       .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    // Phase 2 : pharmacie + dept = scope ZONE valide → le handler appelle
+    // getHostedActivitiesInZone (pharmacie mappable). Mock pour éviter le
+    // réseau (SUPABASE_URL missing en test unit).
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValueOnce({
+      activite: "pharmacie à usage intérieur",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("etablissements_finess_by_categorie");
     await tool?.handler({ categorie: "pharmacie", departement: "08" });
     expect(spy).toHaveBeenCalledWith({ famille: "pharmacie", departement: "08" });
@@ -1763,6 +1774,15 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       ReturnType<typeof densite.densiteEtablissementsSante>
     >;
     vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce(mocked);
+    // Phase 2 : labo + dept déclenche désormais getHostedActivitiesInZone
+    // (labo mappable + scope ZONE). Mock pour éviter le réseau.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("densite_etablissements_sante");
     expect(tool).toBeDefined();
     const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
@@ -1790,6 +1810,16 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       ReturnType<typeof panorama.panoramaSanteTerritoire>
     >;
     vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce(mocked);
+    // Phase 2 : DEFAULT_FAMILLES contient labo + pharmacie (mappables) →
+    // 2 appels parallèles à getHostedActivitiesInZone. mockResolvedValue
+    // (sans Once) couvre les 2 appels.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValue({
+      activite: "test",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("panorama_sante_territoire");
     expect(tool).toBeDefined();
     const out = (await tool?.handler({ code_insee: "59009" })) as Record<string, unknown>;
@@ -1839,6 +1869,15 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       familles_auto_derivees: ["labo"],
     } as unknown as Awaited<ReturnType<typeof coverage.getCoverageFinessVsSireneInRadius>>;
     vi.spyOn(coverage, "getCoverageFinessVsSireneInRadius").mockResolvedValueOnce(mocked);
+    // Phase 2 : auto-derive ['labo'] (single mappable) déclenche désormais
+    // getHostedActivitiesInRadius (biologie). Mock pour éviter le réseau.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("finess_sirene_coverage_in_radius");
     expect(tool).toBeDefined();
     const out = (await tool?.handler({ lon: 2.35, lat: 48.85, naf: "8690B" })) as Record<
@@ -1896,5 +1935,242 @@ describe("withPerimetre (helper de câblage)", () => {
     const out = withPerimetre({ count: 0, results: [] }, perimetre);
     expect(out.perimetre.lens).toBe("categorie_dominante");
     expect(out.perimetre.completeness_note).toMatch(/hospitali/i);
+  });
+});
+
+// Phase 2 — câblage du champ `activite_hebergee` sur les tools `etablissements_finess_*`.
+// 4 cas couverts : 1 famille mappable (chemin nominal), multi-familles (omis),
+// famille non-mappable (omis), by_categorie sans scope zone (omis).
+describe("activite_hebergee wiring — etablissements_finess_*", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("échec hosted RPC → handler renvoie le payload primaire intact + activite_hebergee absent + warn (couche secondaire)", async () => {
+    // Doctrine "hosted = couche secondaire" : un échec hosted (RPC 42P01,
+    // PGRST205, timeout, blip réseau) NE DOIT PAS tuer le tool primaire.
+    // Cf. silent-failure-hunter Phase 2 /review, finding CRITICAL.
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 12,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockRejectedValueOnce(
+      new Error("simulated RPC failure (e.g. matview 42P01)"),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["labo"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    // Primary intact :
+    expect(out.count).toBe(12);
+    // Hosted omis :
+    expect(out.activite_hebergee).toBeUndefined();
+    // Warn loggé pour observabilité :
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /etablissements_finess_in_radius: hosted activity fetch failed.*simulated RPC failure/,
+      ),
+    );
+  });
+
+  it("etablissements_finess_in_radius famille=labo expose activite_hebergee biologie (chemin nominal)", async () => {
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 12,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 5,
+      note: "Plateaux techniques de biologie hébergés — Ne pas additionner les deux comptes sans préciser leur nature.",
+      sites_apercu: [],
+      truncated: false,
+    });
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["labo"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    expect(out.count).toBe(12);
+    const hosted = out.activite_hebergee as { activite: string; count: number; note: string };
+    expect(hosted.count).toBe(5);
+    expect(hosted.activite).toBe("biologie médicale");
+    expect(hosted.note).toMatch(/[Nn]e pas additionner/);
+  });
+
+  it("multi-familles → activite_hebergee absent (sémantique ambiguë)", async () => {
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 0,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    // PAS de spy sur getHostedActivitiesInRadius : si appelé, ça throw réseau.
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["labo", "pharmacie"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    expect(out.activite_hebergee).toBeUndefined();
+  });
+
+  it("famille sans hosted (ex. ehpad) → activite_hebergee absent", async () => {
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 0,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["ehpad"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    expect(out.activite_hebergee).toBeUndefined();
+  });
+
+  it("etablissements_finess_by_categorie sans dept ni commune → activite_hebergee absent (pas de scope zone)", async () => {
+    vi.spyOn(finessDb, "getFinessByCategorie").mockResolvedValueOnce({
+      count: 4112,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessByCategorie>>);
+    const tool = findTool("etablissements_finess_by_categorie");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ categorie: "labo" })) as Record<string, unknown>;
+    expect(out.count).toBe(4112);
+    expect(out.activite_hebergee).toBeUndefined();
+  });
+
+  it("panorama_sante_territoire expose activites_hebergees_par_famille pour les familles mappables uniquement", async () => {
+    vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce({
+      codeInsee: "59009",
+    } as Awaited<ReturnType<typeof panorama.panoramaSanteTerritoire>>);
+    // DEFAULT_FAMILLES = [labo, pharmacie, ehpad, mco, msp_cpts] →
+    // mappables : labo (biologie), pharmacie (PUI). Non mappables : ehpad,
+    // mco, msp_cpts. Donc 2 appels parallèles à getHostedActivitiesInZone.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone")
+      .mockResolvedValueOnce({
+        activite: "biologie médicale",
+        count: 5,
+        note: "Plateaux ... Ne pas additionner les deux comptes sans préciser leur nature.",
+        sites_apercu: [],
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        activite: "pharmacie à usage intérieur",
+        count: 3,
+        note: "PUI ... Ne pas additionner les deux comptes sans préciser leur nature.",
+        sites_apercu: [],
+        truncated: false,
+      });
+    const tool = findTool("panorama_sante_territoire");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ code_insee: "59009" })) as Record<string, unknown>;
+    const dict = out.activites_hebergees_par_famille as Record<
+      string,
+      { activite: string; count: number }
+    >;
+    expect(dict).toBeDefined();
+    expect(Object.keys(dict).sort()).toEqual(["labo", "pharmacie"]);
+    expect(dict.labo?.count).toBe(5);
+    expect(dict.pharmacie?.count).toBe(3);
+    // ehpad/mco/msp_cpts (non mappables) absents
+    expect(dict.ehpad).toBeUndefined();
+    expect(dict.mco).toBeUndefined();
+    expect(dict.msp_cpts).toBeUndefined();
+  });
+
+  it("panorama_sante_territoire finess_familles=[] → activites_hebergees_par_famille absent (volet désactivé)", async () => {
+    vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce({
+      codeInsee: "59009",
+    } as Awaited<ReturnType<typeof panorama.panoramaSanteTerritoire>>);
+    const tool = findTool("panorama_sante_territoire");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ code_insee: "59009", finess_familles: [] })) as Record<
+      string,
+      unknown
+    >;
+    expect(out.activites_hebergees_par_famille).toBeUndefined();
+  });
+
+  it("finess_sirene_coverage_in_radius famille=labo expose activite_hebergee biologie", async () => {
+    vi.spyOn(coverage, "getCoverageFinessVsSireneInRadius").mockResolvedValueOnce({
+      finess_sites: 12,
+      sirene_sirets: 14,
+      matched_count: 11,
+      coverage_ratio: 0.92,
+      matched_samples: [],
+      finess_only_samples: [],
+      sirene_only_samples: [],
+      methodology: "...",
+      caveats: [],
+      coverage_status: "ok",
+      familles_auto_derivees: ["labo"],
+    } as unknown as Awaited<ReturnType<typeof coverage.getCoverageFinessVsSireneInRadius>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 4,
+      note: "Plateaux ... Ne pas additionner les deux comptes sans préciser leur nature.",
+      sites_apercu: [],
+      truncated: false,
+    });
+    const tool = findTool("finess_sirene_coverage_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ lon: 2.35, lat: 48.85, naf: "8690B" })) as Record<
+      string,
+      unknown
+    >;
+    expect(out.coverage_ratio).toBe(0.92);
+    const hosted = out.activite_hebergee as { activite: string; count: number; note: string };
+    expect(hosted.count).toBe(4);
+    expect(hosted.activite).toBe("biologie médicale");
+    expect(hosted.note).toMatch(/[Nn]e pas additionner/);
+  });
+
+  it("densite_etablissements_sante famille=labo expose activite_hebergee biologie + densite_pour_100k_hab", async () => {
+    vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce({
+      zone: {
+        zone: "59",
+        countEtablissements: 95,
+        population: 2_600_000,
+        populationAnnee: 2023,
+        densitePour100k: 3.65,
+      },
+      parametres: { famille: "labo" },
+      source: { etablissements: "FINESS / DREES", population: "INSEE Melodi" },
+    } as unknown as Awaited<ReturnType<typeof densite.densiteEtablissementsSante>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 52, // densité hostée attendue = 52 / 2_600_000 * 100_000 = 2.0
+      note: "Plateaux ... Ne pas additionner les deux comptes sans préciser leur nature.",
+      sites_apercu: [],
+      truncated: false,
+    });
+    const tool = findTool("densite_etablissements_sante");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
+      string,
+      unknown
+    >;
+    const hosted = out.activite_hebergee as {
+      activite: string;
+      count: number;
+      densite_pour_100k_hab: number;
+    };
+    expect(hosted.count).toBe(52);
+    expect(hosted.activite).toBe("biologie médicale");
+    expect(hosted.densite_pour_100k_hab).toBe(2); // (52 / 2_600_000) * 100_000 = 2.0
   });
 });

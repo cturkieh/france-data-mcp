@@ -16,6 +16,7 @@ import {
   IngestError,
   type IngestLogEntry,
   PGRST_COLUMN_CACHE_MISS,
+  appendLogMessage,
   atomicSwapTables,
   downloadCsv,
   getLastSuccessChecksum,
@@ -24,6 +25,7 @@ import {
   insertStagingBatchWithRetry,
   isForceReingestEnv,
   preValidateFile,
+  rebuildHostedActivities,
   runAndRecordCanary,
   runBatchedRpc,
   runIfMain,
@@ -786,15 +788,8 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
  */
 const TRANSIENT_REBUILD_CODES = new Set(["55P03", "40P01", "57014", "53300"]);
 
-/**
- * Concatène `msg` à `log.error_message` en PRÉSERVANT l'existant (`a; b`).
- * Un échec/note antérieur ne doit jamais être écrasé silencieusement
- * (observabilité background : l'audit `ingest_log` doit cumuler les causes).
- */
-function appendLogMessage(log: IngestLogEntry, msg: string): void {
-  const prev = log.error_message ? `${log.error_message}; ` : "";
-  log.error_message = `${prev}${msg}`;
-}
+// `appendLogMessage` est désormais exporté depuis `./shared.js` (Phase 2 /
+// Tâche 3) — partagé avec `finess.ts` qui consomme aussi `rebuildHostedActivities`.
 
 /**
  * Décision PURE du signal de cohérence post-`ban_join` (testable sans DB ni
@@ -888,32 +883,45 @@ export async function rebuildRppsMatviews(
   const { error } = await supabase.rpc("ingest_rebuild_rpps_matviews");
   const elapsedMs = Date.now() - start;
 
-  if (!error) {
-    console.log(`[rpps] ingest_rebuild_rpps_matviews OK in ${elapsedMs}ms`);
-    return;
+  if (error) {
+    const code = (error as { code?: string }).code;
+    const message = (error as { message?: string }).message ?? String(error);
+    const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
+
+    if (code !== undefined && TRANSIENT_REBUILD_CODES.has(code)) {
+      // Transitoire : `ingest_rebuild_rpps_matviews` est transactionnelle →
+      // rollback intégral → AUCUNE matview détruite, l'ancienne (peuplée,
+      // juste périmée) reste en place. Dégradation bénigne, retry au prochain
+      // cron. On NOMME la reconstruction (le statut seul ne dit pas QUOI est
+      // dégradé — contrat alerting). IMPORTANT : on NE chaîne PAS le rebuild
+      // de `finess_hosted_activities` ci-dessous — il JOIN `rpps` ET dépend
+      // implicitement des matviews qu'on vient d'échouer à rafraîchir ; le
+      // rebuilder sur un état rpps désynchronisé ne ferait que propager le
+      // périmé. Retry intégral au prochain cron.
+      console.error(`[rpps] ${detail} — transitoire, ancienne matview préservée (rollback)`);
+      log.status = "partial";
+      appendLogMessage(log, `post-swap matview rebuild (transient ${code}): ${message}`);
+      return;
+    }
+
+    // Structurel : NE PAS avaler en "partial" (trou prouvé /review : matview
+    // cassée → `rpps_in_radius` down, masqué non bloquant). Throw → catch de
+    // `main` → status "failed" + exit(1) = LOUD. Même raisonnement que ci-dessus
+    // sur le skip du rebuild hosted : un structurel ici signifie rpps lui-même
+    // est dans un état invalide → propager au hosted serait nuisible.
+    console.error(`[rpps] ${detail} — STRUCTUREL, échec dur`);
+    throw new IngestError("validate", detail, error);
   }
 
-  const code = (error as { code?: string }).code;
-  const message = (error as { message?: string }).message ?? String(error);
-  const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
+  console.log(`[rpps] ingest_rebuild_rpps_matviews OK in ${elapsedMs}ms`);
 
-  if (code !== undefined && TRANSIENT_REBUILD_CODES.has(code)) {
-    // Transitoire : `ingest_rebuild_rpps_matviews` est transactionnelle →
-    // rollback intégral → AUCUNE matview détruite, l'ancienne (peuplée,
-    // juste périmée) reste en place. Dégradation bénigne, retry au prochain
-    // cron. On NOMME la reconstruction (le statut seul ne dit pas QUOI est
-    // dégradé — contrat alerting).
-    console.error(`[rpps] ${detail} — transitoire, ancienne matview préservée (rollback)`);
-    log.status = "partial";
-    appendLogMessage(log, `post-swap matview rebuild (transient ${code}): ${message}`);
-    return;
-  }
-
-  // Structurel : NE PAS avaler en "partial" (trou prouvé /review : matview
-  // cassée → `rpps_in_radius` down, masqué non bloquant). Throw → catch de
-  // `main` → status "failed" + exit(1) = LOUD.
-  console.error(`[rpps] ${detail} — STRUCTUREL, échec dur`);
-  throw new IngestError("validate", detail, error);
+  // Phase 2 — `finess_hosted_activities` JOIN `rpps` ET `finess` → suit l'OID
+  // des deux → doit être rebuilt post-swap des deux côtés. Hook symétrique
+  // côté FINESS dans `scripts/ingest/finess.ts`. Séquence : RPPS matviews
+  // D'ABORD (ci-dessus) — sinon on rebuild hosted sur un état rpps périmé.
+  // Politique d'erreur (partial sans throw, couche secondaire) dans la
+  // fonction partagée — cf. `rebuildHostedActivities` (`./shared.js`).
+  await rebuildHostedActivities(supabase, log, "rpps");
 }
 
 export const __TESTING__ = {
