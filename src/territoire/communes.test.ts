@@ -81,6 +81,21 @@ describe("searchCommunes", () => {
     const villes = await searchCommunes({ nom: "ZZZTOPONYMEINEXISTANT" });
     expect(villes).toEqual([]);
   });
+
+  // V0.19 : filtre dept natif côté geo.api.gouv.fr (évite de filtrer côté boundary
+  // et de risquer la perte de candidats au-delà de limit=30 sur une ville commune
+  // type "Saint-Martin" dispersée nationalement).
+  it("transmet codeDepartement à l'API quand fourni (V0.19)", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse([
+        { nom: "Mont-Saint-Martin", code: "08308", codeDepartement: "08", population: 88 },
+      ]),
+    );
+    await searchCommunes({ nom: "Saint-Martin", codeDepartement: "08" });
+    const calledUrl = fetchMock.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain("nom=Saint-Martin");
+    expect(calledUrl).toContain("codeDepartement=08");
+  });
 });
 
 describe("getCommuneByCode", () => {

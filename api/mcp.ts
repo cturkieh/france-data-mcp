@@ -383,6 +383,14 @@ async function handleRpc(
     // corriger sa saisie. reportInternalError gère console.error + Sentry.captureException.
     if (err instanceof RangeError) {
       const message = err.message;
+      // V0.19.0 — propage `err.cause` (payload structuré ES2022) au 4ème arg
+      // de `error()` qui le câble dans `error.data` JSON-RPC (cf. signature
+      // `function error(id, code, message, data?)` plus bas). Permet aux
+      // callers (Geo Intel) de distinguer programmiquement les sous-types
+      // d'erreurs (`ambiguous_commune`, `commune_not_in_department`, etc.)
+      // sans parser le message texte. Test garde-fou :
+      // `api/mcp-handler-error-cause.test.ts`.
+      const data = err.cause;
       console.warn(`[france-data-mcp] bad_request on ${request.method}: ${message}`);
       emit(ctx, start, request.method, {
         status: 400,
@@ -390,7 +398,7 @@ async function handleRpc(
         level: "warn",
         extra: { error: message },
       });
-      return error(id, -32602, message);
+      return error(id, -32602, message, data);
     }
     const tool = typeof request.params?.name === "string" ? request.params.name : undefined;
     const message = reportInternalError(err, ctx, start, request.method, {

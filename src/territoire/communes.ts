@@ -41,6 +41,12 @@ export type SearchCommunesOptions = {
   codePostal?: string;
   /** Recherche exacte par code INSEE (5 caractères). */
   code?: string;
+  /**
+   * Filtre par code département INSEE (V0.19). Param natif transmis tel quel
+   * à `geo.api.gouv.fr`. Combinable avec `nom` pour désambiguïser les
+   * homonymes (ex: "Saint-Martin" + dept "08").
+   */
+  codeDepartement?: string;
   /** Nombre maximum de résultats (1-30, défaut 10). */
   limit?: number;
   /**
@@ -89,12 +95,22 @@ type ApiCommune = {
  * ```
  */
 export async function searchCommunes(options: SearchCommunesOptions): Promise<Commune[]> {
-  const { nom, codePostal, code, limit = 10, boostPopulation = false, signal } = options;
+  const {
+    nom,
+    codePostal,
+    code,
+    codeDepartement,
+    limit = 10,
+    boostPopulation = false,
+    signal,
+  } = options;
 
   if (!nom && !codePostal && !code) {
     // RangeError → JSON-RPC -32602 (faute caller, pas -32603 internal_error).
     // Cf. FRANCE-DATA-MCP-2 : sans ce typage, Sentry captait un "internal error"
     // alors que c'est juste un appel mal formé côté caller.
+    // Note V0.19 : `codeDepartement` seul ne suffit pas — c'est un filtre, pas un critère
+    // de recherche (cf. endpoint dédié /departements/{code}/communes si besoin futur).
     throw new RangeError("searchCommunes: au moins un critère (nom, codePostal, code) est requis");
   }
 
@@ -102,6 +118,7 @@ export async function searchCommunes(options: SearchCommunesOptions): Promise<Co
   if (nom) params.set("nom", nom);
   if (codePostal) params.set("codePostal", codePostal);
   if (code) params.set("code", code);
+  if (codeDepartement) params.set("codeDepartement", codeDepartement);
   params.set("fields", DEFAULT_FIELDS);
   params.set("limit", String(clamp(limit, 1, 30)));
   if (boostPopulation) params.set("boost", "population");

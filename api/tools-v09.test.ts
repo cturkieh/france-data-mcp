@@ -167,13 +167,13 @@ describe("UX V0.9 — densite_professionnels_sante XOR code_dept/code_insee", ()
     expect(call?.departement).toBeUndefined();
   });
 
-  it("XOR violation : code_dept + code_insee → RangeError explicite (via resolveZone lib)", async () => {
+  it("XOR violation : code_dept + code_insee → RangeError explicite (V0.19 — throw au boundary)", async () => {
     const tool = findTool("densite_professionnels_sante");
-    // Pas de mock densiteProfessionnelsSante : on veut que la lib réelle
-    // exécute resolveZone et throw avant tout RPC. Wording lib utilise les
-    // noms TS ("departement"/"codeInsee") plutôt que les noms MCP.
+    // V0.19 : le XOR est désormais throw au boundary (`applyCommuneResolver`
+    // branch 2) AVANT l'appel lib, avec le wording MCP ("code_insee"/"departement")
+    // au lieu du wording TS lib historique. `resolveZone` reste en defense-in-depth.
     await expect(tool?.handler({ code_dept: "59", code_insee: "59009" })).rejects.toThrow(
-      /SOIT departement.*SOIT codeInsee/,
+      /redondants.*code_insee.*departement|SOIT.*code_insee.*SOIT.*departement/i,
     );
   });
 
@@ -202,7 +202,10 @@ describe("V0.9 — panorama_sante_territoire (nouveau tool)", () => {
   it("est exposé dans le registry MCP", () => {
     const tool = findTool("panorama_sante_territoire");
     expect(tool).toBeDefined();
-    expect(tool?.inputSchema.required).toEqual(["code_insee"]);
+    // V0.19 : `required: ["code_insee"]` retiré du schema — la validation est
+    // déplacée au handler via `applyCommuneResolver({requireScope: true})`
+    // pour supporter `nom_commune` comme alternative.
+    expect(tool?.inputSchema.required).toBeUndefined();
   });
 
   it("appelle panoramaSanteTerritoire avec codeInsee", async () => {
@@ -259,9 +262,15 @@ describe("V0.9 — panorama_sante_territoire (nouveau tool)", () => {
     ).rejects.toThrow(/famille FINESS invalide/);
   });
 
-  it("code_insee manquant → message d'erreur explicite avec exemple", async () => {
+  it("code_insee manquant → message d'erreur explicite (V0.19 wording = scope requis + nom_commune)", async () => {
     const tool = findTool("panorama_sante_territoire");
-    await expect(tool?.handler({})).rejects.toThrow(/Attendu: "code_insee"/);
-    await expect(tool?.handler({})).rejects.toThrow(/Exemple: \{"code_insee":"59009"\}/);
+    // V0.19 : la validation passe par `applyCommuneResolver({requireScope: true})`
+    // qui throw un wording uniforme mentionnant code_insee ET nom_commune
+    // (les 2 alternatives acceptées). L'exemple JSON historique disparaît
+    // au profit du hint sémantique.
+    await expect(tool?.handler({})).rejects.toThrow(/Scope requis/i);
+    await expect(tool?.handler({})).rejects.toThrow(
+      /code_insee.*nom_commune|nom_commune.*code_insee/i,
+    );
   });
 });

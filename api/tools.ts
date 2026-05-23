@@ -76,6 +76,7 @@ import {
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
+import { applyCommuneResolver } from "./_lib/apply-commune-resolver.js";
 import {
   normalizeAliases,
   requireFinessId,
@@ -1427,7 +1428,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_by_categorie",
-    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
+    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}.\n\nV0.19.0 : accepte \`nom_commune\` (string) comme alternative à \`code_insee\` (résolu via geo.api.gouv.fr). XOR strict — passer SOIT \`departement\` SOIT \`code_insee\` SOIT \`nom_commune\` (combinable avec \`departement\` qui agit alors comme hint de désambiguïsation pour homonymes type "Saint-Martin"). Aucun param zone = France entière (acceptée).\n\nSource : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1439,11 +1440,17 @@ export const TOOLS: McpTool[] = [
         departement: {
           type: "string",
           description:
-            "Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères (Corse '2A'/'2B', pas '20'), DOM/TOM 3 caractères. Optionnel.",
+            "Code département INSEE (ex: '75', '2A', '2B', '971'). Métropole 2 caractères (Corse '2A'/'2B', pas '20'), DOM/TOM 3 caractères. Optionnel. Combinable avec `nom_commune` comme hint resolver (filtre les homonymes), sinon XOR strict avec `code_insee` et `nom_commune`.",
         },
         code_insee: {
           type: "string",
-          description: "Code INSEE de commune (5 caractères). Optionnel.",
+          description:
+            "Code INSEE de commune (5 caractères). Optionnel. XOR strict avec `departement` et `nom_commune`.",
+        },
+        nom_commune: {
+          type: "string",
+          description:
+            'Nom officiel de commune (alternative à `code_insee`, V0.19). Ex: "Lille", "Saint-Étienne". Le serveur résout en interne via geo.api.gouv.fr. Si ambigu (ex "Saint-Martin" → 5 villes), retourne une erreur structurée avec candidates. Combinable avec `departement` comme hint de désambiguïsation. Abréviations type "St-Martin" non reconnues — utiliser le nom officiel complet.',
         },
         limit: {
           type: "number",
@@ -1465,24 +1472,36 @@ export const TOOLS: McpTool[] = [
       }
       const departement = asString(args.departement);
       const codeInsee = asString(args.code_insee);
+      const nomCommune = asString(args.nom_commune);
       const limit = coerceNumber(args.limit, "limit");
+
+      // V0.19.0 — XOR strict + résolution `nom_commune` au boundary.
+      // FR entière acceptée (aucun param zone) → `requireScope: false`.
+      const resolved = await applyCommuneResolver({
+        nomCommune,
+        codeInsee,
+        departement,
+        acceptsDepartementAsScope: true,
+        requireScope: false,
+      });
+
       const input: Parameters<typeof getFinessByCategorie>[0] = { famille };
-      if (departement) input.departement = departement;
-      if (codeInsee) input.code_insee = codeInsee;
+      if (resolved.departement) input.departement = resolved.departement;
+      if (resolved.codeInsee) input.code_insee = resolved.codeInsee;
       if (limit !== undefined) input.limit = limit;
-      // Phase 2 — activite_hebergee : famille est unique (param obligatoire),
-      // donc mappable directement. Mais le scope ZONE doit exister pour appeler
-      // getHostedActivitiesInZone (départment OU commune). Sans scope (recherche
-      // France entière), pas de hosted → omis (limitation v1 acceptée).
+
+      // Phase 2 — activite_hebergee : famille unique (param obligatoire),
+      // mappable directement. Scope ZONE requis pour `getHostedActivitiesInZone`
+      // (dept OU commune). Sans scope (FR entière), pas de hosted → omis.
       const hostedActivity = familleToHostedActivity(famille);
       const hostedTask: Promise<HostedActivityResult | null> =
-        hostedActivity !== null && (departement || codeInsee)
+        hostedActivity !== null && (resolved.departement || resolved.codeInsee)
           ? safeHostedFetch(
               "etablissements_finess_by_categorie",
               getHostedActivitiesInZone({
                 activite: hostedActivity,
-                departement,
-                codeInsee,
+                departement: resolved.departement,
+                codeInsee: resolved.codeInsee,
               }),
             )
           : Promise.resolve(null);
@@ -2049,19 +2068,24 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
   },
   {
     name: "densite_professionnels_sante",
-    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9). Exactement un des deux requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nParis/Marseille/Lyon : la densité par \`code_insee\` est INDISPONIBLE (les praticiens RPPS sont rattachés aux arrondissements alors qu'INSEE n'expose la population qu'à la commune entière) — passer un code commune-mère (75056) ou arrondissement (75108) lève une RangeError explicite. Utiliser \`code_dept\` (75, 13, 69) pour la densité ville entière.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${NOMENCLATURE_COLLISION_WARNING}\n\n${RPPS_CGU_NOTICE}`,
+    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9 / \`nom_commune\`, V0.19). Exactement un des trois requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nV0.19.0 — **sémantique conditionnelle de \`code_dept\`** :\n- \`code_dept\` seul = scope de calcul (densité département entier, comme avant)\n- \`code_dept\` combiné avec \`nom_commune\` = hint de résolution UNIQUEMENT (filtre les communes homonymes), le calcul reste sur la commune résolue\n\nParis/Marseille/Lyon : la densité par \`code_insee\` est INDISPONIBLE (les praticiens RPPS sont rattachés aux arrondissements alors qu'INSEE n'expose la population qu'à la commune entière) — passer un code commune-mère (75056) ou arrondissement (75108) lève une RangeError explicite. Utiliser \`code_dept\` (75, 13, 69) pour la densité ville entière.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${NOMENCLATURE_COLLISION_WARNING}\n\n${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
         code_dept: {
           type: "string",
           description:
-            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe. Exclusif avec code_insee.',
+            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe. Sémantique conditionnelle (V0.19) : seul = scope dept entier ; combiné avec `nom_commune` = hint resolver pour désambiguer les homonymes. XOR avec `code_insee`.',
         },
         code_insee: {
           type: "string",
           description:
-            'Code INSEE de la commune 5 caractères (V0.9). Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté au niveau commune (densité indisponible — voir description) : utiliser code_dept. Exclusif avec code_dept.',
+            'Code INSEE de la commune 5 caractères (V0.9). Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté au niveau commune (densité indisponible — voir description) : utiliser code_dept. XOR avec `code_dept` et `nom_commune`.',
+        },
+        nom_commune: {
+          type: "string",
+          description:
+            'Nom officiel de commune (alternative à `code_insee`, V0.19). Ex: "Lille", "Villeneuve-d\'Ascq". Le serveur résout en interne via geo.api.gouv.fr. Combinable avec `code_dept` comme hint de désambiguïsation pour homonymes (ex "Saint-Martin" + dept "65"). XOR avec `code_insee` (paramètres redondants).',
         },
         profession_code: {
           type: "string",
@@ -2094,17 +2118,31 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         codeInsee: "code_insee",
         insee: "code_insee",
       });
-      requireOneOf(args, ["code_dept", "code_insee"], { code_dept: "59" });
+      // V0.19 — étend requireOneOf à `nom_commune` (3 alternatives au lieu de 2).
+      // Préserve le wording d'erreur historique du tool : "Attendu: code_dept ou code_insee ou nom_commune."
+      requireOneOf(args, ["code_dept", "code_insee", "nom_commune"], { code_dept: "59" });
       const codeDept = asString(args.code_dept);
       const codeInsee = asString(args.code_insee);
-      // Le check XOR (les deux fournis) est délégué à `resolveZone` côté lib
-      // (densite.ts) pour garder une source unique de wording d'erreur. Le
-      // boundary MCP cast `RangeError` en JSON-RPC -32602.
+      const nomCommune = asString(args.nom_commune);
+
+      // V0.19.0 — résolution boundary + XOR strict. Si `nom_commune` fourni,
+      // `code_dept` agit comme HINT resolver (filtre les homonymes) et N'EST PAS
+      // réinjecté en scope de calcul — `applyCommuneResolver` retourne uniquement
+      // `{ codeInsee }`. resolveZone (lib densite.ts) prend le relais pour le XOR
+      // final code_dept vs code_insee côté lib (defense-in-depth).
+      const resolved = await applyCommuneResolver({
+        nomCommune,
+        codeInsee,
+        departement: codeDept,
+        acceptsDepartementAsScope: true,
+        requireScope: false,
+      });
+
       const input: Parameters<typeof densiteProfessionnelsSante>[0] = {
         categorieCodes: categorieCodesFromArgs(args),
       };
-      if (codeDept) input.departement = codeDept;
-      if (codeInsee) input.codeInsee = codeInsee;
+      if (resolved.departement) input.departement = resolved.departement;
+      if (resolved.codeInsee) input.codeInsee = resolved.codeInsee;
       const professionCode = asString(args.profession_code);
       if (professionCode) input.professionCode = professionCode;
       const savoirFaireCode = asString(args.savoir_faire_code);
@@ -2202,14 +2240,24 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
   },
   {
     name: "panorama_sante_territoire",
-    description: `Panorama santé d'une commune française en 1 appel (V0.9). Agrège en parallèle : population (INSEE Melodi), densités médecins + infirmiers + pharmaciens avec comparaison nationale (méthodo DREES), et nombre d'établissements FINESS par famille (default ${JSON.stringify(DEFAULT_FAMILLES)}).\n\nRemplace 7-10 appels MCP individuels par 1 seul. Ne renvoie AUCUNE interprétation métier (pas de qualification automatique 'désert médical') — le caller LLM applique sa grille.\n\n**Granularité mixte** : les densités professionnels et la population sont calculées au niveau **commune** ; le décompte FINESS est agrégé au niveau **département** dérivé du code INSEE (limitation V0.9 — pas de RPC count_finess_by_commune encore). Le champ \`niveauEtablissements\` du résultat indique \`"departement"\` (succès), \`"indisponible"\` (dept indérivable, ex code DOM tronqué) — utiliser cette information pour ne pas confondre ratios commune et dept.\n\nParis/Marseille/Lyon NON supporté : le panorama par commune dépend de la densité par commune, indisponible pour ces villes (INSEE n'expose la population qu'à la commune entière, les praticiens RPPS aux arrondissements). Un code PLM (commune-mère 75056 ou arrondissement) lève une RangeError. Pour ces villes, interroger les tools individuels au niveau \`code_dept\` (75/69/13).\n\nAlias acceptés : \`codeInsee\`/\`insee\`/\`code\` → \`code_insee\`.\n\nSources : RPPS / Annuaire Santé ANS (mensuel), FINESS DREES (bimensuel), INSEE Melodi (PMUN 2023).`,
+    description: `Panorama santé d'une commune française en 1 appel (V0.9). Agrège en parallèle : population (INSEE Melodi), densités médecins + infirmiers + pharmaciens avec comparaison nationale (méthodo DREES), et nombre d'établissements FINESS par famille (default ${JSON.stringify(DEFAULT_FAMILLES)}).\n\nRemplace 7-10 appels MCP individuels par 1 seul. Ne renvoie AUCUNE interprétation métier (pas de qualification automatique 'désert médical') — le caller LLM applique sa grille.\n\nV0.19.0 : accepte \`nom_commune\` (string) comme alternative à \`code_insee\`. \`departement\` (V0.19) = hint resolver UNIQUEMENT (panorama ne calcule pas par dept ; un \`departement\` seul lève une erreur explicite).\n\n**Granularité mixte** : les densités professionnels et la population sont calculées au niveau **commune** ; le décompte FINESS est agrégé au niveau **département** dérivé du code INSEE (limitation V0.9 — pas de RPC count_finess_by_commune encore). Le champ \`niveauEtablissements\` du résultat indique \`"departement"\` (succès), \`"indisponible"\` (dept indérivable, ex code DOM tronqué) — utiliser cette information pour ne pas confondre ratios commune et dept.\n\nParis/Marseille/Lyon NON supporté : le panorama par commune dépend de la densité par commune, indisponible pour ces villes (INSEE n'expose la population qu'à la commune entière, les praticiens RPPS aux arrondissements). Un code PLM (commune-mère 75056 ou arrondissement) lève une RangeError. Pour ces villes, interroger les tools individuels au niveau \`code_dept\` (75/69/13).\n\nAlias acceptés : \`codeInsee\`/\`insee\`/\`code\` → \`code_insee\`.\n\nSources : RPPS / Annuaire Santé ANS (mensuel), FINESS DREES (bimensuel), INSEE Melodi (PMUN 2023).`,
     inputSchema: {
       type: "object",
       properties: {
         code_insee: {
           type: "string",
           description:
-            'Code INSEE de la commune 5 caractères. Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté (voir description).',
+            'Code INSEE de la commune 5 caractères. Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté (voir description). XOR avec `nom_commune`.',
+        },
+        nom_commune: {
+          type: "string",
+          description:
+            'Nom officiel de commune (alternative à `code_insee`, V0.19). Ex: "Lille", "Saint-Étienne". Combinable avec `departement` comme hint de désambiguïsation pour homonymes (ex "Saint-Martin" + dept "65"). Abréviations type "St-Martin" non reconnues.',
+        },
+        departement: {
+          type: "string",
+          description:
+            "Code département INSEE (V0.19, hint resolver UNIQUEMENT). À utiliser EN COMBINAISON avec `nom_commune` pour désambiguer les homonymes. Seul, lève une erreur (panorama = calcul commune uniquement, utiliser `code_insee` ou `nom_commune`).",
         },
         finess_familles: {
           type: "array",
@@ -2217,7 +2265,6 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
           description: `Familles FINESS à inclure dans le décompte établissements. Default ${JSON.stringify(DEFAULT_FAMILLES)}. Passer [] pour omettre le décompte FINESS (renvoie uniquement population + densités PS).`,
         },
       },
-      required: ["code_insee"],
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (rawArgs) => {
@@ -2226,8 +2273,29 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         insee: "code_insee",
         code: "code_insee",
       });
-      const codeInsee = requireString(args, "code_insee", { code_insee: "59009" });
-      const input: Parameters<typeof panoramaSanteTerritoire>[0] = { codeInsee };
+      const codeInsee = asString(args.code_insee);
+      const nomCommune = asString(args.nom_commune);
+      const departement = asString(args.departement);
+
+      // V0.19.0 — résolution boundary + validation scope obligatoire.
+      // panorama = calcul commune uniquement → `acceptsDepartementAsScope: false`.
+      // `requireScope: true` car panorama exige une commune (pas de FR entière).
+      const resolved = await applyCommuneResolver({
+        nomCommune,
+        codeInsee,
+        departement,
+        acceptsDepartementAsScope: false,
+        requireScope: true,
+      });
+      // `resolved.codeInsee` garanti défini ici (requireScope:true throw sinon ;
+      // acceptsDepartementAsScope:false interdit le retour `{departement}`).
+      // Le `!` est sûr — invariant load-bearing du contrat applyCommuneResolver.
+      // Refactor V0.20+ : durcir le type de retour via overloads pour éliminer
+      // le `!` au type-level (cf. review I2). Pour V0.19 le commentaire suffit.
+      const input: Parameters<typeof panoramaSanteTerritoire>[0] = {
+        // biome-ignore lint/style/noNonNullAssertion: invariant requireScope:true + acceptsDepartementAsScope:false → applyCommuneResolver branch 4 ou throw
+        codeInsee: resolved.codeInsee!,
+      };
       // Cohérence avec les autres tools FINESS : `parseFamilles` throw
       // RangeError sur famille invalide au lieu de filtrer silencieusement
       // (fix /review V0.9 — anti-pattern "zéro catch silencieux").
@@ -2252,9 +2320,18 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         // Chaque fetch wrappé individuellement : un échec sur une famille
         // n'empêche pas les autres de remonter (couche secondaire, M2 review).
         return [
+          // V0.19 fix C1 (silent-failure-hunter review) : utiliser le
+          // `resolved.codeInsee` du resolver, PAS la variable brute `codeInsee`
+          // (undefined quand caller passe `nom_commune`). Sinon la lib hosted
+          // throw "departement OR codeInsee requis" → safeHostedFetch catch
+          // silencieux → activites_hebergees_par_famille absent + log mensonger.
           safeHostedFetch(
             `panorama_sante_territoire[${f}]`,
-            getHostedActivitiesInZone({ activite: a, codeInsee }),
+            getHostedActivitiesInZone({
+              activite: a,
+              // biome-ignore lint/style/noNonNullAssertion: même invariant que le handler ci-dessus (applyCommuneResolver requireScope:true + acceptsDepartementAsScope:false)
+              codeInsee: resolved.codeInsee!,
+            }),
           ).then((h) => (h !== null ? ([f, h] as const) : null)),
         ];
       });
