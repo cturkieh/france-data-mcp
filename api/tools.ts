@@ -2195,16 +2195,42 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       // (fix /review V0.9 — anti-pattern "zéro catch silencieux").
       const familles = parseFamilles(args.finess_familles);
       if (familles !== undefined) input.finessFamilles = familles;
-      const result = await panoramaSanteTerritoire(input);
       // `perimetre` doit décrire les familles réellement comptées :
       //  - finess_familles omis  → la lib compte DEFAULT_FAMILLES
       //  - finess_familles = []  → volet FINESS désactivé (panorama = population + densités RPPS)
       //  - finess_familles = [...] → ces familles
       const finessVoletDesactive = familles?.length === 0;
+      const famillesEffectives: readonly FinessFamilleQuery[] = finessVoletDesactive
+        ? []
+        : (familles ?? DEFAULT_FAMILLES);
+      // Phase 2 — fetch `activite_hebergee` par famille mappable, en parallèle
+      // du fetch panorama principal. Le panorama étant un agrégateur multi-familles,
+      // le champ ajouté est un DICTIONNAIRE `activites_hebergees_par_famille`
+      // (Record<famille, HostedActivityResult>) plutôt qu'un seul objet.
+      // Familles non-mappables (ehpad, mco, msp_cpts...) absentes du dict.
+      const hostedPromises = famillesEffectives.flatMap((f) => {
+        const a = familleToHostedActivity(f);
+        return a !== null
+          ? [getHostedActivitiesInZone({ activite: a, codeInsee }).then((h) => [f, h] as const)]
+          : [];
+      });
+      const [result, hostedEntries] = await Promise.all([
+        panoramaSanteTerritoire(input),
+        Promise.all(hostedPromises),
+      ]);
       const perimetre = finessVoletDesactive
         ? RPPS_PERIMETRE
         : finessFamillePerimetre(familles ?? DEFAULT_FAMILLES);
-      return withPerimetre(result, perimetre);
+      const withPerim = withPerimetre(result, perimetre);
+      return hostedEntries.length > 0
+        ? {
+            ...withPerim,
+            activites_hebergees_par_famille: Object.fromEntries(hostedEntries) as Record<
+              string,
+              HostedActivityResult
+            >,
+          }
+        : withPerim;
     },
   },
   {

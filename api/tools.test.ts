@@ -1810,6 +1810,16 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       ReturnType<typeof panorama.panoramaSanteTerritoire>
     >;
     vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce(mocked);
+    // Phase 2 : DEFAULT_FAMILLES contient labo + pharmacie (mappables) →
+    // 2 appels parallèles à getHostedActivitiesInZone. mockResolvedValue
+    // (sans Once) couvre les 2 appels.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValue({
+      activite: "test",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("panorama_sante_territoire");
     expect(tool).toBeDefined();
     const out = (await tool?.handler({ code_insee: "59009" })) as Record<string, unknown>;
@@ -1999,6 +2009,58 @@ describe("activite_hebergee wiring — etablissements_finess_*", () => {
     const out = (await tool?.handler({ categorie: "labo" })) as Record<string, unknown>;
     expect(out.count).toBe(4112);
     expect(out.activite_hebergee).toBeUndefined();
+  });
+
+  it("panorama_sante_territoire expose activites_hebergees_par_famille pour les familles mappables uniquement", async () => {
+    vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce({
+      codeInsee: "59009",
+    } as Awaited<ReturnType<typeof panorama.panoramaSanteTerritoire>>);
+    // DEFAULT_FAMILLES = [labo, pharmacie, ehpad, mco, msp_cpts] →
+    // mappables : labo (biologie), pharmacie (PUI). Non mappables : ehpad,
+    // mco, msp_cpts. Donc 2 appels parallèles à getHostedActivitiesInZone.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone")
+      .mockResolvedValueOnce({
+        activite: "biologie médicale",
+        count: 5,
+        note: "Plateaux ... Ne pas additionner les deux comptes sans préciser leur nature.",
+        sites_apercu: [],
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        activite: "pharmacie à usage intérieur",
+        count: 3,
+        note: "PUI ... Ne pas additionner les deux comptes sans préciser leur nature.",
+        sites_apercu: [],
+        truncated: false,
+      });
+    const tool = findTool("panorama_sante_territoire");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ code_insee: "59009" })) as Record<string, unknown>;
+    const dict = out.activites_hebergees_par_famille as Record<
+      string,
+      { activite: string; count: number }
+    >;
+    expect(dict).toBeDefined();
+    expect(Object.keys(dict).sort()).toEqual(["labo", "pharmacie"]);
+    expect(dict.labo?.count).toBe(5);
+    expect(dict.pharmacie?.count).toBe(3);
+    // ehpad/mco/msp_cpts (non mappables) absents
+    expect(dict.ehpad).toBeUndefined();
+    expect(dict.mco).toBeUndefined();
+    expect(dict.msp_cpts).toBeUndefined();
+  });
+
+  it("panorama_sante_territoire finess_familles=[] → activites_hebergees_par_famille absent (volet désactivé)", async () => {
+    vi.spyOn(panorama, "panoramaSanteTerritoire").mockResolvedValueOnce({
+      codeInsee: "59009",
+    } as Awaited<ReturnType<typeof panorama.panoramaSanteTerritoire>>);
+    const tool = findTool("panorama_sante_territoire");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ code_insee: "59009", finess_familles: [] })) as Record<
+      string,
+      unknown
+    >;
+    expect(out.activites_hebergees_par_famille).toBeUndefined();
   });
 
   it("densite_etablissements_sante famille=labo expose activite_hebergee biologie + densite_pour_100k_hab", async () => {
