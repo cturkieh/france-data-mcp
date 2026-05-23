@@ -16,6 +16,7 @@ import {
   IngestError,
   type IngestLogEntry,
   PGRST_COLUMN_CACHE_MISS,
+  appendLogMessage,
   atomicSwapTables,
   downloadCsv,
   getLastSuccessChecksum,
@@ -24,6 +25,7 @@ import {
   insertStagingBatchWithRetry,
   isForceReingestEnv,
   preValidateFile,
+  rebuildHostedActivities,
   runAndRecordCanary,
   runBatchedRpc,
   runIfMain,
@@ -786,15 +788,8 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
  */
 const TRANSIENT_REBUILD_CODES = new Set(["55P03", "40P01", "57014", "53300"]);
 
-/**
- * Concatène `msg` à `log.error_message` en PRÉSERVANT l'existant (`a; b`).
- * Un échec/note antérieur ne doit jamais être écrasé silencieusement
- * (observabilité background : l'audit `ingest_log` doit cumuler les causes).
- */
-function appendLogMessage(log: IngestLogEntry, msg: string): void {
-  const prev = log.error_message ? `${log.error_message}; ` : "";
-  log.error_message = `${prev}${msg}`;
-}
+// `appendLogMessage` est désormais exporté depuis `./shared.js` (Phase 2 /
+// Tâche 3) — partagé avec `finess.ts` qui consomme aussi `rebuildHostedActivities`.
 
 /**
  * Décision PURE du signal de cohérence post-`ban_join` (testable sans DB ni
@@ -920,39 +915,13 @@ export async function rebuildRppsMatviews(
 
   console.log(`[rpps] ingest_rebuild_rpps_matviews OK in ${elapsedMs}ms`);
 
-  // Phase 2 (chantier « Complétude territoriale & lentilles ») : la matview
-  // `finess_hosted_activities` JOIN `rpps` ET `finess` → suit l'OID des DEUX →
-  // DOIT être rebuilt (jamais REFRESH) post-swap des deux côtés. Ce hook est
-  // côté cron RPPS ; un hook symétrique vit dans le cron FINESS (Tâche 3).
-  //
-  // Séquence : RPPS matviews D'ABORD (ci-dessus), hosted ENSUITE — sinon on
-  // rebuilderait hosted sur un état rpps potentiellement périmé.
-  //
-  // Politique d'erreur DIFFÉRENTE de `ingest_rebuild_rpps_matviews` : la
-  // couche hosted est SECONDAIRE (3 tools de complétude territoriale dérivés ;
-  // les tools RPPS core ne la consomment pas). Un échec, transitoire OU
-  // structurel, est dégradé en `partial` SANS throw — la matview hosted
-  // restera collée à son OID précédent (ou aura été détruite si 2e cron
-  // consécutif en échec, redécouverte par les tools en 42P01 LOUD côté
-  // serveur), mais le cron RPPS LUI a réussi (rpps + matviews principales
-  // peuplées) et le prochain cron rattrape. On veut surtout éviter de marquer
-  // failed+exit(1) un run RPPS par ailleurs réussi.
-  const startHosted = Date.now();
-  const { error: errHosted } = await supabase.rpc("ingest_rebuild_finess_hosted_activities");
-  const elapsedHosted = Date.now() - startHosted;
-  if (errHosted) {
-    const codeHosted = (errHosted as { code?: string }).code;
-    const messageHosted = (errHosted as { message?: string }).message ?? String(errHosted);
-    const detailHosted = `post-swap finess_hosted_activities rebuild failed [code=${codeHosted ?? "none"}] after ${elapsedHosted}ms: ${messageHosted}`;
-    console.error(`[rpps] ${detailHosted} — couche secondaire, dégradé en partial`);
-    log.status = "partial";
-    appendLogMessage(
-      log,
-      `post-swap finess_hosted_activities rebuild (${codeHosted ?? "no-code"}): ${messageHosted}`,
-    );
-    return;
-  }
-  console.log(`[rpps] ingest_rebuild_finess_hosted_activities OK in ${elapsedHosted}ms`);
+  // Phase 2 — `finess_hosted_activities` JOIN `rpps` ET `finess` → suit l'OID
+  // des deux → doit être rebuilt post-swap des deux côtés. Hook symétrique
+  // côté FINESS dans `scripts/ingest/finess.ts`. Séquence : RPPS matviews
+  // D'ABORD (ci-dessus) — sinon on rebuild hosted sur un état rpps périmé.
+  // Politique d'erreur (partial sans throw, couche secondaire) dans la
+  // fonction partagée — cf. `rebuildHostedActivities` (`./shared.js`).
+  await rebuildHostedActivities(supabase, log, "rpps");
 }
 
 export const __TESTING__ = {
