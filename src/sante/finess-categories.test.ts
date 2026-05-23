@@ -115,11 +115,12 @@ describe("finessFamille", () => {
     expect(finessFamille("347")).toBe("prevention_sante"); // CES
   });
 
-  it("maps groupements GCS — but NOT 698 (fourre-tout hospitalier)", () => {
+  it("maps groupements GCS (695/696/697) — but NOT 698 (fourre-tout)", () => {
+    expect(finessFamille("695")).toBe("groupement"); // GCS de moyens - Exploitant
     expect(finessFamille("696")).toBe("groupement"); // GCS de moyens
     expect(finessFamille("697")).toBe("groupement"); // GCS — Etab de santé
-    // 698 is "Autre Etablissement Loi Hospitalière" — explicitly NOT a
-    // groupement de coopération despite an early-v0.3 misclassification.
+    // 698 = "Autre Etablissement Loi Hospitalière" — explicitement PAS un
+    // groupement de coopération malgré une mauvaise classif early-v0.3.
     expect(finessFamille("698")).toBe("autre");
   });
 
@@ -129,13 +130,17 @@ describe("finessFamille", () => {
     expect(finessFamille("463")).toBe("senior_accompagnement"); // CLIC
   });
 
-  it("maps pharmacie famille incl. propharmacies", () => {
+  it("maps pharmacie famille incl. propharmacies, minière, mutualiste", () => {
     expect(finessFamille("620")).toBe("pharmacie"); // Officine
     expect(finessFamille("627")).toBe("pharmacie"); // Propharmacie
+    expect(finessFamille("628")).toBe("pharmacie"); // Pharmacie Minière
+    expect(finessFamille("629")).toBe("pharmacie"); // Pharmacie Mutualiste
   });
 
   it("maps labo / pharmacie / imagerie to dedicated families", () => {
+    expect(finessFamille("610")).toBe("labo"); // Laboratoire d'Analyses
     expect(finessFamille("611")).toBe("labo");
+    expect(finessFamille("612")).toBe("labo"); // Autre LBM sans FSE
     expect(finessFamille("619")).toBe("imagerie");
     expect(finessFamille("620")).toBe("pharmacie");
   });

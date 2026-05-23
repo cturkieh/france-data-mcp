@@ -43,6 +43,13 @@ intégration → reste parallèle/rapide. Tout nouveau test d'intégration touch
 - Logs JSON 1 ligne/req via `logMcpEvent`. Rate limit Upstash 60/min/IP.
 - Anti-spoofing IP : dernier segment XFF (Vercel append en queue).
 - **`SyntaxError` dans le catch root `api/mcp.ts` → JSON-RPC `-32700 Parse error` (status 400) SANS `captureMcpError`** (V0.12.2). Faute caller (JSON body malformé via `@vercel/node` auto-parse) ≠ erreur serveur. La discrimination `err instanceof SyntaxError` AVANT le path Sentry est étroite et justifiée — toute autre exception (TypeError, ReferenceError, custom) reste capturée + re-throw (filet 100 % des 500 préservé). Test garde-fou `api/mcp-handler-parse-error.test.ts`.
+- **Champ `perimetre` sur les tools de comptage** : tout tool qui compte/agrège
+  par famille ou spécialité DOIT exposer un `perimetre` (`src/sante/perimetre.ts`)
+  injecté via `withPerimetre` au boundary `api/tools.ts` (jumeau de
+  `withFreshness`). La couche lib reste pure. `withFreshness` étant `async`,
+  toujours `await` son résultat AVANT de le passer à `withPerimetre` (sinon
+  spread d'une Promise = données perdues). Un comptage filtré sans lentille
+  déclarée = undercount silencieux (cf. `docs/plans/completude-lentilles-sources.md`).
 
 **Boundary (`api/_lib/args.ts`).**
 - Validators `requireXxxId` avec 3 branches (clé absente, type wrong, format wrong) via factor `requireIdPattern`.

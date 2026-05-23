@@ -45,6 +45,12 @@ import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { inspectSite } from "../src/sante/inspect-site.js";
 import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
 import {
+  AMELI_PERIMETRE,
+  type Perimetre,
+  RPPS_PERIMETRE,
+  finessFamillePerimetre,
+} from "../src/sante/perimetre.js";
+import {
   buildCategorieCodes,
   getRppsById,
   getRppsByName,
@@ -219,6 +225,21 @@ const READ_ONLY_TIME_VARYING_ANNOTATIONS: McpToolAnnotations = {
 };
 
 /**
+ * Injecte le descripteur de lentille `perimetre` dans la sortie d'un tool de
+ * comptage. Jumeau de `withFreshness` — métadonnée de présentation ajoutée au
+ * boundary, la couche lib reste pure. Cf. cadrage completude-lentilles-sources.
+ *
+ * Exporté pour le test unitaire pur (`api/tools.test.ts`) — le câblage
+ * handler-level est couvert par les tests d'intégration.
+ */
+export function withPerimetre<T extends object & { then?: never }>(
+  result: T,
+  perimetre: Perimetre,
+): T & { perimetre: Perimetre } {
+  return { ...result, perimetre };
+}
+
+/**
  * Patterns `outputSchema` réutilisables (spec MCP 2025-06-18 §6.3) déclarés
  * une fois et référencés par les 25 tools. Format JSON Schema standard.
  *
@@ -250,6 +271,25 @@ const LOOKUP_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
   },
   required: ["found", "lookupStatus"],
 };
+
+/**
+ * Fragment de schéma pour le champ `perimetre` (lentille de source) injecté par
+ * `withPerimetre`. Optionnel : ajouté aux `properties` des schémas de comptage,
+ * jamais au tableau `required`.
+ */
+const PERIMETRE_OUTPUT_SCHEMA = {
+  type: "object",
+  description:
+    "Lentille de la source : ce que le comptage inclut/exclut. " +
+    "Lire `completeness_note` et la restituer au lecteur final.",
+  properties: {
+    source: { type: "string" },
+    lens: { type: "string" },
+    compte: { type: "string" },
+    exclut: { type: "string" },
+    completeness_note: { type: "string" },
+  },
+} as const;
 
 const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -283,6 +323,7 @@ const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
       type: "object",
       description: "Fraîcheur des sources (présent si `include_freshness: true`).",
     },
+    perimetre: PERIMETRE_OUTPUT_SCHEMA,
   },
   required: ["count", "results"],
 };
@@ -371,6 +412,7 @@ const COVERAGE_OUTPUT_SCHEMA: Record<string, unknown> = {
       description:
         "Statut typé du calcul (toujours présent). `computed` = calcul nominal (finess_sites peut être 0 sur rayon vide). `scope_empty_unknown_naf` = NAF non mappé, court-circuit (corriger le NAF ou compléter naf-finess-mapping). `scope_empty_familles_incompatible` = `familles` toutes incompatibles avec le NAF (réviser le couple ou omettre `familles` pour auto-derive). Le `caveats[]` reste exposé en parallèle pour lecture humaine — ce champ fait foi pour le routage.",
     },
+    perimetre: PERIMETRE_OUTPUT_SCHEMA,
   },
   required: [
     "finess_sites",
@@ -576,6 +618,14 @@ const FAMILLES_LIST = FINESS_FAMILLE_INPUTS.join(", ");
  */
 const FINESS_RS_TRUNCATION_NOTE =
   "Note : `raison_sociale` provient du dump DREES qui abrège les libellés longs (~38 car. max, ex 'CERBALLIANCE HA' pour 'CERBALLIANCE HAZEBROUCK'). Pour le nom légal complet, cross-check via SIREN/SIRET (entreprise_by_siren / etablissement_by_siret).";
+
+const FINESS_FAMILLE_LENS_NOTE =
+  "Lentille : un filtre `familles` compte les établissements par leur " +
+  "catégorie FINESS *principale*. Les activités hébergées dans un site " +
+  "d'une autre catégorie (ex. plateau de biologie d'un hôpital sous " +
+  "`famille=labo`) ne sont pas comptées — voir le champ `perimetre` de la " +
+  "réponse. La famille `imagerie` renvoie le plus souvent 0 résultat " +
+  "(FINESS ne répertorie pas les cabinets d'imagerie).";
 
 /** Garde de typage : valide qu'une string est une famille FINESS queryable. */
 function asFinessFamille(v: unknown): FinessFamilleQuery | undefined {
@@ -1217,7 +1267,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_in_radius",
-    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
+    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1262,12 +1312,15 @@ export const TOOLS: McpTool[] = [
       };
       if (familles) input.familles = familles;
       if (limit !== undefined) input.limit = limit;
-      return withFreshness(await getFinessInRadius(input), args.include_freshness, ["finess"]);
+      const result = await withFreshness(await getFinessInRadius(input), args.include_freshness, [
+        "finess",
+      ]);
+      return withPerimetre(result, finessFamillePerimetre(familles));
     },
   },
   {
     name: "etablissements_finess_by_categorie",
-    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
+    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1310,7 +1363,12 @@ export const TOOLS: McpTool[] = [
       if (departement) input.departement = departement;
       if (codeInsee) input.code_insee = codeInsee;
       if (limit !== undefined) input.limit = limit;
-      return withFreshness(await getFinessByCategorie(input), args.include_freshness, ["finess"]);
+      const result = await withFreshness(
+        await getFinessByCategorie(input),
+        args.include_freshness,
+        ["finess"],
+      );
+      return withPerimetre(result, finessFamillePerimetre([famille]));
     },
   },
   {
@@ -1520,9 +1578,12 @@ export const TOOLS: McpTool[] = [
       const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
       if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
       const result = await getAmeliInRadius(input);
-      return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
-        "ameli_ps",
-      ]);
+      return withPerimetre(
+        await withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
+          "ameli_ps",
+        ]),
+        AMELI_PERIMETRE,
+      );
     },
   },
   {
@@ -1587,9 +1648,12 @@ export const TOOLS: McpTool[] = [
       if (offset !== undefined) input.offset = offset;
       try {
         const result = await getAmeliBySpecialiteDept(input);
-        return withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
-          "ameli_ps",
-        ]);
+        return withPerimetre(
+          await withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
+            "ameli_ps",
+          ]),
+          AMELI_PERIMETRE,
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`[france-data-mcp] ameli_query_failed: ${message}`);
@@ -1758,7 +1822,10 @@ Filtres : \`profession_codes\` (ex: \`["10"]\` Médecin, \`["60"]\` Infirmier), 
       // côté lib, `input.preciseOnly === true` strict reste sûr).
       const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
       if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
-      return withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]);
+      return withPerimetre(
+        await withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]),
+        RPPS_PERIMETRE,
+      );
     },
   },
   {
@@ -1818,7 +1885,12 @@ Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
-      return withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, ["rpps"]);
+      return withPerimetre(
+        await withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, [
+          "rpps",
+        ]),
+        RPPS_PERIMETRE,
+      );
     },
   },
   {
@@ -1922,7 +1994,9 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       }
       const compareNational = coerceBoolean(args.compare_national, "compare_national");
       if (compareNational === true) input.compareNational = true;
-      return densiteProfessionnelsSante(input);
+      // Source effective : RPPS (count) croisé INSEE Melodi (population).
+      const result = await densiteProfessionnelsSante(input);
+      return withPerimetre(result, RPPS_PERIMETRE);
     },
   },
   {
@@ -1971,7 +2045,8 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       };
       const compareNational = coerceBoolean(args.compare_national, "compare_national");
       if (compareNational === true) input.compareNational = true;
-      return densiteEtablissementsSante(input);
+      const result = await densiteEtablissementsSante(input);
+      return withPerimetre(result, finessFamillePerimetre([famille]));
     },
   },
   {
@@ -2007,7 +2082,16 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       // (fix /review V0.9 — anti-pattern "zéro catch silencieux").
       const familles = parseFamilles(args.finess_familles);
       if (familles !== undefined) input.finessFamilles = familles;
-      return panoramaSanteTerritoire(input);
+      const result = await panoramaSanteTerritoire(input);
+      // `perimetre` doit décrire les familles réellement comptées :
+      //  - finess_familles omis  → la lib compte DEFAULT_FAMILLES
+      //  - finess_familles = []  → volet FINESS désactivé (panorama = population + densités RPPS)
+      //  - finess_familles = [...] → ces familles
+      const finessVoletDesactive = familles?.length === 0;
+      const perimetre = finessVoletDesactive
+        ? RPPS_PERIMETRE
+        : finessFamillePerimetre(familles ?? DEFAULT_FAMILLES);
+      return withPerimetre(result, perimetre);
     },
   },
   {
@@ -2263,7 +2347,14 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         maxUnitesLegales,
       };
       if (familles) input.familles = familles;
-      return getCoverageFinessVsSireneInRadius(input);
+      const result = await getCoverageFinessVsSireneInRadius(input);
+      // Le scope FINESS réellement appliqué = familles caller, sinon auto-derive
+      // NAF→familles exposé par la lib (familles_auto_derivees). Sans cette
+      // résolution, perimetre.compte annoncerait "tous" alors que finess_sites
+      // ne compte qu'un sous-ensemble — surdéclaration silencieuse, exactement
+      // le bug qu'on a corrigé sur panorama (commit e306104).
+      const effectiveFamilles = familles ?? result.familles_auto_derivees ?? undefined;
+      return withPerimetre(result, finessFamillePerimetre(effectiveFamilles));
     },
   },
 ];
