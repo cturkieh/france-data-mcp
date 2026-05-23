@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>V0.19.0 — nom_commune resolver (Geo Intel friendly)</title>
+<style>
+  :root{
+    --marine:#0b2e4f; --marine2:#14385f; --bleu:#1d6fd6; --bleu-pale:#e8f1fc;
+    --bg:#eef2f6; --card:#ffffff; --ink:#1a2a3a; --muted:#5b6b7d;
+    --rouge:#c0271a; --rouge-pale:#fbe9e7; --vert:#16794c; --vert-pale:#e6f4ec;
+    --ambre:#b06f00; --ambre-pale:#fdf3e0; --bord:#dce4ec;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.6;font-size:15px;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px;}
+  /* Header */
+  header{background:linear-gradient(135deg,var(--marine),var(--marine2));color:#fff;
+    padding:48px 24px 40px;margin-bottom:36px;}
+  .header-inner{max-width:1080px;margin:0 auto;padding:0 24px;}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:#8fb9e6;font-weight:700;margin-bottom:10px;}
+  h1{font-size:32px;line-height:1.2;font-weight:800;margin-bottom:18px;max-width:820px;}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;}
+  .chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);
+    padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:600;color:#dce9f7;}
+  .chip.go{background:var(--vert);border-color:var(--vert);color:#fff;}
+  .tldr{margin-top:18px;font-size:16px;line-height:1.55;color:#cfdaea;max-width:780px;}
+  .tldr strong{color:#fff;}
+  /* Sections */
+  section{margin-bottom:34px;}
+  h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--bleu);
+    font-weight:800;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  h2 .num{background:var(--bleu);color:#fff;width:24px;height:24px;border-radius:6px;
+    display:inline-flex;align-items:center;justify-content:center;font-size:13px;
+    letter-spacing:0;flex-shrink:0;}
+  h3{font-size:16px;font-weight:700;margin:18px 0 8px;color:var(--marine);}
+  p{margin-bottom:10px;}
+  /* Card */
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;
+    padding:22px 24px;box-shadow:0 1px 3px rgba(11,46,79,.05);}
+  .card + .card{margin-top:14px;}
+  .grid{display:grid;gap:14px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  .g3{grid-template-columns:1fr 1fr 1fr;}
+  @media(max-width:720px){.g2,.g3{grid-template-columns:1fr;}}
+  /* Tables */
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0;}
+  th{background:var(--bleu-pale);color:var(--marine);text-align:left;
+    padding:9px 12px;font-weight:700;font-size:12.5px;text-transform:uppercase;
+    letter-spacing:.03em;border-bottom:2px solid #cfe0f3;}
+  td{padding:9px 12px;border-bottom:1px solid var(--bord);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  code{background:#eef2f6;border:1px solid var(--bord);border-radius:4px;
+    padding:1px 5px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;
+    color:var(--marine);}
+  pre{background:#0e2138;color:#e4ebf3;border-radius:8px;padding:14px 16px;
+    overflow-x:auto;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;
+    line-height:1.55;margin:8px 0;}
+  pre .k{color:#7ab7ff;} pre .s{color:#ffd07a;} pre .c{color:#8fa1b3;font-style:italic;}
+  /* Badges */
+  .badge{display:inline-block;padding:2px 9px;border-radius:5px;font-size:12px;
+    font-weight:700;white-space:nowrap;}
+  .b-ok{background:var(--vert-pale);color:var(--vert);}
+  .b-no{background:var(--rouge-pale);color:var(--rouge);}
+  .b-mid{background:var(--ambre-pale);color:var(--ambre);}
+  .b-info{background:var(--bleu-pale);color:var(--bleu);}
+  /* Callout */
+  .callout{border-left:4px solid var(--bleu);background:var(--bleu-pale);
+    padding:16px 20px;border-radius:0 10px 10px 0;}
+  .callout.warn{border-color:var(--ambre);background:var(--ambre-pale);}
+  .callout.danger{border-color:var(--rouge);background:var(--rouge-pale);}
+  .callout.good{border-color:var(--vert);background:var(--vert-pale);}
+  .callout .lbl{font-weight:800;font-size:12px;text-transform:uppercase;
+    letter-spacing:.07em;display:block;margin-bottom:5px;}
+  .callout.warn .lbl{color:var(--ambre);}
+  .callout.danger .lbl{color:var(--rouge);}
+  .callout.good .lbl{color:var(--vert);}
+  .callout .lbl{color:var(--bleu);}
+  /* Diagram (ASCII flow) */
+  .diagram{background:#0e2138;color:#cfe0f3;border-radius:10px;padding:18px 20px;
+    font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.6;
+    overflow-x:auto;white-space:pre;}
+  .diagram .h{color:#ffd07a;font-weight:700;} .diagram .o{color:#9fffb8;}
+  .diagram .n{color:#ff9a8c;} .diagram .a{color:#7ab7ff;}
+  /* Stat row */
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px;}
+  .stat{flex:1;min-width:170px;background:var(--card);border:1px solid var(--bord);
+    border-radius:10px;padding:16px 18px;}
+  .stat .v{font-size:26px;font-weight:800;color:var(--marine);line-height:1;}
+  .stat .l{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;
+    margin-top:6px;font-weight:600;}
+  /* Decision list */
+  .dec .item{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--bord);}
+  .dec .item:last-child{border-bottom:none;}
+  .dec .num-d{background:var(--bleu);color:#fff;width:30px;height:30px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;font-weight:800;
+    font-size:14px;flex-shrink:0;}
+  .dec .body .t{font-weight:700;color:var(--marine);margin-bottom:4px;}
+  /* Plan steps */
+  .step{display:flex;gap:12px;padding:10px 0;border-bottom:1px solid var(--bord);}
+  .step:last-child{border-bottom:none;}
+  .step .id{background:var(--marine);color:#fff;font-weight:800;font-size:12px;
+    padding:4px 10px;border-radius:6px;height:fit-content;flex-shrink:0;min-width:36px;
+    text-align:center;}
+  .step .body{flex:1;}
+  .step .t{font-weight:700;color:var(--marine);font-size:14px;}
+  .step .d{font-size:13px;color:var(--muted);margin-top:2px;}
+  .effort{font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;
+    background:var(--bleu-pale);color:var(--bleu);margin-left:8px;}
+  /* TL;DR before/after */
+  .ba{display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:center;margin-top:8px;}
+  .ba .arrow{font-size:24px;color:var(--bleu);font-weight:800;text-align:center;}
+  .ba-side{background:#fff;border:1px solid var(--bord);border-radius:10px;padding:14px;}
+  .ba-side .lab{font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.07em;margin-bottom:6px;}
+  .ba-side.bef{border-left:4px solid var(--rouge);}
+  .ba-side.aft{border-left:4px solid var(--vert);}
+  @media(max-width:720px){.ba{grid-template-columns:1fr;}.ba .arrow{transform:rotate(90deg);}}
+  /* Footer */
+  footer{margin-top:60px;padding-top:20px;border-top:1px solid var(--bord);
+    text-align:center;font-size:12px;color:var(--muted);}
+  @media (prefers-color-scheme: dark){
+    body{background:#0a1521;color:#e4ebf3;}
+    .card,.stat,.opt,.ba-side{background:#13243a;border-color:#1f3550;}
+    .callout{background:#1c2c43;}
+    .callout.warn{background:#3d2e15;}
+    .callout.danger{background:#3a1e1a;}
+    .callout.good{background:#1a3325;}
+    th{background:#1a2e48;color:#cfe0f3;border-bottom-color:#1f3550;}
+    td{border-bottom-color:#1f3550;}
+    code{background:#1c2c43;border-color:#1f3550;color:#9fc8ff;}
+    h3{color:#cfe0f3;}
+    .step .id,.dec .num-d{}
+    .stat .v{color:#cfe0f3;}
+    .ba-side{background:#13243a;}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="kicker">france-data-mcp · cadrage feature</div>
+    <h1>V0.19.0 — <code style="background:rgba(255,255,255,.1);color:#fff;border:none;font-size:28px;padding:2px 8px;">nom_commune</code> resolver</h1>
+    <p class="tldr">
+      Sur <strong>3 tools MCP</strong>, on accepte un nouveau paramètre <code style="background:rgba(255,255,255,.1);color:#fff;border:none;">nom_commune</code> (string). Le serveur résout en interne le nom → code INSEE. Geo Intel gagne <strong>1 appel sur 2</strong> (~5s par requête). Rétro-compatibilité totale.
+    </p>
+    <div class="meta">
+      <span class="chip go">DESIGN VALIDÉ</span>
+      <span class="chip">Cible : 1 session ~5h</span>
+      <span class="chip">0 migration · 0 dép npm</span>
+      <span class="chip">2026-05-23</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- Vue d'ensemble -->
+  <section>
+    <h2><span class="num">1</span>Vue d'ensemble — avant / après</h2>
+    <div class="card">
+      <div class="ba">
+        <div class="ba-side bef">
+          <div class="lab">Aujourd'hui — 2 appels MCP</div>
+          <pre><span class="c">1. autocomplete_commune({nom:"Lille"})</span>
+   → <span class="o">{code:"59350"}</span>
+
+<span class="c">2. etablissements_finess_by_categorie({</span>
+     <span class="k">categorie</span>:<span class="s">"labo"</span>,
+     <span class="k">code_insee</span>:<span class="s">"59350"</span>
+   <span class="c">})</span>
+   → <span class="o">{results:[...]}</span></pre>
+          <p style="font-size:12px;color:var(--muted);margin-top:8px;">Coût : ~5s par requête (2× round-trip)</p>
+        </div>
+        <div class="arrow">→</div>
+        <div class="ba-side aft">
+          <div class="lab">V0.19.0 — 1 appel MCP</div>
+          <pre><span class="c">etablissements_finess_by_categorie({</span>
+  <span class="k">categorie</span>:<span class="s">"labo"</span>,
+  <span class="k">nom_commune</span>:<span class="s">"Lille"</span>
+<span class="c">})</span>
+→ <span class="o">{results:[...]}</span></pre>
+          <p style="font-size:12px;color:var(--muted);margin-top:8px;">Coût : ~2.5s par requête (1× round-trip)</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats clés -->
+  <section>
+    <h2><span class="num">2</span>Chiffres clés</h2>
+    <div class="stat-row">
+      <div class="stat"><div class="v">3</div><div class="l">Tools concernés</div></div>
+      <div class="stat"><div class="v">9</div><div class="l">Cas matrice</div></div>
+      <div class="stat"><div class="v">4</div><div class="l">Codes d'erreur</div></div>
+      <div class="stat"><div class="v">~5h</div><div class="l">Effort total</div></div>
+      <div class="stat"><div class="v">0</div><div class="l">Migration DB</div></div>
+    </div>
+  </section>
+
+  <!-- Périmètre -->
+  <section>
+    <h2><span class="num">3</span>Périmètre</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Tool MCP</th><th>Aujourd'hui</th><th>V0.19.0</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>etablissements_finess_by_categorie</code></td>
+            <td>accepte <code>code_insee</code> et <code>departement</code> (AND silencieux)</td>
+            <td><span class="badge b-ok">+ nom_commune</span> <span class="badge b-mid">+ XOR strict</span></td>
+          </tr>
+          <tr>
+            <td><code>panorama_sante_territoire</code></td>
+            <td>accepte <code>code_insee</code> uniquement (required)</td>
+            <td><span class="badge b-ok">+ nom_commune</span></td>
+          </tr>
+          <tr>
+            <td><code>densite_professionnels_sante</code></td>
+            <td>accepte <code>code_dept</code> XOR <code>code_insee</code></td>
+            <td><span class="badge b-ok">+ nom_commune</span> <span class="badge b-info">code_dept devient hint si combiné</span></td>
+          </tr>
+          <tr style="opacity:.55;">
+            <td><code>densite_etablissements_sante</code></td>
+            <td>accepte <code>code_dept</code> uniquement (pas de niveau commune)</td>
+            <td><span class="badge b-info">Backlog V0.20</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="callout" style="margin-top:14px;">
+        <span class="lbl">Pourquoi pas le 4ème</span>
+        <code>densite_etablissements_sante</code> ne sait pas calculer au niveau commune aujourd'hui. L'étendre = nouveau RPC SQL + métadata population + gestion PLM = chantier 2× plus gros qui mérite son propre ticket.
+      </div>
+    </div>
+  </section>
+
+  <!-- Matrice -->
+  <section>
+    <h2><span class="num">4</span>Matrice de comportement</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th style="width:50%;">Cas d'entrée</th><th>Comportement</th><th>Code erreur</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>nom_commune="Lille"</code> (unique)</td><td><span class="badge b-ok">Résout</span> silencieusement → calcul commune 59350</td><td>—</td></tr>
+          <tr><td><code>nom_commune="Saint-Martin"</code> (5 matches)</td><td><span class="badge b-no">Erreur</span> structurée + top 10 candidats par pop</td><td><code>ambiguous_commune</code></td></tr>
+          <tr><td><code>nom="Saint-Martin"</code> + <code>dept="65"</code> (1 match)</td><td><span class="badge b-ok">Résout</span> silencieusement → commune 65392</td><td>—</td></tr>
+          <tr><td><code>nom="Saint-Martin"</code> + <code>dept="08"</code> (0 dans 08)</td><td><span class="badge b-no">Erreur</span> distincte de "inconnu" → liste les depts où elle existe</td><td><code>commune_not_in_department</code></td></tr>
+          <tr><td><code>nom="Saint-Martin"</code> + <code>dept="..."</code> (encore ambigu)</td><td><span class="badge b-no">Erreur</span> + candidats filtrés sur dept</td><td><code>ambiguous_commune</code></td></tr>
+          <tr><td><code>nom_commune="St-Martin"</code> (abrév non reconnue)</td><td><span class="badge b-no">Erreur</span> + hint pédagogique ("utiliser le nom officiel")</td><td><code>unknown_commune</code></td></tr>
+          <tr><td><code>nom_commune</code> + <code>code_insee</code> (redondant)</td><td><span class="badge b-no">Erreur</span> XOR explicite</td><td><code>redundant_commune_params</code></td></tr>
+          <tr><td><code>code_insee</code> seul</td><td><span class="badge b-ok">Pass-through</span> rétrocompat totale</td><td>—</td></tr>
+          <tr><td><code>departement</code>/<code>code_dept</code> seul</td><td><span class="badge b-ok">Pass-through</span> scope dept comme avant</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Architecture -->
+  <section>
+    <h2><span class="num">5</span>Architecture — 1 brique partagée</h2>
+    <div class="card">
+      <p>Un seul helper <code>resolveNomCommune()</code> dans <code>api/_lib/resolve-commune.ts</code> alimente les 3 tools. Pas de duplication, sémantique cohérente, testable unitairement.</p>
+      <div class="diagram">
+<span class="h">┌─────────────────────────────────────────────────────────────────┐</span>
+<span class="h">│</span>                    <span class="a">MCP Boundary (api/)</span>                         <span class="h">│</span>
+<span class="h">│</span>                                                                 <span class="h">│</span>
+<span class="h">│</span>  <span class="o">by_categorie</span>      <span class="o">panorama</span>     <span class="o">densite_professionnels</span>      <span class="h">│</span>
+<span class="h">│</span>       │              │                  │                       <span class="h">│</span>
+<span class="h">│</span>       └──────┬───────┴──────────────────┘                       <span class="h">│</span>
+<span class="h">│</span>              ▼                                                  <span class="h">│</span>
+<span class="h">│</span>   <span class="a">applyCommuneResolver()</span>  ← XOR strict + erreurs structurées   <span class="h">│</span>
+<span class="h">│</span>              │                                                  <span class="h">│</span>
+<span class="h">│</span>              ▼                                                  <span class="h">│</span>
+<span class="h">│</span>   <span class="a">resolveNomCommune()</span>     ← match exact + filtre dept           <span class="h">│</span>
+<span class="h">│</span>              │                                                  <span class="h">│</span>
+<span class="h">└──────────────│──────────────────────────────────────────────────┘</span>
+               ▼
+       <span class="a">searchCommunes()</span>          ← lib src/territoire/ (étendue)
+               │
+               ▼
+   <span class="o">geo.api.gouv.fr</span> · DINUM/Etalab
+   (filtre <span class="o">codeDepartement</span> natif + fuzzy <span class="o">nom</span>)
+      </div>
+    </div>
+  </section>
+
+  <!-- Décisions clés -->
+  <section>
+    <h2><span class="num">6</span>Décisions clés (avec rationale)</h2>
+    <div class="card dec">
+      <div class="item"><div class="num-d">1</div><div class="body">
+        <div class="t">Scope = 3 tools, pas 4</div>
+        <p>Le 4ème (<code>densite_etablissements_sante</code>) ne sait pas calculer par commune. Ticket V0.20 backlog.</p>
+      </div></div>
+      <div class="item"><div class="num-d">2</div><div class="body">
+        <div class="t">Helper boundary partagé (pas un par tool)</div>
+        <p>DRY + cohérence DX LLM + testabilité. ~30 lignes par tool évitées × 3.</p>
+      </div></div>
+      <div class="item"><div class="num-d">3</div><div class="body">
+        <div class="t"><code>departement</code> désambigue (combinable avec <code>nom_commune</code>)</div>
+        <p>Cas LLM typique « Saint-Martin (08) » → 1 appel au lieu de 2. <code>departement</code> sert de hint resolver, pas de scope (sauf si fourni seul).</p>
+      </div></div>
+      <div class="item"><div class="num-d">4</div><div class="body">
+        <div class="t">Match exact case-insensitive + accents normalisés (pas de fuzzy)</div>
+        <p>Tests live : l'API gère casse + accents nativement, mais matche fuzzy <code>Saint-Martin</code> → <code>Mont-Saint-Martin</code> (bruit). Match exact post-API = comportement déterministe.</p>
+      </div></div>
+      <div class="item"><div class="num-d">5</div><div class="body">
+        <div class="t">Pas de gestion <code>St → Saint</code> en V0.19.0 (YAGNI)</div>
+        <p>Si le LLM tape "St-Martin", il reçoit <code>unknown_commune</code> avec un hint pédagogique. Il corrigera en 1 round-trip. V0.19.1 si Sentry remonte le pain point.</p>
+      </div></div>
+      <div class="item"><div class="num-d">6</div><div class="body">
+        <div class="t">Erreurs via <code>RangeError(msg, { cause })</code> → JSON-RPC <code>error.data</code></div>
+        <p>Patch 3 lignes sur <code>api/mcp.ts:384-393</code> pour propager <code>err.cause</code> au 4ème arg de <code>error()</code> (déjà supporté). Test garde-fou obligatoire.</p>
+      </div></div>
+      <div class="item"><div class="num-d">7</div><div class="body">
+        <div class="t">XOR strict introduit dans <code>by_categorie</code> au passage</div>
+        <p>Aujourd'hui <code>departement + code_insee</code> sont AND-és silencieusement. Cassure mineure documentée : le caller (s'il y en a) reçoit désormais une erreur claire.</p>
+      </div></div>
+    </div>
+  </section>
+
+  <!-- Exemples erreurs -->
+  <section>
+    <h2><span class="num">7</span>Forme des erreurs JSON-RPC</h2>
+    <div class="card">
+      <h3 style="margin-top:0;"><code>ambiguous_commune</code></h3>
+      <pre><span class="c">// LLM tape juste "Saint-Martin" → 5 communes en France</span>
+{
+  <span class="k">"error"</span>: {
+    <span class="k">"code"</span>: -32602,
+    <span class="k">"message"</span>: <span class="s">"Commune ambiguë : 5 communes correspondent..."</span>,
+    <span class="k">"data"</span>: {
+      <span class="k">"kind"</span>: <span class="s">"ambiguous_commune"</span>,
+      <span class="k">"candidates"</span>: [
+        {<span class="k">"code"</span>:<span class="s">"97801"</span>, <span class="k">"nom"</span>:<span class="s">"Saint-Martin"</span>, <span class="k">"codeDepartement"</span>:<span class="s">"978"</span>, <span class="k">"population"</span>:31160},
+        {<span class="k">"code"</span>:<span class="s">"65392"</span>, <span class="k">"nom"</span>:<span class="s">"Saint-Martin"</span>, <span class="k">"codeDepartement"</span>:<span class="s">"65"</span>, <span class="k">"population"</span>:436},
+        <span class="c">// ... top 10 par pop décroissante</span>
+      ],
+      <span class="k">"total_matches"</span>: 5,
+      <span class="k">"truncated"</span>: false
+    }
+  }
+}</pre>
+
+      <h3><code>commune_not_in_department</code></h3>
+      <pre><span class="c">// LLM tape "Lyon" + dept="13" → cohérence cassée, mais Lyon existe ailleurs</span>
+{
+  <span class="k">"error"</span>: {
+    <span class="k">"code"</span>: -32602,
+    <span class="k">"message"</span>: <span class="s">"Commune 'Lyon' introuvable dans le département '13'..."</span>,
+    <span class="k">"data"</span>: {
+      <span class="k">"kind"</span>: <span class="s">"commune_not_in_department"</span>,
+      <span class="k">"matches_in_other_dept"</span>: [
+        {<span class="k">"code"</span>:<span class="s">"69123"</span>, <span class="k">"nom"</span>:<span class="s">"Lyon"</span>, <span class="k">"codeDepartement"</span>:<span class="s">"69"</span>, <span class="k">"population"</span>:522969}
+      ]
+    }
+  }
+}</pre>
+
+      <h3><code>unknown_commune</code> (avec hint pédagogique)</h3>
+      <pre><span class="c">// LLM tape "St-Martin" (abréviation)</span>
+{
+  <span class="k">"error"</span>: {
+    <span class="k">"code"</span>: -32602,
+    <span class="k">"message"</span>: <span class="s">"Commune 'St-Martin' inconnue. Utiliser le nom officiel complet..."</span>,
+    <span class="k">"data"</span>: {
+      <span class="k">"kind"</span>: <span class="s">"unknown_commune"</span>,
+      <span class="k">"input"</span>: {<span class="k">"nom_commune"</span>:<span class="s">"St-Martin"</span>},
+      <span class="k">"hint"</span>: <span class="s">"Utiliser le nom officiel complet (ex. 'Saint-Martin'). Les abréviations 'St'/'Ste' ne sont pas reconnues."</span>
+    }
+  }
+}</pre>
+    </div>
+  </section>
+
+  <!-- Périmètre exclu YAGNI -->
+  <section>
+    <h2><span class="num">8</span>Périmètre exclu (YAGNI)</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Item</th><th>Pourquoi exclu</th><th>Trigger d'inclusion future</th></tr></thead>
+        <tbody>
+          <tr><td>Normalisation <code>St → Saint</code></td><td>YAGNI · pédagogique</td><td>Si Sentry &gt; 50/mois <code>unknown_commune</code> avec input <code>St-</code></td></tr>
+          <tr><td>Extension <code>densite_etablissements_sante</code> commune</td><td>Chantier RPC SQL distinct</td><td>Ticket V0.20 backlog</td></tr>
+          <tr><td>Cache local 35K communes</td><td>4 MB mémoire · invalidation COG annuelle · API rapide ~50ms</td><td>Si p99 latence resolver &gt; 500ms en prod</td></tr>
+          <tr><td>Support <code>code_postal</code> alternatif</td><td>Hors demande Geo Intel</td><td>Demande explicite</td></tr>
+          <tr><td>Support EPCI / canton / arrondissement PML</td><td>Sémantique zone administrative ≠ commune</td><td>Chantier séparé</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Risques -->
+  <section>
+    <h2><span class="num">9</span>Risques & mitigations</h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Risque</th><th>Proba</th><th>Impact</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td><code>geo.api.gouv.fr</code> indispo</td><td><span class="badge b-ok">Faible</span></td><td>Tool fail soft</td><td>Réutilise <code>searchCommunes</code> + catch root</td></tr>
+          <tr><td>Double round-trip API en cas <code>not_in_department</code></td><td><span class="badge b-ok">Rare</span></td><td>+50ms sur erreur seulement</td><td>Acceptable, valeur pédagogique &gt; coût</td></tr>
+          <tr><td>Régression XOR <code>by_categorie</code></td><td><span class="badge b-ok">Très faible</span></td><td>Caller reçoit erreur claire au lieu d'AND silencieux</td><td>CHANGELOG explicite + test garde-fou</td></tr>
+          <tr><td>Test <code>error.cause</code> propagation oublié</td><td><span class="badge b-mid">Moyenne</span></td><td>Geo Intel perd payload structuré</td><td>Test obligatoire <code>mcp-handler-error-cause.test.ts</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Plan -->
+  <section>
+    <h2><span class="num">10</span>Plan d'exécution</h2>
+    <div class="card">
+      <div class="step"><div class="id">1</div><div class="body"><div class="t">Lib extension <code>searchCommunes</code> <span class="effort">20 min</span></div><div class="d">Param <code>codeDepartement</code> + test</div></div></div>
+      <div class="step"><div class="id">2</div><div class="body"><div class="t">Helper resolver <code>api/_lib/resolve-commune.ts</code> <span class="effort">1h</span></div><div class="d">Type discriminé + tests unitaires (9 cas matrice)</div></div></div>
+      <div class="step"><div class="id">3</div><div class="body"><div class="t">Helper boundary <code>api/_lib/apply-commune-resolver.ts</code> <span class="effort">1h</span></div><div class="d">XOR strict + format erreurs + tests</div></div></div>
+      <div class="step"><div class="id">4</div><div class="body"><div class="t">Patch <code>api/mcp.ts</code> (propagation <code>error.cause</code>) <span class="effort">20 min</span></div><div class="d">3 lignes + test garde-fou</div></div></div>
+      <div class="step"><div class="id">5</div><div class="body"><div class="t">Câblage <code>by_categorie</code> <span class="effort">30 min</span></div><div class="d">+ <code>nom_commune</code>, + XOR strict, description tool, tests</div></div></div>
+      <div class="step"><div class="id">6</div><div class="body"><div class="t">Câblage <code>panorama_sante_territoire</code> <span class="effort">30 min</span></div><div class="d">+ <code>nom_commune</code>, description, tests</div></div></div>
+      <div class="step"><div class="id">7</div><div class="body"><div class="t">Câblage <code>densite_professionnels_sante</code> <span class="effort">30 min</span></div><div class="d">+ <code>nom_commune</code>, sémantique conditionnelle <code>code_dept</code>, tests</div></div></div>
+      <div class="step"><div class="id">8</div><div class="body"><div class="t">Discipline post-fix <span class="effort">1h</span></div><div class="d"><code>/simplify</code> (3 agents) + <code>/review</code> Passe 1 (3 agents) + Passe 2 (2 agents)</div></div></div>
+      <div class="step"><div class="id">9</div><div class="body"><div class="t">Documentation <span class="effort">30 min</span></div><div class="d">CHANGELOG + CLAUDE.md + entry backlog V0.20</div></div></div>
+      <div class="step"><div class="id">10</div><div class="body"><div class="t">Bump V0.19.0 + commit + tag + push <span class="effort">10 min</span></div><div class="d"><code>package.json</code> + <code>server.json</code> + <code>src/core/version.ts</code></div></div></div>
+      <div class="step"><div class="id">11</div><div class="body"><div class="t">Vercel auto-deploy + <code>/healthz</code> check <span class="effort">5 min</span></div><div class="d">Le HTTP endpoint est déployé automatiquement sur push tag</div></div></div>
+      <div class="step" style="opacity:.6;"><div class="id">12</div><div class="body"><div class="t">STOP — Cyril prend la main</div><div class="d"><code>pnpm publish</code> (OTP npm) + <code>mcp-publisher publish</code> (GitHub OAuth) = maintainer-only</div></div></div>
+    </div>
+  </section>
+
+  <!-- Tests live -->
+  <section>
+    <h2><span class="num">11</span>Annexe — tests live geo.api.gouv.fr</h2>
+    <div class="card">
+      <p>Confronté à la doc + tests live le 2026-05-23 (règle CLAUDE.md : doc officielle + tests réels avant de coder).</p>
+      <table>
+        <thead><tr><th>Input</th><th>Résultat API native</th><th>Décision</th></tr></thead>
+        <tbody>
+          <tr><td><code>?nom=Saint-Martin&codeDepartement=08</code></td><td>2 résultats (Mont-Saint-Martin, Hannogne-Saint-Martin)</td><td><span class="badge b-ok">Filtre dept natif OK</span> · match exact côté boundary élimine le bruit</td></tr>
+          <tr><td><code>?nom=lille</code></td><td>Lille #1 (score 1.81)</td><td><span class="badge b-ok">Casse gérée nativement</span></td></tr>
+          <tr><td><code>?nom=Saint-Etienne</code></td><td>Saint-Étienne #1 (score 0.84)</td><td><span class="badge b-ok">Accents gérés nativement</span></td></tr>
+          <tr><td><code>?nom=St-Martin</code></td><td>0 résultat</td><td><span class="badge b-no">Abréviation NON gérée</span> · hint pédagogique côté boundary</td></tr>
+          <tr><td><code>?nom=St Martin</code></td><td>0 résultat</td><td><span class="badge b-no">Espace non géré</span> · idem</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    Archive technique exhaustive : <code>docs/plans/nom-commune-resolver-v019.md</code> · france-data-mcp · 2026-05-23
+  </footer>
+
+</div>
+</body>
+</html>
