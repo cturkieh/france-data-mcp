@@ -1869,6 +1869,15 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       familles_auto_derivees: ["labo"],
     } as unknown as Awaited<ReturnType<typeof coverage.getCoverageFinessVsSireneInRadius>>;
     vi.spyOn(coverage, "getCoverageFinessVsSireneInRadius").mockResolvedValueOnce(mocked);
+    // Phase 2 : auto-derive ['labo'] (single mappable) déclenche désormais
+    // getHostedActivitiesInRadius (biologie). Mock pour éviter le réseau.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("finess_sirene_coverage_in_radius");
     expect(tool).toBeDefined();
     const out = (await tool?.handler({ lon: 2.35, lat: 48.85, naf: "8690B" })) as Record<
@@ -2061,6 +2070,40 @@ describe("activite_hebergee wiring — etablissements_finess_*", () => {
       unknown
     >;
     expect(out.activites_hebergees_par_famille).toBeUndefined();
+  });
+
+  it("finess_sirene_coverage_in_radius famille=labo expose activite_hebergee biologie", async () => {
+    vi.spyOn(coverage, "getCoverageFinessVsSireneInRadius").mockResolvedValueOnce({
+      finess_sites: 12,
+      sirene_sirets: 14,
+      matched_count: 11,
+      coverage_ratio: 0.92,
+      matched_samples: [],
+      finess_only_samples: [],
+      sirene_only_samples: [],
+      methodology: "...",
+      caveats: [],
+      coverage_status: "ok",
+      familles_auto_derivees: ["labo"],
+    } as unknown as Awaited<ReturnType<typeof coverage.getCoverageFinessVsSireneInRadius>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 4,
+      note: "Plateaux ... Ne pas additionner les deux comptes sans préciser leur nature.",
+      sites_apercu: [],
+      truncated: false,
+    });
+    const tool = findTool("finess_sirene_coverage_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ lon: 2.35, lat: 48.85, naf: "8690B" })) as Record<
+      string,
+      unknown
+    >;
+    expect(out.coverage_ratio).toBe(0.92);
+    const hosted = out.activite_hebergee as { activite: string; count: number; note: string };
+    expect(hosted.count).toBe(4);
+    expect(hosted.activite).toBe("biologie médicale");
+    expect(hosted.note).toMatch(/[Nn]e pas additionner/);
   });
 
   it("densite_etablissements_sante famille=labo expose activite_hebergee biologie + densite_pour_100k_hab", async () => {

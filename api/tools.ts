@@ -2493,7 +2493,24 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       // ne compte qu'un sous-ensemble — surdéclaration silencieuse, exactement
       // le bug qu'on a corrigé sur panorama (commit e306104).
       const effectiveFamilles = familles ?? result.familles_auto_derivees ?? undefined;
-      return withPerimetre(result, finessFamillePerimetre(effectiveFamilles));
+      // Phase 2 — activite_hebergee : si EXACTEMENT 1 famille effective est
+      // mappable (caller ou auto-dérivée), fetch hosted in_radius. Séquentiel
+      // après le coverage : le scope effectif n'est connu qu'après le retour
+      // de la lib (auto-derive dépend du NAF + reverse lookup).
+      const singleFamille: FinessFamilleQuery | undefined =
+        effectiveFamilles?.length === 1 ? effectiveFamilles[0] : undefined;
+      const hostedActivity = singleFamille ? familleToHostedActivity(singleFamille) : null;
+      const hosted = hostedActivity
+        ? await getHostedActivitiesInRadius({
+            activite: hostedActivity,
+            center: { lat, lon },
+            radiusKm,
+          })
+        : null;
+      return withHostedActivity(
+        withPerimetre(result, finessFamillePerimetre(effectiveFamilles)),
+        hosted,
+      );
     },
   },
 ];
