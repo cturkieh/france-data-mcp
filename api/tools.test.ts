@@ -4,6 +4,7 @@ import * as coverage from "../src/sante/coverage.js";
 import * as crossSource from "../src/sante/cross-source.js";
 import * as densite from "../src/sante/densite.js";
 import * as finessDb from "../src/sante/finess-db.js";
+import * as hostedActivities from "../src/sante/hosted-activities.js";
 import * as dinum from "../src/sante/index.js";
 import * as inseeSirene from "../src/sante/insee-sirene.js";
 import * as panorama from "../src/sante/panorama.js";
@@ -151,6 +152,16 @@ describe("etablissements_finess_by_categorie (MCP tool)", () => {
     const spy = vi
       .spyOn(finessDb, "getFinessByCategorie")
       .mockResolvedValueOnce({ count: 0, truncated: false, results: [] });
+    // Phase 2 : pharmacie + dept = scope ZONE valide → le handler appelle
+    // getHostedActivitiesInZone (pharmacie mappable). Mock pour éviter le
+    // réseau (SUPABASE_URL missing en test unit).
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValueOnce({
+      activite: "pharmacie à usage intérieur",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("etablissements_finess_by_categorie");
     await tool?.handler({ categorie: "pharmacie", departement: "08" });
     expect(spy).toHaveBeenCalledWith({ famille: "pharmacie", departement: "08" });
@@ -1896,5 +1907,88 @@ describe("withPerimetre (helper de câblage)", () => {
     const out = withPerimetre({ count: 0, results: [] }, perimetre);
     expect(out.perimetre.lens).toBe("categorie_dominante");
     expect(out.perimetre.completeness_note).toMatch(/hospitali/i);
+  });
+});
+
+// Phase 2 — câblage du champ `activite_hebergee` sur les tools `etablissements_finess_*`.
+// 4 cas couverts : 1 famille mappable (chemin nominal), multi-familles (omis),
+// famille non-mappable (omis), by_categorie sans scope zone (omis).
+describe("activite_hebergee wiring — etablissements_finess_*", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("etablissements_finess_in_radius famille=labo expose activite_hebergee biologie (chemin nominal)", async () => {
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 12,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 5,
+      note: "Plateaux techniques de biologie hébergés — Ne pas additionner les deux comptes sans préciser leur nature.",
+      sites_apercu: [],
+      truncated: false,
+    });
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["labo"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    expect(out.count).toBe(12);
+    const hosted = out.activite_hebergee as { activite: string; count: number; note: string };
+    expect(hosted.count).toBe(5);
+    expect(hosted.activite).toBe("biologie médicale");
+    expect(hosted.note).toMatch(/[Nn]e pas additionner/);
+  });
+
+  it("multi-familles → activite_hebergee absent (sémantique ambiguë)", async () => {
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 0,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    // PAS de spy sur getHostedActivitiesInRadius : si appelé, ça throw réseau.
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["labo", "pharmacie"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    expect(out.activite_hebergee).toBeUndefined();
+  });
+
+  it("famille sans hosted (ex. ehpad) → activite_hebergee absent", async () => {
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 0,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["ehpad"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    expect(out.activite_hebergee).toBeUndefined();
+  });
+
+  it("etablissements_finess_by_categorie sans dept ni commune → activite_hebergee absent (pas de scope zone)", async () => {
+    vi.spyOn(finessDb, "getFinessByCategorie").mockResolvedValueOnce({
+      count: 4112,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessByCategorie>>);
+    const tool = findTool("etablissements_finess_by_categorie");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ categorie: "labo" })) as Record<string, unknown>;
+    expect(out.count).toBe(4112);
+    expect(out.activite_hebergee).toBeUndefined();
   });
 });

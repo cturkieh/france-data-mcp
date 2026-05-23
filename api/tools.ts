@@ -40,6 +40,12 @@ import {
   getFinessByNumFiness,
   getFinessInRadius,
 } from "../src/sante/finess-db.js";
+import {
+  type HostedActivityResult,
+  familleToHostedActivity,
+  getHostedActivitiesInRadius,
+  getHostedActivitiesInZone,
+} from "../src/sante/hosted-activities.js";
 import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { inspectSite } from "../src/sante/inspect-site.js";
@@ -240,6 +246,24 @@ export function withPerimetre<T extends object & { then?: never }>(
 }
 
 /**
+ * Injecte un descripteur d'activité hébergée juxtaposée dans la sortie d'un
+ * tool de comptage filtré par famille. Le compte est SÉPARÉ du `count`
+ * principal — la note interdit l'addition sans précision (cf.
+ * src/sante/hosted-activities.ts). Champ omis si la famille n'a pas
+ * d'activité hébergée pertinente (`hosted === null`).
+ *
+ * Type durci `T extends object & { then?: never }` (cohérent avec withPerimetre)
+ * pour rendre une régression Promise-spread impossible à la compilation.
+ */
+function withHostedActivity<T extends object & { then?: never }>(
+  result: T,
+  hosted: HostedActivityResult | null,
+): T & { activite_hebergee?: HostedActivityResult } {
+  if (hosted === null) return result;
+  return { ...result, activite_hebergee: hosted };
+}
+
+/**
  * Patterns `outputSchema` réutilisables (spec MCP 2025-06-18 §6.3) déclarés
  * une fois et référencés par les 25 tools. Format JSON Schema standard.
  *
@@ -291,6 +315,33 @@ const PERIMETRE_OUTPUT_SCHEMA = {
   },
 } as const;
 
+const HOSTED_ACTIVITY_OUTPUT_SCHEMA = {
+  type: "object",
+  description:
+    "Compte juxtaposé des sites hébergeant l'activité correspondant à la " +
+    "famille filtrée, sous une autre catégorie FINESS. Distinct du `count` " +
+    "principal — lire `note` pour comprendre la sémantique et ne JAMAIS " +
+    "additionner les deux comptes sans préciser leur nature.",
+  properties: {
+    activite: { type: "string" },
+    count: { type: "integer" },
+    note: { type: "string" },
+    sites_apercu: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          num_finess: { type: "string" },
+          raison_sociale: { type: "string" },
+          categorie_code: { type: "string" },
+          categorie_libelle: { type: "string" },
+        },
+      },
+    },
+    truncated: { type: "boolean" },
+  },
+} as const;
+
 const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
   description:
@@ -324,6 +375,7 @@ const QUERY_RESULT_OUTPUT_SCHEMA: Record<string, unknown> = {
       description: "Fraîcheur des sources (présent si `include_freshness: true`).",
     },
     perimetre: PERIMETRE_OUTPUT_SCHEMA,
+    activite_hebergee: HOSTED_ACTIVITY_OUTPUT_SCHEMA,
   },
   required: ["count", "results"],
 };
@@ -1312,10 +1364,29 @@ export const TOOLS: McpTool[] = [
       };
       if (familles) input.familles = familles;
       if (limit !== undefined) input.limit = limit;
-      const result = await withFreshness(await getFinessInRadius(input), args.include_freshness, [
-        "finess",
+      // Phase 2 — activite_hebergee : ajouté UNIQUEMENT si une seule famille
+      // mappable est filtrée (multi-familles → sémantique du hosted ambiguë,
+      // donc omis ; famille non mappable → familleToHostedActivity = null).
+      // Variable intermédiaire pour narrow correctement avec noUncheckedIndexedAccess
+      // (familles[0] sinon FinessFamilleQuery | undefined).
+      const singleFamille: FinessFamilleQuery | undefined =
+        familles?.length === 1 ? familles[0] : undefined;
+      const hostedActivity = singleFamille ? familleToHostedActivity(singleFamille) : null;
+      const [withPerim, hosted] = await Promise.all([
+        (async () =>
+          withPerimetre(
+            await withFreshness(await getFinessInRadius(input), args.include_freshness, ["finess"]),
+            finessFamillePerimetre(familles),
+          ))(),
+        hostedActivity
+          ? getHostedActivitiesInRadius({
+              activite: hostedActivity,
+              center: { lat, lon },
+              radiusKm,
+            })
+          : Promise.resolve(null),
       ]);
-      return withPerimetre(result, finessFamillePerimetre(familles));
+      return withHostedActivity(withPerim, hosted);
     },
   },
   {
@@ -1363,12 +1434,30 @@ export const TOOLS: McpTool[] = [
       if (departement) input.departement = departement;
       if (codeInsee) input.code_insee = codeInsee;
       if (limit !== undefined) input.limit = limit;
-      const result = await withFreshness(
-        await getFinessByCategorie(input),
-        args.include_freshness,
-        ["finess"],
-      );
-      return withPerimetre(result, finessFamillePerimetre([famille]));
+      // Phase 2 — activite_hebergee : famille est unique (param obligatoire),
+      // donc mappable directement. Mais le scope ZONE doit exister pour appeler
+      // getHostedActivitiesInZone (départment OU commune). Sans scope (recherche
+      // France entière), pas de hosted → omis (limitation v1 acceptée).
+      const hostedActivity = familleToHostedActivity(famille);
+      const hostedTask: Promise<HostedActivityResult | null> =
+        hostedActivity !== null && (departement || codeInsee)
+          ? getHostedActivitiesInZone({
+              activite: hostedActivity,
+              departement: departement ?? undefined,
+              codeInsee: codeInsee ?? undefined,
+            })
+          : Promise.resolve(null);
+      const [withPerim, hosted] = await Promise.all([
+        (async () =>
+          withPerimetre(
+            await withFreshness(await getFinessByCategorie(input), args.include_freshness, [
+              "finess",
+            ]),
+            finessFamillePerimetre([famille]),
+          ))(),
+        hostedTask,
+      ]);
+      return withHostedActivity(withPerim, hosted);
     },
   },
   {
