@@ -6,7 +6,7 @@ import {
   finessRadiusMetadata,
 } from "../core/query-metadata.js";
 import { getAnonClient, getUntypedAnonClient } from "../storage/supabase.js";
-import { assertValidDept } from "../territoire/dept-codes.js";
+import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.js";
 import {
   assertValidNumFiness,
   buildListQueryResult,
@@ -115,6 +115,46 @@ export async function countFiness(input: CountFinessInput): Promise<number> {
   if (typeof data !== "number") {
     throw new Error(
       `count_finess returned unexpected type ${typeof data} (famille=${input.famille}, dept=${input.departement ?? "FRANCE"}, expected number, got: ${JSON.stringify(data)})`,
+    );
+  }
+  return data;
+}
+
+export interface CountFinessByCommuneInput {
+  /** Famille FINESS (mappe vers les codes catégorie via FINESS_FAMILY_CODES). */
+  famille: FinessFamilleQuery;
+  /** Code INSEE commune (5 chars exact, format CHAR(5) côté Postgres). */
+  codeInsee: string;
+}
+
+/**
+ * Compte les établissements FINESS d'une famille dans une commune INSEE
+ * (RPC `count_finess_by_commune`, V0.20 — jumeau de `countRppsByCommune` V0.9).
+ *
+ * Brique pour `densiteEtablissementsSante` au niveau commune. La RPC valide
+ * elle-même le format `code_insee` + garde-fou table vide (ERRCODE P0002 si
+ * un swap ingest cassé a vidé `finess` — refus de retourner 0 silencieusement,
+ * cf. lessons learned V0.8.1).
+ *
+ * Limitation Paris/Marseille/Lyon : les FINESS portent l'INSEE arrondissement
+ * (75101-75120, 13201-13216, 69381-69389). Caller doit `assertNotPlmCommune`
+ * AVANT cet appel pour rejet préemptif (cf. densite.ts).
+ */
+export async function countFinessByCommune(input: CountFinessByCommuneInput): Promise<number> {
+  // Validation TS avant roundtrip — sinon code_insee malformé part en parallèle
+  // (Promise.all densite.ts) et la RPC répond ERRCODE 22023 wrappé en -32603
+  // au lieu d'un -32602 propre. Mirror exact du contrat de countRppsByCommune.
+  assertValidCodeInsee(input.codeInsee);
+  const codes = [...FINESS_FAMILY_CODES[input.famille]];
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("count_finess_by_commune", {
+    p_code_insee: input.codeInsee,
+    p_categorie_codes: codes,
+  });
+  if (error) throw new Error(formatRpcError("count_finess_by_commune", error));
+  if (typeof data !== "number") {
+    throw new Error(
+      `count_finess_by_commune returned unexpected type ${typeof data} (famille=${input.famille}, codeInsee=${input.codeInsee}, expected number, got: ${JSON.stringify(data)})`,
     );
   }
   return data;

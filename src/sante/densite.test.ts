@@ -8,6 +8,7 @@ import * as rppsDb from "./rpps-db.js";
 const countRppsSpy = vi.spyOn(rppsDb, "countRpps");
 const countRppsByCommuneSpy = vi.spyOn(rppsDb, "countRppsByCommune");
 const countFinessSpy = vi.spyOn(finessDb, "countFiness");
+const countFinessByCommuneSpy = vi.spyOn(finessDb, "countFinessByCommune");
 const popByDeptSpy = vi.spyOn(melodi, "getPopulationByDept");
 const popByCommuneSpy = vi.spyOn(melodi, "getPopulationByCommune");
 const popFranceSpy = vi.spyOn(melodi, "getPopulationFrance");
@@ -20,6 +21,7 @@ beforeEach(() => {
   countRppsSpy.mockReset();
   countRppsByCommuneSpy.mockReset();
   countFinessSpy.mockReset();
+  countFinessByCommuneSpy.mockReset();
   popByDeptSpy.mockReset();
   popByCommuneSpy.mockReset();
   popFranceSpy.mockReset();
@@ -450,5 +452,125 @@ describe("densiteEtablissementsSante", () => {
     popByDeptSpy.mockResolvedValue(popFound(0));
     const result = await densiteEtablissementsSante({ departement: "75", famille: "labo" });
     expect(result.zone.densitePour100k).toBe(0);
+  });
+
+  it("niveau departement par défaut quand departement fourni (V0.20)", async () => {
+    countFinessSpy.mockResolvedValue(180);
+    popByDeptSpy.mockResolvedValue(popFound(2103778));
+    const result = await densiteEtablissementsSante({ departement: "75", famille: "labo" });
+    expect(result.zone.niveau).toBe("departement");
+  });
+
+  // --- V0.20 : niveau commune (jumeau densiteProfessionnelsSante V0.9) -----
+
+  it("V0.20 — codeInsee → appelle countFinessByCommune + getPopulationByCommune", async () => {
+    countFinessByCommuneSpy.mockResolvedValue(4);
+    popByCommuneSpy.mockResolvedValue(popFound(238246, 2023, "59350"));
+
+    const result = await densiteEtablissementsSante({
+      codeInsee: "59350",
+      famille: "labo",
+    });
+
+    expect(countFinessByCommuneSpy).toHaveBeenCalledWith({
+      famille: "labo",
+      codeInsee: "59350",
+    });
+    expect(popByCommuneSpy).toHaveBeenCalledWith("59350");
+    expect(countFinessSpy).not.toHaveBeenCalled();
+    expect(popByDeptSpy).not.toHaveBeenCalled();
+    expect(result.zone.zone).toBe("59350");
+    expect(result.zone.niveau).toBe("commune");
+    expect(result.zone.countEtablissements).toBe(4);
+    expect(result.zone.population).toBe(238246);
+    expect(result.zone.densitePour100k).toBe(round2((4 / 238246) * 100_000));
+  });
+
+  it("V0.20 — codeInsee + compareNational → national reste basé sur countFiness France entière", async () => {
+    countFinessByCommuneSpy.mockResolvedValue(4);
+    popByCommuneSpy.mockResolvedValue(popFound(238246, 2023, "59350"));
+    countFinessSpy.mockResolvedValueOnce(4500);
+    popFranceSpy.mockResolvedValue(popFranceFound(68094280));
+
+    const result = await densiteEtablissementsSante({
+      codeInsee: "59350",
+      famille: "labo",
+      compareNational: true,
+    });
+
+    expect(result.comparaisonNationale).toBeDefined();
+    expect(result.comparaisonNationale?.national.countEtablissements).toBe(4500);
+    expect(countFinessSpy).toHaveBeenCalledTimes(1);
+    expect(countFinessSpy.mock.calls[0]?.[0]?.departement).toBeUndefined();
+  });
+
+  it("V0.20 — code PLM (75056 commune-mère) → RangeError explicite AVANT toute requête", async () => {
+    await expect(
+      densiteEtablissementsSante({ codeInsee: "75056", famille: "labo" }),
+    ).rejects.toThrow(/Paris\/Lyon\/Marseille|code_dept='75'/);
+    expect(countFinessByCommuneSpy).not.toHaveBeenCalled();
+    expect(popByCommuneSpy).not.toHaveBeenCalled();
+  });
+
+  it("V0.20 — code PLM arrondissement (75108) → RangeError explicite", async () => {
+    await expect(
+      densiteEtablissementsSante({ codeInsee: "75108", famille: "labo" }),
+    ).rejects.toThrow(/Paris\/Lyon\/Marseille|code_dept='75'/);
+    expect(countFinessByCommuneSpy).not.toHaveBeenCalled();
+  });
+
+  it("V0.20 — code PLM Marseille (13201) + Lyon (69381) rejetés", async () => {
+    await expect(
+      densiteEtablissementsSante({ codeInsee: "13201", famille: "labo" }),
+    ).rejects.toThrow(/code_dept='13'/);
+    await expect(
+      densiteEtablissementsSante({ codeInsee: "69381", famille: "labo" }),
+    ).rejects.toThrow(/code_dept='69'/);
+  });
+
+  it("V0.20 — departement + codeInsee → RangeError XOR (resolveZone)", async () => {
+    await expect(
+      densiteEtablissementsSante({
+        departement: "75",
+        codeInsee: "59350",
+        famille: "labo",
+      }),
+    ).rejects.toThrow(/SOIT departement.*SOIT codeInsee/);
+    expect(countFinessSpy).not.toHaveBeenCalled();
+    expect(countFinessByCommuneSpy).not.toHaveBeenCalled();
+  });
+
+  it("V0.20 — ni departement ni codeInsee → RangeError requis", async () => {
+    await expect(
+      // biome-ignore lint/suspicious/noExplicitAny: test du cas runtime où aucun param zone n'est fourni
+      densiteEtablissementsSante({ famille: "labo" } as any),
+    ).rejects.toThrow(/departement ou codeInsee requis/);
+  });
+
+  it("V0.20 — codeInsee + commune Melodi 404 → RangeError clair", async () => {
+    countFinessByCommuneSpy.mockResolvedValue(4);
+    popByCommuneSpy.mockResolvedValue({
+      found: false,
+      lookupStatus: "not_found",
+      key: "00000",
+      message: "Commune 00000 introuvable",
+    });
+    await expect(
+      densiteEtablissementsSante({ codeInsee: "00000", famille: "labo" }),
+    ).rejects.toThrow(/Population introuvable pour la commune 00000/);
+  });
+
+  it("V0.20 — codeInsee Corse 2A004 accepté (non PLM)", async () => {
+    countFinessByCommuneSpy.mockResolvedValue(2);
+    popByCommuneSpy.mockResolvedValue(popFound(72115, 2023, "2A004"));
+    const result = await densiteEtablissementsSante({
+      codeInsee: "2A004",
+      famille: "pharmacie",
+    });
+    expect(result.zone.niveau).toBe("commune");
+    expect(countFinessByCommuneSpy).toHaveBeenCalledWith({
+      famille: "pharmacie",
+      codeInsee: "2A004",
+    });
   });
 });

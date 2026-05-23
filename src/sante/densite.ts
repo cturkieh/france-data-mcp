@@ -27,7 +27,7 @@ import {
   getPopulationFrance,
 } from "../territoire/insee-melodi.js";
 import type { FinessFamilleQuery } from "./finess-categories.js";
-import { type CountFinessInput, countFiness } from "./finess-db.js";
+import { type CountFinessInput, countFiness, countFinessByCommune } from "./finess-db.js";
 import {
   type CountRppsByCommuneInput,
   type CountRppsInput,
@@ -226,19 +226,22 @@ function buildCountByCommuneInput(
 /**
  * Garantit qu'exactement un des deux entre `departement` et `codeInsee` est
  * fourni. RangeError pour mapping JSON-RPC -32602 côté boundary MCP.
+ *
+ * Factorisée (V0.20) pour réutilisation par `densiteProfessionnelsSante` et
+ * `densiteEtablissementsSante`. Le param `toolName` voyage dans le wording
+ * d'erreur — pas de hardcode, 1 source de vérité.
  */
 function resolveZone(
-  input: DensiteProfessionnelsSanteInput,
+  input: { departement?: string; codeInsee?: string },
+  toolName: string,
 ): { kind: "departement"; code: string } | { kind: "commune"; code: string } {
   const hasDept = typeof input.departement === "string" && input.departement.length > 0;
   const hasInsee = typeof input.codeInsee === "string" && input.codeInsee.length > 0;
   if (hasDept && hasInsee) {
-    throw new RangeError(
-      "densiteProfessionnelsSante: passer SOIT departement SOIT codeInsee, pas les deux",
-    );
+    throw new RangeError(`${toolName}: passer SOIT departement SOIT codeInsee, pas les deux`);
   }
   if (!hasDept && !hasInsee) {
-    throw new RangeError("densiteProfessionnelsSante: departement ou codeInsee requis");
+    throw new RangeError(`${toolName}: departement ou codeInsee requis`);
   }
   return hasInsee
     ? { kind: "commune", code: input.codeInsee as string }
@@ -247,22 +250,25 @@ function resolveZone(
 
 /**
  * Garde-fou Paris/Lyon/Marseille (audit P1+P2). La densité par commune y est
- * structurellement impossible : les praticiens RPPS sont rattachés aux
- * arrondissements (75101-75120…) tandis qu'INSEE Melodi n'expose la population
- * qu'au niveau commune entière (75056…). Sans ce garde-fou :
- *  - commune-mère 75056 → countPs=0 + population 2,1M → densité 0 (faux
- *    "désert médical" SILENCIEUX) ;
+ * structurellement impossible : les entités (RPPS ou FINESS) sont rattachées
+ * aux arrondissements (75101-75120…) tandis qu'INSEE Melodi n'expose la
+ * population qu'au niveau commune entière (75056…). Sans ce garde-fou :
+ *  - commune-mère 75056 → count=0 + population 2,1M → densité 0 (faux
+ *    "désert" SILENCIEUX) ;
  *  - arrondissement 75108 → Melodi 404 → RangeError au message trompeur
  *    ("commune fusionnée").
  * On lève une RangeError explicite orientant vers `code_dept` (mappe
  * JSON-RPC -32602), AVANT tout appel DB/Melodi. Détection PLM = source
  * unique `plmDept` (territoire/commune-index, autorité PLM du repo).
+ *
+ * Factorisée (V0.20) avec param `toolName` pour réutilisation
+ * RPPS↔FINESS sans drift de wording.
  */
-function assertNotPlmCommune(codeInsee: string): void {
+function assertNotPlmCommune(codeInsee: string, toolName: string): void {
   const dept = plmDept(codeInsee);
   if (dept) {
     throw new RangeError(
-      `densiteProfessionnelsSante: la densité par commune n'est pas disponible pour Paris/Lyon/Marseille (code ${codeInsee}). Les praticiens RPPS sont rattachés aux arrondissements alors qu'INSEE n'expose la population qu'à la commune entière. Utiliser code_dept='${dept}' pour la densité ville entière.`,
+      `${toolName}: la densité par commune n'est pas disponible pour Paris/Lyon/Marseille (code ${codeInsee}). Les établissements FINESS (resp. praticiens RPPS) sont rattachés aux arrondissements (75101-75120, 13201-13216, 69381-69389) alors qu'INSEE n'expose la population qu'à la commune entière. Utiliser code_dept='${dept}' pour la densité ville entière.`,
     );
   }
 }
@@ -270,7 +276,7 @@ function assertNotPlmCommune(codeInsee: string): void {
 export async function densiteProfessionnelsSante(
   input: DensiteProfessionnelsSanteInput,
 ): Promise<DensiteProfessionnelsSanteResult> {
-  const zoneSpec = resolveZone(input);
+  const zoneSpec = resolveZone(input, "densiteProfessionnelsSante");
   // Garde-fou nomenclature ANS AVANT les counts (dette #1) : un code
   // profession/savoir_faire inconnu — ou un code Ameli homographe — ferait
   // sinon countPs=0 → densité 0 → faux « désert médical » indistinguable
@@ -286,7 +292,7 @@ export async function densiteProfessionnelsSante(
   let populationLookup: PopulationData;
 
   if (zoneSpec.kind === "commune") {
-    assertNotPlmCommune(zoneSpec.code);
+    assertNotPlmCommune(zoneSpec.code, "densiteProfessionnelsSante");
     const countInput = buildCountByCommuneInput(input, zoneSpec.code, modeExerciceCodes);
     const [count, popLookup] = await Promise.all([
       countRppsByCommune(countInput),
@@ -373,8 +379,19 @@ export async function densiteProfessionnelsSante(
 // --- Densité établissements (FINESS + Melodi) ------------------------------
 
 export interface DensiteEtablissementsSanteInput {
-  /** Code département (2-3 chars). Requis. */
-  departement: string;
+  /**
+   * Code département (2-3 chars). Exactement UN des deux entre `departement`
+   * et `codeInsee` est requis. Le département agrège tous les arrondissements
+   * (Paris 75, Lyon 69, Marseille 13) — c'est le bon niveau pour la densité
+   * « ville métropole ».
+   */
+  departement?: string;
+  /**
+   * Code INSEE commune 5 chars (V0.20, jumeau de `densiteProfessionnelsSante`
+   * V0.9). Exclusif avec `departement`. Paris/Lyon/Marseille NON supportés
+   * au niveau commune (cf. `assertNotPlmCommune`) — utiliser `departement`.
+   */
+  codeInsee?: string;
   /**
    * Famille FINESS à compter. Obligatoire — sans filtre, le ratio mélangerait
    * labos, hôpitaux, EHPAD et n'aurait pas de sens.
@@ -385,7 +402,10 @@ export interface DensiteEtablissementsSanteInput {
 }
 
 export interface DensiteEtablissementsResult {
+  /** Code zone analysée (dept ou code INSEE commune). */
   zone: string;
+  /** Niveau géographique analysé (V0.20). Utile pour le LLM pour interpréter. */
+  niveau: "departement" | "commune";
   countEtablissements: number;
   population: number;
   populationAnnee: number;
@@ -429,22 +449,54 @@ function buildFinessCountInput(
 export async function densiteEtablissementsSante(
   input: DensiteEtablissementsSanteInput,
 ): Promise<DensiteEtablissementsSanteResult> {
-  const [countEtab, populationLookup] = await Promise.all([
-    countFiness(buildFinessCountInput(input, input.departement)),
-    getPopulationByDept(input.departement),
-  ]);
+  // V0.20 — résolution dept vs commune. Pattern miroir densiteProfessionnelsSante.
+  const zoneSpec = resolveZone(input, "densiteEtablissementsSante");
 
-  if (!populationLookup.found) {
-    // RangeError pour mapping JSON-RPC -32602 (faute caller récupérable),
-    // aligné avec `densiteProfessionnelsSante` (V0.9 /review Passe 2).
-    throw new RangeError(
-      `Population introuvable pour le département ${input.departement} via INSEE Melodi : ${populationLookup.message}`,
-    );
+  let countEtab: number;
+  let populationLookup: PopulationData;
+
+  if (zoneSpec.kind === "commune") {
+    // PLM rejeté préemptivement : les FINESS portent l'insee arrondissement
+    // (75108 etc.), pas la commune-mère 75056 ; Melodi 404 sur les arrondissements.
+    // Sans ce garde-fou : commune-mère → countEtab=0 + pop 2,1M → densité 0 (faux
+    // "désert" silencieux) ; arrondissement → Melodi 404 message trompeur.
+    assertNotPlmCommune(zoneSpec.code, "densiteEtablissementsSante");
+    // Inline plutôt que helper : 1 seul callsite (la branche dept utilise
+    // `buildFinessCountInput` car appelé 2× — commune + national). Pas de
+    // gain DRY ici, juste du bruit (V0.20 review code-simplifier R2).
+    const [count, popLookup] = await Promise.all([
+      countFinessByCommune({ famille: input.famille, codeInsee: zoneSpec.code }),
+      getPopulationByCommune(zoneSpec.code),
+    ]);
+    if (!popLookup.found) {
+      // RangeError pour mapping JSON-RPC -32602 — commune fusionnée ou code
+      // invalide = faute caller récupérable, pas une panne serveur.
+      throw new RangeError(
+        `Population introuvable pour la commune ${zoneSpec.code} via INSEE Melodi (commune peut-être fusionnée ou code invalide) : ${popLookup.message}`,
+      );
+    }
+    countEtab = count;
+    populationLookup = popLookup;
+  } else {
+    const [count, popLookup] = await Promise.all([
+      countFiness(buildFinessCountInput(input, zoneSpec.code)),
+      getPopulationByDept(zoneSpec.code),
+    ]);
+    if (!popLookup.found) {
+      // RangeError pour mapping JSON-RPC -32602 (faute caller récupérable),
+      // aligné avec `densiteProfessionnelsSante` (V0.9 /review Passe 2).
+      throw new RangeError(
+        `Population introuvable pour le département ${zoneSpec.code} via INSEE Melodi : ${popLookup.message}`,
+      );
+    }
+    countEtab = count;
+    populationLookup = popLookup;
   }
 
   const population = populationLookup.populationMunicipale;
   const zone: DensiteEtablissementsResult = {
-    zone: input.departement,
+    zone: zoneSpec.code,
+    niveau: zoneSpec.kind,
     countEtablissements: countEtab,
     population,
     populationAnnee: populationLookup.annee,
@@ -465,6 +517,8 @@ export async function densiteEtablissementsSante(
   };
 
   if (input.compareNational) {
+    // Comparaison nationale reste basée sur countFiness France entière dans les
+    // 2 cas (dept ou commune) — la sémantique "vs national" est identique.
     const [countNational, popFrance] = await Promise.all([
       countFiness(buildFinessCountInput(input, null)),
       getPopulationFrance(),

@@ -2167,15 +2167,24 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
   },
   {
     name: "densite_etablissements_sante",
-    description:
-      "Densité d'établissements de santé pour 100 000 habitants dans un département, par famille FINESS. Croise FINESS DREES (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nFamilles disponibles : `labo` (laboratoires de biologie médicale), `pharmacie`, `ehpad`, `mco` (court séjour médecine/chirurgie/obstétrique), `ssr` (soins de suite), `psychiatrie`, `dialyse`, `imagerie`, `had` (hospitalisation à domicile), `msp_cpts` (maisons de santé + CPTS), `handicap_enfants`, `handicap_adultes`, `addictologie`, `pmi`, `prevention_sante`, etc. Famille obligatoire — sans filtre, le ratio mélangerait labos / hôpitaux / EHPAD et n'aurait pas de sens.\n\n`compare_national: true` ajoute la densité France entière (DOM inclus) + écart en %. Coût : 1 RPC count_finess + 1 appel Melodi (cacheable).\n\nAlias acceptés : `dept`/`departement` → `code_dept`.",
+    description: `Densité d'établissements de santé pour 100 000 habitants au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\` / \`nom_commune\`, V0.20), par famille FINESS. Croise FINESS DREES (count) et INSEE Melodi (population municipale PMUN, recensement 2023). Exactement un des trois requis.\n\nFamilles disponibles : \`labo\` (laboratoires de biologie médicale), \`pharmacie\`, \`ehpad\`, \`mco\` (court séjour médecine/chirurgie/obstétrique), \`ssr\` (soins de suite), \`psychiatrie\`, \`dialyse\`, \`imagerie\`, \`had\` (hospitalisation à domicile), \`msp_cpts\` (maisons de santé + CPTS), \`handicap_enfants\`, \`handicap_adultes\`, \`addictologie\`, \`pmi\`, \`prevention_sante\`, etc. Famille obligatoire — sans filtre, le ratio mélangerait labos / hôpitaux / EHPAD et n'aurait pas de sens.\n\nV0.20 — **sémantique conditionnelle de \`code_dept\`** :\n- \`code_dept\` seul = scope de calcul (densité département entier, comme avant)\n- \`code_dept\` combiné avec \`nom_commune\` = hint de résolution UNIQUEMENT (filtre les communes homonymes), le calcul reste sur la commune résolue\n\nParis/Marseille/Lyon : la densité par \`code_insee\` est INDISPONIBLE (les FINESS portent l'INSEE arrondissement 75101-75120 etc. alors qu'INSEE n'expose la population qu'à la commune entière) — passer un code commune-mère (75056) ou arrondissement (75108) lève une RangeError explicite. Utiliser \`code_dept\` (75, 13, 69) pour la densité ville entière.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) + écart en %. Coût : 1 RPC count_finess + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.`,
     inputSchema: {
       type: "object",
       properties: {
         code_dept: {
           type: "string",
           description:
-            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe.',
+            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe. Sémantique conditionnelle (V0.20) : seul = scope dept entier ; combiné avec `nom_commune` = hint resolver pour désambiguer les homonymes. XOR avec `code_insee`.',
+        },
+        code_insee: {
+          type: "string",
+          description:
+            'Code INSEE de la commune 5 caractères (V0.20). Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté au niveau commune (densité indisponible — voir description) : utiliser code_dept. XOR avec `code_dept` et `nom_commune`.',
+        },
+        nom_commune: {
+          type: "string",
+          description:
+            'Nom officiel de commune (alternative à `code_insee`, V0.20). Ex: "Lille", "Villeneuve-d\'Ascq". Le serveur résout en interne via geo.api.gouv.fr. Combinable avec `code_dept` comme hint de désambiguïsation pour homonymes (ex "Saint-Martin" + dept "65"). XOR avec `code_insee` (paramètres redondants).',
         },
         famille: {
           type: "string",
@@ -2189,15 +2198,19 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
           default: false,
         },
       },
-      required: ["code_dept", "famille"],
+      required: ["famille"],
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (rawArgs) => {
       const args = normalizeAliases(rawArgs, {
         dept: "code_dept",
         departement: "code_dept",
+        codeInsee: "code_insee",
+        insee: "code_insee",
       });
-      const codeDept = requireString(args, "code_dept", {
+      // V0.20 — étend requireOneOf à `nom_commune` (3 alternatives au lieu de 1).
+      // Préserve wording d'erreur historique du tool.
+      requireOneOf(args, ["code_dept", "code_insee", "nom_commune"], {
         code_dept: "59",
         famille: "labo",
       });
@@ -2205,22 +2218,46 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       if (!famille) {
         throw new RangeError(`famille requise et valide — valeurs : ${FAMILLES_LIST}`);
       }
-      const input: Parameters<typeof densiteEtablissementsSante>[0] = {
+      const codeDept = asString(args.code_dept);
+      const codeInsee = asString(args.code_insee);
+      const nomCommune = asString(args.nom_commune);
+
+      // V0.20 — résolution boundary + XOR strict. Si `nom_commune` fourni,
+      // `code_dept` agit comme HINT resolver (filtre les homonymes) et N'EST PAS
+      // réinjecté en scope de calcul — `applyCommuneResolver` retourne uniquement
+      // `{ codeInsee }`. `resolveZone` (lib densite.ts) prend le relais pour le
+      // XOR final code_dept vs code_insee côté lib (defense-in-depth).
+      const resolved = await applyCommuneResolver({
+        nomCommune,
+        codeInsee,
         departement: codeDept,
-        famille,
-      };
+        acceptsDepartementAsScope: true,
+        requireScope: false,
+      });
+
+      const input: Parameters<typeof densiteEtablissementsSante>[0] = { famille };
+      if (resolved.departement) input.departement = resolved.departement;
+      if (resolved.codeInsee) input.codeInsee = resolved.codeInsee;
+
       const compareNational = coerceBoolean(args.compare_national, "compare_national");
       if (compareNational === true) input.compareNational = true;
+
       // Phase 2 — activite_hebergee (parallélisé avec le fetch densité principal).
       // Densité hostée calculée sur la même population que le compte principal
       // (`result.zone.population`) pour cohérence dimensionnelle.
+      // V0.20 : utilise `resolved.departement`/`resolved.codeInsee` (jamais les
+      // variables brutes — fix anticipé du piège C1 review V0.19 panorama).
       const hostedActivity = familleToHostedActivity(famille);
       const [result, hosted] = await Promise.all([
         densiteEtablissementsSante(input),
         hostedActivity
           ? safeHostedFetch(
               "densite_etablissements_sante",
-              getHostedActivitiesInZone({ activite: hostedActivity, departement: codeDept }),
+              getHostedActivitiesInZone({
+                activite: hostedActivity,
+                departement: resolved.departement,
+                codeInsee: resolved.codeInsee,
+              }),
             )
           : Promise.resolve(null),
       ]);
