@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import * as densiteMod from "../src/sante/densite.js";
+import * as hostedActivities from "../src/sante/hosted-activities.js";
 import * as panoramaMod from "../src/sante/panorama.js";
 import * as territoire from "../src/territoire/index.js";
 import { findTool } from "./tools.js";
@@ -11,6 +12,22 @@ import { findTool } from "./tools.js";
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+/**
+ * Mock générique pour `getHostedActivitiesInZone` — utilisé par les handlers
+ * Phase 2 dès qu'une famille mappable (labo/pharmacie/imagerie) est filtrée
+ * avec un scope zone (dept ou code_insee). Sans ce mock, les tests V0.9
+ * ci-dessous tomberaient sur `SUPABASE_URL missing` (réseau).
+ */
+function mockHostedActivitiesInZone(): void {
+  vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValue({
+    activite: "test",
+    count: 0,
+    note: "test-note",
+    sites_apercu: [],
+    truncated: false,
+  });
+}
 
 describe("UX V0.9 — alias paramètres autocomplete_commune", () => {
   it("accepte `q` (alias) → remappé en `nom`", async () => {
@@ -171,9 +188,10 @@ describe("UX V0.9 — densite_etablissements_sante alias", () => {
     const tool = findTool("densite_etablissements_sante");
     const spy = vi
       .spyOn(densiteMod, "densiteEtablissementsSante")
-      .mockResolvedValue(
-        {} as unknown as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>,
-      );
+      .mockResolvedValue({ zone: { population: 1 } } as unknown as Awaited<
+        ReturnType<typeof densiteMod.densiteEtablissementsSante>
+      >);
+    mockHostedActivitiesInZone(); // Phase 2 : labo + dept → hosted appelé
 
     await tool?.handler({ dept: "59", famille: "labo" });
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ departement: "59" }));
@@ -194,6 +212,7 @@ describe("V0.9 — panorama_sante_territoire (nouveau tool)", () => {
       .mockResolvedValue(
         {} as unknown as Awaited<ReturnType<typeof panoramaMod.panoramaSanteTerritoire>>,
       );
+    mockHostedActivitiesInZone(); // Phase 2 : DEFAULT_FAMILLES contient labo+pharmacie
 
     await tool?.handler({ code_insee: "59009" });
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ codeInsee: "59009" }));
@@ -206,6 +225,7 @@ describe("V0.9 — panorama_sante_territoire (nouveau tool)", () => {
       .mockResolvedValue(
         {} as unknown as Awaited<ReturnType<typeof panoramaMod.panoramaSanteTerritoire>>,
       );
+    mockHostedActivitiesInZone(); // Phase 2 : 3 appels handler × 2 hosted = 6
 
     await tool?.handler({ codeInsee: "75108" });
     expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ codeInsee: "75108" }));
@@ -222,6 +242,7 @@ describe("V0.9 — panorama_sante_territoire (nouveau tool)", () => {
       .mockResolvedValue(
         {} as unknown as Awaited<ReturnType<typeof panoramaMod.panoramaSanteTerritoire>>,
       );
+    mockHostedActivitiesInZone(); // Phase 2 : pharmacie mappable
 
     await tool?.handler({ code_insee: "59009", finess_familles: ["pharmacie", "mco"] });
     const call = spy.mock.calls[0]?.[0];

@@ -50,6 +50,16 @@ intégration → reste parallèle/rapide. Tout nouveau test d'intégration touch
   toujours `await` son résultat AVANT de le passer à `withPerimetre` (sinon
   spread d'une Promise = données perdues). Un comptage filtré sans lentille
   déclarée = undercount silencieux (cf. `docs/plans/completude-lentilles-sources.md`).
+- **Champ `activite_hebergee` sur les tools de comptage FINESS filtrés par
+  famille mappable** (Phase 2) : tout tool FINESS filtré par `labo` / `pharmacie` /
+  `imagerie` DOIT exposer un compte juxtaposé via `withHostedActivity` (jumeau de
+  `withPerimetre`, type durci `T & { then?: never }` anti-Promise-spread). Source =
+  matview `finess_hosted_activities` (jointure RPPS×FINESS, seuil N≥3) via les
+  RPCs lookup `finess_hosted_activities_in_{radius,zone}`. Le rebuild post-swap
+  pattern OID est chaîné dans les crons RPPS ET FINESS (la matview joint les deux
+  tables swappées — un swap de l'une suffit à la désynchroniser silencieusement).
+  La `note` du champ INTERDIT explicitement l'addition avec le `count` principal —
+  doctrine MCP-juxtapose-jamais-additionne. Cf. `docs/plans/completude-lentilles-phase2-plan.md`.
 
 **Boundary (`api/_lib/args.ts`).**
 - Validators `requireXxxId` avec 3 branches (clé absente, type wrong, format wrong) via factor `requireIdPattern`.

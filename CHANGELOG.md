@@ -4,6 +4,31 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.18.0] — 2026-05-23 (Phase 2 — couche d'activités hébergées)
+
+### Added — champ `activite_hebergee` sur les tools de comptage FINESS
+
+- **Champ `activite_hebergee`** (ou `activites_hebergees_par_famille` pour
+  `panorama_sante_territoire`) sur les 5 tools de comptage FINESS filtrés par
+  famille mappable — compte **juxtaposé** des sites hébergeant l'activité
+  correspondante sous une autre catégorie FINESS. Distinct du `count`
+  principal, la `note` interdit explicitement l'addition. Doctrine : le MCP
+  juxtapose, le LLM décide.
+- Mapping `famille → activité hébergée` : `labo` → biologie médicale (plateaux
+  hospitaliers + EFS), `pharmacie` → pharmacies à usage intérieur (PUI),
+  `imagerie` → sites d'imagerie en cliniques/hôpitaux (essentiel de l'offre
+  ambulatoire car la catégorie FINESS `619` est vide en pratique).
+- Tools concernés : `etablissements_finess_in_radius`,
+  `etablissements_finess_by_categorie`, `densite_etablissements_sante`
+  (avec `densite_pour_100k_hab` calculée sur la même population que le compte
+  principal), `panorama_sante_territoire` (dictionnaire multi-familles),
+  `finess_sirene_coverage_in_radius`.
+- Infrastructure : matview `finess_hosted_activities` (jointure RPPS×FINESS,
+  seuil N≥3 calibré sur la mesure prod du 22 mai 2026), rebuild post-swap
+  pattern OID chaîné dans les crons RPPS ET FINESS.
+
+Réf : `docs/plans/completude-lentilles-phase2-{plan,mesure}.md`.
+
 ## [0.17.0] — 2026-05-22 (Phase 1 — transparence des lentilles de source)
 
 ### Added — champ `perimetre` sur les tools de comptage/densité
