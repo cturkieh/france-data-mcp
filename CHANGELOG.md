@@ -4,6 +4,107 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.19.0] — 2026-05-23 (`nom_commune` resolver — Geo Intel friendly)
+
+### Added — paramètre `nom_commune` sur 3 tools MCP
+
+- **`nom_commune` (string)** accepté en alternative à `code_insee` sur :
+  - `etablissements_finess_by_categorie`
+  - `panorama_sante_territoire`
+  - `densite_professionnels_sante`
+
+  Le serveur résout en interne via `geo.api.gouv.fr` (DINUM/Etalab, même
+  source que `autocomplete_commune`). Match exact case-insensitive + accents
+  normalisés (NFD + `\p{M}`) post-API pour éliminer le bruit fuzzy
+  (`Mont-Saint-Martin` n'est plus retourné sur recherche `Saint-Martin`).
+  Économie consommateur Geo Intel : **2 round-trips MCP → 1 (~5s/appel
+  commune)**. Rétro-compatibilité totale `code_insee` + `departement`.
+
+### Added — erreurs structurées JSON-RPC `error.data` (propagation `err.cause`)
+
+- Patch `api/mcp.ts:384-393` : le catch root propage désormais `err.cause`
+  des `RangeError({cause})` au 4ème argument de `error()` (signature déjà
+  supportée). Le caller MCP peut maintenant distinguer programmiquement les
+  sous-types d'erreurs sans parser le message texte.
+
+- **4 codes d'erreur structurés** retournés via `error.data.kind` :
+  - `ambiguous_commune` — N≥2 communes correspondent (top 10 par population
+    décroissante via `candidates[]` + flag `truncated`).
+  - `commune_not_in_department` — nom existe mais hors du `departement`
+    fourni (avec `matches_in_other_dept` pour suggérer les options).
+  - `unknown_commune` — nom inexistant, avec `hint` pédagogique
+    (« utiliser le nom officiel complet, ex. 'Saint-Martin' »).
+  - `redundant_commune_params` — XOR violation (params zone incompatibles).
+
+### Added — sémantique conditionnelle `departement` (hint resolver)
+
+- Quand `nom_commune` est combiné avec `departement`/`code_dept`, le dept
+  agit comme **hint de désambiguïsation** (filtre les homonymes type
+  Saint-Martin), PAS comme scope de calcul. Le tool calcule sur la commune
+  résolue. Sur `densite_professionnels_sante`, `code_dept` a donc une
+  sémantique conditionnelle :
+  - `code_dept` seul = scope département entier (comme avant)
+  - `code_dept` + `nom_commune` = hint resolver (calcul commune)
+
+  Documenté explicitement dans la `description` du tool (LLM-facing).
+
+### Added — architecture interne (3 nouveaux fichiers)
+
+- `api/_lib/resolve-commune.ts` : helper sous-jacent `resolveNomCommune()` +
+  type discriminé `ResolveCommuneResult` (jamais throw, retourne toujours
+  un résultat structuré). Source `geo.api.gouv.fr` + filtre `codeDepartement`
+  natif côté API.
+- `api/_lib/apply-commune-resolver.ts` : helper boundary partagé
+  `applyCommuneResolver()` + format messages erreurs. Câble le XOR strict +
+  traduit les `ResolveCommuneError` en `RangeError({cause})` pour propagation
+  JSON-RPC.
+- Extension lib `src/territoire/communes.ts` : `SearchCommunesOptions`
+  accepte un nouveau champ optionnel `codeDepartement` (param natif
+  transmis à `geo.api.gouv.fr`). Rétro-compatible.
+
+### Changed — cassures mineures documentées
+
+- **`etablissements_finess_by_categorie`** : introduction du **XOR strict**
+  entre `departement`, `code_insee`, `nom_commune`. Avant V0.19 :
+  `departement + code_insee` étaient AND-és silencieusement (le RPC
+  `finess_by_categorie` les recevait comme filtres simultanés sans warning).
+  Désormais : erreur explicite `redundant_commune_params`. Aligne le contrat
+  avec `densite_professionnels_sante` (V0.9). Aucun caller documenté ne
+  dépendait du comportement AND.
+
+- **`panorama_sante_territoire`** : `code_insee` n'est plus `required` au
+  niveau JSON Schema. La validation est déplacée au handler via
+  `applyCommuneResolver({requireScope: true})` pour autoriser `nom_commune`
+  comme alternative. Le caller qui n'envoie ni `code_insee` ni `nom_commune`
+  reçoit désormais `Scope requis : passer code_insee (5 chiffres) ou
+  nom_commune (nom officiel).` au lieu de l'erreur JSON Schema. Sémantique
+  fonctionnelle identique (HTTP 200 + JSON-RPC -32602 dans les deux cas).
+
+### Fixed — régression Phase 2 sur `panorama_sante_territoire[hosted]`
+
+- Détectée pendant la review V0.19 : le handler appelait
+  `getHostedActivitiesInZone({codeInsee})` avec la variable brute `codeInsee`
+  (undefined quand caller passe `nom_commune`). La lib hosted throw, capté
+  silencieusement par `safeHostedFetch` (couche secondaire jamais-throw) →
+  `activites_hebergees_par_famille` absent du panorama + log warn mensonger
+  imputant la panne à une matview. Fix : utiliser `resolved.codeInsee` du
+  resolver. Test garde-fou ajouté pour bloquer toute régression future.
+
+### Documentation
+
+- Design source : `docs/plans/nom-commune-resolver-v019.md` + jumeau `.html`
+  (convention double livraison validation Cyril).
+- Plan d'implé : `docs/plans/nom-commune-resolver-v019-plan.md` (11 tasks
+  TDD step-by-step).
+- Convention `applyCommuneResolver` ajoutée à `CLAUDE.md` (section
+  Endpoint `api/`).
+
+### Backlog déplacé en V0.20
+
+- Extension `densite_etablissements_sante` au niveau commune (requiert un
+  nouveau RPC SQL `count_finess_by_commune` + métadata population +
+  gestion PLM). Non bloquant pour V0.19, feature additive.
+
 ## [0.18.0] — 2026-05-23 (Phase 2 — couche d'activités hébergées)
 
 ### Added — champ `activite_hebergee` sur les tools de comptage FINESS

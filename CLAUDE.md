@@ -60,6 +60,30 @@ intégration → reste parallèle/rapide. Tout nouveau test d'intégration touch
   tables swappées — un swap de l'une suffit à la désynchroniser silencieusement).
   La `note` du champ INTERDIT explicitement l'addition avec le `count` principal —
   doctrine MCP-juxtapose-jamais-additionne. Cf. `docs/plans/completude-lentilles-phase2-plan.md`.
+- **Résolution `nom_commune` → `code_insee` au boundary via `applyCommuneResolver`**
+  (V0.19) : tout tool MCP qui accepte un scope commune DOIT utiliser
+  `api/_lib/apply-commune-resolver.ts` (qui consomme `resolve-commune.ts`) plutôt
+  que de réinventer la résolution. Source `geo.api.gouv.fr` (DINUM, même que
+  `autocomplete_commune`) + filtre exact case-insensitive + accents normalisés
+  (NFD + `\p{M}`, aligné avec `text-match.ts` / `commune-index.ts`). Sémantique
+  load-bearing : `nom_commune + departement` → `departement` est un **hint
+  resolver** (filtre côté API), JAMAIS un scope de calcul ; le tool reçoit
+  uniquement `{ codeInsee }`. Pour `densite_professionnels_sante`, `code_dept`
+  a donc une **sémantique conditionnelle** (seul = scope dept entier ; combiné
+  avec `nom_commune` = hint resolver) — documentée explicitement dans la
+  `description` du tool (LLM-facing doc) car contre-intuitive sinon. Les
+  erreurs (4 kinds : `ambiguous_commune`, `commune_not_in_department`,
+  `unknown_commune`, `redundant_commune_params`) voyagent via
+  `RangeError(msg, { cause })` jusqu'à `error.data` JSON-RPC (patch
+  `api/mcp.ts:384-393` propage `err.cause` au 4ème arg de `error()` — test
+  garde-fou `api/mcp-handler-error-cause.test.ts`). **Régression Phase 2
+  fermée** : panorama passait `codeInsee` brut (variable d'entrée) à
+  `getHostedActivitiesInZone` au lieu de `resolved.codeInsee`, masqué par
+  `safeHostedFetch` couche secondaire → `activites_hebergees_par_famille`
+  systématiquement absent dès qu'on passait `nom_commune`. Garde-fou
+  `tools-v019.test.ts` "C1 régression" mocke `getHostedActivitiesInZone` +
+  assert `firstCall?.codeInsee === resolved.codeInsee` (pas undefined).
+  Source de vérité du contrat : `docs/plans/nom-commune-resolver-v019.md`.
 
 **Boundary (`api/_lib/args.ts`).**
 - Validators `requireXxxId` avec 3 branches (clé absente, type wrong, format wrong) via factor `requireIdPattern`.
