@@ -4,6 +4,92 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.20.0] — 2026-05-23 (`densite_etablissements_sante` au niveau commune)
+
+### Added — extension du 4ème et dernier tool santé "scope commune"
+
+Suite à la V0.19 (`nom_commune` resolver sur 3 tools), V0.20 boucle la
+parité scope commune en étendant `densite_etablissements_sante` qui ne
+savait calculer qu'au niveau département.
+
+- **`densite_etablissements_sante`** accepte désormais :
+  - `code_dept` (rétro-compat — scope département entier, comme avant)
+  - `code_insee` (V0.20 — scope commune, jumeau densite_professionnels V0.9)
+  - `nom_commune` (V0.20 — alternative résolue via geo.api.gouv.fr, V0.19 pattern)
+
+- **Sémantique conditionnelle de `code_dept`** (jumeau densite_professionnels) :
+  - `code_dept` seul = scope département entier (comportement V0.19)
+  - `code_dept` + `nom_commune` = hint resolver pour désambiguer les
+    homonymes (ex Saint-Martin + dept 65) ; calcul reste sur la commune résolue
+  - Documenté explicitement dans la `description` MCP (LLM-facing)
+
+- **Champ `niveau: "departement" | "commune"`** ajouté à
+  `DensiteEtablissementsResult` pour cohérence avec `DensiteResult`
+  (densite_professionnels V0.9). Aide le LLM caller à interpréter le ratio
+  (densité ville entière vs commune isolée).
+
+### Added — architecture interne
+
+- **Nouvelle RPC SQL** `count_finess_by_commune(p_code_insee CHAR(5),
+  p_categorie_codes TEXT[]) → BIGINT` (`20260523T144500_rpc_count_finess_by_commune.sql`).
+  Pattern miroir 100% de `count_rpps_by_commune` V0.9 :
+  - Validation regex `code_insee` (métropole + Corse 2A/2B + DOM)
+  - `EXECUTE format` custom plan (literal interpolation, V0.5.4 pattern)
+  - Garde-fou table vide `ERRCODE P0002` (refuse 0 silent post-swap cassé)
+  - `statement_timeout='5s'`
+  - Index composite `finess_insee_categorie_idx (code_insee, categorie_code)`
+    DÉJÀ présent (migration 20260508000019, mirroré staging via 20260508000021).
+    Plan attendu : index scan composite <5 ms même sur communes denses.
+
+- **Nouvelle fonction lib** `countFinessByCommune(input)` dans
+  `src/sante/finess-db.ts` — jumeau `countRppsByCommune` V0.9 (sans les
+  filtres profession/savoir_faire — FINESS = juste catégorie).
+
+- **Refactor `resolveZone` + `assertNotPlmCommune` paramétrés** dans
+  `src/sante/densite.ts` : 1 source de vérité wording RPPS↔FINESS via param
+  `toolName`. PLM rejette désormais avec mention explicite FINESS + RPPS
+  ("Les établissements FINESS (resp. praticiens RPPS) sont rattachés…").
+
+### Changed — non-breaking
+
+- **`DensiteEtablissementsSanteInput.departement: string` → `departement?: string`**
+  (+ ajout `codeInsee?: string`). La validation passe par `resolveZone` côté
+  lib + `applyCommuneResolver({acceptsDepartementAsScope:true, requireScope:false})`
+  côté boundary, avec `requireOneOf` 3 alternatives pour wording d'erreur
+  cohérent. Aucun caller existant cassé (rétrocompat `code_dept` seul).
+
+- **`densite_etablissements_sante.required: ["code_dept", "famille"]` →
+  `["famille"]`**. La validation `code_dept`/`code_insee`/`nom_commune` est
+  déplacée au handler. Caller passant `{famille: "labo"}` seul reçoit
+  désormais `Attendu: "code_dept" ou "code_insee" ou "nom_commune"` au lieu
+  de l'erreur JSON Schema. Sémantique fonctionnelle identique (HTTP 200 +
+  JSON-RPC -32602 dans les 2 cas).
+
+### Fixed — anticipation du piège C1 V0.19
+
+`activite_hebergee` calculée côté handler utilise désormais
+`resolved.departement` / `resolved.codeInsee` (PAS les variables brutes).
+Sans ça, un caller `nom_commune` ferait throw `getHostedActivitiesInZone`
+("departement OR codeInsee requis"), capturé silencieusement par
+`safeHostedFetch` → champ `activite_hebergee` absent avec faux warn
+matview désynchronisée. Test garde-fou `tools-v020.test.ts` "C1 régression
+V0.20" valide explicitement l'invariant.
+
+### Documentation
+
+- CHANGELOG V0.20.0 (ce fichier).
+- Convention `applyCommuneResolver` (CLAUDE.md V0.19) inchangée — V0.20 est
+  une extension dans le même pattern.
+
+### Coordination apply migration SQL
+
+⚠️ La migration `20260523T144500_rpc_count_finess_by_commune.sql` doit être
+appliquée MANUELLEMENT dans le dashboard Supabase SQL editor AVANT le push
+code (canal `T-format` non supporté par CLI Supabase, cf. mémoire
+`migration-autoapply-deferred`). Sans ça, le tool en prod throw
+"function count_finess_by_commune does not exist" sur tout appel avec
+`code_insee` ou `nom_commune`.
+
 ## [0.19.0] — 2026-05-23 (`nom_commune` resolver — Geo Intel friendly)
 
 ### Added — paramètre `nom_commune` sur 3 tools MCP
