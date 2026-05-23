@@ -339,6 +339,10 @@ const HOSTED_ACTIVITY_OUTPUT_SCHEMA = {
       },
     },
     truncated: { type: "boolean" },
+    // Densité hostée pour 100k hab. Renseignée uniquement par les tools de
+    // densité (Phase 2 Task 6), calculée sur la même population que le
+    // compte principal pour cohérence dimensionnelle.
+    densite_pour_100k_hab: { type: "number" },
   },
 } as const;
 
@@ -2134,8 +2138,28 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       };
       const compareNational = coerceBoolean(args.compare_national, "compare_national");
       if (compareNational === true) input.compareNational = true;
-      const result = await densiteEtablissementsSante(input);
-      return withPerimetre(result, finessFamillePerimetre([famille]));
+      // Phase 2 — activite_hebergee (parallélisé avec le fetch densité principal).
+      // Densité hostée calculée sur la même population que le compte principal
+      // (`result.zone.population`) pour cohérence dimensionnelle.
+      const hostedActivity = familleToHostedActivity(famille);
+      const [result, hosted] = await Promise.all([
+        densiteEtablissementsSante(input),
+        hostedActivity
+          ? getHostedActivitiesInZone({ activite: hostedActivity, departement: codeDept })
+          : Promise.resolve(null),
+      ]);
+      const hostedWithDensite =
+        hosted && result.zone.population > 0
+          ? {
+              ...hosted,
+              densite_pour_100k_hab:
+                Math.round((hosted.count / result.zone.population) * 100_000 * 100) / 100,
+            }
+          : hosted;
+      return withHostedActivity(
+        withPerimetre(result, finessFamillePerimetre([famille])),
+        hostedWithDensite,
+      );
     },
   },
   {

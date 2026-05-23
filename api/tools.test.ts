@@ -1774,6 +1774,15 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       ReturnType<typeof densite.densiteEtablissementsSante>
     >;
     vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce(mocked);
+    // Phase 2 : labo + dept déclenche désormais getHostedActivitiesInZone
+    // (labo mappable + scope ZONE). Mock pour éviter le réseau.
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 0,
+      note: "test-note",
+      sites_apercu: [],
+      truncated: false,
+    });
     const tool = findTool("densite_etablissements_sante");
     expect(tool).toBeDefined();
     const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
@@ -1990,5 +1999,40 @@ describe("activite_hebergee wiring — etablissements_finess_*", () => {
     const out = (await tool?.handler({ categorie: "labo" })) as Record<string, unknown>;
     expect(out.count).toBe(4112);
     expect(out.activite_hebergee).toBeUndefined();
+  });
+
+  it("densite_etablissements_sante famille=labo expose activite_hebergee biologie + densite_pour_100k_hab", async () => {
+    vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce({
+      zone: {
+        zone: "59",
+        countEtablissements: 95,
+        population: 2_600_000,
+        populationAnnee: 2023,
+        densitePour100k: 3.65,
+      },
+      parametres: { famille: "labo" },
+      source: { etablissements: "FINESS / DREES", population: "INSEE Melodi" },
+    } as unknown as Awaited<ReturnType<typeof densite.densiteEtablissementsSante>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInZone").mockResolvedValueOnce({
+      activite: "biologie médicale",
+      count: 52, // densité hostée attendue = 52 / 2_600_000 * 100_000 = 2.0
+      note: "Plateaux ... Ne pas additionner les deux comptes sans préciser leur nature.",
+      sites_apercu: [],
+      truncated: false,
+    });
+    const tool = findTool("densite_etablissements_sante");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
+      string,
+      unknown
+    >;
+    const hosted = out.activite_hebergee as {
+      activite: string;
+      count: number;
+      densite_pour_100k_hab: number;
+    };
+    expect(hosted.count).toBe(52);
+    expect(hosted.activite).toBe("biologie médicale");
+    expect(hosted.densite_pour_100k_hab).toBe(2); // (52 / 2_600_000) * 100_000 = 2.0
   });
 });

@@ -86,6 +86,13 @@ export interface HostedActivityResult {
   note: string;
   sites_apercu: HostedSiteSample[];
   truncated: boolean;
+  /**
+   * Densité hostée pour 100k hab. Renseignée UNIQUEMENT par les tools de
+   * densité (Phase 2 Task 6+), calculée sur la même population que le compte
+   * principal. Absente sur les tools `_in_radius` et `_by_categorie` (qui
+   * n'ont pas de population de référence dans leur scope).
+   */
+  densite_pour_100k_hab?: number;
 }
 
 const DEFAULT_SAMPLE_LIMIT = 5;
