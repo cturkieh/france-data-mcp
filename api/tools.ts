@@ -264,6 +264,35 @@ function withHostedActivity<T extends object & { then?: never }>(
 }
 
 /**
+ * Wrap un fetch hosted (couche d'activités hébergées Phase 2) avec récupération
+ * d'erreur SANS-throw : tout échec downstream (RPC 42P01 si matview détruite par
+ * 2 swaps consécutifs KO, PGRST205 si RPC absente avant apply migration, 57014
+ * timeout, blip réseau) → `console.warn` + retour `null` → champ
+ * `activite_hebergee` omis.
+ *
+ * Sans ce wrapper, un `Promise.all([primary, hosted])` qui échoue côté hosted
+ * tuerait le tool primaire ALORS QUE sa donnée est intacte — c'est l'asymétrie
+ * que la doctrine « hosted = couche secondaire » documente déjà côté cron
+ * (`rebuildHostedActivities` dégrade en `partial` SANS throw, cf.
+ * `scripts/ingest/shared.ts`). On porte la même politique côté API : la
+ * juxtaposition est un bonus, jamais un blocage.
+ */
+async function safeHostedFetch(
+  toolName: string,
+  task: Promise<HostedActivityResult>,
+): Promise<HostedActivityResult | null> {
+  try {
+    return await task;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[france-data-mcp] ${toolName}: hosted activity fetch failed (couche secondaire, champ omis): ${message}`,
+    );
+    return null;
+  }
+}
+
+/**
  * Patterns `outputSchema` réutilisables (spec MCP 2025-06-18 §6.3) déclarés
  * une fois et référencés par les 25 tools. Format JSON Schema standard.
  *
@@ -1383,11 +1412,14 @@ export const TOOLS: McpTool[] = [
             finessFamillePerimetre(familles),
           ))(),
         hostedActivity
-          ? getHostedActivitiesInRadius({
-              activite: hostedActivity,
-              center: { lat, lon },
-              radiusKm,
-            })
+          ? safeHostedFetch(
+              "etablissements_finess_in_radius",
+              getHostedActivitiesInRadius({
+                activite: hostedActivity,
+                center: { lat, lon },
+                radiusKm,
+              }),
+            )
           : Promise.resolve(null),
       ]);
       return withHostedActivity(withPerim, hosted);
@@ -1445,11 +1477,14 @@ export const TOOLS: McpTool[] = [
       const hostedActivity = familleToHostedActivity(famille);
       const hostedTask: Promise<HostedActivityResult | null> =
         hostedActivity !== null && (departement || codeInsee)
-          ? getHostedActivitiesInZone({
-              activite: hostedActivity,
-              departement: departement ?? undefined,
-              codeInsee: codeInsee ?? undefined,
-            })
+          ? safeHostedFetch(
+              "etablissements_finess_by_categorie",
+              getHostedActivitiesInZone({
+                activite: hostedActivity,
+                departement,
+                codeInsee,
+              }),
+            )
           : Promise.resolve(null);
       const [withPerim, hosted] = await Promise.all([
         (async () =>
@@ -2145,7 +2180,10 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       const [result, hosted] = await Promise.all([
         densiteEtablissementsSante(input),
         hostedActivity
-          ? getHostedActivitiesInZone({ activite: hostedActivity, departement: codeDept })
+          ? safeHostedFetch(
+              "densite_etablissements_sante",
+              getHostedActivitiesInZone({ activite: hostedActivity, departement: codeDept }),
+            )
           : Promise.resolve(null),
       ]);
       const hostedWithDensite =
@@ -2210,17 +2248,26 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       // Familles non-mappables (ehpad, mco, msp_cpts...) absentes du dict.
       const hostedPromises = famillesEffectives.flatMap((f) => {
         const a = familleToHostedActivity(f);
-        return a !== null
-          ? [getHostedActivitiesInZone({ activite: a, codeInsee }).then((h) => [f, h] as const)]
-          : [];
+        if (a === null) return [];
+        // Chaque fetch wrappé individuellement : un échec sur une famille
+        // n'empêche pas les autres de remonter (couche secondaire, M2 review).
+        return [
+          safeHostedFetch(
+            `panorama_sante_territoire[${f}]`,
+            getHostedActivitiesInZone({ activite: a, codeInsee }),
+          ).then((h) => (h !== null ? ([f, h] as const) : null)),
+        ];
       });
-      const [result, hostedEntries] = await Promise.all([
+      const [result, hostedResolved] = await Promise.all([
         panoramaSanteTerritoire(input),
         Promise.all(hostedPromises),
       ]);
+      const hostedEntries = hostedResolved.filter(
+        (e): e is readonly [FinessFamilleQuery, HostedActivityResult] => e !== null,
+      );
       const perimetre = finessVoletDesactive
         ? RPPS_PERIMETRE
-        : finessFamillePerimetre(familles ?? DEFAULT_FAMILLES);
+        : finessFamillePerimetre(famillesEffectives);
       const withPerim = withPerimetre(result, perimetre);
       return hostedEntries.length > 0
         ? {
@@ -2501,11 +2548,14 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         effectiveFamilles?.length === 1 ? effectiveFamilles[0] : undefined;
       const hostedActivity = singleFamille ? familleToHostedActivity(singleFamille) : null;
       const hosted = hostedActivity
-        ? await getHostedActivitiesInRadius({
-            activite: hostedActivity,
-            center: { lat, lon },
-            radiusKm,
-          })
+        ? await safeHostedFetch(
+            "finess_sirene_coverage_in_radius",
+            getHostedActivitiesInRadius({
+              activite: hostedActivity,
+              center: { lat, lon },
+              radiusKm,
+            }),
+          )
         : null;
       return withHostedActivity(
         withPerimetre(result, finessFamillePerimetre(effectiveFamilles)),

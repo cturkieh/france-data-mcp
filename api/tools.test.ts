@@ -1944,6 +1944,39 @@ describe("withPerimetre (helper de câblage)", () => {
 describe("activite_hebergee wiring — etablissements_finess_*", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("échec hosted RPC → handler renvoie le payload primaire intact + activite_hebergee absent + warn (couche secondaire)", async () => {
+    // Doctrine "hosted = couche secondaire" : un échec hosted (RPC 42P01,
+    // PGRST205, timeout, blip réseau) NE DOIT PAS tuer le tool primaire.
+    // Cf. silent-failure-hunter Phase 2 /review, finding CRITICAL.
+    vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
+      count: 12,
+      truncated: false,
+      results: [],
+    } as unknown as Awaited<ReturnType<typeof finessDb.getFinessInRadius>>);
+    vi.spyOn(hostedActivities, "getHostedActivitiesInRadius").mockRejectedValueOnce(
+      new Error("simulated RPC failure (e.g. matview 42P01)"),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tool = findTool("etablissements_finess_in_radius");
+    expect(tool).toBeDefined();
+    const out = (await tool?.handler({
+      lat: 50.63,
+      lon: 3.06,
+      familles: ["labo"],
+      radius_km: 5,
+    })) as Record<string, unknown>;
+    // Primary intact :
+    expect(out.count).toBe(12);
+    // Hosted omis :
+    expect(out.activite_hebergee).toBeUndefined();
+    // Warn loggé pour observabilité :
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /etablissements_finess_in_radius: hosted activity fetch failed.*simulated RPC failure/,
+      ),
+    );
+  });
+
   it("etablissements_finess_in_radius famille=labo expose activite_hebergee biologie (chemin nominal)", async () => {
     vi.spyOn(finessDb, "getFinessInRadius").mockResolvedValueOnce({
       count: 12,
