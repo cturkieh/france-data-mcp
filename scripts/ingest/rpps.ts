@@ -888,32 +888,71 @@ export async function rebuildRppsMatviews(
   const { error } = await supabase.rpc("ingest_rebuild_rpps_matviews");
   const elapsedMs = Date.now() - start;
 
-  if (!error) {
-    console.log(`[rpps] ingest_rebuild_rpps_matviews OK in ${elapsedMs}ms`);
-    return;
+  if (error) {
+    const code = (error as { code?: string }).code;
+    const message = (error as { message?: string }).message ?? String(error);
+    const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
+
+    if (code !== undefined && TRANSIENT_REBUILD_CODES.has(code)) {
+      // Transitoire : `ingest_rebuild_rpps_matviews` est transactionnelle →
+      // rollback intégral → AUCUNE matview détruite, l'ancienne (peuplée,
+      // juste périmée) reste en place. Dégradation bénigne, retry au prochain
+      // cron. On NOMME la reconstruction (le statut seul ne dit pas QUOI est
+      // dégradé — contrat alerting). IMPORTANT : on NE chaîne PAS le rebuild
+      // de `finess_hosted_activities` ci-dessous — il JOIN `rpps` ET dépend
+      // implicitement des matviews qu'on vient d'échouer à rafraîchir ; le
+      // rebuilder sur un état rpps désynchronisé ne ferait que propager le
+      // périmé. Retry intégral au prochain cron.
+      console.error(`[rpps] ${detail} — transitoire, ancienne matview préservée (rollback)`);
+      log.status = "partial";
+      appendLogMessage(log, `post-swap matview rebuild (transient ${code}): ${message}`);
+      return;
+    }
+
+    // Structurel : NE PAS avaler en "partial" (trou prouvé /review : matview
+    // cassée → `rpps_in_radius` down, masqué non bloquant). Throw → catch de
+    // `main` → status "failed" + exit(1) = LOUD. Même raisonnement que ci-dessus
+    // sur le skip du rebuild hosted : un structurel ici signifie rpps lui-même
+    // est dans un état invalide → propager au hosted serait nuisible.
+    console.error(`[rpps] ${detail} — STRUCTUREL, échec dur`);
+    throw new IngestError("validate", detail, error);
   }
 
-  const code = (error as { code?: string }).code;
-  const message = (error as { message?: string }).message ?? String(error);
-  const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
+  console.log(`[rpps] ingest_rebuild_rpps_matviews OK in ${elapsedMs}ms`);
 
-  if (code !== undefined && TRANSIENT_REBUILD_CODES.has(code)) {
-    // Transitoire : `ingest_rebuild_rpps_matviews` est transactionnelle →
-    // rollback intégral → AUCUNE matview détruite, l'ancienne (peuplée,
-    // juste périmée) reste en place. Dégradation bénigne, retry au prochain
-    // cron. On NOMME la reconstruction (le statut seul ne dit pas QUOI est
-    // dégradé — contrat alerting).
-    console.error(`[rpps] ${detail} — transitoire, ancienne matview préservée (rollback)`);
+  // Phase 2 (chantier « Complétude territoriale & lentilles ») : la matview
+  // `finess_hosted_activities` JOIN `rpps` ET `finess` → suit l'OID des DEUX →
+  // DOIT être rebuilt (jamais REFRESH) post-swap des deux côtés. Ce hook est
+  // côté cron RPPS ; un hook symétrique vit dans le cron FINESS (Tâche 3).
+  //
+  // Séquence : RPPS matviews D'ABORD (ci-dessus), hosted ENSUITE — sinon on
+  // rebuilderait hosted sur un état rpps potentiellement périmé.
+  //
+  // Politique d'erreur DIFFÉRENTE de `ingest_rebuild_rpps_matviews` : la
+  // couche hosted est SECONDAIRE (3 tools de complétude territoriale dérivés ;
+  // les tools RPPS core ne la consomment pas). Un échec, transitoire OU
+  // structurel, est dégradé en `partial` SANS throw — la matview hosted
+  // restera collée à son OID précédent (ou aura été détruite si 2e cron
+  // consécutif en échec, redécouverte par les tools en 42P01 LOUD côté
+  // serveur), mais le cron RPPS LUI a réussi (rpps + matviews principales
+  // peuplées) et le prochain cron rattrape. On veut surtout éviter de marquer
+  // failed+exit(1) un run RPPS par ailleurs réussi.
+  const startHosted = Date.now();
+  const { error: errHosted } = await supabase.rpc("ingest_rebuild_finess_hosted_activities");
+  const elapsedHosted = Date.now() - startHosted;
+  if (errHosted) {
+    const codeHosted = (errHosted as { code?: string }).code;
+    const messageHosted = (errHosted as { message?: string }).message ?? String(errHosted);
+    const detailHosted = `post-swap finess_hosted_activities rebuild failed [code=${codeHosted ?? "none"}] after ${elapsedHosted}ms: ${messageHosted}`;
+    console.error(`[rpps] ${detailHosted} — couche secondaire, dégradé en partial`);
     log.status = "partial";
-    appendLogMessage(log, `post-swap matview rebuild (transient ${code}): ${message}`);
+    appendLogMessage(
+      log,
+      `post-swap finess_hosted_activities rebuild (${codeHosted ?? "no-code"}): ${messageHosted}`,
+    );
     return;
   }
-
-  // Structurel : NE PAS avaler en "partial" (trou prouvé /review : matview
-  // cassée → `rpps_in_radius` down, masqué non bloquant). Throw → catch de
-  // `main` → status "failed" + exit(1) = LOUD.
-  console.error(`[rpps] ${detail} — STRUCTUREL, échec dur`);
-  throw new IngestError("validate", detail, error);
+  console.log(`[rpps] ingest_rebuild_finess_hosted_activities OK in ${elapsedHosted}ms`);
 }
 
 export const __TESTING__ = {
