@@ -1,0 +1,121 @@
+# .github/workflows/cleanup-stale-previous.yml
+name: Cleanup stale <source>_previous
+
+on:
+  schedule:
+    # Every Sunday at 03:00 UTC — decorrelated from ingestion windows:
+    #   - ingest-finess  : 1st & 15th of month, 04:00 UTC
+    #   - ingest-rpps    : 5th of month,        04:00 UTC
+    #   - ingest-ameli   : every Monday,        04:00 UTC
+    #   - ingest-cds     : every Monday,        06:00 UTC
+    # Decoupled from ingestion by design: when an ingestion succeeds, the
+    # atomic swap overwrites `<prod>_previous` and the cleanup is a no-op
+    # (`kept`); the cleanup only triggers DROP when the ingestion has
+    # stagnated past `--max-age-days` (checksum identical repeatedly, source
+    # upstream broken, cron disabled).
+    #
+    # NOTE: GitHub disables scheduled workflows after 60 days WITHOUT any
+    # repository activity (push/PR). Since this repo receives weekly commits,
+    # the schedule stays alive; if activity drops, the cleanup silently stops
+    # and `<source>_previous` will accumulate disk. If long inactivity is
+    # expected, set up an external monitor (Sentry cron / healthcheck.io ping).
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        # Defaut canonique: 7 jours (mirror SQL `p_max_age_days INT DEFAULT 7`
+        # dans migration `20260514T080000_rpc_drop_stale_previous.sql` ET TS
+        # `DROP_STALE_PREVIOUS_DEFAULT_DAYS` dans `scripts/ingest/shared.ts`).
+        # On NE met PAS de `default` ici : si l'input est omis, la step ci-dessous
+        # garde l'override désactivé et le CLI applique le défaut TS — une seule
+        # source de vérité runtime côté code.
+        description: "Override the staleness threshold (1-365 days). Vide = défaut TS (7j)."
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: cleanup-stale-previous
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    # Réaliste : checkout + pnpm install ≈ 30-60s + 3 RPC ~50ms = <2 min.
+    # Cap 5 min = 3× la marge cold-start, suffisant pour alerter sur dérive
+    # structurelle (RPC qui passerait à plusieurs minutes = signal fort).
+    timeout-minutes: 5
+    env:
+      # Pre-validate l'input AVANT install pour échouer fast si bornes violées.
+      # Pass via env: plutot qu'interpolation directe dans `run:` — durcissement
+      # standard GitHub Actions (évite toute interpolation imprévue côté shell).
+      MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days }}
+    steps:
+      - name: Validate max_age_days bounds
+        if: env.MAX_AGE_DAYS != ''
+        run: |
+          if ! [[ "$MAX_AGE_DAYS" =~ ^[0-9]+$ ]] || (( MAX_AGE_DAYS < 1 || MAX_AGE_DAYS > 365 )); then
+            echo "::error::max_age_days must be an integer in [1, 365], got '$MAX_AGE_DAYS'"
+            exit 1
+          fi
+
+      - name: Validate required secrets present
+        # Fail-fast clair AVANT checkout+install (~30-60s) si SUPABASE_URL ou
+        # SUPABASE_SERVICE_ROLE_KEY est absent : sinon le throw du CLI Node
+        # « Missing SUPABASE_URL » est moins lisible dans les logs GH que
+        # cette `::error::` annotation, et arrive après l'install pnpm.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          missing=()
+          [ -z "$SUPABASE_URL" ] && missing+=("SUPABASE_URL")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Required repository secret(s) missing: ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run cleanup
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -n "$MAX_AGE_DAYS" ]; then
+            pnpm cleanup:stale-previous "--max-age-days=$MAX_AGE_DAYS"
+          else
+            pnpm cleanup:stale-previous
+          fi
+
+      - name: Open issue on failure
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[cleanup-failure] stale-previous cleanup failed (run #${context.runId})`,
+              body: `The weekly stale-previous cleanup failed.\n\n` +
+                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
+                    `Cleanup is best-effort and idempotent — re-run via workflow_dispatch once the underlying issue is fixed. ` +
+                    `If the failure is structural (RPC contract drift, schema migration), the failure log will pinpoint the source. ` +
+                    `Per-source failures do NOT cascade — each \`<source>_previous\` is processed independently and the script exits 1 if ANY source failed.`,
+              labels: ['cleanup-failure'],
+            })

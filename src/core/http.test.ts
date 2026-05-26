@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError, RateLimitExceededError, fetchJson } from "./http.js";
+import { runWithFakeTimers } from "./test-helpers.js";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -60,6 +61,37 @@ describe("fetchJson", () => {
     await expect(
       fetchJson("https://example.test/api", { maxRetries: 1, baseDelayMs: 10 }),
     ).rejects.toBeInstanceOf(RateLimitExceededError);
+  });
+
+  // Garde-fou : si une API amont renvoie 429 SANS le header `retry-after` (cas
+  // dégradé, observé sur certains proxies), `parseRetryAfter(null)` doit
+  // retourner un défaut > 0 ET un retry doit être tenté. Sans cet ensemble
+  // d'assertions, un changement du défaut vers 0 (qui produirait une hot-loop
+  // sur les 429 sans header) passerait silencieusement : un drain de timer
+  // avec délai 0 résout instantanément et `fetchMock.toHaveBeenCalledTimes(2)`
+  // resterait vrai. On vérifie donc EXPLICITEMENT qu'un timer non-trivial est
+  // armé avant le drain (`expect(vi.getTimerCount()).toBeGreaterThan(0)`).
+  it("429 sans retry-after : fallback timer armé > 0, retry réussit", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock
+        .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+        .mockResolvedValueOnce(jsonOk({ ok: true }));
+
+      const promise = fetchJson<{ ok: boolean }>("https://example.test/api", {
+        maxRetries: 1,
+      });
+      // Yield la 1re microtâche : sans ça, `fetchJson` n'a pas encore eu le
+      // temps d'enregistrer son `setTimeout(retry-after)` au moment du check.
+      await Promise.resolve();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      const result = await runWithFakeTimers(promise);
+      expect(result).toEqual({ ok: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("throw HttpError immédiatement sur 404 (pas de retry)", async () => {
