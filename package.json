@@ -80,7 +80,8 @@
     "ingest:finess": "tsx scripts/ingest/finess.ts",
     "ingest:ameli": "tsx scripts/ingest/ameli.ts",
     "ingest:rpps": "tsx scripts/ingest/rpps.ts",
-    "ingest:cds": "tsx scripts/ingest/cds.ts"
+    "ingest:cds": "tsx scripts/ingest/cds.ts",
+    "cleanup:stale-previous": "tsx scripts/ingest/drop-stale-previous.ts"
   },
   "engines": {
     "node": ">=22"
