@@ -22,10 +22,28 @@ import {
   dropStalePrevious,
 } from "./shared.js";
 
+/**
+ * Mapping `prodTable` (nom physique de la table en base) ↔ `source` (clé
+ * `ingest_log.source` utilisée par les cron scripts). Les deux sont
+ * indépendants en pratique :
+ *  - `prodTable` est le nom SQL réel (ex. `annuaire_ameli`), construit par
+ *    les migrations + l'atomic swap qui produit `<prodTable>_previous`.
+ *  - `source` est l'identifiant logique loggué dans `ingest_log` par chaque
+ *    cron (ex. `ameli_ps`, `cds`) — historiquement plus court / mnémonique.
+ *
+ * NE PAS confondre. Ce script doit cibler la table physique pour le DROP et
+ * le `source` pour lire `MAX(started_at)` côté `ingest_log`.
+ *
+ * Vérifié prod 2026-05-26 :
+ *   - `annuaire_ameli_previous` existe ; `ameli_ps_previous` n'a jamais existé.
+ *   - `centres_sante_previous` existe ; `ingest_log.source='cds'`.
+ *   - `finess_previous` / `rpps_previous` existent ; source = même que prodTable.
+ */
 const SOURCES: Array<{ prodTable: string; source: string }> = [
   { prodTable: "finess", source: "finess" },
-  { prodTable: "ameli_ps", source: "ameli_ps" },
+  { prodTable: "annuaire_ameli", source: "ameli_ps" },
   { prodTable: "rpps", source: "rpps" },
+  { prodTable: "centres_sante", source: "cds" },
 ];
 
 function parseMaxAgeDaysFromArgv(): number {
