@@ -4,6 +4,88 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — fix cold-start 57014 timeouts
+
+### Fixed — élimination des 21 timeouts 57014 cold-start observés sur 14j
+
+Diagnostic prod confirmé via le triptyque `pg_roles` + `pg_stat_user_tables`
++ `ingest_log` (cf. mémoire `prove-rootcause-by-prod`) :
+- `authenticator` (rôle PostgREST) a `statement_timeout=8s + lock_timeout=8s`.
+- 8 RPCs lookup n'avaient AUCUN override → héritaient du 8s.
+- Cause prouvée : cold buffers / cold pool après inactivité (pas d'embouteillage
+  cron — aucun cron actif dans les 6h précédant les timeouts du 2026-05-27 21:06).
+
+Baseline Sentry 14j : **21 events 57014** sur 8 RPCs (finess_by_num_finess,
+finess_by_categorie, ameli_by_specialite_dept, ameli_lister_specialites,
+rpps_in_radius, lister_savoir_faire_rpps + indirectement count_rpps×5,
+count_rpps_by_commune×1, rpps_search_by_name×1 — ces 3 dernières déjà tunées,
+non touchées par cette PR).
+
+### Added — migration `extend_statement_timeout_lookups` (15s sur 8 RPCs)
+
+`supabase/migrations/20260528T130000_extend_statement_timeout_lookups.sql`
+applique `ALTER FUNCTION ... SET statement_timeout = '15s'` sur 8 RPCs.
+
+- **Pourquoi 15s** : 2× le budget authenticator (8s) → ~3-5s de marge au-dessus
+  du cold-start P99 mesuré (~5s). Reste court vs un défaut généreux 30s qui
+  masquerait les vraies requêtes pathologiques.
+- **Idempotence** : `ALTER FUNCTION SET` n'écrit que la clause de config, pas
+  le corps. Zéro risque de re-régresser un patron matview OID rebuild ou un
+  GiST partiel découplé (cf. gotchas CLAUDE.md).
+- **NON touchées** (tuning intentionnel court, kept-warm garde leurs buffers
+  chauds) : `count_rpps` (2s), `count_rpps_by_commune` (5s), `rpps_search_by_name` (10s).
+
+### Added — cron `keep-warm.yml` toutes les 10 min
+
+`.github/workflows/keep-warm.yml` (curl-only, pas de pnpm install) maintient
+les buffers Postgres chauds et le lambda Vercel warm :
+
+- `*/10 * * * *` — coverage 24/7, sweet spot vs buffer cache (~minutes) et
+  cold lambda restart (~5min).
+- 5 steps : `/healthz` + 4 RPCs critiques (`data_freshness`, `verifier_site_actif`
+  PK FINESS, `etablissements_finess_by_categorie` index scan, `densite_professionnels_sante`
+  count_rpps_by_commune RPPS path).
+- Aucun secret nécessaire (URL publique, rate-limit IP Upstash côté boundary).
+- `cancel-in-progress: true` — un run en retard est sauté, pas accumulé.
+- Repo public = runs GH Actions illimités gratuits.
+
+### Methodology — re-mesurer post-deploy
+
+Baseline pre-deploy (cette PR) : **21 events 57014 / 14j** (= 14 events sur
+les 8 RPCs migrées + 7 events sur les 3 RPCs déjà tunées non touchées :
+count_rpps×5, count_rpps_by_commune×1, rpps_search_by_name×1).
+
+Requête Sentry exacte pour la re-mesure post-deploy (à figer sinon on
+compte « à l'œil » dans 14 jours et on risque de manquer des variantes) :
+```
+project:france-data-mcp 57014
+```
+Filtres `is:unresolved` / `is:resolved` selon ce qu'on cherche.
+
+Cible post-deploy : **0 events / 14j** (compter 14 jours après merge).
+Si > 5 events persistent → cause B (pool saturation) pas A (cold-start),
+investiguer la concurrence Vercel lambda × pool PostgREST × cron load.
+
+### Added — garde-fou anti-régression silencieuse `lookup-statement-timeout.test.ts`
+
+`scripts/ingest/lookup-statement-timeout.test.ts` (~150 lignes, parité
+structurelle du test `enrichment-statement-timeout.test.ts` qui couvre la
+même classe de bug côté pipelines d'ingestion).
+
+**Pourquoi** : `ALTER FUNCTION ... SET statement_timeout` écrit le proconfig
+au catalogue mais n'est PAS porté par les défs canoniques `CREATE OR REPLACE
+FUNCTION` dans les migrations source. Si une future migration recrée une
+des 8 RPCs (ajout d'une colonne au SELECT, fix d'un cast) sans re-déclarer
+le `SET statement_timeout` dans son header, **Postgres écrase silencieusement
+le proconfig à NULL** → retombée sur le 8s authenticator → les 21 timeouts/14j
+reviennent sans alerte avant les events Sentry. Même classe SILENCIEUSE que
+les gotchas CLAUDE.md « matview OID rebuild » et « GiST partiel découplé ».
+
+**Invariant** : pour chacune des 8 RPCs, la DERNIÈRE déclaration (CREATE OR
+REPLACE OU ALTER FUNCTION, ordre = tri nom de fichier) porte un
+`SET statement_timeout` dans `[15s, 55s]`. Fail CI rouge avant merge si
+régression.
+
 ## [0.20.0] — 2026-05-23 (`densite_etablissements_sante` au niveau commune)
 
 ### Added — extension du 4ème et dernier tool santé "scope commune"
