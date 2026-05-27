@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — fix cold-start 57014 timeouts
+## [0.20.1] — 2026-05-28 (fix cold-start 57014 timeouts)
 
 ### Fixed — élimination des 21 timeouts 57014 cold-start observés sur 14j
 
