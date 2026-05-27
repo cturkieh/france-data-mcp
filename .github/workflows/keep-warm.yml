@@ -1,0 +1,168 @@
+# .github/workflows/keep-warm.yml
+name: Keep warm MCP server
+
+on:
+  schedule:
+    # Toutes les 10 minutes. Postgres garde les hot tuples ~minutes dans le
+    # buffer cache (effective_cache_size partagé), un Vercel lambda warm
+    # dure ~5 min avant cold restart. 10 min = sweet spot couverture / coût.
+    #
+    # NOTE : GitHub disables scheduled workflows after 60 days WITHOUT
+    # repository activity. Vu la cadence de commits sur ce repo, pas un
+    # risque immédiat — mais si activité chute, le keep-warm s'arrêtera
+    # silencieusement et les 57014 cold-start reviendront. Watch via Sentry.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  # Aucun write nécessaire — pas d'ouverture d'issue sur échec ponctuel
+  # (le keep-warm est best-effort, un run raté de temps en temps n'est pas
+  # un signal opérationnel utile). Si la latence dérive STRUCTURELLEMENT,
+  # Sentry capturera les 57014 sur les vrais appels LLM clients.
+  contents: read
+
+concurrency:
+  group: keep-warm
+  # Si un run précédent traîne (>10 min), on annule et on prend le nouveau —
+  # un keep-warm en retard n'a pas de valeur, mieux vaut le suivant à l'heure.
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    # Cap dur. Un run normal = 5-15s (4 curl). 2 min = signal fort de dérive
+    # (lambda Vercel HS, Supabase down, ou rate-limit Upstash en train de
+    # bloquer). Le timeout-minutes coupe avant de gaspiller du runtime GH.
+    timeout-minutes: 2
+    env:
+      # URL publique du serveur MCP — pas de secret, le boundary auth est
+      # côté lambda Vercel (rate-limit IP via Upstash, pas d'auth caller).
+      MCP_URL: https://france-data-mcp.vercel.app
+    steps:
+      - name: Health check
+        # Chauffe le lambda Vercel + valide la config env (Supabase, Sentry,
+        # Axiom, Upstash, INSEE_SIRENE, ANS_FHIR). Pas de hit Postgres.
+        # --fail-with-body : sur 5xx, curl exit non-zéro MAIS affiche le body
+        # (HTML d'erreur Vercel, message JSON) → diagnostic visible dans les
+        # logs GH Actions plutôt qu'un `exit 22` muet (gotcha curl -f standard).
+        run: |
+          response=$(curl -sSL --fail-with-body --max-time 10 "$MCP_URL/healthz")
+          # Étape 1 : valider que le response est du JSON parseable. Sans ce
+          # check, `jq -e '.status == "ok"'` sur du HTML (CDN poison, route
+          # mismatch en preview promu) exit 2 (parse error) — le `if` voit
+          # non-zero = false → step succès silencieux (faux vert ironique).
+          echo "$response" | jq empty 2>/dev/null || {
+            echo "::error::healthz response is not valid JSON: $response"
+            exit 1
+          }
+          echo "$response" | jq -e '.status == "ok"' > /dev/null
+          version=$(echo "$response" | jq -r '.version')
+          echo "::notice::healthz ok (version=$version)"
+
+      - name: Warm data_freshness (ingest_log read)
+        # Lit `ingest_log` via la matview de fraîcheur. Touche une table
+        # petite (~50 rows), plan stable. Chauffe le pool PostgREST + le
+        # cache schema. JSON-RPC stateless, pas de handshake initialize.
+        run: |
+          response=$(curl -sSL --fail-with-body --max-time 20 -X POST "$MCP_URL/mcp" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"data_freshness","arguments":{}}}')
+          # Étape 1 : JSON parseable (cf. healthz step).
+          echo "$response" | jq empty 2>/dev/null || {
+            echo "::error::data_freshness response is not valid JSON: $response"
+            exit 1
+          }
+          # Étape 2 : pas d'erreur JSON-RPC top-level (le serveur route les
+          # 57014 Postgres en `error.code:-32603`, cf. api/mcp.ts).
+          if echo "$response" | jq -e '.error' > /dev/null; then
+            echo "::error::data_freshness returned JSON-RPC error: $response"
+            exit 1
+          fi
+          echo "::notice::data_freshness ok"
+
+      - name: Warm finess_by_num_finess (PK lookup)
+        # PK lookup sur table FINESS (93K rows). Reproduit exactement le
+        # path qui a timeouté à 21:06 le 27/05 (verifier_site_actif appelle
+        # cette RPC). Si elle timeout malgré la migration 15s, on a un vrai
+        # problème structurel à investiguer.
+        # Note: verifier_site_actif fait aussi des calls externes DINUM/INSEE,
+        # mais c'est inévitable pour reproduire fidèlement le path qui a
+        # produit les 57014 prouvés prod. Un blip DINUM fera échouer ce step
+        # (signal externe, pas cold-start MCP) — trade-off documenté.
+        run: |
+          response=$(curl -sSL --fail-with-body --max-time 20 -X POST "$MCP_URL/mcp" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"verifier_site_actif","arguments":{"num_finess":"920028487"}}}')
+          echo "$response" | jq empty 2>/dev/null || {
+            echo "::error::verifier_site_actif response is not valid JSON: $response"
+            exit 1
+          }
+          if echo "$response" | jq -e '.error' > /dev/null; then
+            echo "::error::verifier_site_actif returned JSON-RPC error: $response"
+            exit 1
+          fi
+          echo "::notice::verifier_site_actif (PK FINESS) ok"
+
+      - name: Warm finess_by_categorie (index scan)
+        # Index scan finess(code_insee, categorie_code) sur Lille (59350)
+        # famille labo. Reproduit le path qui a timeouté en parallèle des
+        # autres RPCs lors du test live. Limit 1 = warmup minimal.
+        # On passe `code_insee` RAW (pas `nom_commune`) pour éviter un
+        # round-trip externe vers geo.api.gouv.fr — un blip DINUM ferait
+        # échouer le keep-warm sans rapport avec le cold-start MCP.
+        run: |
+          response=$(curl -sSL --fail-with-body --max-time 20 -X POST "$MCP_URL/mcp" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"etablissements_finess_by_categorie","arguments":{"categorie":"labo","code_insee":"59350","limit":1}}}')
+          echo "$response" | jq empty 2>/dev/null || {
+            echo "::error::etablissements_finess_by_categorie response is not valid JSON: $response"
+            exit 1
+          }
+          if echo "$response" | jq -e '.error' > /dev/null; then
+            echo "::error::etablissements_finess_by_categorie returned JSON-RPC error: $response"
+            exit 1
+          fi
+          echo "::notice::etablissements_finess_by_categorie (index scan FINESS) ok"
+
+      - name: Warm count_rpps_by_commune (RPPS commune-level)
+        # Chauffe count_rpps_by_commune (déjà tunée 5s, pas modifiée par
+        # cette PR) + index rpps(code_insee) sur Villeneuve-d'Ascq 59009.
+        # code_insee RAW (cf. step précédente, évite geo.api.gouv.fr).
+        run: |
+          response=$(curl -sSL --fail-with-body --max-time 20 -X POST "$MCP_URL/mcp" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"densite_professionnels_sante","arguments":{"code_insee":"59009","savoir_faire_code":"SM04"}}}')
+          echo "$response" | jq empty 2>/dev/null || {
+            echo "::error::densite_professionnels_sante (commune) response is not valid JSON: $response"
+            exit 1
+          }
+          if echo "$response" | jq -e '.error' > /dev/null; then
+            echo "::error::densite_professionnels_sante (commune) returned JSON-RPC error: $response"
+            exit 1
+          fi
+          echo "::notice::densite_professionnels_sante (count_rpps_by_commune) ok"
+
+      - name: Warm count_rpps (RPPS département-level)
+        # Chauffe count_rpps BARE (déjà tunée 2s, 5 events Sentry/14j sur
+        # 21 = plus impactée des 3 RPCs tunées court). count_rpps frappe
+        # rpps(profession_code) au niveau département, codepath distinct
+        # de count_rpps_by_commune. Sans ce step, count_rpps reste froide
+        # malgré la promesse CHANGELOG "keep-warm protège les 3 RPCs tunées".
+        run: |
+          response=$(curl -sSL --fail-with-body --max-time 20 -X POST "$MCP_URL/mcp" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"densite_professionnels_sante","arguments":{"code_dept":"59"}}}')
+          echo "$response" | jq empty 2>/dev/null || {
+            echo "::error::densite_professionnels_sante (dept) response is not valid JSON: $response"
+            exit 1
+          }
+          if echo "$response" | jq -e '.error' > /dev/null; then
+            echo "::error::densite_professionnels_sante (dept) returned JSON-RPC error: $response"
+            exit 1
+          fi
+          echo "::notice::densite_professionnels_sante (count_rpps bare) ok"
