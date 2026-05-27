@@ -81,15 +81,26 @@ function escapeRegExp(s: string): string {
  *   - Cherche `(?:public\.)?fn` : namespace `public.fn` ou nu. Une future
  *     migration utilisant un schéma différent (ex `app.fn`) sortirait du
  *     scope du garde-fou. Aucune RPC du projet n'est aujourd'hui hors public.
- *   - Le `[\s\S]*?\$\$[\s\S]*?\$\$` du pattern CREATE assume un délimiteur
- *     extérieur `$$` non imbriqué (≡ contrat de `latestFunctionBodyLoose`
- *     dans migration-sql.ts). Vrai pour les 8 RPCs ciblées.
+ *   - Le délimiteur dollar-quote utilise une back-reference `\1` pour
+ *     tolérer les tags nommés (`$$` mais aussi `$body$`, `$func$`, etc.) —
+ *     pattern aligné sur `latestFunctionBody` strict dans migration-sql.ts.
+ *     Sans cette tolérance, une future migration anti-collision (corps
+ *     contenant `$$` en littéral) deviendrait invisible au garde-fou =
+ *     faux vert sur la régression que ce test prétend attraper.
+ *   - Le `create\s+(?:or\s+replace\s+)?function` accepte AUSSI le pattern
+ *     `DROP FUNCTION ... ; CREATE FUNCTION ...` (sans OR REPLACE) que le
+ *     projet utilise pour les changements de signature (ex
+ *     `20260514T040000_matview_rpps_savoir_faire.sql`). Sans le `?`, un
+ *     changement de signature recréerait la fonction avec proconfig=NULL
+ *     sans alerte du garde-fou.
  */
 function latestDeclarationBlock(fnName: string): string {
   const allSql = readAllMigrationsSql().toLowerCase();
   const esc = escapeRegExp(fnName);
+  // CREATE [OR REPLACE] FUNCTION fn ... AS $tag$ ... $tag$ — back-ref \1 sur le tag
+  // pour tolérer $$ et $body$/$func$/etc. sans confondre un `$$` interne d'un format().
   const create = new RegExp(
-    `create\\s+or\\s+replace\\s+function\\s+(?:public\\.)?${esc}\\b[\\s\\S]*?\\$\\$[\\s\\S]*?\\$\\$`,
+    `create\\s+(?:or\\s+replace\\s+)?function\\s+(?:public\\.)?${esc}\\b[\\s\\S]*?\\bas\\s+(\\$[a-z_]*\\$)[\\s\\S]*?\\1`,
     "g",
   );
   const alter = new RegExp(`alter\\s+function\\s+(?:public\\.)?${esc}\\b[^;]*;`, "g");
