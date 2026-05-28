@@ -1,9 +1,154 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as freshnessMod from "../storage/ingest-log.js";
 import type { GeocodeResult } from "../territoire/geocode.js";
 import * as geocodeMod from "../territoire/geocode.js";
+import * as irisMod from "../territoire/iris-profil.js";
+import * as ameliMod from "./ameli-db.js";
+import * as cdsMod from "./cds-db.js";
+import * as coverageMod from "./coverage.js";
+import * as finessMod from "./finess-db.js";
 import { panoramaImplantationComplet, runSection } from "./panorama-implantation.js";
+import * as panoramaMod from "./panorama.js";
+import * as rppsMod from "./rpps-db.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+/** Mocke les 8 briques de section avec des retours minimaux valides. */
+function mockAllSectionsOk(opts: { revenuPct?: number } = {}) {
+  vi.spyOn(geocodeMod, "geocode").mockResolvedValue(geocodeOk());
+  vi.spyOn(panoramaMod, "panoramaSanteTerritoire").mockResolvedValue({
+    codeInsee: "59350",
+    niveau: "commune",
+    niveauEtablissements: "departement",
+    densitesProfessionnels: {} as never,
+    etablissementsParFamille: [],
+    demande: null,
+    sources: {} as never,
+  });
+  vi.spyOn(irisMod, "getProfilIris").mockResolvedValue({
+    found: true,
+    lookupStatus: "found",
+    mode: "bassin",
+    rayon_km: 5,
+    nb_iris_agreges: 27,
+    population_bassin: 48230,
+    age: {} as never,
+    csp: {} as never,
+    familles_avec_enfants: 6120,
+    revenu_median_pondere: 24800,
+    couverture: { revenu_pct_population: opts.revenuPct ?? 1, iris_revenu_manquants: 0 },
+    source: "INSEE/FILOSOFI",
+  } as never);
+  vi.spyOn(finessMod, "getFinessInRadius").mockResolvedValue({
+    count: 0,
+    truncated: false,
+    results: [],
+  });
+  vi.spyOn(rppsMod, "getRppsInRadius").mockResolvedValue({
+    count: 0,
+    truncated: false,
+    results: [],
+  });
+  vi.spyOn(ameliMod, "getAmeliInRadius").mockResolvedValue({
+    count: 0,
+    truncated: false,
+    results: [],
+  });
+  vi.spyOn(cdsMod, "getCdsInRadius").mockResolvedValue({ count: 0, truncated: false, results: [] });
+  vi.spyOn(coverageMod, "getCoverageFinessVsSireneInRadius").mockResolvedValue({
+    coverage_status: "computed",
+    finess_only_count: 2,
+    sirene_only_count: 5,
+    finess_sites: 23,
+    sirene_sirets: 21,
+    coverage_ratio: 1.1,
+  } as never);
+  vi.spyOn(freshnessMod, "getDataFreshness").mockResolvedValue([
+    {
+      source: "finess",
+      cadence_hint: "bimestrielle",
+      last_success_at: "2026-05-01",
+      staleness_days: 27,
+    } as never,
+  ]);
+}
+
+describe("panorama_implantation_complet — sections (Promise.all + couverture)", () => {
+  it("toutes sections OK → couverture tout 'ok' + meta peuplée", async () => {
+    mockAllSectionsOk();
+    const r = await panoramaImplantationComplet({ adresse: "Lille rue Nationale", rayonKm: 5 });
+    expect(r.meta.code_insee).toBe("59350");
+    expect(r.meta.point).toEqual({ lat: 50.633, lon: 3.057 });
+    expect(r.meta.sources.length).toBeGreaterThan(0);
+    for (const section of [
+      "territoire",
+      "demande",
+      "concurrents",
+      "pourvoyeurs",
+      "prescripteurs",
+      "cds",
+      "referentiels",
+    ]) {
+      expect(r.couverture[section]).toBe("ok");
+    }
+    expect(r.referentiels).not.toBeNull();
+  });
+
+  it("FILOSOFI partiel → couverture.demande = 'partiel:revenu_pct_population=…' (spec §4.5)", async () => {
+    mockAllSectionsOk({ revenuPct: 0.84 });
+    const r = await panoramaImplantationComplet({ adresse: "Lille" });
+    expect(r.couverture.demande).toBe("partiel:revenu_pct_population=0.84");
+    expect(r.demande).not.toBeNull(); // la donnée reste servie
+  });
+
+  it("section 'demande' down → 'indisponible:…', les 6 autres restent 'ok'", async () => {
+    mockAllSectionsOk();
+    vi.spyOn(irisMod, "getProfilIris").mockRejectedValue(new Error("IRIS DB down"));
+    const r = await panoramaImplantationComplet({ adresse: "Lille" });
+    expect(r.couverture.demande).toMatch(/^indisponible:/);
+    expect(r.demande).toBeNull();
+    expect(r.couverture.territoire).toBe("ok");
+    expect(r.couverture.concurrents).toBe("ok");
+    expect(r.couverture.referentiels).toBe("ok");
+  });
+
+  it("Promise.all : les sections sont parallélisées (pas en série)", async () => {
+    mockAllSectionsOk();
+    const order: string[] = [];
+    const slow =
+      <T>(tag: string, val: T) =>
+      async () => {
+        order.push(`start-${tag}`);
+        await new Promise((res) => setTimeout(res, 15));
+        order.push(`end-${tag}`);
+        return val;
+      };
+    vi.spyOn(panoramaMod, "panoramaSanteTerritoire").mockImplementation(
+      slow("terr", {
+        codeInsee: "59350",
+        niveau: "commune",
+        niveauEtablissements: "departement",
+        densitesProfessionnels: {},
+        etablissementsParFamille: [],
+        demande: null,
+        sources: {},
+      }) as never,
+    );
+    vi.spyOn(finessMod, "getFinessInRadius").mockImplementation(
+      slow("fin", { count: 0, truncated: false, results: [] }) as never,
+    );
+    vi.spyOn(cdsMod, "getCdsInRadius").mockImplementation(
+      slow("cds", { count: 0, truncated: false, results: [] }) as never,
+    );
+    await panoramaImplantationComplet({ adresse: "Lille" });
+    const firstEnd = order.findIndex((s) => s.startsWith("end-"));
+    const lastStart = order
+      .map((s, i) => (s.startsWith("start-") ? i : -1))
+      .filter((i) => i >= 0)
+      .pop();
+    expect(firstEnd).toBeGreaterThan(lastStart ?? -1); // tous les start AVANT le 1er end
+  });
+});
 
 describe("runSection — dégradation par section (spec §4.4)", () => {
   it("succès → { data, status: 'ok' }", async () => {
