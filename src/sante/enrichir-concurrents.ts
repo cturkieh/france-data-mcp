@@ -74,50 +74,70 @@ function verdictToActif(verdict: InspectSiteResult["statut_site"]["verdict_site"
 
 /** Enquête un concurrent. Toute erreur/absence → `partiel:<raison>` (jamais throw). */
 async function enrichirUn(finess: string): Promise<ConcurrentEnrichi> {
+  // inspect + compare : socle de l'enquête. Si CE bloc échoue, rien d'exploitable.
+  let inspectR: Awaited<ReturnType<typeof inspectSite>>;
+  let compareR: Awaited<ReturnType<typeof compareRaisonSocialeFinessVsRpps>>;
   try {
-    const [inspectR, compareR] = await Promise.all([
+    [inspectR, compareR] = await Promise.all([
       inspectSite({ numFiness: finess, historiqueDetail: false }),
       compareRaisonSocialeFinessVsRpps(finess),
     ]);
+  } catch (err) {
+    const raison = err instanceof Error ? err.message : String(err);
+    console.error(`${LOG_TAG}: concurrent ${finess} — inspect/compare en échec : ${raison}`);
+    return partiel(finess, raison);
+  }
 
-    if (!inspectR.found) {
-      return partiel(finess, `inspect_site: ${inspectR.message}`);
-    }
+  if (!inspectR.found) {
+    return partiel(finess, `inspect_site: ${inspectR.message}`);
+  }
 
-    const siren = extractSiren(inspectR);
-    const groupeR = siren ? await getEntrepriseBySiren(siren) : null;
-    const groupe: ConcurrentGroupe | null = groupeR?.found
-      ? {
+  // Groupe parent ISOLÉ dans son propre try : un échec `entreprise_by_siren` ne
+  // doit PAS jeter les données inspect/compare déjà obtenues (statut, équipe,
+  // historique, signal M&A). Sur échec → `groupe: null` + drapeau précis, mais
+  // le reste reste servi (review silent-failure §2 — anti perte de données).
+  const siren = extractSiren(inspectR);
+  let groupe: ConcurrentGroupe | null = null;
+  let couverture: ConcurrentEnrichi["couverture"] = "ok";
+  if (siren) {
+    try {
+      const groupeR = await getEntrepriseBySiren(siren);
+      if (groupeR.found) {
+        groupe = {
           siren: groupeR.siren,
           denomination: groupeR.nomComplet,
           nombre_etablissements: groupeR.nombreEtablissements ?? null,
           est_grand_groupe: (groupeR.nombreEtablissements ?? 0) >= GRAND_GROUPE_SEUIL,
-        }
-      : null;
-
-    const ma_signal: ConcurrentMaSignal | null = compareR.found
-      ? {
-          rebranding_detecte: compareR.statut === "divergent_after_normalization",
-          statut_comparaison: compareR.statut,
-          finess_raison_sociale: compareR.finess_raison_sociale,
-          rpps_raisons_sociales: compareR.rpps_raisons_sociales,
-        }
-      : null;
-
-    return {
-      finess,
-      raison_sociale: inspectR.finess.raison_sociale,
-      statut_actif: verdictToActif(inspectR.statut_site.verdict_site),
-      equipe_count: inspectR.professionnels.count,
-      historique_recent: inspectR.historique,
-      ma_signal,
-      groupe,
-      couverture: "ok",
-    };
-  } catch (err) {
-    const raison = err instanceof Error ? err.message : String(err);
-    return partiel(finess, raison);
+        };
+      }
+    } catch (err) {
+      const raison = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `${LOG_TAG}: concurrent ${finess} — groupe SIREN ${siren} indisponible : ${raison}`,
+      );
+      couverture = `partiel:groupe_siren:${raison}`;
+    }
   }
+
+  const ma_signal: ConcurrentMaSignal | null = compareR.found
+    ? {
+        rebranding_detecte: compareR.statut === "divergent_after_normalization",
+        statut_comparaison: compareR.statut,
+        finess_raison_sociale: compareR.finess_raison_sociale,
+        rpps_raisons_sociales: compareR.rpps_raisons_sociales,
+      }
+    : null;
+
+  return {
+    finess,
+    raison_sociale: inspectR.finess.raison_sociale,
+    statut_actif: verdictToActif(inspectR.statut_site.verdict_site),
+    equipe_count: inspectR.professionnels.count,
+    historique_recent: inspectR.historique,
+    ma_signal,
+    groupe,
+    couverture,
+  };
 }
 
 /** Concurrent dégradé : drapeau `partiel` + `console.warn` (jamais silencieux). */

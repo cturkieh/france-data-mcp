@@ -39,10 +39,16 @@ bottleneck. Release **additive** : aucun outil supprimé ni renommé, zéro brea
 
 ### Pièges internalisés (le LLM n'a plus à y penser)
 
-- **PLM** (Paris/Lyon/Marseille) : territoire/densité basculés sur le département
-  (`meta.plm_mode=true`), sinon `RangeError` côté RPC.
+- **PLM** (Paris/Lyon/Marseille) : `panorama_sante_territoire` étant commune-only
+  (rejette les codes PLM), la section `territoire` est flaggée `indisponible`
+  (`meta.plm_mode=true`) avec repli explicite vers `densite_sante` au département ;
+  les 6 autres sections (radius/bassin) restent servies sur le point.
 - **`geo_precision`** : `prescripteurs` expose `precis_count` (PS à l'adresse, pas
   au centroïde commune) ; `cds` sans distance individuelle (centroïde commune).
+- **Troncature** : `count` cappé à la borne de requête → drapeau `couverture`
+  `partiel:tronqué` (le `count` est un plancher, pas le total) + champ `truncated`.
+- **Géocodage `match_partial`** : exposé dans `meta.geocode` (l'IGN a pu renvoyer
+  une adresse divergente) — non bloquant, le caller relativise l'ancrage.
 - **Ameli ≠ ANS/RPPS** : nomenclatures cloisonnées dans le code (IDEL=Ameli `24`,
   médecins=RPPS `10`), jamais croisées.
 - **Couverture FILOSOFI** : `demande` flaggée `partiel:revenu_pct_population=…`

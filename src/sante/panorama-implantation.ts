@@ -67,8 +67,8 @@ export interface PanoramaImplantationMeta {
   code_dept: string;
   commune: string;
   rayon_km: number;
-  geocode: { score: number; confidence_low: boolean };
-  /** true si Paris/Lyon/Marseille → densité/territoire calculés au département. */
+  geocode: { score: number; confidence_low: boolean; match_partial: boolean };
+  /** true si Paris/Lyon/Marseille → section `territoire` indisponible (cf. couverture). */
   plm_mode: boolean;
   sources: string[];
   generated_at: string;
@@ -113,6 +113,19 @@ export async function runSection<T>(
   }
 }
 
+/**
+ * Section radius servie mais dont le résultat est CAPPÉ à la borne de requête
+ * (`truncated`) → `partiel:tronqué`. Le `count` est alors un PLANCHER, pas le
+ * total réel — le LLM doit le savoir (review §2). Préserve `indisponible`/
+ * `partiel` déjà posés par `runSection`.
+ */
+function flagTruncation(outcome: SectionOutcome<{ truncated?: boolean }>): SectionStatus {
+  if (outcome.status === "ok" && outcome.data?.truncated === true) {
+    return "partiel:tronqué_limite_atteinte";
+  }
+  return outcome.status;
+}
+
 /** Ancrage résolu — toutes les sections en dépendent. */
 interface Anchor {
   point: { lat: number; lon: number };
@@ -123,6 +136,8 @@ interface Anchor {
   plmMode: boolean;
   geocodeScore: number;
   confidenceLow: boolean;
+  /** L'IGN a renvoyé une adresse divergente (Dice < 0.7) — point à re-vérifier. */
+  matchPartial: boolean;
   adresseDemandee: string | null;
 }
 
@@ -149,6 +164,7 @@ async function resolveAnchor(input: PanoramaImplantationInput): Promise<Anchor> 
       plmMode: plmDept(input.codeInsee) !== null,
       geocodeScore: 1,
       confidenceLow: false,
+      matchPartial: false, // point fourni explicitement = pas de géocodage à valider
       adresseDemandee: null,
     };
   }
@@ -175,6 +191,18 @@ async function resolveAnchor(input: PanoramaImplantationInput): Promise<Anchor> 
     throw new RangeError(`${LOG_TAG}: ancrage — code_insee invalide "${codeInsee}"`);
   }
 
+  // `match_partial` (IGN a renvoyé une AUTRE adresse, Dice < 0.7) : signal
+  // CONSERVATEUR (faux positifs fréquents sur adresses partielles type
+  // "Lille rue Nationale" sans CP). On NE rejette PAS (ça casserait les saisies
+  // partielles légitimes) mais on l'expose dans `meta.geocode` + warn pour que
+  // le LLM relativise l'ancrage (review silent-failure §1).
+  const matchPartial = g.match_partial === true;
+  if (matchPartial) {
+    console.warn(
+      `${LOG_TAG}: ancrage match_partial — IGN a renvoyé "${g.label}" pour "${input.adresse}" (à re-vérifier)`,
+    );
+  }
+
   return {
     point: { lat: g.point.lat, lon: g.point.lon },
     codeInsee,
@@ -184,6 +212,7 @@ async function resolveAnchor(input: PanoramaImplantationInput): Promise<Anchor> 
     plmMode: plmDept(codeInsee) !== null,
     geocodeScore: g.score,
     confidenceLow: false,
+    matchPartial,
     adresseDemandee: input.adresse,
   };
 }
@@ -206,16 +235,31 @@ function finessSummary(f: FinessResult) {
   };
 }
 
+// Bornes de requête radius. Les libs renvoient `count = résultats CAPPÉS` (pas
+// le total) + `truncated = il y a plus que la borne`. On propage `truncated`
+// dans chaque section et on flague `couverture` en `partiel:tronqué` quand il
+// vaut true — sinon le LLM lit une densité MINORÉE en silence (review §2).
+const LIMIT_CONCURRENTS = 50;
+const LIMIT_POURVOYEURS = 200;
+const LIMIT_PRESCRIPTEURS = 200;
+const LIMIT_CDS = 50;
+
 /** Concurrents directs : labos FINESS dans le rayon — résumé count + top 15 distance. */
 async function sectionConcurrents(point: { lat: number; lon: number }, rayonKm: number) {
   const r = await getFinessInRadius({
     center: { lat: point.lat, lon: point.lon },
     radiusKm: rayonKm,
     familles: ["labo"],
-    limit: 50,
+    limit: LIMIT_CONCURRENTS,
   });
   const top = r.results.slice(0, 15).map(finessSummary);
-  return { count: r.count, top, au_dela_count: Math.max(0, r.count - top.length) };
+  // `count` est cappé à la borne ; `truncated` dit s'il y a plus de labos que ça.
+  return {
+    count: r.count,
+    truncated: r.truncated,
+    top,
+    au_dela_count: Math.max(0, r.count - top.length),
+  };
 }
 
 /** Pourvoyeurs écosystémiques (MCO/EHPAD/SSR/dialyse) groupés par famille — top 3 chacun. */
@@ -224,7 +268,7 @@ async function sectionPourvoyeurs(point: { lat: number; lon: number }, rayonKm: 
     center: { lat: point.lat, lon: point.lon },
     radiusKm: rayonKm,
     familles: [...FAMILLES_POURVOYEURS],
-    limit: 200,
+    limit: LIMIT_POURVOYEURS,
   });
   const groupes: Record<string, FinessResult[]> = {};
   for (const f of r.results) {
@@ -237,7 +281,13 @@ async function sectionPourvoyeurs(point: { lat: number; lon: number }, rayonKm: 
     const list = groupes[fam] ?? [];
     return { count: list.length, top3: list.slice(0, 3).map(finessSummary) };
   };
-  return { mco: mk("mco"), ehpad: mk("ehpad"), ssr: mk("ssr"), dialyse: mk("dialyse") };
+  return {
+    truncated: r.truncated,
+    mco: mk("mco"),
+    ehpad: mk("ehpad"),
+    ssr: mk("ssr"),
+    dialyse: mk("dialyse"),
+  };
 }
 
 /** Prescripteurs : MG (RPPS, geo_precision) + IDEL (Ameli, spe 24). En parallèle. */
@@ -249,18 +299,21 @@ async function sectionPrescripteurs(point: { lat: number; lon: number }, rayonKm
       radiusKm: rayonKm,
       professionCodes: [RPPS_PROFESSION_MEDECIN],
       preciseOnly: false,
-      limit: 200,
+      limit: LIMIT_PRESCRIPTEURS,
     }),
     getAmeliInRadius({
       center,
       radiusKm: rayonKm,
       specialiteCodes: [AMELI_SPECIALITE_IDEL],
-      limit: 200,
+      limit: LIMIT_PRESCRIPTEURS,
     }),
   ]);
   return {
+    // Au moins un des deux volets cappé → section flaggée partielle.
+    truncated: mg.truncated || idel.truncated,
     mg: {
       count: mg.count,
+      truncated: mg.truncated,
       precis_count: countPrecis(mg.results),
       top: mg.results.slice(0, 10).map((r) => ({
         nom: r.identite.nom,
@@ -270,6 +323,7 @@ async function sectionPrescripteurs(point: { lat: number; lon: number }, rayonKm
     },
     idel: {
       count: idel.count,
+      truncated: idel.truncated,
       precis_count: countPrecis(idel.results),
       top: idel.results.slice(0, 10).map((r) => ({
         nom: r.identite.nom,
@@ -285,10 +339,11 @@ async function sectionCds(point: { lat: number; lon: number }, rayonKm: number) 
   const r = await getCdsInRadius({
     center: { lat: point.lat, lon: point.lon },
     radiusKm: rayonKm,
-    limit: 50,
+    limit: LIMIT_CDS,
   });
   return {
     count: r.count,
+    truncated: r.truncated,
     liste: r.results.slice(0, 15).map((c) => ({
       finess: c.etab_finess,
       nom: c.raison_sociale,
@@ -350,11 +405,7 @@ export async function panoramaImplantationComplet(
   input: PanoramaImplantationInput,
 ): Promise<PanoramaImplantationResult> {
   const anchor = await resolveAnchor(input);
-  const { point, codeInsee, codeDept, rayonKm, plmMode } = anchor;
-  // Piège PLM (§4.5) : densité/territoire au niveau département (sinon RangeError
-  // côté RPC, RPPS rattaché aux arrondissements). Les sections radius restent
-  // sur le point — un rayon géographique n'a pas le problème PLM.
-  const territoireKey = plmMode ? codeDept : codeInsee;
+  const { point, codeInsee, rayonKm, plmMode } = anchor;
 
   const [
     territoire,
@@ -366,9 +417,20 @@ export async function panoramaImplantationComplet(
     referentiels,
     freshness,
   ] = await Promise.all([
-    runSection("territoire", async () =>
-      summariseTerritoire(await panoramaSanteTerritoire({ codeInsee: territoireKey })),
-    ),
+    runSection("territoire", async () => {
+      // Piège PLM (§4.5) : `panorama_sante_territoire` est commune-only et REJETTE
+      // les codes Paris/Lyon/Marseille (arrondissement, commune-mère ET dept).
+      // On ne peut donc PAS servir les densités commune ici — on flague
+      // explicitement `indisponible` avec le repli actionnable (densite_sante au
+      // dept), plutôt que de laisser la brique throw un message cryptique. Les 6
+      // autres sections (radius/bassin) restent calculées sur le point.
+      if (plmMode) {
+        throw new Error(
+          "PLM (Paris/Lyon/Marseille) : densités commune indisponibles via panorama_sante_territoire — utiliser densite_sante au niveau département",
+        );
+      }
+      return summariseTerritoire(await panoramaSanteTerritoire({ codeInsee }));
+    }),
     runSection("demande", async () => {
       const r = await getProfilIris({ point: { lon: point.lon, lat: point.lat }, rayonKm });
       if (!r.found) {
@@ -400,11 +462,17 @@ export async function panoramaImplantationComplet(
   const couverture: Record<string, SectionStatus> = {
     territoire: territoire.status,
     demande: demandeStatus,
-    concurrents: concurrents.status,
-    pourvoyeurs: pourvoyeurs.status,
-    prescripteurs: prescripteurs.status,
-    cds: cds.status,
+    // Troncature (count cappé à la borne) → `partiel:tronqué` : le LLM sait que
+    // le compte est un PLANCHER, pas le total réel (review §2). Élargir le rayon
+    // ou requêter l'unitaire pour le détail.
+    concurrents: flagTruncation(concurrents),
+    pourvoyeurs: flagTruncation(pourvoyeurs),
+    prescripteurs: flagTruncation(prescripteurs),
+    cds: flagTruncation(cds),
     referentiels: referentiels.status,
+    // Fraîcheur best-effort : si KO, `meta.sources` est amputé — on l'expose ici
+    // pour que la dégradation soit dans la SORTIE, pas seulement dans le log.
+    freshness: freshness.status,
   };
 
   // Labels de sources tracées (freshness best-effort — jamais bloquant).
@@ -421,7 +489,11 @@ export async function panoramaImplantationComplet(
       code_dept: anchor.codeDept,
       commune: anchor.commune,
       rayon_km: anchor.rayonKm,
-      geocode: { score: anchor.geocodeScore, confidence_low: anchor.confidenceLow },
+      geocode: {
+        score: anchor.geocodeScore,
+        confidence_low: anchor.confidenceLow,
+        match_partial: anchor.matchPartial,
+      },
       plm_mode: anchor.plmMode,
       sources,
       generated_at: new Date().toISOString(),

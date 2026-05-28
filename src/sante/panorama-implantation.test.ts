@@ -212,24 +212,22 @@ describe("panorama_implantation_complet — ancrage (rejet total)", () => {
 });
 
 describe("panorama_implantation_complet — piège PLM (spec §4.5)", () => {
-  it("arrondissement PLM (Paris 1er) → plm_mode=true + territoire calculé au département", async () => {
+  it("arrondissement PLM (Paris 1er) → plm_mode=true + territoire 'indisponible' SANS appeler la brique commune-only", async () => {
     mockAllSectionsOk();
     vi.spyOn(geocodeMod, "geocode").mockResolvedValue(
       geocodeOk({ point: { lat: 48.86, lon: 2.34 }, codeCommune: "75101", commune: "Paris 1er" }),
     );
-    const terrSpy = vi.spyOn(panoramaMod, "panoramaSanteTerritoire").mockResolvedValue({
-      codeInsee: "75",
-      niveau: "commune",
-      niveauEtablissements: "departement",
-      densitesProfessionnels: {} as never,
-      etablissementsParFamille: [],
-      demande: null,
-      sources: {} as never,
-    });
+    // panorama_sante_territoire REJETTE les codes PLM (commune-only) → on ne
+    // l'appelle PAS en PLM, on flague territoire indisponible (repli densite_sante dept).
+    const terrSpy = vi.spyOn(panoramaMod, "panoramaSanteTerritoire");
     const r = await panoramaImplantationComplet({ adresse: "Paris 1er" });
     expect(r.meta.plm_mode).toBe(true);
-    // territoire/densité au département (75), pas l'arrondissement (75101) → sinon RangeError RPC.
-    expect(terrSpy).toHaveBeenCalledWith({ codeInsee: "75" });
+    expect(terrSpy).not.toHaveBeenCalled();
+    expect(r.couverture.territoire).toMatch(/^indisponible:/);
+    expect(r.couverture.territoire).toContain("département");
+    // Les sections radius/bassin restent servies (le point est valide).
+    expect(r.couverture.concurrents).toBe("ok");
+    expect(r.couverture.demande).toBe("ok");
   });
 
   it("commune non-PLM → plm_mode=false + territoire au code INSEE commune", async () => {
@@ -246,5 +244,38 @@ describe("panorama_implantation_complet — piège PLM (spec §4.5)", () => {
     const r = await panoramaImplantationComplet({ adresse: "Lille" });
     expect(r.meta.plm_mode).toBe(false);
     expect(terrSpy).toHaveBeenCalledWith({ codeInsee: "59350" });
+  });
+});
+
+describe("panorama_implantation_complet — garde-fous revue", () => {
+  it("résultat radius tronqué (count cappé) → couverture 'partiel:tronqué' (count = plancher)", async () => {
+    mockAllSectionsOk();
+    // 50 labos rendus mais truncated:true → il y en a plus que la borne.
+    vi.spyOn(finessMod, "getFinessInRadius").mockResolvedValue({
+      count: 50,
+      truncated: true,
+      results: [],
+    });
+    const r = await panoramaImplantationComplet({ adresse: "Lyon Part-Dieu" });
+    expect(r.couverture.concurrents).toMatch(/^partiel:tronqué/);
+    expect(r.couverture.pourvoyeurs).toMatch(/^partiel:tronqué/);
+  });
+
+  it("géocode match_partial (IGN renvoie une autre adresse) → exposé dans meta.geocode (pas de rejet)", async () => {
+    mockAllSectionsOk();
+    vi.spyOn(geocodeMod, "geocode").mockResolvedValue(geocodeOk({ match_partial: true }));
+    const r = await panoramaImplantationComplet({ adresse: "rue ambiguë" });
+    expect(r.meta.geocode.match_partial).toBe(true);
+    // Pas de rejet : l'étude est servie (signal conservateur, le LLM relativise).
+    expect(r.couverture.concurrents).toBe("ok");
+  });
+
+  it("échec freshness → couverture.freshness flaggée (dégradation visible dans la sortie)", async () => {
+    mockAllSectionsOk();
+    vi.spyOn(freshnessMod, "getDataFreshness").mockRejectedValue(new Error("ingest-log down"));
+    const r = await panoramaImplantationComplet({ adresse: "Lille" });
+    expect(r.couverture.freshness).toMatch(/^indisponible:/);
+    // Le panorama reste servi malgré freshness KO.
+    expect(r.couverture.concurrents).toBe("ok");
   });
 });

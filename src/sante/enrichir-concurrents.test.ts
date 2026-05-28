@@ -122,4 +122,16 @@ describe("enrichir_concurrents", () => {
     const r = await enrichirConcurrents({ finess: ["999"] });
     expect(r.concurrents[0]?.couverture).toMatch(/^partiel:/);
   });
+
+  it("échec entreprise_by_siren → données inspect/compare PRÉSERVÉES + drapeau précis", async () => {
+    mockBriquesOk();
+    // Seul le groupe parent échoue : statut/équipe/historique doivent survivre.
+    vi.spyOn(dinumMod, "getEntrepriseBySiren").mockRejectedValue(new Error("DINUM 503"));
+    const r = await enrichirConcurrents({ finess: ["1"] });
+    const c = r.concurrents[0];
+    expect(c?.statut_actif).toBe(true); // PRÉSERVÉ (pas null)
+    expect(c?.equipe_count).toBe(12); // PRÉSERVÉ
+    expect(c?.groupe).toBeNull();
+    expect(c?.couverture).toMatch(/^partiel:groupe_siren:/);
+  });
 });
