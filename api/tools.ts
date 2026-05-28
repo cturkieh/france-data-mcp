@@ -73,6 +73,7 @@ import {
   getCommuneByCode,
   getPopulationByCommune,
   getPopulationByDept,
+  getPopulationByIris,
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
@@ -1067,7 +1068,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "population",
     description:
-      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'une COMMUNE (code INSEE 5 caractères) OU d'un DÉPARTEMENT (code 2-3 caractères) — la granularité est auto-détectée par la longueur du `code`. Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN est la base légale officielle des indicateurs DREES (densité médicale, etc.). Retourne un `LookupResult` discriminé par `found`.\n\n- Commune (5 car., ex `75056` Paris, `13055` Marseille, `2A004` Ajaccio) : si elle a fusionné/changé de code, `found: false` + orientation `autocomplete_commune`. INSEE n'expose PAS la population des arrondissements PLM (75101-75120, 13201-13216, 69381-69389) → passer la commune-mère, ou le code département.\n- Département (2-3 car., ex `75`, `59`, `2A`, `971`) : Mayotte (`976`) est ABSENTE de Melodi → `lookupNotFound` (pas une erreur).\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee` et `code_dept`/`dept`/`departement`/`code_departement` → `code`.",
+      "Population d'une COMMUNE (code INSEE 5 car.), d'un DÉPARTEMENT (2-3 car.) OU d'un IRIS infracommunal (9 car.) — granularité auto-détectée par la longueur du `code`. Retourne un `LookupResult` discriminé par `found`.\n\n- IRIS (9 car., ex `751103701` = commune `75110` + IRIS `3701`) : population totale du quartier au Recensement 2022 (champ `population`, comptes bruts), + `libelle`, `code_commune`, `type_iris` (H/A/D/Z). Source : INSEE RP 2022 (table ingérée, géo 01/01/2024). Maille la plus fine (quartier) pour les villes ; en zone peu dense la commune = 1 IRIS (`type_iris` Z, code `COM+0000`). Pour le profil démographique détaillé d'un îlot ou d'un bassin (âge, CSP, familles, revenu), utiliser `profil_iris`.\n- Commune (5 car., ex `75056` Paris, `13055` Marseille, `2A004` Ajaccio) : PMUN/PCAP/PTOT. Source INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN = base légale DREES. Commune fusionnée → `found: false` + orientation `autocomplete_commune`. INSEE n'expose PAS les arrondissements PLM (75101-75120, 13201-13216, 69381-69389) → passer la commune-mère ou le département.\n- Département (2-3 car., ex `75`, `59`, `2A`, `971`) : Mayotte (`976`) ABSENTE de Melodi → `lookupNotFound`.\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee`, `code_dept`/`dept`/`departement`/`code_departement`, `code_iris`/`iris` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1090,18 +1091,21 @@ export const TOOLS: McpTool[] = [
         dept: "code",
         departement: "code",
         code_departement: "code",
+        code_iris: "code",
+        iris: "code",
       });
       // Trim une fois : la longueur (choix de granularité) ET la valeur passée
       // aux getters (regex ancrées strictes) restent cohérentes — un code
       // whitespace-paddé ne produit plus un message « invalide » trompeur.
       const code = requireString(args, "code", { code: "75056" }).trim();
-      // Auto-détection par longueur : commune = 5 (ex 75056), département = 2-3
-      // (75, 971, 2A). La granularité IRIS (9 car.) s'ajoutera en 0.22.0.
+      // Auto-détection par longueur : IRIS = 9 (ex 751103701, RP 2022 DB),
+      // commune = 5 (ex 75056, Melodi live), département = 2-3 (75, 971, 2A).
       const len = code.length;
+      if (len === 9) return getPopulationByIris(code);
       if (len === 5) return getPopulationByCommune(code);
       if (len === 2 || len === 3) return getPopulationByDept(code);
       throw new RangeError(
-        `Code "${code}" non reconnu : attendu 5 caractères (commune INSEE, ex "75056") ou 2-3 caractères (département, ex "75"/"971"/"2A").`,
+        `Code "${code}" non reconnu : attendu 9 caractères (IRIS, ex "751103701"), 5 caractères (commune INSEE, ex "75056") ou 2-3 caractères (département, ex "75"/"971"/"2A").`,
       );
     },
   },
