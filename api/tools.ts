@@ -33,6 +33,7 @@ import {
   densiteEtablissementsSante,
   densiteProfessionnelsSante,
 } from "../src/sante/densite.js";
+import { enrichirConcurrents } from "../src/sante/enrichir-concurrents.js";
 import { FINESS_FAMILY_CODES } from "../src/sante/finess-categories.js";
 import {
   type FinessFamilleQuery,
@@ -49,6 +50,7 @@ import {
 import { getEntrepriseBySiren, searchEntreprises } from "../src/sante/index.js";
 import { lookupSiretViaInsee } from "../src/sante/insee-sirene.js";
 import { inspectSite } from "../src/sante/inspect-site.js";
+import { panoramaImplantationComplet } from "../src/sante/panorama-implantation.js";
 import { DEFAULT_FAMILLES, panoramaSanteTerritoire } from "../src/sante/panorama.js";
 import {
   AMELI_PERIMETRE,
@@ -2699,6 +2701,84 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
         withPerimetre(result, finessFamillePerimetre(effectiveFamilles)),
         hosted,
       );
+    },
+  },
+  {
+    name: "panorama_implantation_complet",
+    description: `Étude d'implantation labo en 1 appel (V0.23). Géocode l'adresse cible puis agrège EN PARALLÈLE 7 sections : \`territoire\` (densités PS commune vs national + établissements), \`demande\` (profil démographique du BASSIN — rayon — via profil_iris : âge, CSP, revenu pondéré), \`concurrents\` (labos FINESS), \`pourvoyeurs\` (MCO/EHPAD/SSR/dialyse — drivers écosystémiques), \`prescripteurs\` (médecins RPPS + IDEL Ameli), \`cds\` (centres de santé), \`referentiels\` (qualité couverture FINESS↔SIRENE).\n\nRemplace ~15 appels MCP individuels par 1. Renvoie des RÉSUMÉS (count / top-N / moyenne), JAMAIS de listes brutes. AUCUNE interprétation métier (pas de 'désert médical' ni de verdict GO/NO-GO) — le caller LLM applique sa grille.\n\nDÉGRADATION (lis \`couverture\` — 1 drapeau par section) : \`"ok"\` | \`"partiel:<raison>"\` | \`"indisponible:<raison>"\`. Si une source est down, SA section est flaggée et le RESTE est renvoyé — comble alors le trou via l'outil unitaire correspondant (etablissements_finess_in_radius, professionnels_rpps_in_radius, densite_sante, centres_sante_in_radius…). Échec d'ANCRAGE (géocodage KO / adresse douteuse / code INSEE indérivable) = rejet total (RangeError).\n\nPièges internalisés : Paris/Lyon/Marseille basculés sur le département (\`meta.plm_mode=true\`) ; \`prescripteurs\` expose \`precis_count\` (PS géolocalisés à l'adresse, pas au centroïde commune) ; \`cds\` sans distance individuelle (centroïde commune).\n\nWORKFLOW : appelle CET outil pour DÉMARRER une étude, puis creuse les sections \`partiel\`/\`indisponible\` via les unitaires, puis \`enrichir_concurrents\` sur le top 3 de \`concurrents.top\`.\n\nSources : IGN (géocodage), FINESS DREES, RPPS/ANS, Ameli/CNAM, INSEE/FILOSOFI, SIRENE/DINUM.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        adresse: {
+          type: "string",
+          description:
+            'Adresse cible, géocodée en interne via IGN. Ex: "12 rue Nationale, Lille". XOR avec `point`.',
+        },
+        point: {
+          type: "object",
+          description:
+            "Coordonnées { lat, lon } si déjà connues (skip géocodage). Fournir `code_insee` avec.",
+          properties: { lat: { type: "number" }, lon: { type: "number" } },
+        },
+        code_insee: {
+          type: "string",
+          description: "Code INSEE commune (avec `point`, quand le géocodage est déjà fait).",
+        },
+        rayon_km: {
+          type: "number",
+          description: "Rayon du bassin de l'étude (km). Défaut 5.",
+        },
+      },
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, { rayonKm: "rayon_km", rayon: "rayon_km" });
+      const adresse = asString(args.adresse);
+      const codeInsee = asString(args.code_insee);
+      const rayonKm = coerceNumber(args.rayon_km, "rayon_km");
+      let point: { lat: number; lon: number } | undefined;
+      const pointRaw = args.point;
+      if (pointRaw && typeof pointRaw === "object") {
+        const p = pointRaw as Record<string, unknown>;
+        const lat = coerceNumber(p.lat, "point.lat");
+        const lon = coerceNumber(p.lon, "point.lon");
+        if (lat !== undefined && lon !== undefined) point = { lat, lon };
+      }
+      return panoramaImplantationComplet({
+        ...(adresse ? { adresse } : {}),
+        ...(point ? { point } : {}),
+        ...(codeInsee ? { codeInsee } : {}),
+        ...(rayonKm !== undefined ? { rayonKm } : {}),
+      });
+    },
+  },
+  {
+    name: "enrichir_concurrents",
+    description: `Enquête approfondie sur le top concurrents (V0.23). Pour chaque FINESS : statut actif + taille d'équipe + historique récent (inspect_site), signal M&A — rebranding en cours — (compare raison sociale FINESS vs RPPS), groupe parent (entreprise_by_siren : Biogroup/Cerballiance/… + \`est_grand_groupe\`).\n\nCap dur \`max=3\` (inspect_site ~7 K tokens/appel — JAMAIS 10+). Drapeau \`couverture\` PAR concurrent (\`"ok"\` | \`"partiel:<raison>"\`) : un concurrent qui échoue n'annule pas les autres.\n\nTypiquement appelé sur \`concurrents.top[0..2].finess\` renvoyés par panorama_implantation_complet.\n\nSources : FINESS/ANS, RPPS/ANS, SIRENE/DINUM.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        finess: {
+          type: "array",
+          items: { type: "string" },
+          description: "Numéros FINESS à enquêter (typiquement le top 3 concurrents par distance).",
+        },
+        max: {
+          type: "number",
+          description: "Cap dur du nombre de concurrents enquêtés. Défaut 3.",
+        },
+      },
+      required: ["finess"],
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const raw = Array.isArray(rawArgs.finess) ? rawArgs.finess : [];
+      const finess = raw.map((f) => asString(f)).filter((f): f is string => Boolean(f));
+      if (finess.length === 0) {
+        throw new RangeError("enrichir_concurrents: 'finess' (string[] non vide) requis");
+      }
+      const max = coerceNumber(rawArgs.max, "max");
+      return enrichirConcurrents({ finess, ...(max !== undefined ? { max } : {}) });
     },
   },
 ];

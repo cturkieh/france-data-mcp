@@ -3,10 +3,12 @@ import * as ameliDb from "../src/sante/ameli-db.js";
 import * as coverage from "../src/sante/coverage.js";
 import * as crossSource from "../src/sante/cross-source.js";
 import * as densite from "../src/sante/densite.js";
+import * as enrichirConcurrentsMod from "../src/sante/enrichir-concurrents.js";
 import * as finessDb from "../src/sante/finess-db.js";
 import * as hostedActivities from "../src/sante/hosted-activities.js";
 import * as dinum from "../src/sante/index.js";
 import * as inseeSirene from "../src/sante/insee-sirene.js";
+import * as panoramaImpl from "../src/sante/panorama-implantation.js";
 import * as panorama from "../src/sante/panorama.js";
 import { finessFamillePerimetre } from "../src/sante/perimetre.js";
 import * as rppsDb from "../src/sante/rpps-db.js";
@@ -2262,5 +2264,58 @@ describe("activite_hebergee wiring — etablissements_finess_*", () => {
     expect(hosted.count).toBe(52);
     expect(hosted.activite).toBe("biologie médicale");
     expect(hosted.densite_pour_100k_hab).toBe(2); // (52 / 2_600_000) * 100_000 = 2.0
+  });
+});
+
+describe("panorama_implantation_complet (MCP tool)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("délègue à panoramaImplantationComplet avec adresse + rayon (alias rayon_km)", async () => {
+    const spy = vi
+      .spyOn(panoramaImpl, "panoramaImplantationComplet")
+      .mockResolvedValue({ meta: {}, couverture: {} } as never);
+    const tool = findTool("panorama_implantation_complet");
+    await tool?.handler({ adresse: "Lille rue Nationale", rayon_km: 5 });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ adresse: "Lille rue Nationale", rayonKm: 5 }),
+    );
+  });
+
+  it("accepte un point { lat, lon } + code_insee", async () => {
+    const spy = vi
+      .spyOn(panoramaImpl, "panoramaImplantationComplet")
+      .mockResolvedValue({ meta: {}, couverture: {} } as never);
+    const tool = findTool("panorama_implantation_complet");
+    await tool?.handler({ point: { lat: 50.6, lon: 3.0 }, code_insee: "59350" });
+    expect(spy).toHaveBeenCalledWith(
+      expect.objectContaining({ point: { lat: 50.6, lon: 3.0 }, codeInsee: "59350" }),
+    );
+  });
+
+  it("ancrage KO → RangeError propagée (=> -32602 côté MCP)", async () => {
+    vi.spyOn(panoramaImpl, "panoramaImplantationComplet").mockRejectedValue(
+      new RangeError("ancrage — géocodage sans résultat"),
+    );
+    const tool = findTool("panorama_implantation_complet");
+    await expect(tool?.handler({ adresse: "zzz" })).rejects.toThrow(RangeError);
+  });
+});
+
+describe("enrichir_concurrents (MCP tool)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("délègue avec finess[] + max", async () => {
+    const spy = vi
+      .spyOn(enrichirConcurrentsMod, "enrichirConcurrents")
+      .mockResolvedValue({ concurrents: [], meta: {} } as never);
+    const tool = findTool("enrichir_concurrents");
+    await tool?.handler({ finess: ["590000123"], max: 3 });
+    expect(spy).toHaveBeenCalledWith({ finess: ["590000123"], max: 3 });
+  });
+
+  it("finess vide ou absent → RangeError (pas d'appel silencieux)", async () => {
+    const tool = findTool("enrichir_concurrents");
+    await expect(tool?.handler({})).rejects.toThrow(RangeError);
+    await expect(tool?.handler({ finess: [] })).rejects.toThrow(RangeError);
   });
 });
