@@ -33,7 +33,13 @@ describe("getDataFreshness", () => {
   it("retourne une ligne par source connue, même quand ingest_log est vide", async () => {
     mockQuery([]);
     const result = await getDataFreshness();
-    expect(result.map((r) => r.source).sort()).toEqual(["ameli_ps", "cds", "finess", "rpps"]);
+    expect(result.map((r) => r.source).sort()).toEqual([
+      "ameli_ps",
+      "cds",
+      "finess",
+      "iris",
+      "rpps",
+    ]);
     for (const r of result) {
       expect(r.last_success_at).toBeNull();
       expect(r.staleness_days).toBeNull();

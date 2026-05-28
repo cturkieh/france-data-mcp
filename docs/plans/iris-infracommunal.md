@@ -135,8 +135,10 @@ discriminé (jamais 0 silencieux).
 
 ## 7. Méthodologie de preuve
 
-- Ingestion : canary post-swap (counts attendus ~16K IRIS, ~2000 hab/îlot
-  médian), `ingest_log` success/partial/failed.
+- Ingestion : canary post-swap (counts attendus **~49K lignes** — vérifié
+  2026-05-28 sur les fichiers réels : ~16K IRIS urbains TYP_IRIS H/A/D **+**
+  ~33K communes non-irisées TYP_IRIS Z codées `COM+"0000"` ; le « ~16K » initial
+  ne comptait que les IRIS urbains), `ingest_log` success/partial/failed.
 - `profil_iris` : tests unit sur les 3 règles d'agrégation (R1 proxy + couverture,
   R2 centroïde vs intersection, R3 comptes bruts), + acceptance prod sur un
   bassin urbain connu (ex. Paris 11ᵉ, rayon 2 km) vs un point rural (1 îlot).

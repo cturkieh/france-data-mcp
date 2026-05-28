@@ -454,3 +454,30 @@ describe("matviews refresh par les scripts d'ingest sont whitelistées", () => {
     ).toEqual([]);
   });
 });
+
+describe("staging-create est un superset des index prod (iris)", () => {
+  it("chaque liste de colonnes d'index prod iris existe à l'identique dans ingest_create_iris_staging()", () => {
+    // Phase B étape 1 : les 3 index prod (geog GiST, centroid_geog GiST,
+    // code_commune btree) DOIVENT voyager dans `iris` via le RENAME du swap
+    // annuel. Aujourd'hui prod-table + staging-create cohabitent dans la même
+    // migration (parité triviale), mais ce garde-fou capte la DÉRIVE future :
+    // un index ajouté sur `iris` par une migration ultérieure non mirroré dans
+    // staging-create serait perdu au prochain swap (régression silencieuse —
+    // exactement la classe close pour rpps/ameli).
+    const stagingBody = latestFunctionBody("ingest_create_iris_staging");
+    expect(stagingBody.length).toBeGreaterThan(0);
+
+    const prodCols = liveIndexColumnLists(allMigrationsSql(), "iris");
+    const stagingCols = indexColumnLists(stagingBody, "iris_staging");
+
+    // geog + centroid_geog + code_commune => 3 listes distinctes au minimum.
+    expect(prodCols.size).toBeGreaterThanOrEqual(3);
+    expect(stagingCols.size).toBeGreaterThanOrEqual(prodCols.size);
+
+    const missing = [...prodCols].filter((c) => !stagingCols.has(c));
+    expect(
+      missing,
+      `Index prod sur iris absents (par liste de colonnes) de ingest_create_iris_staging() — seront PERDUS au prochain swap annuel : ${JSON.stringify(missing)}`,
+    ).toEqual([]);
+  });
+});

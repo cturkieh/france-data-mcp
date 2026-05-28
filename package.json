@@ -81,6 +81,7 @@
     "ingest:ameli": "tsx scripts/ingest/ameli.ts",
     "ingest:rpps": "tsx scripts/ingest/rpps.ts",
     "ingest:cds": "tsx scripts/ingest/cds.ts",
+    "ingest:iris": "tsx scripts/ingest/iris.ts",
     "cleanup:stale-previous": "tsx scripts/ingest/drop-stale-previous.ts"
   },
   "engines": {
