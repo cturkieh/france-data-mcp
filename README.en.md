@@ -79,11 +79,10 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.20.1 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+✅ **v0.20.2 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-- [ ] **Unified RPPS + Ameli PS sheet** (concatenated, divergences exposed).
 - [ ] **v1.0+**: DOM-COM, INSEE IRIS, DPC.
 
 ---
