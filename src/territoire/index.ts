@@ -37,4 +37,11 @@ export {
   type IrisProfilRow,
 } from "./iris-db.js";
 
+export {
+  getProfilIris,
+  type ProfilIrisInput,
+  type IletProfile,
+  type BassinProfile,
+} from "./iris-profil.js";
+
 export const TERRITOIRE_VERSION = "0.1.0";

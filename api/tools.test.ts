@@ -1313,15 +1313,16 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
 });
 
 describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
-  it("expose un outputSchema sur les tools object-root (26 tools attendus)", () => {
+  it("expose un outputSchema sur les tools object-root (27 tools attendus)", () => {
     const withOutput = TOOLS.filter((t) => t.outputSchema !== undefined);
     // Phase A 0.21.0 — fusions :
     //  - 3 listers (2 avec outputSchema, 1 sans) → 1 `lister_nomenclature` AVEC
     //    QUERY_RESULT_OUTPUT_SCHEMA (schema lenient, couvre les 3 référentiels) → Δ -1.
     //  - 2 `population_par_*` (avec outputSchema) → 1 `population` (avec) → Δ -1.
     //  - 2 `densite_*` (sans outputSchema) → 1 `densite_sante` (sans) → Δ 0.
-    // 28 (0.20.x) - 1 - 1 = 26. Reste sans outputSchema : densite_sante (objet riche imbriqué).
-    expect(withOutput).toHaveLength(26);
+    // 28 (0.20.x) - 1 - 1 = 26. Phase B 0.22.0 — +1 `profil_iris` (LookupResult) = 27.
+    // Reste sans outputSchema : densite_sante (objet riche imbriqué).
+    expect(withOutput).toHaveLength(27);
   });
 
   it("omet volontairement l'outputSchema pour les tools array-root ou nullable", () => {

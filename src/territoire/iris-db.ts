@@ -80,6 +80,42 @@ export async function fetchIrisProfilByCode(codeIris: string): Promise<IrisProfi
   return rows[0] ?? null;
 }
 
+/** Helper interne : appelle une RPC IRIS renvoyant une liste de lignes profil. */
+async function callIrisRowsRpc(
+  rpc: string,
+  params: Record<string, unknown>,
+): Promise<IrisProfilRow[]> {
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc(rpc, params);
+  if (error) {
+    throw new Error(`[france-data-mcp] ${rpc} RPC failed: ${error.message}`);
+  }
+  return (Array.isArray(data) ? data : []) as IrisProfilRow[];
+}
+
+/** Profil de l'IRIS CONTENANT le point (point-in-polygon). `null` hors couverture (mer, étranger). */
+export async function fetchIrisAtPoint(lon: number, lat: number): Promise<IrisProfilRow | null> {
+  const rows = await callIrisRowsRpc("iris_at_point", { p_lon: lon, p_lat: lat });
+  return rows[0] ?? null;
+}
+
+/** Îlots dont le CENTROÏDE est dans le disque (R2) centré sur un point. */
+export function fetchIrisInRadius(
+  lon: number,
+  lat: number,
+  rayonM: number,
+): Promise<IrisProfilRow[]> {
+  return callIrisRowsRpc("iris_in_radius", { p_lon: lon, p_lat: lat, p_rayon_m: rayonM });
+}
+
+/** Îlots du bassin centré sur le centroïde d'un IRIS. Liste VIDE = code_iris absent. */
+export function fetchIrisInRadiusOfCode(
+  codeIris: string,
+  rayonM: number,
+): Promise<IrisProfilRow[]> {
+  return callIrisRowsRpc("iris_in_radius_of_code", { p_code_iris: codeIris, p_rayon_m: rayonM });
+}
+
 /** Population (RP 2022) d'un IRIS, exposée par le tool `population` (granularité 9 car.). */
 export interface IrisPopulationLookup {
   codeIris: string;

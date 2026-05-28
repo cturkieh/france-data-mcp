@@ -74,6 +74,7 @@ import {
   getPopulationByCommune,
   getPopulationByDept,
   getPopulationByIris,
+  getProfilIris,
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
@@ -1107,6 +1108,45 @@ export const TOOLS: McpTool[] = [
       throw new RangeError(
         `Code "${code}" non reconnu : attendu 9 caractères (IRIS, ex "751103701"), 5 caractères (commune INSEE, ex "75056") ou 2-3 caractères (département, ex "75"/"971"/"2A").`,
       );
+    },
+  },
+  {
+    name: "profil_iris",
+    description:
+      "Profil démographique au grain QUARTIER (IRIS) — la « demande » d'un territoire (âge, CSP, familles, revenu), à croiser avec l'offre de soins pour l'aide à l'implantation. Source : INSEE RP 2022 + FILOSOFI 2021 (tables ingérées, géo 01/01/2024). Retourne un `LookupResult` discriminé par `found`.\n\nEntrée : EXACTEMENT un de `point` (`lat`+`lon`) OU `code_iris` (9 car.). `rayon_km` optionnel (0 < r ≤ 10) → DEUX modes :\n- SANS `rayon_km` → profil de l'ÎLOT seul (~2000 hab) sous le point / du code. `mode: \"ilot\"`, `revenu_median` = médiane réelle de l'îlot.\n- AVEC `rayon_km` → AGRÉGAT du BASSIN = îlots dont le CENTROÏDE est dans le disque (chaque îlot compté 1 fois). `mode: \"bassin\"`, `population_bassin`, `nb_iris_agreges`, et `revenu_median_pondere` = PROXY (moyenne pondérée population des médianes des îlots couverts — PAS une vraie médiane de bassin) + `couverture` {`revenu_pct_population`, `iris_revenu_manquants`} car FILOSOFI ne couvre que les communes ≥5000 hab.\n\nLes parts `age` (part_65_plus/75_plus) et `csp` (cadres, prof_interm, employés, ouvriers, agriculteurs, artisans_comm, retraités, autres) sont des ratios sur comptes bruts (Σ/Σ). Pour une simple population de commune/dept, utiliser `population`. `not_found` motivé si code absent ou point hors métropole / en mer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lat: { type: "number", description: "Latitude du point (mode point)." },
+        lon: { type: "number", description: "Longitude du point (mode point)." },
+        code_iris: {
+          type: "string",
+          description: "Code IRIS 9 caractères (ex `751103701`) — alternatif au point.",
+        },
+        rayon_km: {
+          type: "number",
+          description: "Rayon du bassin en km (0 < r ≤ 10). Absent = profil de l'îlot seul.",
+        },
+      },
+    },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const lon = coerceNumber(rawArgs.lon, "lon");
+      const lat = coerceNumber(rawArgs.lat, "lat");
+      const codeIris =
+        asString(rawArgs.code_iris) ?? asString(rawArgs.codeIris) ?? asString(rawArgs.iris);
+      const rayonKm = coerceNumber(rawArgs.rayon_km ?? rawArgs.rayonKm, "rayon_km");
+      const input: Parameters<typeof getProfilIris>[0] = {};
+      if (lon !== undefined || lat !== undefined) {
+        if (lon === undefined || lat === undefined) {
+          throw new RangeError("Le mode point requiert `lat` ET `lon` numériques.");
+        }
+        input.point = { lon, lat };
+      }
+      if (codeIris) input.codeIris = codeIris;
+      if (rayonKm !== undefined) input.rayonKm = rayonKm;
+      return getProfilIris(input);
     },
   },
   {
