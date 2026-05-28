@@ -18,12 +18,15 @@ const {
   mapContourRecord,
   mapPopRecord,
   mapFamillesRecord,
+  mapRevenuRecord,
   parseNum,
   CODE_IRIS_RE,
   POP_COLUMNS,
   FAMILLES_COLUMNS,
+  FILO_COLUMNS,
   POP_EXPECTED_HEADERS,
   FAMILLES_EXPECTED_HEADERS,
+  FILO_EXPECTED_HEADERS,
 } = __TESTING__;
 
 /** Ligne réelle Paris 10e (IRIS urbain TYP_IRIS H). */
@@ -112,12 +115,24 @@ describe("CODE_IRIS_RE", () => {
 describe("parseNum", () => {
   it("parse les comptes INSEE, null pour vide/non-numérique", () => {
     expect(parseNum("859")).toBe(859);
-    expect(parseNum("692.108")).toBeCloseTo(692.108);
+    expect(parseNum("692.108")).toBeCloseTo(692.108); // RP : séparateur point
     expect(parseNum("  42 ")).toBe(42);
     expect(parseNum("")).toBeNull();
     expect(parseNum("   ")).toBeNull();
     expect(parseNum(undefined)).toBeNull();
     expect(parseNum("N/A")).toBeNull();
+  });
+
+  it("normalise la VIRGULE décimale française (FILOSOFI : 19,0 ; 0,55)", () => {
+    // Sans ce support, toutes les valeurs décimales FILOSOFI tomberaient à null.
+    expect(parseNum("19,0")).toBe(19);
+    expect(parseNum("0,55")).toBeCloseTo(0.55);
+    expect(parseNum("14990")).toBe(14990); // revenu entier (€) inchangé
+    // 692.108 = population pondérée décimale INSEE (RP), PAS 692108 : aucun
+    // séparateur de milliers dans les fichiers IRIS → pas de collision.
+    expect(parseNum("692.108")).toBeCloseTo(692.108);
+    // Fail-safe : un format à >1 virgule dégrade vers null, JAMAIS un nombre faux.
+    expect(parseNum("1,234,5")).toBeNull();
   });
 });
 
@@ -221,5 +236,42 @@ describe("mapFamillesRecord (RP couples-familles-ménages)", () => {
       expect(FAMILLES_EXPECTED_HEADERS).toContain(col);
     }
     expect(FAMILLES_EXPECTED_HEADERS.length).toBe(Object.keys(FAMILLES_COLUMNS).length + 1);
+  });
+});
+
+describe("mapRevenuRecord (FILOSOFI 2021 disponible)", () => {
+  // Forme réelle : revenus entiers (€), taux de pauvreté en VIRGULE décimale.
+  const revRow: Record<string, string> = {
+    IRIS: "010040101",
+    DISP_MED21: "20350",
+    DISP_D121: "11620",
+    DISP_D921: "32060",
+    DISP_TP6021: "19,0",
+  };
+
+  it("mappe médiane + déciles + taux de pauvreté (virgule → point)", () => {
+    expect(mapRevenuRecord(revRow).row).toEqual({
+      code_iris: "010040101",
+      revenu_median: 20350,
+      revenu_d1: 11620,
+      revenu_d9: 32060,
+      taux_pauvrete: 19,
+    });
+  });
+
+  it("skippe (bad_code) si code_iris non conforme", () => {
+    expect(mapRevenuRecord({ ...revRow, IRIS: "abc" }).skip).toBe("bad_code");
+  });
+
+  it("passe une cellule supprimée (secret stat) à null", () => {
+    expect(mapRevenuRecord({ ...revRow, DISP_MED21: "" }).row?.revenu_median).toBeNull();
+  });
+
+  it("expectedHeaders couvre IRIS + toutes les colonnes revenu lues", () => {
+    expect(FILO_EXPECTED_HEADERS).toContain("IRIS");
+    for (const col of Object.values(FILO_COLUMNS)) {
+      expect(FILO_EXPECTED_HEADERS).toContain(col);
+    }
+    expect(FILO_EXPECTED_HEADERS.length).toBe(Object.keys(FILO_COLUMNS).length + 1);
   });
 });

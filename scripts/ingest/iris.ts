@@ -29,21 +29,22 @@ import {
 const execFileAsync = promisify(execFile);
 
 // Phase B — IRIS infracommunal. Cf. docs/plans/iris-infracommunal.md.
-// Cron annuel UNIFIÉ ingérant 3 blocs (même millésime géo 01/01/2024), chacun
-// dans sa table avec swap atomique INDÉPENDANT :
+// Cron annuel UNIFIÉ ingérant 4 blocs, chacun dans sa table avec swap atomique
+// INDÉPENDANT :
 //   1. Contours IGN « CONTOURS-IRIS » 2024 → table `iris` (polygones).
 //   2. RP 2022 base population (âge + CSP)   → table `iris_population`.
 //   3. RP 2022 couples-familles-ménages      → table `iris_familles`.
-// (Le revenu FILOSOFI = étape 3, ajouté ensuite comme 4e bloc.)
+//   4. FILOSOFI 2021 revenu disponible       → table `iris_revenu` (couverture
+//      PARTIELLE : communes ≥5000 hab → ~16K IRIS, LEFT JOIN obligatoire).
 //
 // CHECKSUM COMBINÉ : un seul `ingest_log.source = 'iris'` + un sha combiné des
-// 3 fichiers sources → court-circuit ssi AUCUN n'a changé. Refresh annuel donc
-// re-ingérer les 3 quand un seul change est acceptable (et 1 seule ligne
+// 4 fichiers sources → court-circuit ssi AUCUN n'a changé. Refresh annuel donc
+// re-ingérer les 4 quand un seul change est acceptable (et 1 seule ligne
 // `data_freshness`). PAS de matview FROM ces tables → pas de bombe OID ; les
 // stats sont jointes à `iris` sur code_iris au query-time (profil_iris).
 //
 // GÉOMÉTRIE (bloc 1) = ogr2ogr (reproj Lambert-93→4326 + WKT) + 7z, dépendances
-// SYSTÈME (gdal-bin + p7zip). 7z décompresse AUSSI les .zip INSEE (blocs 2-3).
+// SYSTÈME (gdal-bin + p7zip). 7z décompresse AUSSI les .zip INSEE (blocs 2-4).
 
 const IRIS_CONTOURS_URL =
   process.env.IRIS_CONTOURS_URL ??
@@ -54,6 +55,9 @@ const IRIS_POP_URL =
 const IRIS_FAMILLES_URL =
   process.env.IRIS_FAMILLES_URL ??
   "https://www.insee.fr/fr/statistiques/fichier/8647008/base-ic-couples-familles-menages-2022_csv.zip";
+const IRIS_REVENU_URL =
+  process.env.IRIS_REVENU_URL ??
+  "https://www.insee.fr/fr/statistiques/fichier/8229323/BASE_TD_FILO_IRIS_2021_DISP_CSV.zip";
 
 /** .7z métropole ~40 Mo / zips RP ~20 Mo ; seuils anti-troncature de download. */
 const MIN_CONTOURS_BYTES = 30_000_000;
@@ -64,6 +68,13 @@ const MIN_RP_ZIP_BYTES = 5_000_000;
 // mais coupe un parse partiel / un changement structurel.
 const MIN_ROWS = 40_000;
 const MAX_ROWS = 55_000;
+
+// FILOSOFI = couverture PARTIELLE (communes ≥5000 hab) → ~16K IRIS seulement
+// (16 027 mesurés), bande propre bien plus basse que les 3 autres blocs.
+const FILO_MIN_ROWS = 10_000;
+const FILO_MAX_ROWS = 25_000;
+/** zip FILOSOFI ~0,9 Mo (CSV 2,3 Mo) — bien plus petit que les zips RP. */
+const MIN_FILO_ZIP_BYTES = 300_000;
 
 /** Nom de la couche dans le GeoPackage IGN (vérifié `ogrinfo` 2026-05-28). */
 const GPKG_LAYER = "contours_iris";
@@ -113,21 +124,21 @@ async function main(): Promise<void> {
   // trompeur sur une désync de millésime inter-tables).
   const swappedBlocks: string[] = [];
   try {
-    // 1. DOWNLOAD des 3 sources + dernier checksum success, en parallèle.
-    const [contours, pop, familles, lastSha] = await Promise.all([
+    // 1. DOWNLOAD des 4 sources + dernier checksum success, en parallèle.
+    const [contours, pop, familles, revenu, lastSha] = await Promise.all([
       downloadCsv(IRIS_CONTOURS_URL, "contours-iris.7z"),
       downloadCsv(IRIS_POP_URL, "iris-pop.zip"),
       downloadCsv(IRIS_FAMILLES_URL, "iris-familles.zip"),
+      downloadCsv(IRIS_REVENU_URL, "iris-revenu.zip"),
       getLastSuccessChecksum("iris"),
     ]);
 
-    // Checksum COMBINÉ ordonné (contours|pop|familles) : court-circuit ssi les
-    // 3 sont byte-identiques au dernier success. L'ajout d'un 4e bloc (FILOSOFI)
-    // changera mécaniquement ce sha → 1 re-run, attendu.
+    // Checksum COMBINÉ ordonné (contours|pop|familles|revenu) : court-circuit ssi
+    // les 4 sont byte-identiques au dernier success.
     const combinedSha = computeSha256Buffer(
-      Buffer.from(`${contours.sha256}|${pop.sha256}|${familles.sha256}`),
+      Buffer.from(`${contours.sha256}|${pop.sha256}|${familles.sha256}|${revenu.sha256}`),
     );
-    log.csv_size_bytes = contours.sizeBytes + pop.sizeBytes + familles.sizeBytes;
+    log.csv_size_bytes = contours.sizeBytes + pop.sizeBytes + familles.sizeBytes + revenu.sizeBytes;
     log.csv_sha256 = combinedSha;
 
     if (await shortCircuitIfSameChecksum(log, lastSha, combinedSha, "iris", force)) return;
@@ -136,6 +147,7 @@ async function main(): Promise<void> {
     assertMinSize(contours.sizeBytes, MIN_CONTOURS_BYTES, "contours .7z");
     assertMinSize(pop.sizeBytes, MIN_RP_ZIP_BYTES, "RP population .zip");
     assertMinSize(familles.sizeBytes, MIN_RP_ZIP_BYTES, "RP familles .zip");
+    assertMinSize(revenu.sizeBytes, MIN_FILO_ZIP_BYTES, "FILOSOFI revenu .zip");
 
     workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "iris-ingest-"));
     const supabase = getUntypedServiceClient("iris");
@@ -152,6 +164,8 @@ async function main(): Promise<void> {
       stagingTable: "iris_population_staging",
       prodTable: "iris_population",
       expectedHeaders: POP_EXPECTED_HEADERS,
+      minRows: MIN_ROWS,
+      maxRows: MAX_ROWS,
       map: mapPopRecord,
     });
     swappedBlocks.push("iris_population");
@@ -163,9 +177,24 @@ async function main(): Promise<void> {
       stagingTable: "iris_familles_staging",
       prodTable: "iris_familles",
       expectedHeaders: FAMILLES_EXPECTED_HEADERS,
+      minRows: MIN_ROWS,
+      maxRows: MAX_ROWS,
       map: mapFamillesRecord,
     });
     swappedBlocks.push("iris_familles");
+
+    // ── BLOC 4 — FILOSOFI 2021 revenu → iris_revenu (couverture PARTIELLE) ────
+    const revenuCount = await ingestStatsCsv(revenu.filePath, workDir, supabase, {
+      block: "revenu",
+      stagingRpc: "ingest_create_iris_revenu_staging",
+      stagingTable: "iris_revenu_staging",
+      prodTable: "iris_revenu",
+      expectedHeaders: FILO_EXPECTED_HEADERS,
+      minRows: FILO_MIN_ROWS,
+      maxRows: FILO_MAX_ROWS,
+      map: mapRevenuRecord,
+    });
+    swappedBlocks.push("iris_revenu");
 
     // CANARY post-swap (non-bloquant) — cible la table `iris` (contours).
     await runAndRecordCanary(supabase, "iris", log, "iris");
@@ -175,7 +204,7 @@ async function main(): Promise<void> {
     await writeIngestLogSuccessSafe(log, "iris");
     const elapsedSec = (Date.now() - new Date(startedAt).getTime()) / 1000;
     console.log(
-      `[iris] success: contours=${contoursCount} pop=${popCount} familles=${famCount} en ${elapsedSec}s`,
+      `[iris] success: contours=${contoursCount} pop=${popCount} familles=${famCount} revenu=${revenuCount} en ${elapsedSec}s`,
     );
   } catch (err) {
     console.error("[iris] ingestion failed:", err);
@@ -194,7 +223,7 @@ async function main(): Promise<void> {
     // Le prochain run répare tout (checksum combiné changé → ré-ingestion).
     log.error_message =
       swappedBlocks.length > 0
-        ? `${ingestErr.message} — ATTENTION ${swappedBlocks.length} bloc(s) DÉJÀ swappé(s) en prod [${swappedBlocks.join(", ")}] : désync de millésime possible jusqu'au prochain run (qui réingère les 3 via checksum combiné)`
+        ? `${ingestErr.message} — ATTENTION ${swappedBlocks.length} bloc(s) DÉJÀ swappé(s) en prod [${swappedBlocks.join(", ")}] : désync de millésime possible jusqu'au prochain run (qui réingère TOUS les blocs via le checksum combiné)`
         : ingestErr.message;
     log.finished_at = new Date().toISOString();
     await writeIngestLogFailureFallback(log, "iris");
@@ -243,7 +272,7 @@ async function ingestContours(
   await waitForSchemaReload();
 
   const stats = await streamContoursToStaging(csvPath, supabase);
-  assertRowBand(stats.inserted, "contours");
+  assertRowBand(stats.inserted, "contours", MIN_ROWS, MAX_ROWS);
 
   // Anomalies de parse — DEUX causes à seuils/diagnostics SÉPARÉS (ne jamais
   // fusionner : un faux « column shift » sur une géométrie vide égarerait l'ops).
@@ -414,8 +443,18 @@ const FAMILLES_COLUMNS = {
   familles_monoparentales: "C22_MENFAMMONO",
 } as const;
 
+// FILOSOFI 2021 « disponible » (BASE_TD_FILO_IRIS_2021_DISP). Revenus en € (entiers),
+// taux de pauvreté en % (décimale VIRGULE — cf. parseNum).
+const FILO_COLUMNS = {
+  revenu_median: "DISP_MED21",
+  revenu_d1: "DISP_D121",
+  revenu_d9: "DISP_D921",
+  taux_pauvrete: "DISP_TP6021",
+} as const;
+
 type IrisPopulationRow = { code_iris: string } & Record<keyof typeof POP_COLUMNS, number | null>;
 type IrisFamillesRow = { code_iris: string } & Record<keyof typeof FAMILLES_COLUMNS, number | null>;
+type IrisRevenuRow = { code_iris: string } & Record<keyof typeof FILO_COLUMNS, number | null>;
 
 /** Discriminé (comme `ParsedContour`) : row mappée OU skip COMPTÉ (jamais avalé). */
 type StatsParsed<T> = { row: T; skip?: never } | { row?: never; skip: "bad_code" };
@@ -423,6 +462,7 @@ type StatsParsed<T> = { row: T; skip?: never } | { row?: never; skip: "bad_code"
 /** Header attendu par bloc = IRIS + TOUTES les colonnes lues (source = COLUMN_MAP). */
 const POP_EXPECTED_HEADERS = ["IRIS", ...Object.values(POP_COLUMNS)];
 const FAMILLES_EXPECTED_HEADERS = ["IRIS", ...Object.values(FAMILLES_COLUMNS)];
+const FILO_EXPECTED_HEADERS = ["IRIS", ...Object.values(FILO_COLUMNS)];
 
 function parseNumericColumns<F extends string>(
   record: Record<string, string>,
@@ -453,14 +493,24 @@ function mapFamillesRecord(record: Record<string, string>): StatsParsed<IrisFami
   return mapStatsRecord(record, FAMILLES_COLUMNS);
 }
 
+function mapRevenuRecord(record: Record<string, string>): StatsParsed<IrisRevenuRow> {
+  return mapStatsRecord(record, FILO_COLUMNS);
+}
+
 /**
- * Parse un compte INSEE → number | null. Vide = null (cellule légitimement
- * absente). Une valeur NON vide mais non numérique reste null MAIS est rare sur
- * une source RP propre ; un column-shift massif est attrapé en amont par la
- * validation de header (preValidateFile) et la bande de lignes.
+ * Parse une valeur numérique INSEE → number | null. Vide / non numérique = null
+ * (cellule légitimement absente — secret statistique). Gère le séparateur
+ * décimal VIRGULE : le RP utilise le point (692.108) MAIS FILOSOFI utilise la
+ * virgule française (19,0 ; 0,55) → on normalise `,`→`.` (les fichiers INSEE
+ * IRIS n'ont jamais de séparateur de milliers, donc pas de collision). Sans ça,
+ * toutes les valeurs décimales FILOSOFI tomberaient à null SILENCIEUSEMENT.
+ * Un column-shift massif reste attrapé en amont par preValidateFile (header) +
+ * la bande de lignes ; un code_iris non conforme par le compteur de skip.
  */
 function parseNum(raw: string | undefined): number | null {
-  const v = (raw ?? "").trim();
+  // replaceAll (intent explicite « , = décimale ») : une valeur à >1 virgule
+  // donnerait de toute façon NaN→null (dégrade vers null, JAMAIS un nombre faux).
+  const v = (raw ?? "").trim().replaceAll(",", ".");
   if (v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
@@ -472,6 +522,8 @@ interface StatsCsvConfig<T> {
   stagingTable: string;
   prodTable: string;
   expectedHeaders: string[];
+  minRows: number;
+  maxRows: number;
   map: (record: Record<string, string>) => StatsParsed<T>;
 }
 
@@ -514,7 +566,7 @@ async function ingestStatsCsv<T extends object>(
   await waitForSchemaReload();
 
   const { inserted, skippedBadCode } = await streamStatsToStaging(csvPath, supabase, cfg);
-  assertRowBand(inserted, cfg.block);
+  assertRowBand(inserted, cfg.block, cfg.minRows, cfg.maxRows);
 
   // Skips COMPTÉS + seuillés (parité avec le bloc contours) : un column-shift
   // PARTIEL sur la colonne `IRIS` (quelques milliers de lignes non conformes)
@@ -586,17 +638,17 @@ async function streamStatsToStaging<T extends object>(
 
 // ── Helpers partagés ─────────────────────────────────────────────────────────
 
-function assertRowBand(inserted: number, block: string): void {
-  if (inserted < MIN_ROWS) {
+function assertRowBand(inserted: number, block: string, min: number, max: number): void {
+  if (inserted < min) {
     throw new IngestError(
       "validate",
-      `[${block}] Row count ${inserted} below minimum ${MIN_ROWS} — suspected partial parse (truncated CSV or conversion failure)`,
+      `[${block}] Row count ${inserted} below minimum ${min} — suspected partial parse (truncated CSV or conversion failure)`,
     );
   }
-  if (inserted > MAX_ROWS) {
+  if (inserted > max) {
     throw new IngestError(
       "validate",
-      `[${block}] Row count ${inserted} above maximum ${MAX_ROWS} — suspected upstream format change`,
+      `[${block}] Row count ${inserted} above maximum ${max} — suspected upstream format change`,
     );
   }
 }
@@ -687,12 +739,15 @@ export const __TESTING__ = {
   mapContourRecord,
   mapPopRecord,
   mapFamillesRecord,
+  mapRevenuRecord,
   parseNum,
   CODE_IRIS_RE,
   POP_COLUMNS,
   FAMILLES_COLUMNS,
+  FILO_COLUMNS,
   POP_EXPECTED_HEADERS,
   FAMILLES_EXPECTED_HEADERS,
+  FILO_EXPECTED_HEADERS,
   GEOM_BATCH_MAX_ROWS,
   GEOM_BATCH_MAX_BYTES,
   MIN_ROWS,
