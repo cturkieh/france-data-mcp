@@ -116,6 +116,11 @@ export function fetchIrisInRadiusOfCode(
   return callIrisRowsRpc("iris_in_radius_of_code", { p_code_iris: codeIris, p_rayon_m: rayonM });
 }
 
+/** Tous les IRIS d'une commune (par code INSEE 5 car.). Liste VIDE = hors couverture (DOM). */
+export function fetchIrisByCommune(codeCommune: string): Promise<IrisProfilRow[]> {
+  return callIrisRowsRpc("iris_by_commune", { p_code_commune: codeCommune });
+}
+
 /** Population (RP 2022) d'un IRIS, exposée par le tool `population` (granularité 9 car.). */
 export interface IrisPopulationLookup {
   codeIris: string;

@@ -155,12 +155,29 @@ export function buildIletProfile(row: IrisProfilRow): IletProfile {
   };
 }
 
+/** Agrégat démographique brut d'un ensemble d'IRIS (cœur partagé bassin/commune). */
+export interface IrisDemographics {
+  population: number;
+  nb_iris: number;
+  age: AgeParts;
+  csp: CspParts;
+  familles_avec_enfants: number;
+  /** R1 — PROXY (moyenne pondérée des médianes des îlots couverts). */
+  revenu_median_pondere: number | null;
+  couverture: {
+    revenu_pct_population: number;
+    iris_revenu_manquants: number;
+  };
+}
+
 /**
- * Agrégat de bassin (R1 + R3 + couverture). PURE — les lignes en entrée sont
- * DÉJÀ sélectionnées par centroïde (R2) côté RPC. Σ sur comptes BRUTS (décimaux
- * INSEE conservés pour la précision ; population arrondie en sortie).
+ * Cœur d'agrégation R1+R3+couverture sur un ENSEMBLE d'IRIS. PURE. Partagé par
+ * `aggregateBassin` (bassin par centroïde, R2) ET le bloc « demande » commune du
+ * panorama (tous les IRIS d'une commune) → une seule implémentation des règles,
+ * jamais de ré-agrégation dupliquée (contrat spec §4). Σ sur comptes BRUTS
+ * (décimaux INSEE conservés ; population arrondie en sortie).
  */
-export function aggregateBassin(rows: IrisProfilRow[], rayonKm: number): BassinProfile {
+export function aggregateIrisDemographics(rows: IrisProfilRow[]): IrisDemographics {
   let pop = 0;
   let pop65 = 0;
   let pop75 = 0;
@@ -197,9 +214,11 @@ export function aggregateBassin(rows: IrisProfilRow[], rayonKm: number): BassinP
     csp.retraites += n(r.csp_retraites);
     csp.autres += n(r.csp_autres);
     if (r.revenu_median != null && r.pop_total != null) {
-      // Pondération par la population de l'îlot (proxy R1).
-      revNum += r.revenu_median * r.pop_total;
-      popCouverte += r.pop_total;
+      // Pondération par la population de l'îlot (proxy R1). `n()` finite-safe ICI
+      // AUSSI (pas seulement les Σ comptes) : un NUMERIC corrompu en string non
+      // numérique empoisonnerait sinon revenu_median_pondere=NaN servi en sortie.
+      revNum += n(r.revenu_median) * n(r.pop_total);
+      popCouverte += n(r.pop_total);
     } else {
       // Revenu absent OU non pondérable (pop_total null) → compté MANQUANT, jamais
       // avalé silencieusement (un îlot couvert mais sans pop, quasi inexistant
@@ -209,14 +228,9 @@ export function aggregateBassin(rows: IrisProfilRow[], rayonKm: number): BassinP
   }
 
   return {
-    mode: "bassin",
-    rayon_km: rayonKm,
-    nb_iris_agreges: rows.length,
-    population_bassin: Math.round(pop),
-    age: {
-      part_65_plus: part(pop65, pop),
-      part_75_plus: part(pop75, pop),
-    },
+    population: Math.round(pop),
+    nb_iris: rows.length,
+    age: { part_65_plus: part(pop65, pop), part_75_plus: part(pop75, pop) },
     csp: cspParts(csp, pop15p),
     familles_avec_enfants: Math.round(famEnf),
     revenu_median_pondere: popCouverte > 0 ? Math.round(revNum / popCouverte) : null,
@@ -224,6 +238,25 @@ export function aggregateBassin(rows: IrisProfilRow[], rayonKm: number): BassinP
       revenu_pct_population: part(popCouverte, pop) ?? 0,
       iris_revenu_manquants: irisRevenuManquants,
     },
+  };
+}
+
+/**
+ * Agrégat de BASSIN (R2 : lignes déjà sélectionnées par centroïde côté RPC).
+ * Wrapper du cœur `aggregateIrisDemographics` + cadre bassin (mode, rayon).
+ */
+export function aggregateBassin(rows: IrisProfilRow[], rayonKm: number): BassinProfile {
+  const d = aggregateIrisDemographics(rows);
+  return {
+    mode: "bassin",
+    rayon_km: rayonKm,
+    nb_iris_agreges: d.nb_iris,
+    population_bassin: d.population,
+    age: d.age,
+    csp: d.csp,
+    familles_avec_enfants: d.familles_avec_enfants,
+    revenu_median_pondere: d.revenu_median_pondere,
+    couverture: d.couverture,
     source: RP_SOURCE,
   };
 }
