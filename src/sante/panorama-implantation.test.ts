@@ -210,3 +210,41 @@ describe("panorama_implantation_complet — ancrage (rejet total)", () => {
     await expect(panoramaImplantationComplet({})).rejects.toThrow(RangeError);
   });
 });
+
+describe("panorama_implantation_complet — piège PLM (spec §4.5)", () => {
+  it("arrondissement PLM (Paris 1er) → plm_mode=true + territoire calculé au département", async () => {
+    mockAllSectionsOk();
+    vi.spyOn(geocodeMod, "geocode").mockResolvedValue(
+      geocodeOk({ point: { lat: 48.86, lon: 2.34 }, codeCommune: "75101", commune: "Paris 1er" }),
+    );
+    const terrSpy = vi.spyOn(panoramaMod, "panoramaSanteTerritoire").mockResolvedValue({
+      codeInsee: "75",
+      niveau: "commune",
+      niveauEtablissements: "departement",
+      densitesProfessionnels: {} as never,
+      etablissementsParFamille: [],
+      demande: null,
+      sources: {} as never,
+    });
+    const r = await panoramaImplantationComplet({ adresse: "Paris 1er" });
+    expect(r.meta.plm_mode).toBe(true);
+    // territoire/densité au département (75), pas l'arrondissement (75101) → sinon RangeError RPC.
+    expect(terrSpy).toHaveBeenCalledWith({ codeInsee: "75" });
+  });
+
+  it("commune non-PLM → plm_mode=false + territoire au code INSEE commune", async () => {
+    mockAllSectionsOk();
+    const terrSpy = vi.spyOn(panoramaMod, "panoramaSanteTerritoire").mockResolvedValue({
+      codeInsee: "59350",
+      niveau: "commune",
+      niveauEtablissements: "departement",
+      densitesProfessionnels: {} as never,
+      etablissementsParFamille: [],
+      demande: null,
+      sources: {} as never,
+    });
+    const r = await panoramaImplantationComplet({ adresse: "Lille" });
+    expect(r.meta.plm_mode).toBe(false);
+    expect(terrSpy).toHaveBeenCalledWith({ codeInsee: "59350" });
+  });
+});
