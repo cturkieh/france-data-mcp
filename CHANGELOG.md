@@ -4,6 +4,59 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.23.0] — 2026-05-28 (Panoramas composites — étude d'implantation en 1 appel, 32 → 34)
+
+Ajoute **2 outils composites** taillés pour l'étude d'implantation d'un labo par
+GEO Intel. Objectif : collapser une étude qui enchaînait ~15 appels MCP **en
+série** via le connecteur Anthropic (~5 s d'overhead chacun → timeout 300 s) à
+**~2 appels**. La composition se fait **côté serveur** (sous-requêtes parallèles
+en direct sur la base, sans connecteur) — c'est le seul levier qui supprime le
+bottleneck. Release **additive** : aucun outil supprimé ni renommé, zéro breaking.
+
+### Added
+
+- **Tool `panorama_implantation_complet(adresse | point, rayon_km=5)`** (33e tool) —
+  géocode la cible puis agrège **en parallèle** 7 sections hétérogènes :
+  `territoire` (densités PS commune vs national, réutilise `panorama_sante_territoire`),
+  `demande` (profil démo du **bassin**/rayon, réutilise `profil_iris`),
+  `concurrents` (labos FINESS), `pourvoyeurs` (MCO/EHPAD/SSR/dialyse),
+  `prescripteurs` (médecins RPPS + IDEL Ameli), `cds`, `referentiels` (couverture
+  FINESS↔SIRENE). Renvoie des **résumés** (count/top-N), jamais de listes brutes.
+- **Tool `enrichir_concurrents(finess[], max=3)`** (34e tool) — enquête le top 3
+  concurrents : statut + équipe + historique (`inspect_site`), signal M&A
+  (`compare_raison_sociale_finess_vs_rpps`), groupe parent (`entreprise_by_siren`).
+  Cap dur `max=3` (`inspect_site` ~7 K tokens/appel).
+
+### Doctrine de dégradation (divergence assumée vs `panorama_sante_territoire`)
+
+- **Échec d'ancrage** (géocodage KO / `confidence_low` / code INSEE indérivable)
+  → **rejet total** `-32602` : rien n'est calculable sans le point.
+- **Échec d'une section** → drapeau `couverture` (`"ok"` | `"partiel:<raison>"` |
+  `"indisponible:<raison>"`) + `console.warn` structuré, **le reste est renvoyé**.
+  Jamais silencieux : le LLM voit le trou et le comble via l'outil unitaire.
+  (Justifié : 7 sections hétérogènes sur 5 sources ≠ 4 densités homogènes du
+  petit panorama qui, lui, rejette tout.)
+
+### Pièges internalisés (le LLM n'a plus à y penser)
+
+- **PLM** (Paris/Lyon/Marseille) : territoire/densité basculés sur le département
+  (`meta.plm_mode=true`), sinon `RangeError` côté RPC.
+- **`geo_precision`** : `prescripteurs` expose `precis_count` (PS à l'adresse, pas
+  au centroïde commune) ; `cds` sans distance individuelle (centroïde commune).
+- **Ameli ≠ ANS/RPPS** : nomenclatures cloisonnées dans le code (IDEL=Ameli `24`,
+  médecins=RPPS `10`), jamais croisées.
+- **Couverture FILOSOFI** : `demande` flaggée `partiel:revenu_pct_population=…`
+  quand le revenu ne couvre pas 100 % du bassin.
+
+### Notes
+
+- **Aucune migration DB** : réutilise les tables existantes + IRIS (0.22).
+  Modules `src/sante/panorama-implantation.ts` + `src/sante/enrichir-concurrents.ts`.
+- Tests : suite complète verte (TDD — ancrage rejet-total, dégradation par
+  section, parallélisme `Promise.all`, PLM, cap `enrichir`, intégration MCP).
+- Sources : IGN (géocodage), FINESS DREES, RPPS/ANS, Ameli/CNAM, INSEE/FILOSOFI,
+  SIRENE/DINUM.
+
 ## [0.22.0] — 2026-05-28 (IRIS infracommunal — démographie au quartier, 31 → 32)
 
 Ajoute la maille **IRIS** (Îlots Regroupés pour l'Information Statistique, le
