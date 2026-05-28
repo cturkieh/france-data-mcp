@@ -43,7 +43,7 @@ describe("assertKnownAmeliSpecialiteCodes (garde-fou nomenclature Ameli — jume
     await expect(assertKnownAmeliSpecialiteCodes(["SM04"])).rejects.toBeInstanceOf(RangeError);
   });
 
-  it("le message liste le(s) code(s) inconnu(s) ET cross-pointe lister_specialites_ameli (Niveau 2)", async () => {
+  it("le message liste le(s) code(s) inconnu(s) ET cross-pointe lister_nomenclature (Niveau 2)", async () => {
     mockRpc.mockResolvedValueOnce({
       data: [{ unknown_code: "SM04" }, { unknown_code: "999" }],
       error: null,
@@ -52,7 +52,7 @@ describe("assertKnownAmeliSpecialiteCodes (garde-fou nomenclature Ameli — jume
     expect(err).toBeInstanceOf(RangeError);
     expect(err.message).toContain("'SM04'");
     expect(err.message).toContain("'999'");
-    expect(err.message).toContain("lister_specialites_ameli");
+    expect(err.message).toContain("lister_nomenclature");
     expect(err.message).toMatch(/ANS|profession_code|savoir_faire/);
   });
 

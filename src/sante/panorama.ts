@@ -10,7 +10,7 @@
  * aucune interprétation métier (pas de "désert médical" auto-qualifié).
  *
  * Périmètre V0.9 : niveau commune via `codeInsee` uniquement. Le niveau dept
- * est déjà couvert par `densite_professionnels_sante` (compare_national) + les
+ * est déjà couvert par `densite_sante` (cible=professionnels, compare_national) + les
  * tools existants ; ajouter une variante dept ici dupliquerait sans valeur
  * ajoutée immédiate. Étendre en V0.9.1 si la demande émerge.
  */

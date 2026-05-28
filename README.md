@@ -61,7 +61,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 ---
 
-## Outils MCP (35 tools)
+## Outils MCP (31 tools)
 
 ### 🗺️ Territoire (4)
 `autocomplete_commune` · `get_commune_by_code` · `geocode_adresse` · `reverse_geocode`
@@ -74,20 +74,23 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 > 24 familles couvrant ~92 % du volume. Source DREES rafraîchie bimestriellement.
 
-### 👨‍⚕️ Professionnels libéraux Ameli (4)
-`professionnels_in_radius` · `professionnels_par_specialite_dept` · `lister_specialites_ameli` · `lister_types_ps_ameli`
+### 👨‍⚕️ Professionnels libéraux Ameli (2)
+`professionnels_in_radius` · `professionnels_par_specialite_dept`
 
-> Libéraux **conventionnés uniquement** (~462 K).
+> Libéraux **conventionnés uniquement** (~462 K). Découverte des codes spécialité/type_ps : `lister_nomenclature` (voir ci-dessous).
 
 ### 🩺 Tous les PS — RPPS / Annuaire Santé ANS (5)
 `professionnels_rpps_in_radius` · `professionnels_rpps_par_dept` · `rpps_dans_etablissement` · `rpps_search_by_name` (fuzzy) · `professionnel_by_rpps` (+ fallback FHIR ANS)
 
 > ~2,2 M PS actifs (libéraux + salariés privés + hospitaliers contractuels + agents publics). Par défaut : Civils uniquement.
 
-### 📊 Démographie & densités — INSEE Melodi (5)
+### 📊 Démographie & densités — INSEE Melodi (2)
 Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DREES (ratios pour 100 k hab.).
 
-`population_par_commune` · `population_par_departement` · `densite_professionnels_sante` (+ comparaison nationale matview <50 ms) · `densite_etablissements_sante` (labos, pharmacies, EHPAD, hôpitaux) · `lister_specialites_medicales` (découverte des codes savoir_faire RPPS)
+`population` (commune ou département — granularité auto-détectée par la longueur du code) · `densite_sante` (`cible: professionnels` RPPS **ou** `etablissements` FINESS — labos, pharmacies, EHPAD, hôpitaux ; + comparaison nationale matview <50 ms)
+
+### 🔎 Découverte des nomenclatures (1)
+`lister_nomenclature` (`referentiel: ameli_specialites | ameli_types_ps | rpps_savoir_faire`) — codes spécialité/type_ps Ameli **et** savoir_faire RPPS dans un seul tool (remplace les 3 anciens `lister_*`).
 
 ### 🧭 Agrégateur santé territoire (1) — V0.9
 `panorama_sante_territoire` — 1 call pour population + densités médecins/infirmiers/pharmaciens vs national + count FINESS par famille (labo, pharmacie, EHPAD, MCO, MSP/CPTS). Granularité explicite (`niveau: commune`, `niveauEtablissements: departement | indisponible`).
@@ -112,7 +115,7 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.20.2 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.21.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 

@@ -6,7 +6,7 @@ import { RPPS_SAVOIR_FAIRE } from "./rpps-types.js";
  * Garde-fou anti-drift sur les codes savoir_faire ANS canoniques.
  *
  * Mapping vérifié sur le dump prod le 2026-05-15 via le tool MCP
- * `lister_specialites_medicales` (profession_code='10') :
+ * `lister_nomenclature` (referentiel: rpps_savoir_faire, profession_code='10') :
  *   - SM02 = "Anesthesie-réanimation"            (23 586 PS)
  *   - SM04 = "Cardiologie et maladies vasculaires" (18 002 PS)
  *   - SM15 = "Dermatologie et vénéréologie"        (7 594 PS)

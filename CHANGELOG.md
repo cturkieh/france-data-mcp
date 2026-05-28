@@ -4,6 +4,51 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.21.0] — 2026-05-28 (rationalisation des tools — 3 fusions, 35 → 31)
+
+### ⚠️ BREAKING — 5 tools supprimés, remplacés par 3 tools paramétrés
+
+Trop de tools dégrade la sélection du bon outil par le LLM (collision de ranking
+du `tool_search`, prouvée en V0.20.2 sur `lister_specialites_ameli`). Avant
+d'ajouter l'IRIS (0.22.0), on consolide. La branche 0.x autorise les breaking
+changes mineurs documentés. **Pas d'alias de compat** : les anciens noms
+renvoient désormais « tool not found ». Couche lib (`src/`) inchangée — refactor
+localisé aux définitions de tools + boundary.
+
+Table de migration (à répercuter côté consommateurs, ex. GEO Intel) :
+
+| Ancien appel | Nouveau appel |
+|---|---|
+| `lister_specialites_ameli({limit})` | `lister_nomenclature({referentiel:"ameli_specialites", limit})` |
+| `lister_types_ps_ameli({include_specialites})` | `lister_nomenclature({referentiel:"ameli_types_ps", include_specialites})` |
+| `lister_specialites_medicales({profession_code})` | `lister_nomenclature({referentiel:"rpps_savoir_faire", profession_code})` |
+| `population_par_commune({code})` | `population({code})` (granularité auto-détectée) |
+| `population_par_departement({code})` | `population({code})` |
+| `densite_professionnels_sante({code_dept, savoir_faire_code})` | `densite_sante({cible:"professionnels", code_dept, savoir_faire_code})` |
+| `densite_etablissements_sante({code_dept, famille})` | `densite_sante({cible:"etablissements", code_dept, famille})` |
+
+### Changed — les 3 fusions
+
+- **`lister_nomenclature(referentiel)`** remplace les 3 tools de découverte
+  (`ameli_specialites` / `ameli_types_ps` / `rpps_savoir_faire`). Élimine
+  **structurellement** la collision de ranking (plus de jumeaux).
+- **`population(code)`** remplace les 2 tools population — granularité
+  auto-détectée par la longueur du `code` (5 = commune, 2-3 = département ;
+  prépare la granularité IRIS 9 car. en 0.22.0).
+- **`densite_sante(cible)`** remplace les 2 tools densité (`professionnels` /
+  `etablissements`). Validation croisée : un filtre du mauvais référentiel
+  (`famille` avec cible=professionnels, ou `profession_code`/`savoir_faire_code`/
+  `mode_exercice_codes` avec cible=etablissements) → `RangeError` explicite
+  (doctrine anti-échec-silencieux, plutôt qu'un filtre vide trompeur).
+
+**Net : 35 → 31 tools.** Famille `*_in_radius` (6 tools) volontairement NON
+fusionnée (filtres/sorties hétérogènes → un méga-tool conditionnel perdrait en
+lisibilité LLM). Nouveau validateur boundary partagé `requireEnumParam`
+(`api/_lib/args.ts`) pour les paramètres discriminants `referentiel` / `cible`.
+
+Cadrage : `docs/plans/rationalisation-tools-mcp.{md,html}`. Phase A d'un chantier
+en 2 temps (Phase B = IRIS infracommunal, 0.22.0).
+
 ## [0.20.2] — 2026-05-28 (anti-confusion nomenclatures spécialité)
 
 ### Changed — différenciation des descriptions de tools jumeaux (anti-collision tool_search)

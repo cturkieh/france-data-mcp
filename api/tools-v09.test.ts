@@ -6,7 +6,7 @@ import * as panoramaMod from "../src/sante/panorama.js";
 import * as territoire from "../src/territoire/index.js";
 import { findTool } from "./tools.js";
 
-// Tests V0.9 : alias paramètres, code_insee dans densite_professionnels_sante,
+// Tests V0.9 : alias paramètres, code_insee dans densite_sante (professionnels),
 // nouveau tool panorama_sante_territoire, messages d'erreur suggestifs.
 
 afterEach(() => {
@@ -93,8 +93,8 @@ describe("UX V0.9 — alias get_commune_by_code, population_par_*", () => {
     expect(spy).toHaveBeenCalledWith("59009");
   });
 
-  it("population_par_commune accepte codeInsee/insee → code", async () => {
-    const tool = findTool("population_par_commune");
+  it("population (granularité commune) accepte codeInsee/insee → code", async () => {
+    const tool = findTool("population");
     const spy = vi.spyOn(territoire, "getPopulationByCommune").mockResolvedValue({
       found: false,
       lookupStatus: "not_found",
@@ -108,8 +108,8 @@ describe("UX V0.9 — alias get_commune_by_code, population_par_*", () => {
     expect(spy).toHaveBeenLastCalledWith("75056");
   });
 
-  it("population_par_departement accepte dept/departement/code_dept → code", async () => {
-    const tool = findTool("population_par_departement");
+  it("population (granularité département) accepte dept/departement/code_dept → code", async () => {
+    const tool = findTool("population");
     const spy = vi.spyOn(territoire, "getPopulationByDept").mockResolvedValue({
       found: false,
       lookupStatus: "not_found",
@@ -126,7 +126,7 @@ describe("UX V0.9 — alias get_commune_by_code, population_par_*", () => {
   });
 
   it("messages d'erreur explicites (Reçu vs Attendu vs Exemple)", async () => {
-    const tool = findTool("population_par_commune");
+    const tool = findTool("population");
     vi.spyOn(territoire, "getPopulationByCommune").mockResolvedValue({
       found: false,
       lookupStatus: "not_found",
@@ -139,53 +139,55 @@ describe("UX V0.9 — alias get_commune_by_code, population_par_*", () => {
   });
 });
 
-describe("UX V0.9 — densite_professionnels_sante XOR code_dept/code_insee", () => {
+describe("UX V0.9 — densite_sante (professionnels) XOR code_dept/code_insee", () => {
   it("alias dept/departement → code_dept", async () => {
-    const tool = findTool("densite_professionnels_sante");
+    const tool = findTool("densite_sante");
     const spy = vi.spyOn(densiteMod, "densiteProfessionnelsSante").mockResolvedValue({
       // structure minimale, on ne vérifie que l'appel
     } as unknown as Awaited<ReturnType<typeof densiteMod.densiteProfessionnelsSante>>);
 
-    await tool?.handler({ dept: "59" });
+    await tool?.handler({ cible: "professionnels", dept: "59" });
     expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ departement: "59" }));
 
-    await tool?.handler({ departement: "75" });
+    await tool?.handler({ cible: "professionnels", departement: "75" });
     expect(spy).toHaveBeenLastCalledWith(expect.objectContaining({ departement: "75" }));
   });
 
   it("V0.9 — code_insee fourni → densité au niveau commune", async () => {
-    const tool = findTool("densite_professionnels_sante");
+    const tool = findTool("densite_sante");
     const spy = vi
       .spyOn(densiteMod, "densiteProfessionnelsSante")
       .mockResolvedValue(
         {} as unknown as Awaited<ReturnType<typeof densiteMod.densiteProfessionnelsSante>>,
       );
 
-    await tool?.handler({ code_insee: "59009" });
+    await tool?.handler({ cible: "professionnels", code_insee: "59009" });
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ codeInsee: "59009" }));
     const call = spy.mock.calls[0]?.[0];
     expect(call?.departement).toBeUndefined();
   });
 
   it("XOR violation : code_dept + code_insee → RangeError explicite (V0.19 — throw au boundary)", async () => {
-    const tool = findTool("densite_professionnels_sante");
+    const tool = findTool("densite_sante");
     // V0.19 : le XOR est désormais throw au boundary (`applyCommuneResolver`
     // branch 2) AVANT l'appel lib, avec le wording MCP ("code_insee"/"departement")
     // au lieu du wording TS lib historique. `resolveZone` reste en defense-in-depth.
-    await expect(tool?.handler({ code_dept: "59", code_insee: "59009" })).rejects.toThrow(
-      /redondants.*code_insee.*departement|SOIT.*code_insee.*SOIT.*departement/i,
-    );
+    await expect(
+      tool?.handler({ cible: "professionnels", code_dept: "59", code_insee: "59009" }),
+    ).rejects.toThrow(/redondants.*code_insee.*departement|SOIT.*code_insee.*SOIT.*departement/i);
   });
 
   it("aucun des deux → suggestion explicite", async () => {
-    const tool = findTool("densite_professionnels_sante");
-    await expect(tool?.handler({})).rejects.toThrow(/Attendu: "code_dept" ou "code_insee"/);
+    const tool = findTool("densite_sante");
+    await expect(tool?.handler({ cible: "professionnels" })).rejects.toThrow(
+      /Attendu: "code_dept" ou "code_insee"/,
+    );
   });
 });
 
-describe("UX V0.9 — densite_etablissements_sante alias", () => {
+describe("UX V0.9 — densite_sante (etablissements) alias", () => {
   it("alias dept → code_dept", async () => {
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     const spy = vi
       .spyOn(densiteMod, "densiteEtablissementsSante")
       .mockResolvedValue({ zone: { population: 1 } } as unknown as Awaited<
@@ -193,7 +195,7 @@ describe("UX V0.9 — densite_etablissements_sante alias", () => {
       >);
     mockHostedActivitiesInZone(); // Phase 2 : labo + dept → hosted appelé
 
-    await tool?.handler({ dept: "59", famille: "labo" });
+    await tool?.handler({ cible: "etablissements", dept: "59", famille: "labo" });
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ departement: "59" }));
   });
 });

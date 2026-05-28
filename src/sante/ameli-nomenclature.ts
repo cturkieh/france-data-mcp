@@ -17,7 +17,7 @@
  *   2. `AMELI_SPECIALITES_FREQUENTES` — quelques codes spécialité courants
  *      pour prospection (MG, IDE, kiné, podologue, sage-femme, dentiste…),
  *      à utiliser dans les exemples de doc tool. Pas exhaustif — le tool
- *      `lister_specialites_ameli()` donne la nomenclature complète live.
+ *      `lister_nomenclature(referentiel: ameli_specialites)` donne la nomenclature complète live.
  *
  * Périmètre stocké en base : `type_ps_code ∈ {1, 2, 5}`. Les codes 3 et 4
  * sont filtrés à l'ingestion (cf. `scripts/ingest/ameli.ts`, règle de
@@ -134,7 +134,7 @@ export const AMELI_TYPE_PS_QUERYABLE: readonly string[] = Object.values(AMELI_TY
 /**
  * Spécialités fréquentes en prospection commerciale santé. Pas exhaustif —
  * la nomenclature complète comporte 88+ codes (vérifié sur le CSV 2026-05-09).
- * Pour la liste live, utiliser le tool MCP `lister_specialites_ameli()`.
+ * Pour la liste live, utiliser le tool MCP `lister_nomenclature(referentiel: ameli_specialites)`.
  */
 export const AMELI_SPECIALITES_FREQUENTES = [
   { code: "01", libelle: "Médecin généraliste", typePs: "1" },

@@ -206,7 +206,7 @@ describe("V0.19.0 — panorama_sante_territoire + nom_commune", () => {
   });
 });
 
-describe("V0.19.0 — densite_professionnels_sante + nom_commune", () => {
+describe("V0.19.0 — densite_sante (professionnels) + nom_commune", () => {
   it("nom_commune seul → résolu, passé en codeInsee", async () => {
     vi.spyOn(resolveModule, "resolveNomCommune").mockResolvedValueOnce({
       resolved: true,
@@ -217,8 +217,8 @@ describe("V0.19.0 — densite_professionnels_sante + nom_commune", () => {
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteProfessionnelsSante>>,
       );
-    const tool = findTool("densite_professionnels_sante");
-    await tool?.handler({ nom_commune: "Lille" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "professionnels", nom_commune: "Lille" });
     expect(densiteSpy).toHaveBeenCalledWith(expect.objectContaining({ codeInsee: "59350" }));
     expect(densiteSpy.mock.calls[0]?.[0].departement).toBeUndefined();
   });
@@ -233,8 +233,8 @@ describe("V0.19.0 — densite_professionnels_sante + nom_commune", () => {
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteProfessionnelsSante>>,
       );
-    const tool = findTool("densite_professionnels_sante");
-    await tool?.handler({ nom_commune: "Saint-Martin", code_dept: "65" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "professionnels", nom_commune: "Saint-Martin", code_dept: "65" });
     expect(resolveSpy).toHaveBeenCalledWith(expect.objectContaining({ departement: "65" }));
     expect(densiteSpy).toHaveBeenCalledWith(expect.objectContaining({ codeInsee: "65392" }));
     expect(densiteSpy.mock.calls[0]?.[0].departement).toBeUndefined();
@@ -246,8 +246,8 @@ describe("V0.19.0 — densite_professionnels_sante + nom_commune", () => {
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteProfessionnelsSante>>,
       );
-    const tool = findTool("densite_professionnels_sante");
-    await tool?.handler({ code_dept: "59" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "professionnels", code_dept: "59" });
     expect(densiteSpy).toHaveBeenCalledWith(expect.objectContaining({ departement: "59" }));
     expect(densiteSpy.mock.calls[0]?.[0].codeInsee).toBeUndefined();
   });
@@ -258,20 +258,22 @@ describe("V0.19.0 — densite_professionnels_sante + nom_commune", () => {
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteProfessionnelsSante>>,
       );
-    const tool = findTool("densite_professionnels_sante");
-    await tool?.handler({ code_insee: "59350" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "professionnels", code_insee: "59350" });
     expect(densiteSpy).toHaveBeenCalledWith(expect.objectContaining({ codeInsee: "59350" }));
   });
 
   it("XOR : nom_commune + code_insee → RangeError redondant", async () => {
-    const tool = findTool("densite_professionnels_sante");
-    await expect(tool?.handler({ nom_commune: "Lille", code_insee: "59350" })).rejects.toThrow(
-      /redondants|SOIT/i,
-    );
+    const tool = findTool("densite_sante");
+    await expect(
+      tool?.handler({ cible: "professionnels", nom_commune: "Lille", code_insee: "59350" }),
+    ).rejects.toThrow(/redondants|SOIT/i);
   });
 
   it("rien fourni → RangeError requireOneOf (wording historique préservé)", async () => {
-    const tool = findTool("densite_professionnels_sante");
-    await expect(tool?.handler({})).rejects.toThrow(/Attendu.*code_dept|nom_commune|code_insee/i);
+    const tool = findTool("densite_sante");
+    await expect(tool?.handler({ cible: "professionnels" })).rejects.toThrow(
+      /Attendu.*code_dept|nom_commune|code_insee/i,
+    );
   });
 });
