@@ -430,6 +430,41 @@ describe("lister_specialites_ameli (MCP tool)", () => {
   });
 });
 
+// Régression de découvrabilité (2026-05-28) : lister_specialites_ameli et
+// lister_specialites_medicales partagent ~90 % de leurs tokens distinctifs
+// ("lister specialites codes spécialité") → le tool_search d'un client MCP peut
+// surclasser le jumeau ANS sur une requête "codes spécialité Ameli" et ne jamais
+// rendre la version Ameli (faux positif "outil absent" remonté par un client).
+// Conséquence produit : l'agent filtre un savoir_faire_code ANS ('SM04') là où il
+// faut un specialite_code Ameli ('03') → filtre vide SANS exception (homographes).
+// Parade : front-load des tokens distinctifs + cross-pointeurs explicites dans les
+// deux sens. NE PAS retirer ces gardes.
+describe("jumeaux Ameli/ANS — différenciation anti-collision retrieval", () => {
+  it("lister_specialites_ameli front-load les tokens Ameli/conventionnés/CNAM", () => {
+    const desc = findTool("lister_specialites_ameli")?.description ?? "";
+    // Invariant load-bearing : le tout premier token diverge du jumeau ANS (qui
+    // commence par "Liste les spécialités médicales"). On verrouille la divergence
+    // + la présence des tokens distinctifs, PAS le libellé exact de la parenthèse
+    // (évite une fragilité du test à toute reformulation future légitime).
+    expect(desc.startsWith("Codes spécialité Ameli")).toBe(true);
+    expect(desc).toMatch(/conventionn/);
+    expect(desc).toMatch(/Assurance Maladie|CNAM/);
+  });
+
+  it("lister_specialites_ameli cross-pointe le jumeau ANS (anti-confusion savoir-faire)", () => {
+    const desc = findTool("lister_specialites_ameli")?.description ?? "";
+    expect(desc).toContain("lister_specialites_medicales");
+    expect(desc).toMatch(/savoir-faire|ANS|RPPS/);
+  });
+
+  it("lister_specialites_medicales cross-pointe la version Ameli conventionnés", () => {
+    const desc = findTool("lister_specialites_medicales")?.description ?? "";
+    expect(desc).toContain("lister_specialites_ameli");
+    expect(desc).toMatch(/Ameli/);
+    expect(desc).toMatch(/conventionn/);
+  });
+});
+
 describe("lister_types_ps_ameli (MCP tool)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
