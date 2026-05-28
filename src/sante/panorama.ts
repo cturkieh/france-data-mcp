@@ -16,6 +16,8 @@
  */
 
 import { assertValidCodeInsee, deptFromCodeInsee } from "../territoire/dept-codes.js";
+import { fetchIrisByCommune } from "../territoire/iris-db.js";
+import { type IrisDemographics, aggregateIrisDemographics } from "../territoire/iris-profil.js";
 import { type DensiteProfessionnelsSanteResult, densiteProfessionnelsSante } from "./densite.js";
 import type { FinessFamilleQuery } from "./finess-categories.js";
 import { type CountFinessInput, countFiness } from "./finess-db.js";
@@ -83,11 +85,22 @@ export interface PanoramaSanteTerritoireResult {
    * "indisponible"`).
    */
   etablissementsParFamille: PanoramaEtablissementsEntry[];
+  /**
+   * Bloc « DEMANDE » — profil démographique de la commune agrégé depuis ses
+   * IRIS (âge, CSP, familles, revenu) au RP 2022 + FILOSOFI 2021. À CROISER avec
+   * l'OFFRE (densités PS, établissements) pour l'aide à l'implantation.
+   * `null` = couche secondaire indisponible (commune hors couverture IRIS — DOM
+   * non ingéré — OU échec du sous-appel, le panorama principal restant valide).
+   * Les parts (âge/CSP) sont des ratios Σ/Σ ; `revenu_median_pondere` est un
+   * PROXY (moyenne pondérée des médianes d'îlots couverts) avec son `couverture`.
+   */
+  demande: IrisDemographics | null;
   /** Sources de données utilisées — traçabilité pour le LLM. */
   sources: {
     professionnels: typeof SOURCE_LABELS.rpps;
     etablissements: typeof SOURCE_LABELS.finess;
     population: typeof SOURCE_LABELS.melodi;
+    demande: typeof SOURCE_LABELS.iris;
   };
 }
 
@@ -109,7 +122,7 @@ export async function panoramaSanteTerritoire(
   assertValidCodeInsee(input.codeInsee);
   const familles = input.finessFamilles ?? DEFAULT_FAMILLES;
 
-  const [medecins, infirmiers, pharmaciens, finessResult] = await Promise.all([
+  const [medecins, infirmiers, pharmaciens, finessResult, demande] = await Promise.all([
     densiteProfessionnelsSante({
       codeInsee: input.codeInsee,
       professionCode: RPPS_PROFESSION.MEDECIN,
@@ -126,6 +139,7 @@ export async function panoramaSanteTerritoire(
       compareNational: true,
     }),
     countFinessByFamilleCommune(input.codeInsee, familles),
+    safeFetchDemandeIris(input.codeInsee),
   ]);
 
   return {
@@ -134,12 +148,33 @@ export async function panoramaSanteTerritoire(
     niveauEtablissements: finessResult.niveauEtablissements,
     densitesProfessionnels: { medecins, infirmiers, pharmaciens },
     etablissementsParFamille: finessResult.entries,
+    demande,
     sources: {
       professionnels: SOURCE_LABELS.rpps,
       etablissements: SOURCE_LABELS.finess,
       population: SOURCE_LABELS.melodi,
+      demande: SOURCE_LABELS.iris,
     },
   };
+}
+
+/**
+ * Bloc « demande » = profil démo de la commune agrégé depuis ses IRIS. Couche
+ * SECONDAIRE : son échec (DB indispo, RPC manquante) NE DOIT PAS faire tomber le
+ * panorama principal (population/densités/établissements) — il dégrade en `null`
+ * + warn (doctrine `safe<X>Fetch`, finding CRITICAL Phase 2). `[]` = commune hors
+ * couverture IRIS (DOM non ingéré) → `null` (pas un objet à 0 trompeur).
+ */
+async function safeFetchDemandeIris(codeInsee: string): Promise<IrisDemographics | null> {
+  try {
+    const rows = await fetchIrisByCommune(codeInsee);
+    return rows.length === 0 ? null : aggregateIrisDemographics(rows);
+  } catch (err) {
+    console.warn(
+      `[france-data-mcp] panorama_sante_territoire: bloc demande IRIS indisponible pour ${codeInsee} (${err instanceof Error ? err.message : String(err)}) — panorama principal préservé`,
+    );
+    return null;
+  }
 }
 
 /**

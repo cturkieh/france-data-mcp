@@ -61,7 +61,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 ---
 
-## Outils MCP (31 tools)
+## Outils MCP (32 tools)
 
 ### 🗺️ Territoire (4)
 `autocomplete_commune` · `get_commune_by_code` · `geocode_adresse` · `reverse_geocode`
@@ -84,16 +84,16 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 > ~2,2 M PS actifs (libéraux + salariés privés + hospitaliers contractuels + agents publics). Par défaut : Civils uniquement.
 
-### 📊 Démographie & densités — INSEE Melodi (2)
-Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DREES (ratios pour 100 k hab.).
+### 📊 Démographie & densités — INSEE Melodi + IRIS (3)
+Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DREES (ratios pour 100 k hab.). Maille **IRIS** (quartier, ~48,6K zones) pour la DEMANDE, à croiser avec l'offre de soins.
 
-`population` (commune ou département — granularité auto-détectée par la longueur du code) · `densite_sante` (`cible: professionnels` RPPS **ou** `etablissements` FINESS — labos, pharmacies, EHPAD, hôpitaux ; + comparaison nationale matview <50 ms)
+`population` (IRIS 9 car., commune 5 car. **ou** département 2-3 car. — granularité auto-détectée par la longueur du code) · `densite_sante` (`cible: professionnels` RPPS **ou** `etablissements` FINESS — labos, pharmacies, EHPAD, hôpitaux ; + comparaison nationale matview <50 ms) · `profil_iris` (`point` **ou** `code_iris`, `rayon_km?`) — profil démo d'un îlot ou d'un bassin (âge, CSP, familles, revenu) au RP 2022 + FILOSOFI 2021
 
 ### 🔎 Découverte des nomenclatures (1)
 `lister_nomenclature` (`referentiel: ameli_specialites | ameli_types_ps | rpps_savoir_faire`) — codes spécialité/type_ps Ameli **et** savoir_faire RPPS dans un seul tool (remplace les 3 anciens `lister_*`).
 
 ### 🧭 Agrégateur santé territoire (1) — V0.9
-`panorama_sante_territoire` — 1 call pour population + densités médecins/infirmiers/pharmaciens vs national + count FINESS par famille (labo, pharmacie, EHPAD, MCO, MSP/CPTS). Granularité explicite (`niveau: commune`, `niveauEtablissements: departement | indisponible`).
+`panorama_sante_territoire` — 1 call pour population + densités médecins/infirmiers/pharmaciens vs national + count FINESS par famille (labo, pharmacie, EHPAD, MCO, MSP/CPTS) + **bloc demande IRIS** (profil démo de la commune : âge, CSP, familles, revenu, agrégé depuis ses IRIS). Granularité explicite (`niveau: commune`, `niveauEtablissements: departement | indisponible`).
 
 ### 🔀 Croisement multi-source (6)
 Réconciliation FINESS ↔ RPPS ↔ SIRENE — faits bruts sans interprétation métier.
@@ -115,11 +115,12 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.21.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.22.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
-- [ ] **V1.0+** : DOM-COM, INSEE IRIS, DPC.
+- [x] **V0.22.0** : INSEE IRIS (métropole) — démographie au quartier (âge, CSP, familles, revenu).
+- [ ] **V1.0+** : DOM-COM (IRIS + santé), DPC.
 
 ---
 

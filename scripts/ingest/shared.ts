@@ -155,7 +155,7 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
 }
 
 /** Sources supportées dans `ingest_log.source` (utile pour `getLastSuccessChecksum`). */
-export type IngestSource = "finess" | "ameli_ps" | "rpps" | "cds";
+export type IngestSource = "finess" | "ameli_ps" | "rpps" | "cds" | "iris";
 
 /**
  * Préfixe utilisé dans les logs stderr structurés des callers ingest
@@ -165,7 +165,7 @@ export type IngestSource = "finess" | "ameli_ps" | "rpps" | "cds";
  * logs GitHub Actions) — AUCUN script ne grep ces préfixes aujourd'hui.
  * Garder `ameli` (vs `ameli_ps`) évite le bruit dans les logs cron.
  */
-export type IngestStderrPrefix = "finess" | "ameli" | "rpps" | "cds";
+export type IngestStderrPrefix = "finess" | "ameli" | "rpps" | "cds" | "iris";
 
 export interface IngestLogEntry {
   source: string;

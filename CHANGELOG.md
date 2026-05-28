@@ -4,6 +4,52 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.22.0] — 2026-05-28 (IRIS infracommunal — démographie au quartier, 31 → 32)
+
+Ajoute la maille **IRIS** (Îlots Regroupés pour l'Information Statistique, le
+maillage INSEE le plus fin : ~48,6K zones dont ~16K quartiers urbains + ~33K
+communes non-irisées). Donne la **DEMANDE** (âge, CSP, familles, revenu) au grain
+quartier, à croiser avec l'OFFRE de soins déjà en base pour l'aide à l'implantation.
+Première donnée **géométrique** du projet (polygones, jusqu'ici points uniquement).
+Métropole d'abord (FXX) ; DOM en fast-follow (flaggés `null`, jamais 0 silencieux).
+
+### Added
+
+- **Tool `profil_iris(point | code_iris, rayon_km?)`** (32e tool) — profil démo
+  d'un îlot (sans rayon) ou d'un bassin (avec rayon). Contrat consommé par GEO
+  Intel. 3 règles d'agrégation load-bearing : **R1** revenu = moyenne pondérée
+  population des médianes d'îlots couverts FILOSOFI (PROXY, jamais médiane vraie)
+  + `couverture` ; **R2** inclusion par centroïde dans le rayon ; **R3** parts
+  âge/CSP sur comptes bruts Σ/Σ.
+- **`population(code)` granularité IRIS** : un code 9 caractères → population du
+  quartier au RP 2022 (DB ; Melodi ne sert pas l'IRIS).
+- **`panorama_sante_territoire` bloc `demande`** : profil démo de la commune
+  agrégé depuis ses IRIS (couche secondaire, dégrade en `null` sans casser le
+  panorama principal).
+- **Ingestion annuelle unifiée** (`scripts/ingest/iris.ts`, workflow
+  `ingest-iris.yml`) : contours IGN CONTOURS-IRIS 2024 (.7z GeoPackage
+  Lambert-93 → ogr2ogr reproj WGS84) + RP 2022 (âge/CSP/familles) + FILOSOFI
+  2021 (revenu), checksum combiné, 4 swaps atomiques indépendants. Dépendances
+  système gdal-bin + p7zip.
+- Tables `iris` (geom MultiPolygon + geog/centroid_geog STORED + GiST) +
+  `iris_population` / `iris_familles` / `iris_revenu` + vue `iris_full` + RPCs
+  spatiales (point-in-polygon, rayon par centroïde, lookup commune).
+- `data_freshness` étend la source `iris` (cadence annuelle).
+
+### Fixed
+
+- Régression prod corrigée au passage : le canary RPPS était mort en silence
+  depuis ~2026-05-15 (un `CREATE OR REPLACE` de la migration canary CDS avait
+  écrasé la branche `rpps`). Restauré + branche `iris` ajoutée.
+
+### Notes techniques
+
+- FILOSOFI = couverture partielle (communes ≥5000 hab) → ~32 % des IRIS, **LEFT
+  JOIN** obligatoire, couverture exposée (doctrine non-silencieuse).
+- Données INSEE IRIS = estimations **décimales** pondérées (population arrondie
+  en sortie ; séparateur décimal virgule géré pour FILOSOFI).
+- Vue `iris_full` = vue SIMPLE (pas matview → pas de bombe OID), `security_invoker`.
+
 ## [0.21.0] — 2026-05-28 (rationalisation des tools — 3 fusions, 35 → 31)
 
 ### ⚠️ BREAKING — 5 tools supprimés, remplacés par 3 tools paramétrés

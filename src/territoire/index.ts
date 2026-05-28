@@ -29,4 +29,23 @@ export {
   type GeoLevel,
 } from "./insee-melodi.js";
 
+export {
+  getPopulationByIris,
+  fetchIrisProfilByCode,
+  assertIrisCode,
+  type IrisPopulationLookup,
+  type IrisProfilRow,
+} from "./iris-db.js";
+
+export {
+  getProfilIris,
+  aggregateIrisDemographics,
+  type ProfilIrisInput,
+  type IletProfile,
+  type BassinProfile,
+  type IrisDemographics,
+} from "./iris-profil.js";
+
+export { fetchIrisByCommune } from "./iris-db.js";
+
 export const TERRITOIRE_VERSION = "0.1.0";

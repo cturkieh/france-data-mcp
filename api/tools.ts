@@ -73,6 +73,8 @@ import {
   getCommuneByCode,
   getPopulationByCommune,
   getPopulationByDept,
+  getPopulationByIris,
+  getProfilIris,
   reverseGeocode,
   searchCommunes,
 } from "../src/territoire/index.js";
@@ -1067,7 +1069,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "population",
     description:
-      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'une COMMUNE (code INSEE 5 caractères) OU d'un DÉPARTEMENT (code 2-3 caractères) — la granularité est auto-détectée par la longueur du `code`. Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN est la base légale officielle des indicateurs DREES (densité médicale, etc.). Retourne un `LookupResult` discriminé par `found`.\n\n- Commune (5 car., ex `75056` Paris, `13055` Marseille, `2A004` Ajaccio) : si elle a fusionné/changé de code, `found: false` + orientation `autocomplete_commune`. INSEE n'expose PAS la population des arrondissements PLM (75101-75120, 13201-13216, 69381-69389) → passer la commune-mère, ou le code département.\n- Département (2-3 car., ex `75`, `59`, `2A`, `971`) : Mayotte (`976`) est ABSENTE de Melodi → `lookupNotFound` (pas une erreur).\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee` et `code_dept`/`dept`/`departement`/`code_departement` → `code`.",
+      "Population d'une COMMUNE (code INSEE 5 car.), d'un DÉPARTEMENT (2-3 car.) OU d'un IRIS infracommunal (9 car.) — granularité auto-détectée par la longueur du `code`. Retourne un `LookupResult` discriminé par `found`.\n\n- IRIS (9 car., ex `751103701` = commune `75110` + IRIS `3701`) : population totale du quartier au Recensement 2022 (champ `population`, comptes bruts), + `libelle`, `code_commune`, `type_iris` (H/A/D/Z). Source : INSEE RP 2022 (table ingérée, géo 01/01/2024). Maille la plus fine (quartier) pour les villes ; en zone peu dense la commune = 1 IRIS (`type_iris` Z, code `COM+0000`). Pour le profil démographique détaillé d'un îlot ou d'un bassin (âge, CSP, familles, revenu), utiliser `profil_iris`.\n- Commune (5 car., ex `75056` Paris, `13055` Marseille, `2A004` Ajaccio) : PMUN/PCAP/PTOT. Source INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN = base légale DREES. Commune fusionnée → `found: false` + orientation `autocomplete_commune`. INSEE n'expose PAS les arrondissements PLM (75101-75120, 13201-13216, 69381-69389) → passer la commune-mère ou le département.\n- Département (2-3 car., ex `75`, `59`, `2A`, `971`) : Mayotte (`976`) ABSENTE de Melodi → `lookupNotFound`.\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee`, `code_dept`/`dept`/`departement`/`code_departement`, `code_iris`/`iris` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1090,19 +1092,61 @@ export const TOOLS: McpTool[] = [
         dept: "code",
         departement: "code",
         code_departement: "code",
+        code_iris: "code",
+        iris: "code",
       });
       // Trim une fois : la longueur (choix de granularité) ET la valeur passée
       // aux getters (regex ancrées strictes) restent cohérentes — un code
       // whitespace-paddé ne produit plus un message « invalide » trompeur.
       const code = requireString(args, "code", { code: "75056" }).trim();
-      // Auto-détection par longueur : commune = 5 (ex 75056), département = 2-3
-      // (75, 971, 2A). La granularité IRIS (9 car.) s'ajoutera en 0.22.0.
+      // Auto-détection par longueur : IRIS = 9 (ex 751103701, RP 2022 DB),
+      // commune = 5 (ex 75056, Melodi live), département = 2-3 (75, 971, 2A).
       const len = code.length;
+      if (len === 9) return getPopulationByIris(code);
       if (len === 5) return getPopulationByCommune(code);
       if (len === 2 || len === 3) return getPopulationByDept(code);
       throw new RangeError(
-        `Code "${code}" non reconnu : attendu 5 caractères (commune INSEE, ex "75056") ou 2-3 caractères (département, ex "75"/"971"/"2A").`,
+        `Code "${code}" non reconnu : attendu 9 caractères (IRIS, ex "751103701"), 5 caractères (commune INSEE, ex "75056") ou 2-3 caractères (département, ex "75"/"971"/"2A").`,
       );
+    },
+  },
+  {
+    name: "profil_iris",
+    description:
+      "Profil démographique au grain QUARTIER (IRIS) — la « demande » d'un territoire (âge, CSP, familles, revenu), à croiser avec l'offre de soins pour l'aide à l'implantation. Source : INSEE RP 2022 + FILOSOFI 2021 (tables ingérées, géo 01/01/2024). Retourne un `LookupResult` discriminé par `found`.\n\nEntrée : EXACTEMENT un de `point` (`lat`+`lon`) OU `code_iris` (9 car.). `rayon_km` optionnel (0 < r ≤ 10) → DEUX modes :\n- SANS `rayon_km` → profil de l'ÎLOT seul (~2000 hab) sous le point / du code. `mode: \"ilot\"`, `revenu_median` = médiane réelle de l'îlot.\n- AVEC `rayon_km` → AGRÉGAT du BASSIN = îlots dont le CENTROÏDE est dans le disque (chaque îlot compté 1 fois). `mode: \"bassin\"`, `population_bassin`, `nb_iris_agreges`, et `revenu_median_pondere` = PROXY (moyenne pondérée population des médianes des îlots couverts — PAS une vraie médiane de bassin) + `couverture` {`revenu_pct_population`, `iris_revenu_manquants`} car FILOSOFI ne couvre que les communes ≥5000 hab.\n\nLes parts `age` (part_65_plus/75_plus) et `csp` (cadres, prof_interm, employés, ouvriers, agriculteurs, artisans_comm, retraités, autres) sont des ratios sur comptes bruts (Σ/Σ). Pour une simple population de commune/dept, utiliser `population`. `not_found` motivé si code absent ou point hors métropole / en mer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lat: { type: "number", description: "Latitude du point (mode point)." },
+        lon: { type: "number", description: "Longitude du point (mode point)." },
+        code_iris: {
+          type: "string",
+          description: "Code IRIS 9 caractères (ex `751103701`) — alternatif au point.",
+        },
+        rayon_km: {
+          type: "number",
+          description: "Rayon du bassin en km (0 < r ≤ 10). Absent = profil de l'îlot seul.",
+        },
+      },
+    },
+    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (rawArgs) => {
+      const lon = coerceNumber(rawArgs.lon, "lon");
+      const lat = coerceNumber(rawArgs.lat, "lat");
+      const codeIris =
+        asString(rawArgs.code_iris) ?? asString(rawArgs.codeIris) ?? asString(rawArgs.iris);
+      const rayonKm = coerceNumber(rawArgs.rayon_km ?? rawArgs.rayonKm, "rayon_km");
+      const input: Parameters<typeof getProfilIris>[0] = {};
+      if (lon !== undefined || lat !== undefined) {
+        if (lon === undefined || lat === undefined) {
+          throw new RangeError("Le mode point requiert `lat` ET `lon` numériques.");
+        }
+        input.point = { lon, lat };
+      }
+      if (codeIris) input.codeIris = codeIris;
+      if (rayonKm !== undefined) input.rayonKm = rayonKm;
+      return getProfilIris(input);
     },
   },
   {
@@ -2288,7 +2332,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
   },
   {
     name: "panorama_sante_territoire",
-    description: `Panorama santé d'une commune française en 1 appel (V0.9). Agrège en parallèle : population (INSEE Melodi), densités médecins + infirmiers + pharmaciens avec comparaison nationale (méthodo DREES), et nombre d'établissements FINESS par famille (default ${JSON.stringify(DEFAULT_FAMILLES)}).\n\nRemplace 7-10 appels MCP individuels par 1 seul. Ne renvoie AUCUNE interprétation métier (pas de qualification automatique 'désert médical') — le caller LLM applique sa grille.\n\nV0.19.0 : accepte \`nom_commune\` (string) comme alternative à \`code_insee\`. \`departement\` (V0.19) = hint resolver UNIQUEMENT (panorama ne calcule pas par dept ; un \`departement\` seul lève une erreur explicite).\n\n**Granularité mixte** : les densités professionnels et la population sont calculées au niveau **commune** ; le décompte FINESS est agrégé au niveau **département** dérivé du code INSEE (limitation V0.9 — pas de RPC count_finess_by_commune encore). Le champ \`niveauEtablissements\` du résultat indique \`"departement"\` (succès), \`"indisponible"\` (dept indérivable, ex code DOM tronqué) — utiliser cette information pour ne pas confondre ratios commune et dept.\n\nParis/Marseille/Lyon NON supporté : le panorama par commune dépend de la densité par commune, indisponible pour ces villes (INSEE n'expose la population qu'à la commune entière, les praticiens RPPS aux arrondissements). Un code PLM (commune-mère 75056 ou arrondissement) lève une RangeError. Pour ces villes, interroger les tools individuels au niveau \`code_dept\` (75/69/13).\n\nAlias acceptés : \`codeInsee\`/\`insee\`/\`code\` → \`code_insee\`.\n\nSources : RPPS / Annuaire Santé ANS (mensuel), FINESS DREES (bimensuel), INSEE Melodi (PMUN 2023).`,
+    description: `Panorama santé d'une commune française en 1 appel (V0.9). Agrège en parallèle : population (INSEE Melodi), densités médecins + infirmiers + pharmaciens avec comparaison nationale (méthodo DREES), nombre d'établissements FINESS par famille (default ${JSON.stringify(DEFAULT_FAMILLES)}), et un bloc DEMANDE (V0.22.0 — profil démographique de la commune agrégé depuis ses IRIS : âge, CSP, familles, revenu pondéré, à CROISER avec l'OFFRE ci-dessus pour l'aide à l'implantation ; \`demande: null\` si commune hors couverture IRIS (DOM non ingéré) — pour le détail au quartier ou un bassin par rayon, utiliser \`profil_iris\`).\n\nRemplace 7-10 appels MCP individuels par 1 seul. Ne renvoie AUCUNE interprétation métier (pas de qualification automatique 'désert médical') — le caller LLM applique sa grille.\n\nV0.19.0 : accepte \`nom_commune\` (string) comme alternative à \`code_insee\`. \`departement\` (V0.19) = hint resolver UNIQUEMENT (panorama ne calcule pas par dept ; un \`departement\` seul lève une erreur explicite).\n\n**Granularité mixte** : les densités professionnels et la population sont calculées au niveau **commune** ; le décompte FINESS est agrégé au niveau **département** dérivé du code INSEE (limitation V0.9 — pas de RPC count_finess_by_commune encore). Le champ \`niveauEtablissements\` du résultat indique \`"departement"\` (succès), \`"indisponible"\` (dept indérivable, ex code DOM tronqué) — utiliser cette information pour ne pas confondre ratios commune et dept.\n\nParis/Marseille/Lyon NON supporté : le panorama par commune dépend de la densité par commune, indisponible pour ces villes (INSEE n'expose la population qu'à la commune entière, les praticiens RPPS aux arrondissements). Un code PLM (commune-mère 75056 ou arrondissement) lève une RangeError. Pour ces villes, interroger les tools individuels au niveau \`code_dept\` (75/69/13).\n\nAlias acceptés : \`codeInsee\`/\`insee\`/\`code\` → \`code_insee\`.\n\nSources : RPPS / Annuaire Santé ANS (mensuel), FINESS DREES (bimensuel), INSEE Melodi (PMUN 2023).`,
     inputSchema: {
       type: "object",
       properties: {

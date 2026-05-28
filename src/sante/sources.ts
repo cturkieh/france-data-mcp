@@ -14,4 +14,5 @@ export const SOURCE_LABELS = {
   melodi: "INSEE Melodi (DS_POPULATIONS_REFERENCE)",
   dinum: "Recherche Entreprises DINUM (live)",
   insee_sirene: "INSEE SIRENE V3.11 (live, fallback)",
+  iris: "INSEE RP 2022 + FILOSOFI 2021, niveau IRIS (Supabase, annuel)",
 } as const;

@@ -1,15 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as irisDbMod from "../territoire/iris-db.js";
 import * as densiteMod from "./densite.js";
 import * as finessMod from "./finess-db.js";
 import { panoramaSanteTerritoire } from "./panorama.js";
 
 const densiteSpy = vi.spyOn(densiteMod, "densiteProfessionnelsSante");
 const countFinessSpy = vi.spyOn(finessMod, "countFiness");
+const fetchIrisSpy = vi.spyOn(irisDbMod, "fetchIrisByCommune");
 
 beforeEach(() => {
   densiteSpy.mockReset();
   countFinessSpy.mockReset();
+  // Défaut : bloc demande vide (null) → ne pollue pas les tests existants.
+  fetchIrisSpy.mockReset();
+  fetchIrisSpy.mockResolvedValue([]);
 });
 
 function makeDensite(profession: string, count = 50, pop = 60_000) {
@@ -172,5 +177,51 @@ describe("panoramaSanteTerritoire", () => {
     for (const call of countFinessSpy.mock.calls) {
       expect(call[0]?.departement).toBe("974");
     }
+  });
+
+  it("bloc DEMANDE : agrège les IRIS de la commune (âge/CSP/revenu) + source", async () => {
+    densiteSpy.mockImplementation(async (input) => makeDensite(input.professionCode ?? "10"));
+    countFinessSpy.mockResolvedValue(3);
+    // 2 IRIS minimalistes (champs non testés à null via le cast partiel).
+    fetchIrisSpy.mockResolvedValue([
+      {
+        code_iris: "590090101",
+        pop_total: 1000,
+        pop_65p: 200,
+        pop_15p: 800,
+        csp_cadres: 160,
+        revenu_median: 20000,
+      },
+      {
+        code_iris: "590090102",
+        pop_total: 1000,
+        pop_65p: 100,
+        pop_15p: 800,
+        csp_cadres: 240,
+        revenu_median: 24000,
+      },
+      // biome-ignore lint/suspicious/noExplicitAny: lignes partielles — seuls les champs agrégés ici comptent
+    ] as any);
+
+    const result = await panoramaSanteTerritoire({ codeInsee: "59009" });
+    expect(result.demande).not.toBeNull();
+    expect(result.demande?.population).toBe(2000);
+    expect(result.demande?.nb_iris).toBe(2);
+    expect(result.demande?.age.part_65_plus).toBeCloseTo(300 / 2000); // 0.15 (Σ/Σ)
+    expect(result.demande?.revenu_median_pondere).toBe(22000); // (20000+24000)/2 pondéré égal
+    expect(result.sources.demande).toContain("FILOSOFI");
+  });
+
+  it("couche secondaire : un échec du bloc DEMANDE ne casse PAS le panorama (null + warn)", async () => {
+    densiteSpy.mockImplementation(async (input) => makeDensite(input.professionCode ?? "10"));
+    countFinessSpy.mockResolvedValue(3);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    fetchIrisSpy.mockRejectedValueOnce(new Error("DB down"));
+
+    const result = await panoramaSanteTerritoire({ codeInsee: "59009" });
+    expect(result.demande).toBeNull(); // dégradé, pas de throw
+    expect(result.densitesProfessionnels.medecins).toBeDefined(); // panorama principal intact
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("demande IRIS indisponible"));
+    warnSpy.mockRestore();
   });
 });

@@ -19,7 +19,7 @@ import { getUntypedAnonClient } from "./supabase.js";
  * `ingest_log` par les scripts dans `scripts/ingest/*`). Les sources live
  * (DINUM, INSEE, ANS FHIR) ne passent pas par ingest_log car non DB-backed.
  */
-export const INGEST_SOURCES = ["finess", "ameli_ps", "rpps", "cds"] as const;
+export const INGEST_SOURCES = ["finess", "ameli_ps", "rpps", "cds", "iris"] as const;
 export type IngestSource = (typeof INGEST_SOURCES)[number];
 
 /**
@@ -32,6 +32,7 @@ export const INGEST_CADENCE: Record<IngestSource, string> = {
   ameli_ps: "hebdomadaire (côté Annuaire Santé Ameli)",
   rpps: "mensuelle (côté Annuaire Santé ANS)",
   cds: "hebdomadaire (Centres de Santé — Annuaire Ameli CNAM)",
+  iris: "annuelle (contours IGN CONTOURS-IRIS + démographie RP/FILOSOFI INSEE, géo 01/01/2024)",
 };
 
 export interface IngestFreshnessRow {
