@@ -1,9 +1,27 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GeocodeResult } from "../territoire/geocode.js";
 import * as geocodeMod from "../territoire/geocode.js";
-import { panoramaImplantationComplet } from "./panorama-implantation.js";
+import { panoramaImplantationComplet, runSection } from "./panorama-implantation.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("runSection — dégradation par section (spec §4.4)", () => {
+  it("succès → { data, status: 'ok' }", async () => {
+    const r = await runSection("concurrents", async () => ({ count: 3 }));
+    expect(r).toEqual({ data: { count: 3 }, status: "ok" });
+  });
+
+  it("brique throw → { data: null, status: 'indisponible:…' } + warn, PAS de throw", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = await runSection("cds", async () => {
+      throw new Error("CDS source 500");
+    });
+    expect(r.data).toBeNull();
+    expect(r.status).toMatch(/^indisponible:/);
+    expect(r.status).toContain("CDS source 500");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("cds"));
+  });
+});
 
 /** Géocode mock complet et fiable (Lille rue Nationale). */
 function geocodeOk(overrides: Partial<GeocodeResult> = {}): GeocodeResult {

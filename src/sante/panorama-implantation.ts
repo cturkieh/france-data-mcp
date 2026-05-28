@@ -68,6 +68,33 @@ export interface PanoramaImplantationResult {
   referentiels: unknown | null;
 }
 
+/** Résultat d'une section : la donnée (ou `null` si dégradée) + son statut. */
+export interface SectionOutcome<T> {
+  data: T | null;
+  status: SectionStatus;
+}
+
+/**
+ * Exécute une brique de section avec dégradation NON silencieuse (spec §4.4) :
+ * un échec passe la section en `indisponible:<raison>` + `console.warn`
+ * structuré (observabilité MCP), et le reste du panorama est préservé. Le LLM
+ * client voit le trou via `couverture` et le comble par l'outil unitaire.
+ * JAMAIS de catch muet (règle projet « zéro catch silencieux »).
+ */
+export async function runSection<T>(
+  name: string,
+  fn: () => Promise<T>,
+): Promise<SectionOutcome<T>> {
+  try {
+    const data = await fn();
+    return { data, status: "ok" };
+  } catch (err) {
+    const raison = err instanceof Error ? err.message : String(err);
+    console.warn(`${LOG_TAG}: section '${name}' indisponible — ${raison} (panorama préservé)`);
+    return { data: null, status: `indisponible:${raison}` };
+  }
+}
+
 /** Ancrage résolu — toutes les sections en dépendent. */
 interface Anchor {
   point: { lat: number; lon: number };
