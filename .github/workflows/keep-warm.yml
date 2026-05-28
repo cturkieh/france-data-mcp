@@ -135,16 +135,16 @@ jobs:
           response=$(curl -sSL --fail-with-body --max-time 20 -X POST "$MCP_URL/mcp" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"densite_professionnels_sante","arguments":{"code_insee":"59009","savoir_faire_code":"SM04"}}}')
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"densite_sante","arguments":{"cible":"professionnels","code_insee":"59009","savoir_faire_code":"SM04"}}}')
           echo "$response" | jq empty 2>/dev/null || {
-            echo "::error::densite_professionnels_sante (commune) response is not valid JSON: $response"
+            echo "::error::densite_sante (commune) response is not valid JSON: $response"
             exit 1
           }
           if echo "$response" | jq -e '.error' > /dev/null; then
-            echo "::error::densite_professionnels_sante (commune) returned JSON-RPC error: $response"
+            echo "::error::densite_sante (commune) returned JSON-RPC error: $response"
             exit 1
           fi
-          echo "::notice::densite_professionnels_sante (count_rpps_by_commune) ok"
+          echo "::notice::densite_sante professionnels (count_rpps_by_commune) ok"
 
       - name: Warm count_rpps (RPPS département-level)
         # Chauffe count_rpps BARE (déjà tunée 2s, 5 events Sentry/14j sur
@@ -156,13 +156,13 @@ jobs:
           response=$(curl -sSL --fail-with-body --max-time 20 -X POST "$MCP_URL/mcp" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
-            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"densite_professionnels_sante","arguments":{"code_dept":"59"}}}')
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"densite_sante","arguments":{"cible":"professionnels","code_dept":"59"}}}')
           echo "$response" | jq empty 2>/dev/null || {
-            echo "::error::densite_professionnels_sante (dept) response is not valid JSON: $response"
+            echo "::error::densite_sante (dept) response is not valid JSON: $response"
             exit 1
           }
           if echo "$response" | jq -e '.error' > /dev/null; then
-            echo "::error::densite_professionnels_sante (dept) returned JSON-RPC error: $response"
+            echo "::error::densite_sante (dept) returned JSON-RPC error: $response"
             exit 1
           fi
-          echo "::notice::densite_professionnels_sante (count_rpps bare) ok"
+          echo "::notice::densite_sante professionnels (count_rpps bare) ok"
