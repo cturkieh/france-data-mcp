@@ -11,12 +11,14 @@ import {
   IngestError,
   type IngestLogEntry,
   atomicSwapTables,
+  computeSha256Buffer,
   downloadCsv,
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
   isForceReingestEnv,
+  preValidateFile,
   runAndRecordCanary,
   runIfMain,
   shortCircuitIfSameChecksum,
@@ -27,49 +29,56 @@ import {
 const execFileAsync = promisify(execFile);
 
 // Phase B — IRIS infracommunal. Cf. docs/plans/iris-infracommunal.md.
-// Étape 1/6 : ingestion des contours IGN « CONTOURS-IRIS » 2024 (géo 01/01/2024)
-// dans la table `iris`. Les blocs démographiques (RP 2022, FILOSOFI 2021) sont
-// ajoutés aux étapes 2-3 dans CE MÊME cron (refresh annuel groupé), chacun avec
-// sa propre table + swap atomique.
+// Cron annuel UNIFIÉ ingérant 3 blocs (même millésime géo 01/01/2024), chacun
+// dans sa table avec swap atomique INDÉPENDANT :
+//   1. Contours IGN « CONTOURS-IRIS » 2024 → table `iris` (polygones).
+//   2. RP 2022 base population (âge + CSP)   → table `iris_population`.
+//   3. RP 2022 couples-familles-ménages      → table `iris_familles`.
+// (Le revenu FILOSOFI = étape 3, ajouté ensuite comme 4e bloc.)
 //
-// GÉOMÉTRIE = nouveau pour ce projet : source en GeoPackage Lambert-93 compressé
-// .7z. Pipeline : download .7z → 7z extract → ogr2ogr (reprojection 2154→4326 +
-// export WKT) → CSV → insert staging en EWKT → swap. ogr2ogr + 7z sont des
-// dépendances SYSTÈME (gdal-bin + p7zip) installées par le workflow GitHub Actions
-// ET requises localement pour les tests. Choix loader validé : ogr2ogr ne fait QUE
-// la conversion/reprojection ; l'écriture DB reste sur le pipeline PostgREST
-// `insertStagingBatchWithRetry` éprouvé (cohérence avec les 4 sources existantes,
-// pas de connexion Postgres directe). Géométries mesurées : avg ~5,5 Ko, max ~171 Ko
-// → batching par OCTETS (vs nb de lignes seul) pour rester sous la limite de payload.
+// CHECKSUM COMBINÉ : un seul `ingest_log.source = 'iris'` + un sha combiné des
+// 3 fichiers sources → court-circuit ssi AUCUN n'a changé. Refresh annuel donc
+// re-ingérer les 3 quand un seul change est acceptable (et 1 seule ligne
+// `data_freshness`). PAS de matview FROM ces tables → pas de bombe OID ; les
+// stats sont jointes à `iris` sur code_iris au query-time (profil_iris).
+//
+// GÉOMÉTRIE (bloc 1) = ogr2ogr (reproj Lambert-93→4326 + WKT) + 7z, dépendances
+// SYSTÈME (gdal-bin + p7zip). 7z décompresse AUSSI les .zip INSEE (blocs 2-3).
 
-/** Override runtime via env (CI / test). Métropole FXX uniquement (DOM = fast-follow). */
 const IRIS_CONTOURS_URL =
   process.env.IRIS_CONTOURS_URL ??
   "https://data.geopf.fr/telechargement/download/CONTOURS-IRIS/CONTOURS-IRIS_3-0__GPKG_LAMB93_FXX_2024-01-01/CONTOURS-IRIS_3-0__GPKG_LAMB93_FXX_2024-01-01.7z";
+const IRIS_POP_URL =
+  process.env.IRIS_POP_URL ??
+  "https://www.insee.fr/fr/statistiques/fichier/8647014/base-ic-evol-struct-pop-2022_csv.zip";
+const IRIS_FAMILLES_URL =
+  process.env.IRIS_FAMILLES_URL ??
+  "https://www.insee.fr/fr/statistiques/fichier/8647008/base-ic-couples-familles-menages-2022_csv.zip";
 
-/** .7z métropole ~40 Mo ; 30 Mo attrape une troncature de download. */
-const MIN_ARCHIVE_BYTES = 30_000_000;
+/** .7z métropole ~40 Mo / zips RP ~20 Mo ; seuils anti-troncature de download. */
+const MIN_CONTOURS_BYTES = 30_000_000;
+const MIN_RP_ZIP_BYTES = 5_000_000;
 
-// Bande de cohérence post-parse. Métropole FXX 2024 = 48 569 features
-// (14 429 H + 819 A + 321 D + 33 000 Z communes non-irisées). La bande large
-// absorbe un millésime à venir sans fausse alerte, mais coupe un parse partiel
-// (troncature) ou un changement structurel majeur.
+// Bande de cohérence post-parse, commune aux 3 blocs : tous ~48,6 K (contours)
+// à ~49,3 K (RP métropole) lignes. Large pour absorber un futur millésime,
+// mais coupe un parse partiel / un changement structurel.
 const MIN_ROWS = 40_000;
 const MAX_ROWS = 55_000;
 
 /** Nom de la couche dans le GeoPackage IGN (vérifié `ogrinfo` 2026-05-28). */
 const GPKG_LAYER = "contours_iris";
 
+/** Délimiteur des CSV INSEE RP (point-virgule). */
+const RP_DELIMITER = ";";
+
 /**
- * Batching PostgREST par octets. Une géométrie IRIS pèse ~5,5 Ko en moyenne mais
- * jusqu'à ~171 Ko (communes côtières découpées). On flush au PLUS PETIT de
- * `BATCH_MAX_ROWS` lignes OU `BATCH_MAX_BYTES` cumulés — sans le plafond octets,
- * un lot de 200 grosses géométries dépasserait la limite de payload de la
- * passerelle Supabase (413). 500 Ko laisse une marge confortable même si
- * plusieurs grosses géométries tombent dans le même lot.
+ * Batching PostgREST par OCTETS pour le bloc contours : géométrie ~5,5 Ko en
+ * moyenne, jusqu'à ~171 Ko → flush au plus petit de N lignes / octets cumulés
+ * (sinon 413). Les blocs stats (petites lignes numériques) batchent par lignes.
  */
-const BATCH_MAX_ROWS = 200;
-const BATCH_MAX_BYTES = 500_000;
+const GEOM_BATCH_MAX_ROWS = 200;
+const GEOM_BATCH_MAX_BYTES = 500_000;
+const STATS_BATCH_ROWS = 500;
 
 /** Pause après NOTIFY pgrst pour que le 1er insert trouve la table (leçon FINESS V0.2). */
 const PGRST_RELOAD_WAIT_MS = 2000;
@@ -83,11 +92,7 @@ interface IrisStagingRow {
   geom: string;
 }
 
-/**
- * code_iris = dept(2) + commune(3) + iris(4). Le dept est 2 chiffres OU
- * exactement `2A`/`2B` (Corse) — la lettre n'apparaît QUE dans ce cas, jamais
- * ailleurs (un `7A…` serait un column shift, pas un vrai code).
- */
+/** code_iris = dept(2) + commune(3) + iris(4). Dept = 2 chiffres OU `2A`/`2B` (Corse). */
 const CODE_IRIS_RE = /^(?:[0-9]{2}|2[AB])[0-9]{7}$/u;
 
 async function main(): Promise<void> {
@@ -102,100 +107,76 @@ async function main(): Promise<void> {
   };
 
   let workDir: string | null = null;
+  // Blocs déjà swappés en prod (chaque ingest* swappe AVANT de retourner). Lu
+  // par le catch : si un bloc tardif échoue après ≥1 swap, l'audit DOIT dire
+  // quelles tables sont déjà à jour (sinon `failed` nu = « rien n'a bougé »
+  // trompeur sur une désync de millésime inter-tables).
+  const swappedBlocks: string[] = [];
   try {
-    // 1. DOWNLOAD .7z + dernier checksum success en parallèle (RTT économisé).
-    const [downloaded, lastSha] = await Promise.all([
+    // 1. DOWNLOAD des 3 sources + dernier checksum success, en parallèle.
+    const [contours, pop, familles, lastSha] = await Promise.all([
       downloadCsv(IRIS_CONTOURS_URL, "contours-iris.7z"),
+      downloadCsv(IRIS_POP_URL, "iris-pop.zip"),
+      downloadCsv(IRIS_FAMILLES_URL, "iris-familles.zip"),
       getLastSuccessChecksum("iris"),
     ]);
-    log.csv_size_bytes = downloaded.sizeBytes;
-    log.csv_sha256 = downloaded.sha256;
 
-    if (await shortCircuitIfSameChecksum(log, lastSha, downloaded.sha256, "iris", force)) return;
+    // Checksum COMBINÉ ordonné (contours|pop|familles) : court-circuit ssi les
+    // 3 sont byte-identiques au dernier success. L'ajout d'un 4e bloc (FILOSOFI)
+    // changera mécaniquement ce sha → 1 re-run, attendu.
+    const combinedSha = computeSha256Buffer(
+      Buffer.from(`${contours.sha256}|${pop.sha256}|${familles.sha256}`),
+    );
+    log.csv_size_bytes = contours.sizeBytes + pop.sizeBytes + familles.sizeBytes;
+    log.csv_sha256 = combinedSha;
 
-    // 2. PRE-VALIDATE (taille seule — source binaire .7z, pas de header CSV).
-    if (downloaded.sizeBytes < MIN_ARCHIVE_BYTES) {
-      throw new IngestError(
-        "pre_validate",
-        `Archive size ${downloaded.sizeBytes} below minimum ${MIN_ARCHIVE_BYTES} (suspected truncated download)`,
-      );
-    }
+    if (await shortCircuitIfSameChecksum(log, lastSha, combinedSha, "iris", force)) return;
 
-    // 3. EXTRACT .7z → GeoPackage, puis ogr2ogr → CSV WKT reprojeté 4326.
+    // Pré-validation taille (sources binaires / zippées).
+    assertMinSize(contours.sizeBytes, MIN_CONTOURS_BYTES, "contours .7z");
+    assertMinSize(pop.sizeBytes, MIN_RP_ZIP_BYTES, "RP population .zip");
+    assertMinSize(familles.sizeBytes, MIN_RP_ZIP_BYTES, "RP familles .zip");
+
     workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "iris-ingest-"));
-    const gpkgPath = await extractGeoPackage(downloaded.filePath, workDir);
-    const csvPath = path.join(workDir, "iris-wkt.csv");
-    await convertGpkgToWktCsv(gpkgPath, csvPath);
-
-    // 4. CREATE STAGING + attendre le reload du schema-cache PostgREST.
     const supabase = getUntypedServiceClient("iris");
-    const { error: stagingErr } = await supabase.rpc("ingest_create_iris_staging");
-    if (stagingErr) {
-      throw new IngestError("copy", `Failed to create iris_staging table: ${stagingErr.message}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, PGRST_RELOAD_WAIT_MS));
 
-    // 5. STREAM CSV → STAGING (insert EWKT, batching par octets).
-    const stats = await streamContoursToStaging(csvPath, supabase);
-    log.row_count = stats.inserted;
+    // ── BLOC 1 — contours → iris ─────────────────────────────────────────────
+    const contoursCount = await ingestContours(contours.filePath, workDir, supabase);
+    swappedBlocks.push("iris");
+    log.row_count = contoursCount;
 
-    // 6. VALIDATE COHERENCE.
-    if (stats.inserted < MIN_ROWS) {
-      throw new IngestError(
-        "validate",
-        `Row count ${stats.inserted} below minimum ${MIN_ROWS} — suspected partial parse (truncated CSV or ogr2ogr failure)`,
-      );
-    }
-    if (stats.inserted > MAX_ROWS) {
-      throw new IngestError(
-        "validate",
-        `Row count ${stats.inserted} above maximum ${MAX_ROWS} — suspected upstream format change`,
-      );
-    }
-    // Anomalies de parse — DEUX causes à seuils/diagnostics SÉPARÉS (ne jamais
-    // fusionner : un faux diagnostic « column shift » sur une géométrie vide
-    // enverrait l'ops chercher au mauvais endroit). Dénominateur = total traité.
-    const processed = stats.inserted + stats.skippedBadCode + stats.skippedEmptyGeom;
-    if (stats.skippedBadCode > 0) {
-      const rate = stats.skippedBadCode / processed;
-      console.warn(
-        `[iris] ${stats.skippedBadCode} lignes à code_iris invalide ignorées (${(rate * 100).toFixed(2)}%)`,
-      );
-      if (rate > 0.01) {
-        throw new IngestError(
-          "validate",
-          `Invalid code_iris rate ${(rate * 100).toFixed(2)}% above 1% — likely IGN schema change (column shift sur code_iris)`,
-        );
-      }
-    }
-    if (stats.skippedEmptyGeom > 0) {
-      // `geom` est NOT NULL et tout IRIS a un contour → une géométrie vide est
-      // un signal FORT (ogr2ogr partiel, reprojection ratée, WKT dans une autre
-      // colonne). Tolérance plus stricte que bad_code (0,5 %).
-      const rate = stats.skippedEmptyGeom / processed;
-      console.warn(
-        `[iris] ${stats.skippedEmptyGeom} lignes à géométrie vide ignorées (${(rate * 100).toFixed(2)}%)`,
-      );
-      if (rate > 0.005) {
-        throw new IngestError(
-          "validate",
-          `Empty-geometry rate ${(rate * 100).toFixed(2)}% above 0.5% — ogr2ogr conversion partielle, couche/SRID source incorrects, ou WKT déplacé`,
-        );
-      }
-    }
+    // ── BLOC 2 — RP population (âge + CSP) → iris_population ──────────────────
+    const popCount = await ingestStatsCsv(pop.filePath, workDir, supabase, {
+      block: "pop",
+      stagingRpc: "ingest_create_iris_population_staging",
+      stagingTable: "iris_population_staging",
+      prodTable: "iris_population",
+      expectedHeaders: POP_EXPECTED_HEADERS,
+      map: mapPopRecord,
+    });
+    swappedBlocks.push("iris_population");
 
-    // 7. ATOMIC SWAP iris_staging → iris.
-    await atomicSwapTables({ prodTable: "iris" });
+    // ── BLOC 3 — RP couples-familles-ménages → iris_familles ─────────────────
+    const famCount = await ingestStatsCsv(familles.filePath, workDir, supabase, {
+      block: "familles",
+      stagingRpc: "ingest_create_iris_familles_staging",
+      stagingTable: "iris_familles_staging",
+      prodTable: "iris_familles",
+      expectedHeaders: FAMILLES_EXPECTED_HEADERS,
+      map: mapFamillesRecord,
+    });
+    swappedBlocks.push("iris_familles");
 
-    // 8. CANARY post-swap (non-bloquant — pas de cibles iris seedées tant que la
-    // 1re ingestion n'a pas confirmé des codes stables ; retourne vide = OK).
+    // CANARY post-swap (non-bloquant) — cible la table `iris` (contours).
     await runAndRecordCanary(supabase, "iris", log, "iris");
 
     if (log.status !== "partial") log.status = "success";
     log.finished_at = new Date().toISOString();
     await writeIngestLogSuccessSafe(log, "iris");
     const elapsedSec = (Date.now() - new Date(startedAt).getTime()) / 1000;
-    console.log(`[iris] success: ${stats.inserted} IRIS ingérés en ${elapsedSec}s`);
+    console.log(
+      `[iris] success: contours=${contoursCount} pop=${popCount} familles=${famCount} en ${elapsedSec}s`,
+    );
   } catch (err) {
     console.error("[iris] ingestion failed:", err);
     const ingestErr =
@@ -208,13 +189,18 @@ async function main(): Promise<void> {
           );
     log.status = "failed";
     log.error_phase = ingestErr.phase;
-    log.error_message = ingestErr.message;
+    // Audit HONNÊTE : si des blocs ont déjà swappé, le dire — un `failed` nu
+    // masquerait une désync de millésime (tables swappées N + table échouée N-1).
+    // Le prochain run répare tout (checksum combiné changé → ré-ingestion).
+    log.error_message =
+      swappedBlocks.length > 0
+        ? `${ingestErr.message} — ATTENTION ${swappedBlocks.length} bloc(s) DÉJÀ swappé(s) en prod [${swappedBlocks.join(", ")}] : désync de millésime possible jusqu'au prochain run (qui réingère les 3 via checksum combiné)`
+        : ingestErr.message;
     log.finished_at = new Date().toISOString();
     await writeIngestLogFailureFallback(log, "iris");
     console.error(`[iris] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
     process.exit(1);
   } finally {
-    // Best-effort cleanup du workdir temporaire (GeoPackage 159 Mo + CSV 261 Mo).
     if (workDir) {
       try {
         await fsp.rm(workDir, { recursive: true, force: true });
@@ -225,80 +211,72 @@ async function main(): Promise<void> {
   }
 }
 
-/**
- * Extrait l'archive .7z dans `destDir` et retourne le chemin du `.gpkg`. La
- * livraison IGN imbrique le GeoPackage dans une arborescence profonde
- * (CONTOURS-IRIS/1_DONNEES.../...) → recherche récursive du premier `.gpkg`.
- */
-async function extractGeoPackage(archivePath: string, destDir: string): Promise<string> {
-  try {
-    await execFileAsync("7z", ["x", "-y", `-o${destDir}`, archivePath], {
-      maxBuffer: 64 * 1024 * 1024,
-    });
-  } catch (err) {
-    console.error(`[iris] 7z extraction failed for ${archivePath}:`, err);
+function assertMinSize(actual: number, min: number, label: string): void {
+  if (actual < min) {
     throw new IngestError(
       "pre_validate",
-      `7z extraction failed (p7zip installé ? PATH ?): ${err instanceof Error ? err.message : String(err)}`,
-      err,
+      `${label} size ${actual} below minimum ${min} (suspected truncated download)`,
     );
   }
-  const gpkg = await findFirstByExt(destDir, ".gpkg");
+}
+
+// ── BLOC 1 : contours ──────────────────────────────────────────────────────
+
+async function ingestContours(
+  archivePath: string,
+  workDir: string,
+  supabase: SupabaseClient,
+): Promise<number> {
+  const dir = path.join(workDir, "contours");
+  await extractArchive(archivePath, dir);
+  const gpkg = await findFirst(dir, (n) => n.endsWith(".gpkg"));
   if (!gpkg) {
-    throw new IngestError(
-      "pre_validate",
-      `Aucun .gpkg trouvé dans l'archive extraite (${destDir})`,
-    );
+    throw new IngestError("pre_validate", `Aucun .gpkg trouvé dans l'archive extraite (${dir})`);
   }
-  return gpkg;
-}
+  const csvPath = path.join(workDir, "iris-wkt.csv");
+  await convertGpkgToWktCsv(gpkg, csvPath);
 
-/**
- * ogr2ogr : GeoPackage Lambert-93 → CSV avec géométrie en WKT reprojetée 4326.
- * `-t_srs EPSG:4326` (source RGF93/Lambert-93 auto-détectée depuis le .gpkg),
- * `-lco GEOMETRY=AS_WKT` (1ère colonne = WKT), `-lco SEPARATOR=COMMA`.
- * Header attendu : `geometrie,cleabs,code_insee,nom_commune,iris,code_iris,nom_iris,type_iris`.
- */
-async function convertGpkgToWktCsv(gpkgPath: string, csvPath: string): Promise<void> {
-  try {
-    await execFileAsync(
-      "ogr2ogr",
-      [
-        "-f",
-        "CSV",
-        csvPath,
-        gpkgPath,
-        GPKG_LAYER,
-        "-t_srs",
-        "EPSG:4326",
-        "-lco",
-        "GEOMETRY=AS_WKT",
-        "-lco",
-        "SEPARATOR=COMMA",
-      ],
-      // 64 Mo : le CSV part dans un FICHIER (pas stdout), mais ogr2ogr est
-      // bavard sur stderr (1 warning/géométrie réparée × ~48,6 K features). Un
-      // maxBuffer trop juste ferait rejeter `ENOBUFS` un run pourtant réussi sur
-      // disque → faux « ogr2ogr absent ». 64 Mo absorbe le bruit stderr.
-      { maxBuffer: 64 * 1024 * 1024 },
-    );
-  } catch (err) {
-    console.error(`[iris] ogr2ogr conversion failed for ${gpkgPath}:`, err);
-    throw new IngestError(
-      "pre_validate",
-      `ogr2ogr conversion failed (gdal-bin installé ? PATH ?): ${err instanceof Error ? err.message : String(err)}`,
-      err,
-    );
+  const { error } = await supabase.rpc("ingest_create_iris_staging");
+  if (error) {
+    throw new IngestError("copy", `Failed to create iris_staging table: ${error.message}`);
   }
-  if (!fs.existsSync(csvPath)) {
-    throw new IngestError("pre_validate", `ogr2ogr n'a pas produit le CSV attendu (${csvPath})`);
-  }
-}
+  await waitForSchemaReload();
 
-interface ContoursStreamStats {
-  inserted: number;
-  skippedBadCode: number;
-  skippedEmptyGeom: number;
+  const stats = await streamContoursToStaging(csvPath, supabase);
+  assertRowBand(stats.inserted, "contours");
+
+  // Anomalies de parse — DEUX causes à seuils/diagnostics SÉPARÉS (ne jamais
+  // fusionner : un faux « column shift » sur une géométrie vide égarerait l'ops).
+  const processed = stats.inserted + stats.skippedBadCode + stats.skippedEmptyGeom;
+  if (stats.skippedBadCode > 0) {
+    const rate = stats.skippedBadCode / processed;
+    console.warn(
+      `[iris] ${stats.skippedBadCode} lignes à code_iris invalide ignorées (${(rate * 100).toFixed(2)}%)`,
+    );
+    if (rate > 0.01) {
+      throw new IngestError(
+        "validate",
+        `Invalid code_iris rate ${(rate * 100).toFixed(2)}% above 1% — likely IGN schema change (column shift sur code_iris)`,
+      );
+    }
+  }
+  if (stats.skippedEmptyGeom > 0) {
+    // `geom` NOT NULL + tout IRIS a un contour → géométrie vide = signal FORT
+    // (ogr2ogr partiel, reprojection ratée, WKT déplacé). Tolérance stricte 0,5 %.
+    const rate = stats.skippedEmptyGeom / processed;
+    console.warn(
+      `[iris] ${stats.skippedEmptyGeom} lignes à géométrie vide ignorées (${(rate * 100).toFixed(2)}%)`,
+    );
+    if (rate > 0.005) {
+      throw new IngestError(
+        "validate",
+        `Empty-geometry rate ${(rate * 100).toFixed(2)}% above 0.5% — ogr2ogr conversion partielle, couche/SRID source incorrects, ou WKT déplacé`,
+      );
+    }
+  }
+
+  await atomicSwapTables({ prodTable: "iris" });
+  return stats.inserted;
 }
 
 /** Discriminé : une ligne mappée OU une raison de skip (anomalie comptée). */
@@ -307,14 +285,12 @@ type ParsedContour =
   | { row?: never; skip: "bad_code" | "empty_geom" };
 
 /**
- * Mappe une ligne CSV ogr2ogr (header
- * `geometrie,cleabs,code_insee,nom_commune,iris,code_iris,nom_iris,type_iris`)
- * vers une row staging. PURE (testable sans DB ni I/O). Skippe — en comptant —
- * un `code_iris` non conforme (CODE_IRIS_RE) ou une géométrie vide : sur une
- * source IGN aussi propre, l'un OU l'autre signale un column shift / changement
- * de schéma, jamais un cas normal. La géométrie est préfixée `SRID=4326;` (EWKT)
- * car ogr2ogr `-lco GEOMETRY=AS_WKT` produit du WKT nu (SRID 0) que le cast vers
- * `geometry(MultiPolygon, 4326)` rejetterait sans le SRID explicite.
+ * Mappe une ligne CSV ogr2ogr → row staging. PURE. Skippe (en comptant) un
+ * `code_iris` non conforme ou une géométrie vide. `code_commune` est DÉRIVÉ de
+ * code_iris (jamais la colonne CSV `code_insee`) : garantit l'invariant
+ * code_commune == left(code_iris,5) et supprime un chemin de clé vide silencieux
+ * (un code_insee absent produirait `''`, accepté par CHAR(5) NOT NULL). EWKT
+ * `SRID=4326;` car le WKT nu d'ogr2ogr est SRID 0 (cast rejeté sinon).
  */
 function mapContourRecord(record: Record<string, string>): ParsedContour {
   const codeIris = (record.code_iris ?? "").trim();
@@ -324,16 +300,7 @@ function mapContourRecord(record: Record<string, string>): ParsedContour {
   return {
     row: {
       code_iris: codeIris,
-      // DÉRIVÉ de code_iris (déjà validé CODE_IRIS_RE) — JAMAIS la colonne CSV
-      // `code_insee` : garantit l'invariant code_commune == left(code_iris,5)
-      // (vérifié prod, commune_mismatch=0) ET supprime un chemin silencieux —
-      // un `code_insee` absent (column shift) produirait `''`, accepté par la
-      // colonne CHAR(5) NOT NULL en `'     '` → clé de raccord vide ingérée
-      // sans erreur. La dérivation rend ce cas impossible.
       code_commune: codeIris.slice(0, 5),
-      // getNonEmpty (shared) plutôt qu'un helper local : il strip en plus les
-      // control-chars résiduels du CSV (\r\n\t) qui casseraient le JSON de
-      // l'insert PostgREST — pertinent sur des libellés INSEE/IGN bruts.
       libelle: getNonEmpty(record, "nom_iris"),
       type_iris: getNonEmpty(record, "type_iris"),
       geom: `SRID=4326;${wkt}`,
@@ -341,12 +308,17 @@ function mapContourRecord(record: Record<string, string>): ParsedContour {
   };
 }
 
+interface ContoursStreamStats {
+  inserted: number;
+  skippedBadCode: number;
+  skippedEmptyGeom: number;
+}
+
 async function streamContoursToStaging(
   csvPath: string,
   supabase: SupabaseClient,
 ): Promise<ContoursStreamStats> {
-  const stream = fs.createReadStream(csvPath, { encoding: "utf8" });
-  const parser = stream.pipe(
+  const parser = fs.createReadStream(csvPath, { encoding: "utf8" }).pipe(
     parse({
       delimiter: ",",
       columns: true,
@@ -381,18 +353,14 @@ async function streamContoursToStaging(
     if (parsed.row) {
       batch.push(parsed.row);
       batchBytes += parsed.row.geom.length;
-      if (batch.length >= BATCH_MAX_ROWS || batchBytes >= BATCH_MAX_BYTES) {
+      if (batch.length >= GEOM_BATCH_MAX_ROWS || batchBytes >= GEOM_BATCH_MAX_BYTES) {
         await flush();
       }
       continue;
     }
-    // Switch EXHAUSTIF (garde `never`) : compteurs distincts par cause — un
-    // futur 3e `skip` sans compteur dédié serait une erreur de compilation
-    // (discipline finess.ts). Fusionner les causes diluerait l'`empty_geom`
-    // sous le seuil/message « column shift » du `bad_code` (diagnostic faux).
-    // Le discriminant est assigné à une variable locale AVANT le switch : TS ne
-    // narrow PAS en `never` au default à travers un accès de propriété
-    // (`parsed.skip`) — même contrainte que finess.ts.
+    // Switch EXHAUSTIF (garde `never`) : compteurs distincts par cause. Le
+    // discriminant est sorti en variable locale AVANT le switch — TS ne narrow
+    // pas en `never` au default via un accès de propriété (contrainte finess.ts).
     const reason = parsed.skip;
     switch (reason) {
       case "bad_code":
@@ -411,19 +379,303 @@ async function streamContoursToStaging(
   return { inserted, skippedBadCode, skippedEmptyGeom };
 }
 
-/** Recherche récursive du premier fichier portant l'extension `ext` (insensible casse). */
-async function findFirstByExt(dir: string, ext: string): Promise<string | null> {
-  // Tri par nom : `readdir` ne garantit aucun ordre → sélection stable/auditable
-  // si l'archive contenait un jour > 1 .gpkg (annexe, journal). FXX n'en a qu'un.
+// ── BLOCS 2-3 : stats CSV (RP population / familles) ─────────────────────────
+
+// Mapping champ DB → colonne CSV INSEE. SOURCE UNIQUE pilotant (1) le type de
+// row, (2) le parseur (itération), (3) `expectedHeaders` de preValidateFile.
+// Garantit qu'AUCUNE colonne lue n'échappe à la validation de header → ferme le
+// trou « renommage INSEE d'une colonne non-sentinelle → parseNum(undefined)=null
+// massif silencieux » (finding HIGH revue étape 2). Ajouter une colonne ici la
+// propage automatiquement au type, au parseur ET au garde-fou header.
+const POP_COLUMNS = {
+  pop_total: "P22_POP",
+  pop_0_14: "P22_POP0014",
+  pop_15_29: "P22_POP1529",
+  pop_30_44: "P22_POP3044",
+  pop_45_59: "P22_POP4559",
+  pop_60_74: "P22_POP6074",
+  pop_75p: "P22_POP75P",
+  pop_65p: "P22_POP65P", // agrégat INSEE distinct (pas dérivé des tranches)
+  pop_15p: "C22_POP15P", // dénominateur des parts CSP
+  csp_agriculteurs: "C22_POP15P_STAT_GSEC11_21",
+  csp_artisans_comm: "C22_POP15P_STAT_GSEC12_22",
+  csp_cadres: "C22_POP15P_STAT_GSEC13_23",
+  csp_prof_interm: "C22_POP15P_STAT_GSEC14_24",
+  csp_employes: "C22_POP15P_STAT_GSEC15_25",
+  csp_ouvriers: "C22_POP15P_STAT_GSEC16_26",
+  csp_retraites: "C22_POP15P_STAT_GSEC32",
+  csp_autres: "C22_POP15P_STAT_GSEC40",
+} as const;
+
+const FAMILLES_COLUMNS = {
+  menages_total: "C22_MEN",
+  couples_avec_enfants: "C22_MENCOUPAENF",
+  couples_sans_enfants: "C22_MENCOUPSENF",
+  familles_monoparentales: "C22_MENFAMMONO",
+} as const;
+
+type IrisPopulationRow = { code_iris: string } & Record<keyof typeof POP_COLUMNS, number | null>;
+type IrisFamillesRow = { code_iris: string } & Record<keyof typeof FAMILLES_COLUMNS, number | null>;
+
+/** Discriminé (comme `ParsedContour`) : row mappée OU skip COMPTÉ (jamais avalé). */
+type StatsParsed<T> = { row: T; skip?: never } | { row?: never; skip: "bad_code" };
+
+/** Header attendu par bloc = IRIS + TOUTES les colonnes lues (source = COLUMN_MAP). */
+const POP_EXPECTED_HEADERS = ["IRIS", ...Object.values(POP_COLUMNS)];
+const FAMILLES_EXPECTED_HEADERS = ["IRIS", ...Object.values(FAMILLES_COLUMNS)];
+
+function parseNumericColumns<F extends string>(
+  record: Record<string, string>,
+  columns: Record<F, string>,
+): Record<F, number | null> {
+  const out = {} as Record<F, number | null>;
+  for (const field of Object.keys(columns) as F[]) {
+    out[field] = parseNum(record[columns[field]]);
+  }
+  return out;
+}
+
+/** Mappe une ligne RP via un COLUMN_MAP. Skip (COMPTÉ) si `IRIS` non conforme. */
+function mapStatsRecord<F extends string>(
+  record: Record<string, string>,
+  columns: Record<F, string>,
+): StatsParsed<{ code_iris: string } & Record<F, number | null>> {
+  const codeIris = (record.IRIS ?? "").trim();
+  if (!CODE_IRIS_RE.test(codeIris)) return { skip: "bad_code" };
+  return { row: { code_iris: codeIris, ...parseNumericColumns(record, columns) } };
+}
+
+function mapPopRecord(record: Record<string, string>): StatsParsed<IrisPopulationRow> {
+  return mapStatsRecord(record, POP_COLUMNS);
+}
+
+function mapFamillesRecord(record: Record<string, string>): StatsParsed<IrisFamillesRow> {
+  return mapStatsRecord(record, FAMILLES_COLUMNS);
+}
+
+/**
+ * Parse un compte INSEE → number | null. Vide = null (cellule légitimement
+ * absente). Une valeur NON vide mais non numérique reste null MAIS est rare sur
+ * une source RP propre ; un column-shift massif est attrapé en amont par la
+ * validation de header (preValidateFile) et la bande de lignes.
+ */
+function parseNum(raw: string | undefined): number | null {
+  const v = (raw ?? "").trim();
+  if (v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+interface StatsCsvConfig<T> {
+  block: string;
+  stagingRpc: string;
+  stagingTable: string;
+  prodTable: string;
+  expectedHeaders: string[];
+  map: (record: Record<string, string>) => StatsParsed<T>;
+}
+
+/**
+ * Ingestion générique d'un CSV stats RP (download déjà fait) : extract .zip →
+ * data CSV (pas `meta_`) → preValidate header (attrape un column-shift LOUD) →
+ * staging → stream/insert → bande de cohérence → swap atomique. Retourne le
+ * nombre de lignes insérées.
+ */
+async function ingestStatsCsv<T extends object>(
+  zipPath: string,
+  workDir: string,
+  supabase: SupabaseClient,
+  cfg: StatsCsvConfig<T>,
+): Promise<number> {
+  const dir = path.join(workDir, cfg.block);
+  await extractArchive(zipPath, dir);
+  // Le .zip INSEE contient le CSV data + un `meta_*.CSV` (dictionnaire) à
+  // exclure. CASSE-INSENSIBLE : les fichiers INSEE sont en `.CSV` MAJUSCULE
+  // (le `.gpkg` IGN était minuscule, d'où le bug initial sur `.endsWith(".csv")`).
+  const csvPath = await findFirst(dir, (n) => {
+    const lower = n.toLowerCase();
+    return lower.endsWith(".csv") && !lower.startsWith("meta");
+  });
+  if (!csvPath) {
+    throw new IngestError("pre_validate", `Aucun CSV data (hors meta_) dans ${dir}`);
+  }
+  // Validation de header : un renommage / column-shift INSEE échoue ICI (LOUD)
+  // au lieu de produire des colonnes silencieusement NULL en aval.
+  await preValidateFile(csvPath, {
+    minSizeBytes: 1_000_000,
+    expectedHeaderColumns: cfg.expectedHeaders,
+    delimiter: RP_DELIMITER,
+  });
+
+  const { error } = await supabase.rpc(cfg.stagingRpc);
+  if (error) {
+    throw new IngestError("copy", `Failed to create ${cfg.stagingTable}: ${error.message}`);
+  }
+  await waitForSchemaReload();
+
+  const { inserted, skippedBadCode } = await streamStatsToStaging(csvPath, supabase, cfg);
+  assertRowBand(inserted, cfg.block);
+
+  // Skips COMPTÉS + seuillés (parité avec le bloc contours) : un column-shift
+  // PARTIEL sur la colonne `IRIS` (quelques milliers de lignes non conformes)
+  // garderait `inserted` dans la bande → swap d'une table AMPUTÉE en status
+  // success. Le seuil 1 % lève LOUD avec le bon diagnostic, jamais avalé.
+  if (skippedBadCode > 0) {
+    const rate = skippedBadCode / (inserted + skippedBadCode);
+    console.warn(
+      `[iris:${cfg.block}] ${skippedBadCode} lignes à colonne IRIS non conforme ignorées (${(rate * 100).toFixed(2)}%)`,
+    );
+    if (rate > 0.01) {
+      throw new IngestError(
+        "validate",
+        `[${cfg.block}] Invalid IRIS rate ${(rate * 100).toFixed(2)}% above 1% — likely column shift sur la colonne IRIS`,
+      );
+    }
+  }
+
+  await atomicSwapTables({ prodTable: cfg.prodTable });
+  return inserted;
+}
+
+async function streamStatsToStaging<T extends object>(
+  csvPath: string,
+  supabase: SupabaseClient,
+  cfg: StatsCsvConfig<T>,
+): Promise<{ inserted: number; skippedBadCode: number }> {
+  const parser = fs.createReadStream(csvPath, { encoding: "utf8" }).pipe(
+    parse({
+      delimiter: RP_DELIMITER,
+      columns: true,
+      skip_empty_lines: true,
+      relax_quotes: true,
+      trim: true,
+      bom: true,
+    }),
+  );
+
+  let batch: T[] = [];
+  let inserted = 0;
+  let skippedBadCode = 0;
+  let firstBatch = true;
+
+  const flush = async (): Promise<void> => {
+    if (batch.length === 0) return;
+    await insertStagingBatchWithRetry(supabase, cfg.stagingTable, batch, {
+      logPrefix: `iris:${cfg.block}`,
+      isFirstBatch: firstBatch,
+    });
+    firstBatch = false;
+    inserted += batch.length;
+    batch = [];
+  };
+
+  for await (const record of parser as AsyncIterable<Record<string, string>>) {
+    const parsed = cfg.map(record);
+    if (parsed.skip) {
+      // COMPTÉ (pas `continue` muet) : seuillé en aval pour attraper un column
+      // shift sur la colonne IRIS — cf. ingestStatsCsv.
+      skippedBadCode++;
+      continue;
+    }
+    batch.push(parsed.row);
+    if (batch.length >= STATS_BATCH_ROWS) await flush();
+  }
+  await flush();
+  return { inserted, skippedBadCode };
+}
+
+// ── Helpers partagés ─────────────────────────────────────────────────────────
+
+function assertRowBand(inserted: number, block: string): void {
+  if (inserted < MIN_ROWS) {
+    throw new IngestError(
+      "validate",
+      `[${block}] Row count ${inserted} below minimum ${MIN_ROWS} — suspected partial parse (truncated CSV or conversion failure)`,
+    );
+  }
+  if (inserted > MAX_ROWS) {
+    throw new IngestError(
+      "validate",
+      `[${block}] Row count ${inserted} above maximum ${MAX_ROWS} — suspected upstream format change`,
+    );
+  }
+}
+
+function waitForSchemaReload(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, PGRST_RELOAD_WAIT_MS));
+}
+
+/** Extrait une archive (.7z ou .zip) dans `destDir` via 7z (p7zip). */
+async function extractArchive(archivePath: string, destDir: string): Promise<void> {
+  try {
+    await execFileAsync("7z", ["x", "-y", `-o${destDir}`, archivePath], {
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (err) {
+    console.error(`[iris] 7z extraction failed for ${archivePath}:`, err);
+    throw new IngestError(
+      "pre_validate",
+      `7z extraction failed (p7zip installé ? PATH ?): ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  }
+}
+
+/**
+ * ogr2ogr : GeoPackage Lambert-93 → CSV avec géométrie en WKT reprojetée 4326.
+ * `-t_srs EPSG:4326` (source auto-détectée), `-lco GEOMETRY=AS_WKT` (1ère
+ * colonne = WKT), `-lco SEPARATOR=COMMA`. Header attendu :
+ * `geometrie,cleabs,code_insee,nom_commune,iris,code_iris,nom_iris,type_iris`.
+ */
+async function convertGpkgToWktCsv(gpkgPath: string, csvPath: string): Promise<void> {
+  try {
+    await execFileAsync(
+      "ogr2ogr",
+      [
+        "-f",
+        "CSV",
+        csvPath,
+        gpkgPath,
+        GPKG_LAYER,
+        "-t_srs",
+        "EPSG:4326",
+        "-lco",
+        "GEOMETRY=AS_WKT",
+        "-lco",
+        "SEPARATOR=COMMA",
+      ],
+      // 64 Mo : le CSV part dans un FICHIER (pas stdout), mais ogr2ogr est bavard
+      // sur stderr (1 warning/géométrie réparée × ~48,6 K). Un maxBuffer trop
+      // juste ferait rejeter ENOBUFS un run pourtant réussi → faux « gdal absent ».
+      { maxBuffer: 64 * 1024 * 1024 },
+    );
+  } catch (err) {
+    console.error(`[iris] ogr2ogr conversion failed for ${gpkgPath}:`, err);
+    throw new IngestError(
+      "pre_validate",
+      `ogr2ogr conversion failed (gdal-bin installé ? PATH ?): ${err instanceof Error ? err.message : String(err)}`,
+      err,
+    );
+  }
+  if (!fs.existsSync(csvPath)) {
+    throw new IngestError("pre_validate", `ogr2ogr n'a pas produit le CSV attendu (${csvPath})`);
+  }
+}
+
+/** Recherche récursive du premier fichier satisfaisant `predicate(nom)` (tri stable par nom). */
+async function findFirst(
+  dir: string,
+  predicate: (name: string) => boolean,
+): Promise<string | null> {
   const entries = (await fsp.readdir(dir, { withFileTypes: true })).sort((a, b) =>
     a.name.localeCompare(b.name),
   );
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      const found = await findFirstByExt(full, ext);
+      const found = await findFirst(full, predicate);
       if (found) return found;
-    } else if (entry.name.toLowerCase().endsWith(ext.toLowerCase())) {
+    } else if (predicate(entry.name)) {
       return full;
     }
   }
@@ -433,9 +685,16 @@ async function findFirstByExt(dir: string, ext: string): Promise<string | null> 
 /** Surface de test (cf. convention `__TESTING__` de finess.ts). */
 export const __TESTING__ = {
   mapContourRecord,
+  mapPopRecord,
+  mapFamillesRecord,
+  parseNum,
   CODE_IRIS_RE,
-  BATCH_MAX_ROWS,
-  BATCH_MAX_BYTES,
+  POP_COLUMNS,
+  FAMILLES_COLUMNS,
+  POP_EXPECTED_HEADERS,
+  FAMILLES_EXPECTED_HEADERS,
+  GEOM_BATCH_MAX_ROWS,
+  GEOM_BATCH_MAX_BYTES,
   MIN_ROWS,
   MAX_ROWS,
 };
