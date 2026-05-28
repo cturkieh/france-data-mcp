@@ -154,6 +154,64 @@ describe("buildIletProfile", () => {
   });
 });
 
+describe("réalisme PostgREST — NUMERIC sérialisé en STRING (garde-fou P1/P2)", () => {
+  // PostgREST renvoie les colonnes NUMERIC en STRING (préservation de précision) ;
+  // iris-db.test.ts le teste déjà pour pop_total. Ici on verrouille les chemins
+  // d'AGRÉGATION (R1) et d'EXPOSITION brute (revenu_median/taux_pauvrete de l'îlot)
+  // — un `+=` sur une string concatène ("0100" au lieu de 100), un champ exposé
+  // brut viole le type `number | null`. Les valeurs brutes sont des string par
+  // construction du backend ; le cast `as unknown as number` reproduit le runtime.
+  const num = (v: string) => v as unknown as number;
+
+  it("aggregateBassin somme des pop_total/revenu STRING sans JAMAIS concaténer (R1)", () => {
+    const rows = [
+      row({
+        pop_total: num("100"),
+        revenu_median: num("20000"),
+        pop_65p: num("20"),
+        pop_15p: num("80"),
+      }),
+      row({
+        pop_total: num("300"),
+        revenu_median: num("30000"),
+        pop_65p: num("60"),
+        pop_15p: num("160"),
+      }),
+    ];
+    const agg = aggregateBassin(rows, 2);
+    expect(agg.population_bassin).toBe(400); // PAS "0100300" → 100300
+    expect(agg.revenu_median_pondere).toBe(27500); // (20000×100 + 30000×300) / 400
+    expect(agg.couverture.revenu_pct_population).toBe(1); // popCouverte=400, pas une string
+  });
+
+  it("buildIletProfile coerce revenu_median/taux_pauvrete STRING → number (contrat number|null)", () => {
+    const p = buildIletProfile(
+      row({ pop_total: num("2000"), revenu_median: num("32510"), taux_pauvrete: num("19.0") }),
+    );
+    expect(p.revenu_median).toBe(32510);
+    expect(typeof p.revenu_median).toBe("number"); // PAS la string "32510"
+    expect(p.taux_pauvrete).toBe(19);
+    expect(typeof p.taux_pauvrete).toBe("number");
+  });
+
+  it("buildIletProfile garde null pour un revenu hors couverture FILOSOFI (jamais 0)", () => {
+    const p = buildIletProfile(
+      row({ pop_total: num("2000"), revenu_median: null, taux_pauvrete: null }),
+    );
+    expect(p.revenu_median).toBeNull();
+    expect(p.taux_pauvrete).toBeNull();
+  });
+
+  it("buildIletProfile dégrade un revenu NUMERIC corrompu en null + warn (jamais avalé muet)", () => {
+    // Distingue "absent légitime" (null → null muet, OK) de "source corrompue"
+    // (string non numérique → null MAIS warn grep-able, règle projet).
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const p = buildIletProfile(row({ pop_total: num("2000"), revenu_median: num("N/A") }));
+    expect(p.revenu_median).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/revenu_median non numérique/u));
+  });
+});
+
 describe("getProfilIris — validation & orchestration", () => {
   it("throw si NI point NI code_iris, ou les DEUX", async () => {
     await expect(getProfilIris({})).rejects.toThrow(RangeError);

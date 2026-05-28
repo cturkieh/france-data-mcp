@@ -675,8 +675,9 @@ async function extractArchive(archivePath: string, destDir: string): Promise<voi
 
 /**
  * ogr2ogr : GeoPackage Lambert-93 → CSV avec géométrie en WKT reprojetée 4326.
- * `-t_srs EPSG:4326` (source auto-détectée), `-lco GEOMETRY=AS_WKT` (1ère
- * colonne = WKT), `-lco SEPARATOR=COMMA`. Header attendu :
+ * `-t_srs EPSG:4326` (source auto-détectée), `-nlt PROMOTE_TO_MULTI` (force tout
+ * en MULTIPOLYGON — voir plus bas), `-lco GEOMETRY=AS_WKT` (1ère colonne = WKT),
+ * `-lco SEPARATOR=COMMA`. Header attendu :
  * `geometrie,cleabs,code_insee,nom_commune,iris,code_iris,nom_iris,type_iris`.
  */
 async function convertGpkgToWktCsv(gpkgPath: string, csvPath: string): Promise<void> {
@@ -689,6 +690,13 @@ async function convertGpkgToWktCsv(gpkgPath: string, csvPath: string): Promise<v
         csvPath,
         gpkgPath,
         GPKG_LAYER,
+        // PROMOTE_TO_MULTI : garantit que TOUTE feature sort en MULTIPOLYGON, même
+        // si un futur millésime IGN mêle des POLYGON simples. Sans ce flag, une
+        // seule géométrie POLYGON violerait le typmod geometry(MultiPolygon,4326)
+        // à l'INSERT → tout le batch échoue (le millésime 2024 est 100 % multi,
+        // mais c'est une assurance gratuite et idempotente contre la dérive amont).
+        "-nlt",
+        "PROMOTE_TO_MULTI",
         "-t_srs",
         "EPSG:4326",
         "-lco",

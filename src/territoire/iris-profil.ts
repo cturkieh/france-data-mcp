@@ -99,6 +99,27 @@ const n = (v: number | null): number => {
   return Number.isFinite(x) ? x : 0;
 };
 
+// Jumeau de `n()` qui PRÉSERVE null (≠ écrase en 0) — pour les champs EXPOSÉS
+// BRUTS au contrat (`revenu_median`, `taux_pauvrete` de l'îlot). PostgREST
+// sérialise les NUMERIC en STRING (prouvé : iris-db.test.ts teste "2157.34") :
+// sans coercition, le champ violerait son type `number | null` (string "32510"
+// servie, et toute arithmétique aval `+` la concaténerait). `null` reste `null`
+// (hors couverture FILOSOFI = absence légitime, JAMAIS un 0 trompeur).
+// Une valeur NON numérique (millésime FILOSOFI corrompu / "N/A" / secret stat)
+// dégrade en `null` MAIS jamais en SILENCE : warn grep-able (jumeau iris-db.ts,
+// règle projet « dégradation source jamais muette »). On ne l'escalade PAS en
+// not_found — contrairement à la population, le revenu est secondaire (absent
+// ~68 % par design) et ne pilote pas le found/not_found.
+const numOrNull = (v: number | null, field: string): number | null => {
+  if (v == null) return null;
+  const x = Number(v);
+  if (Number.isFinite(x)) return x;
+  console.warn(
+    `[france-data-mcp] buildIletProfile: ${field} non numérique (raw=${JSON.stringify(v)}) — dégradé en null`,
+  );
+  return null;
+};
+
 /** Part `numerateur / denominateur`, arrondie à 4 décimales, `null` si denom ≤ 0. */
 function part(numerateur: number, denominateur: number): number | null {
   if (denominateur <= 0) return null;
@@ -149,8 +170,8 @@ export function buildIletProfile(row: IrisProfilRow): IletProfile {
     },
     csp: cspParts(cspSums, pop15p),
     familles_avec_enfants: famAvecEnf == null ? null : Math.round(famAvecEnf),
-    revenu_median: row.revenu_median,
-    taux_pauvrete: row.taux_pauvrete,
+    revenu_median: numOrNull(row.revenu_median, "revenu_median"),
+    taux_pauvrete: numOrNull(row.taux_pauvrete, "taux_pauvrete"),
     source: RP_SOURCE,
   };
 }
