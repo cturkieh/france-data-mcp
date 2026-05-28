@@ -54,7 +54,7 @@ export const RPPS_PROFESSION = {
  *   - SM26 = Qualifié en Médecine Générale (PAS la dermato — bug B4)
  *
  * Source : extraction RPPS / Annuaire Santé ANS, vérifiée sur dump prod le
- * 2026-05-15 via `lister_specialites_medicales` (profession_code='10').
+ * 2026-05-15 via `lister_nomenclature` (referentiel: rpps_savoir_faire, profession_code='10').
  * Étendre uniquement avec des codes vérifiés sur dump prod.
  */
 export const RPPS_SAVOIR_FAIRE = {

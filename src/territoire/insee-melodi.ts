@@ -209,7 +209,7 @@ export async function getPopulationByCommune(
   if (communeMere !== codeInsee) {
     return lookupNotFound(
       codeInsee,
-      `Arrondissement PLM ${codeInsee} — INSEE Melodi n'expose la population qu'à la commune entière. Utiliser le code commune-mère "${communeMere}" (population_par_commune) ou code_dept="${plmDept(codeInsee)}" (population_par_departement).`,
+      `Arrondissement PLM ${codeInsee} — INSEE Melodi n'expose la population qu'à la commune entière. Utiliser le tool population avec le code commune-mère "${communeMere}" ou le code département "${plmDept(codeInsee)}".`,
     );
   }
   try {

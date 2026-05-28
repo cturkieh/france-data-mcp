@@ -29,6 +29,31 @@ function paramError(message: string): RangeError {
 }
 
 /**
+ * Valide un paramètre discriminant à valeurs fermées (enum) — ex. `referentiel`
+ * de `lister_nomenclature`, `cible` de `densite_sante` (fusions Phase A 0.21.0).
+ * Retourne la valeur typée, ou throw `RangeError` (→ JSON-RPC -32602) avec les
+ * valeurs admises + un exemple. 3 branches (absent / mauvais type / hors enum)
+ * pour un message actionnable côté LLM.
+ */
+export function requireEnumParam<T extends string>(
+  args: Record<string, unknown>,
+  key: string,
+  allowed: readonly T[],
+  example: T,
+): T {
+  const raw = args[key];
+  const allowedList = allowed.map((v) => `"${v}"`).join(", ");
+  const hint = `Valeurs admises : ${allowedList}. Exemple : ${JSON.stringify({ [key]: example })}`;
+  if (raw === undefined || raw === null) {
+    throw paramError(`Paramètre "${key}" requis. ${hint}`);
+  }
+  if (typeof raw !== "string" || !allowed.includes(raw as T)) {
+    throw paramError(`Paramètre "${key}" invalide : ${JSON.stringify(raw)}. ${hint}`);
+  }
+  return raw as T;
+}
+
+/**
  * Remap les clés présentes dans `args` selon `aliasMap`. La clé canonique
  * (valeur du map) gagne toujours si elle est déjà présente — le caller a
  * fourni la forme correcte, on ne l'écrase pas avec un alias.
@@ -120,7 +145,7 @@ export function requireOneOf(
 
 /**
  * Valide qu'une clé string non-vide est présente dans `args`. Retourne la
- * valeur. Pattern raccourci pour les tools mono-param (population_par_commune,
+ * valeur. Pattern raccourci pour les tools mono-param (population,
  * get_commune_by_code, panorama_sante_territoire, etc.).
  *
  * Usage typique :

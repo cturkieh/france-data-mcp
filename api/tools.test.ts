@@ -361,7 +361,7 @@ describe("documentation tools Ameli — type_ps codes", () => {
   it("la description du tool oriente vers specialite_codes pour ciblage précis", () => {
     const tool = findTool("professionnels_in_radius");
     expect(tool?.description).toMatch(/cibler une profession précise/i);
-    expect(tool?.description).toContain("lister_specialites_ameli");
+    expect(tool?.description).toContain("lister_nomenclature");
   });
 
   it("la description annonce explicitement le calcul haversine", () => {
@@ -370,16 +370,15 @@ describe("documentation tools Ameli — type_ps codes", () => {
   });
 });
 
-describe("lister_specialites_ameli (MCP tool)", () => {
+describe("lister_nomenclature — referentiel ameli_specialites", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("est enregistré dans la liste des tools", () => {
-    const tool = findTool("lister_specialites_ameli");
+  it("est enregistré et exige le param referentiel", () => {
+    const tool = findTool("lister_nomenclature");
     expect(tool).toBeDefined();
-    // Aucun paramètre requis : le tool retourne toute la nomenclature.
-    expect(tool?.inputSchema.required).toBeUndefined();
+    expect(tool?.inputSchema.required).toEqual(["referentiel"]);
   });
 
   it("délègue à listAmeliSpecialites et expose un count", async () => {
@@ -394,8 +393,11 @@ describe("lister_specialites_ameli (MCP tool)", () => {
         is_libelle_partage: false,
       },
     ]);
-    const tool = findTool("lister_specialites_ameli");
-    const result = (await tool?.handler({})) as { count: number; results: unknown[] };
+    const tool = findTool("lister_nomenclature");
+    const result = (await tool?.handler({ referentiel: "ameli_specialites" })) as {
+      count: number;
+      results: unknown[];
+    };
     expect(spy).toHaveBeenCalledOnce();
     expect(result.count).toBe(1);
     expect(result.results).toHaveLength(1);
@@ -412,8 +414,8 @@ describe("lister_specialites_ameli (MCP tool)", () => {
       is_libelle_partage: false,
     }));
     vi.spyOn(ameliDb, "listAmeliSpecialites").mockResolvedValue(many);
-    const tool = findTool("lister_specialites_ameli");
-    const def = (await tool?.handler({})) as {
+    const tool = findTool("lister_nomenclature");
+    const def = (await tool?.handler({ referentiel: "ameli_specialites" })) as {
       count: number;
       total: number;
       truncated: boolean;
@@ -424,56 +426,48 @@ describe("lister_specialites_ameli (MCP tool)", () => {
     expect(def.truncated).toBe(true);
     expect(def.results).toHaveLength(50);
 
-    const all = (await tool?.handler({ limit: 1000 })) as { count: number; truncated: boolean };
+    const all = (await tool?.handler({ referentiel: "ameli_specialites", limit: 1000 })) as {
+      count: number;
+      truncated: boolean;
+    };
     expect(all.count).toBe(60);
     expect(all.truncated).toBe(false);
   });
 });
 
-// Régression de découvrabilité (2026-05-28) : lister_specialites_ameli et
-// lister_specialites_medicales partagent ~90 % de leurs tokens distinctifs
-// ("lister specialites codes spécialité") → le tool_search d'un client MCP peut
-// surclasser le jumeau ANS sur une requête "codes spécialité Ameli" et ne jamais
-// rendre la version Ameli (faux positif "outil absent" remonté par un client).
-// Conséquence produit : l'agent filtre un savoir_faire_code ANS ('SM04') là où il
-// faut un specialite_code Ameli ('03') → filtre vide SANS exception (homographes).
-// Parade : front-load des tokens distinctifs + cross-pointeurs explicites dans les
-// deux sens. NE PAS retirer ces gardes.
-describe("jumeaux Ameli/ANS — différenciation anti-collision retrieval", () => {
-  it("lister_specialites_ameli front-load les tokens Ameli/conventionnés/CNAM", () => {
-    const desc = findTool("lister_specialites_ameli")?.description ?? "";
-    // Invariant load-bearing : le tout premier token diverge du jumeau ANS (qui
-    // commence par "Liste les spécialités médicales"). On verrouille la divergence
-    // + la présence des tokens distinctifs, PAS le libellé exact de la parenthèse
-    // (évite une fragilité du test à toute reformulation future légitime).
-    expect(desc.startsWith("Codes spécialité Ameli")).toBe(true);
-    expect(desc).toMatch(/conventionn/);
-    expect(desc).toMatch(/Assurance Maladie|CNAM/);
-  });
-
-  it("lister_specialites_ameli cross-pointe le jumeau ANS (anti-confusion savoir-faire)", () => {
-    const desc = findTool("lister_specialites_ameli")?.description ?? "";
-    expect(desc).toContain("lister_specialites_medicales");
-    expect(desc).toMatch(/savoir-faire|ANS|RPPS/);
-  });
-
-  it("lister_specialites_medicales cross-pointe la version Ameli conventionnés", () => {
-    const desc = findTool("lister_specialites_medicales")?.description ?? "";
-    expect(desc).toContain("lister_specialites_ameli");
-    expect(desc).toMatch(/Ameli/);
-    expect(desc).toMatch(/conventionn/);
-  });
-});
-
-describe("lister_types_ps_ameli (MCP tool)", () => {
+// Fusion Phase A (0.21.0) : lister_specialites_ameli + lister_types_ps_ameli +
+// lister_specialites_medicales → lister_nomenclature(referentiel). Un seul tool
+// de découverte = plus de jumeaux à se masquer mutuellement dans le tool_search
+// (la collision de ranking V0.20.2 est éliminée structurellement). NE PAS
+// réintroduire les anciens noms.
+describe("lister_nomenclature — fusion (rupture + dispatch)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("est enregistré dans la liste des tools", () => {
-    const tool = findTool("lister_types_ps_ameli");
-    expect(tool).toBeDefined();
-    expect(tool?.inputSchema.required).toBeUndefined();
+  it("les 3 anciens tools de découverte sont supprimés (breaking 0.21.0)", () => {
+    expect(findTool("lister_specialites_ameli")).toBeUndefined();
+    expect(findTool("lister_types_ps_ameli")).toBeUndefined();
+    expect(findTool("lister_specialites_medicales")).toBeUndefined();
+  });
+
+  it("referentiel manquant ou hors enum → RangeError (→ JSON-RPC -32602)", async () => {
+    const tool = findTool("lister_nomenclature");
+    await expect(tool?.handler({})).rejects.toBeInstanceOf(RangeError);
+    await expect(tool?.handler({ referentiel: "inconnu" })).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it("la description différencie les 3 référentiels (anti-confusion homographes)", () => {
+    const desc = findTool("lister_nomenclature")?.description ?? "";
+    expect(desc).toContain("ameli_specialites");
+    expect(desc).toContain("rpps_savoir_faire");
+    expect(desc).toMatch(/DISTINCTE/i);
+  });
+});
+
+describe("lister_nomenclature — referentiel ameli_types_ps", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("délègue à listAmeliTypesPs et expose specialites_presentes au caller", async () => {
@@ -486,8 +480,8 @@ describe("lister_types_ps_ameli (MCP tool)", () => {
         specialites_presentes: [{ code: "24", libelle: "Infirmier", count: 104041 }],
       },
     ]);
-    const tool = findTool("lister_types_ps_ameli");
-    const result = (await tool?.handler({})) as {
+    const tool = findTool("lister_nomenclature");
+    const result = (await tool?.handler({ referentiel: "ameli_types_ps" })) as {
       count: number;
       results: Array<{ specialites_presentes: unknown[] }>;
     };
@@ -509,8 +503,11 @@ describe("lister_types_ps_ameli (MCP tool)", () => {
         ],
       },
     ]);
-    const tool = findTool("lister_types_ps_ameli");
-    const result = (await tool?.handler({ include_specialites: false })) as {
+    const tool = findTool("lister_nomenclature");
+    const result = (await tool?.handler({
+      referentiel: "ameli_types_ps",
+      include_specialites: false,
+    })) as {
       results: Array<{ specialites_presentes?: unknown[]; nb_specialites?: number }>;
     };
     expect(result.results[0]?.specialites_presentes).toBeUndefined();
@@ -1316,14 +1313,15 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
 });
 
 describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
-  it("expose un outputSchema sur les tools object-root (28 tools attendus)", () => {
+  it("expose un outputSchema sur les tools object-root (26 tools attendus)", () => {
     const withOutput = TOOLS.filter((t) => t.outputSchema !== undefined);
-    // 34 tools après V0.10.4 (+ compare_adresse_cnam_vs_finess, audit P4)
-    // - 3 spec-violating (autocomplete_commune array-root, geocode_adresse / reverse_geocode nullable)
-    // - 3 V0.8 sans outputSchema (densite_professionnels_sante, densite_etablissements_sante,
-    //   lister_specialites_medicales — objets riches imbriqués, schema détaillé reporté en V0.8.1)
-    // = 28.
-    expect(withOutput).toHaveLength(28);
+    // Phase A 0.21.0 — fusions :
+    //  - 3 listers (2 avec outputSchema, 1 sans) → 1 `lister_nomenclature` AVEC
+    //    QUERY_RESULT_OUTPUT_SCHEMA (schema lenient, couvre les 3 référentiels) → Δ -1.
+    //  - 2 `population_par_*` (avec outputSchema) → 1 `population` (avec) → Δ -1.
+    //  - 2 `densite_*` (sans outputSchema) → 1 `densite_sante` (sans) → Δ 0.
+    // 28 (0.20.x) - 1 - 1 = 26. Reste sans outputSchema : densite_sante (objet riche imbriqué).
+    expect(withOutput).toHaveLength(26);
   });
 
   it("omet volontairement l'outputSchema pour les tools array-root ou nullable", () => {
@@ -1344,9 +1342,9 @@ describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
   });
 });
 
-describe("densite_professionnels_sante — exemples savoir_faire_code (régression B4)", () => {
+describe("densite_sante — exemples savoir_faire_code (régression B4)", () => {
   const savoirFaireDesc = () => {
-    const tool = findTool("densite_professionnels_sante");
+    const tool = findTool("densite_sante");
     const props = tool?.inputSchema.properties as
       | Record<string, { description: string }>
       | undefined;
@@ -1359,6 +1357,61 @@ describe("densite_professionnels_sante — exemples savoir_faire_code (régressi
 
   it("documente SM15 comme code dermato-vénéréologie", () => {
     expect(savoirFaireDesc()).toMatch(/SM15[^.]*[Dd]ermato/);
+  });
+});
+
+// Fusion Phase A (0.21.0) : densite_professionnels_sante + densite_etablissements_sante
+// → densite_sante(cible). Validation croisée load-bearing : un filtre du mauvais
+// référentiel filtrerait dans le vide sans erreur (doctrine anti-échec-silencieux,
+// cf. garde-fous nomenclature V0.20.2). NE PAS réintroduire les anciens noms.
+describe("densite_sante — fusion (rupture + validation croisée cible×filtres)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("les 2 anciens tools densite sont supprimés (breaking 0.21.0)", () => {
+    expect(findTool("densite_professionnels_sante")).toBeUndefined();
+    expect(findTool("densite_etablissements_sante")).toBeUndefined();
+  });
+
+  it("cible manquante ou hors enum → RangeError (→ JSON-RPC -32602)", async () => {
+    const tool = findTool("densite_sante");
+    await expect(tool?.handler({ code_dept: "59" })).rejects.toBeInstanceOf(RangeError);
+    await expect(tool?.handler({ cible: "labos", code_dept: "59" })).rejects.toBeInstanceOf(
+      RangeError,
+    );
+  });
+
+  it("cible=professionnels + famille → RangeError (filtre du mauvais référentiel)", async () => {
+    const tool = findTool("densite_sante");
+    await expect(
+      tool?.handler({ cible: "professionnels", code_dept: "59", famille: "labo" }),
+    ).rejects.toThrow(/famille/i);
+  });
+
+  it("cible=etablissements + savoir_faire_code → RangeError (filtre du mauvais référentiel)", async () => {
+    const tool = findTool("densite_sante");
+    await expect(
+      tool?.handler({
+        cible: "etablissements",
+        code_dept: "59",
+        famille: "labo",
+        savoir_faire_code: "SM04",
+      }),
+    ).rejects.toThrow(/professionnels/i);
+  });
+
+  it("cible=etablissements + profession_code NON-string (number) → RangeError (pas d'ignore silencieux)", async () => {
+    // Garde-fou silent-failure-hunter : un code numérique (fréquent en JSON-RPC)
+    // ne doit PAS passer la garde croisée (asString renverrait undefined). La
+    // détection est en présence brute, pas via asString.
+    const tool = findTool("densite_sante");
+    await expect(
+      tool?.handler({
+        cible: "etablissements",
+        code_dept: "59",
+        famille: "labo",
+        profession_code: 10,
+      }),
+    ).rejects.toThrow(/professionnels/i);
   });
 });
 
@@ -1595,7 +1648,7 @@ describe("radius PS — geo_precision documenté (régression B5 V0.12.0)", () =
 
 describe("collision nomenclatures Ameli/ANS (régression B3)", () => {
   for (const name of [
-    "densite_professionnels_sante",
+    "densite_sante",
     "professionnels_rpps_par_dept",
     "professionnels_rpps_in_radius",
   ]) {
@@ -1608,7 +1661,7 @@ describe("collision nomenclatures Ameli/ANS (régression B3)", () => {
   }
 });
 
-describe("lister_specialites_medicales — limit + profession_code (B2)", () => {
+describe("lister_nomenclature — referentiel rpps_savoir_faire (limit + profession_code, B2)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -1620,8 +1673,8 @@ describe("lister_specialites_medicales — limit + profession_code (B2)", () => 
       count_ps: 1000 - i,
     }));
     vi.spyOn(rppsDb, "listSavoirFaireRpps").mockResolvedValue(many);
-    const tool = findTool("lister_specialites_medicales");
-    const result = (await tool?.handler({})) as {
+    const tool = findTool("lister_nomenclature");
+    const result = (await tool?.handler({ referentiel: "rpps_savoir_faire" })) as {
       count: number;
       total: number;
       truncated: boolean;
@@ -1683,11 +1736,7 @@ describe("exemples code_insee PLM corrigés (régression P2)", () => {
     return `${tool?.description ?? ""} ${props?.code_insee?.description ?? ""} ${props?.code?.description ?? ""}`;
   }
 
-  for (const name of [
-    "densite_professionnels_sante",
-    "panorama_sante_territoire",
-    "population_par_commune",
-  ]) {
+  for (const name of ["densite_sante", "panorama_sante_territoire", "population"]) {
     it(`${name} : aucun code arrondissement PLM présenté comme exemple positif`, () => {
       const txt = descAndParam(name);
       // Un code arrondissement entre guillemets accolé à un nom de ville =
@@ -1699,7 +1748,7 @@ describe("exemples code_insee PLM corrigés (régression P2)", () => {
     });
   }
 
-  for (const name of ["densite_professionnels_sante", "panorama_sante_territoire"]) {
+  for (const name of ["densite_sante", "panorama_sante_territoire"]) {
     it(`${name} : signale PLM non supporté + oriente code_dept`, () => {
       const d = findTool(name)?.description ?? "";
       expect(d).toMatch(/Paris|Lyon|Marseille/);
@@ -1804,7 +1853,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
     expect(out?.count).toBe(4);
   });
 
-  it("densite_etablissements_sante expose perimetre + préserve le payload", async () => {
+  it("densite_sante (etablissements) expose perimetre + préserve le payload", async () => {
     const mocked = { zone: { densite: 12.3 } } as Awaited<
       ReturnType<typeof densite.densiteEtablissementsSante>
     >;
@@ -1818,24 +1867,28 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
       sites_apercu: [],
       truncated: false,
     });
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     expect(tool).toBeDefined();
-    const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
-      string,
-      unknown
-    >;
+    const out = (await tool?.handler({
+      cible: "etablissements",
+      code_dept: "59",
+      famille: "labo",
+    })) as Record<string, unknown>;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("categorie_dominante");
     expect(out?.zone).toEqual({ densite: 12.3 });
   });
 
-  it("densite_professionnels_sante expose perimetre + préserve le payload", async () => {
+  it("densite_sante (professionnels) expose perimetre + préserve le payload", async () => {
     const mocked = { zone: { densite: 45.6 } } as Awaited<
       ReturnType<typeof densite.densiteProfessionnelsSante>
     >;
     vi.spyOn(densite, "densiteProfessionnelsSante").mockResolvedValueOnce(mocked);
-    const tool = findTool("densite_professionnels_sante");
+    const tool = findTool("densite_sante");
     expect(tool).toBeDefined();
-    const out = (await tool?.handler({ code_dept: "59" })) as Record<string, unknown>;
+    const out = (await tool?.handler({ cible: "professionnels", code_dept: "59" })) as Record<
+      string,
+      unknown
+    >;
     expect((out?.perimetre as Record<string, unknown>)?.lens).toBe("registre_complet");
     expect(out?.zone).toEqual({ densite: 45.6 });
   });
@@ -2174,7 +2227,7 @@ describe("activite_hebergee wiring — etablissements_finess_*", () => {
     expect(hosted.note).toMatch(/[Nn]e pas additionner/);
   });
 
-  it("densite_etablissements_sante famille=labo expose activite_hebergee biologie + densite_pour_100k_hab", async () => {
+  it("densite_sante (etablissements) famille=labo expose activite_hebergee biologie + densite_pour_100k_hab", async () => {
     vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce({
       zone: {
         zone: "59",
@@ -2193,12 +2246,13 @@ describe("activite_hebergee wiring — etablissements_finess_*", () => {
       sites_apercu: [],
       truncated: false,
     });
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     expect(tool).toBeDefined();
-    const out = (await tool?.handler({ code_dept: "59", famille: "labo" })) as Record<
-      string,
-      unknown
-    >;
+    const out = (await tool?.handler({
+      cible: "etablissements",
+      code_dept: "59",
+      famille: "labo",
+    })) as Record<string, unknown>;
     const hosted = out.activite_hebergee as {
       activite: string;
       count: number;

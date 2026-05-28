@@ -63,7 +63,7 @@ export async function assertKnownAmeliSpecialiteCodes(
   if (unknown.length > 0) {
     const list = unknown.map((c) => `'${c}'`).join(", ");
     throw new RangeError(
-      `Code(s) spécialité Ameli inconnu(s) dans la nomenclature : specialite_code ${list}. Rappel : les codes Ameli (specialite_code / type_ps_code, libéraux conventionnés Assurance Maladie) sont une nomenclature DISTINCTE des codes ANS (profession_code / savoir_faire_code) — un même nombre y désigne des choses différentes. Découvrir les codes Ameli valides via le tool lister_specialites_ameli.`,
+      `Code(s) spécialité Ameli inconnu(s) dans la nomenclature : specialite_code ${list}. Rappel : les codes Ameli (specialite_code / type_ps_code, libéraux conventionnés Assurance Maladie) sont une nomenclature DISTINCTE des codes ANS (profession_code / savoir_faire_code) — un même nombre y désigne des choses différentes. Découvrir les codes Ameli valides via le tool lister_nomenclature (referentiel: ameli_specialites).`,
     );
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Tests boundary V0.20 — extension `densite_etablissements_sante` au niveau
+ * Tests boundary V0.20 — extension `densite_sante` au niveau
  * commune (alignement avec densite_professionnels V0.9 + nom_commune V0.19).
  *
  * Pattern miroir api/tools-v019.test.ts.
@@ -19,15 +19,15 @@ function fakeCommune(code: string, nom: string, codeDepartement: string): Commun
 beforeEach(() => vi.restoreAllMocks());
 afterEach(() => vi.restoreAllMocks());
 
-describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
+describe("V0.20 — densite_sante + niveau commune", () => {
   it("rétro-compat : code_dept seul fonctionne comme avant", async () => {
     const densiteSpy = vi
       .spyOn(densiteMod, "densiteEtablissementsSante")
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>,
       );
-    const tool = findTool("densite_etablissements_sante");
-    await tool?.handler({ code_dept: "75", famille: "labo" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "etablissements", code_dept: "75", famille: "labo" });
     expect(densiteSpy).toHaveBeenCalledWith(
       expect.objectContaining({ departement: "75", famille: "labo" }),
     );
@@ -40,8 +40,8 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>,
       );
-    const tool = findTool("densite_etablissements_sante");
-    await tool?.handler({ code_insee: "59350", famille: "labo" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "etablissements", code_insee: "59350", famille: "labo" });
     expect(densiteSpy).toHaveBeenCalledWith(
       expect.objectContaining({ codeInsee: "59350", famille: "labo" }),
     );
@@ -58,8 +58,8 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>,
       );
-    const tool = findTool("densite_etablissements_sante");
-    await tool?.handler({ nom_commune: "Lille", famille: "labo" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "etablissements", nom_commune: "Lille", famille: "labo" });
     expect(densiteSpy).toHaveBeenCalledWith(
       expect.objectContaining({ codeInsee: "59350", famille: "labo" }),
     );
@@ -76,8 +76,13 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
       .mockResolvedValueOnce(
         {} as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>,
       );
-    const tool = findTool("densite_etablissements_sante");
-    await tool?.handler({ nom_commune: "Saint-Martin", code_dept: "65", famille: "labo" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({
+      cible: "etablissements",
+      nom_commune: "Saint-Martin",
+      code_dept: "65",
+      famille: "labo",
+    });
     expect(resolveSpy).toHaveBeenCalledWith(expect.objectContaining({ departement: "65" }));
     expect(densiteSpy).toHaveBeenCalledWith(
       expect.objectContaining({ codeInsee: "65392", famille: "labo" }),
@@ -86,16 +91,26 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
   });
 
   it("V0.20 — code_dept + code_insee → RangeError XOR (applyCommuneResolver branch 2)", async () => {
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     await expect(
-      tool?.handler({ code_dept: "75", code_insee: "59350", famille: "labo" }),
+      tool?.handler({
+        cible: "etablissements",
+        code_dept: "75",
+        code_insee: "59350",
+        famille: "labo",
+      }),
     ).rejects.toThrow(/redondants|SOIT/i);
   });
 
   it("V0.20 — nom_commune + code_insee → RangeError XOR redondant", async () => {
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     await expect(
-      tool?.handler({ nom_commune: "Lille", code_insee: "59350", famille: "labo" }),
+      tool?.handler({
+        cible: "etablissements",
+        nom_commune: "Lille",
+        code_insee: "59350",
+        famille: "labo",
+      }),
     ).rejects.toThrow(/redondants|SOIT/i);
   });
 
@@ -112,9 +127,13 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
         truncated: false,
       },
     });
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     try {
-      await tool?.handler({ nom_commune: "Saint-Martin", famille: "labo" });
+      await tool?.handler({
+        cible: "etablissements",
+        nom_commune: "Saint-Martin",
+        famille: "labo",
+      });
       throw new Error("expected RangeError");
     } catch (err) {
       expect(err).toBeInstanceOf(RangeError);
@@ -123,24 +142,26 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
   });
 
   it("V0.20 — rien fourni (sauf famille) → RangeError requireOneOf 3 alternatives", async () => {
-    const tool = findTool("densite_etablissements_sante");
-    await expect(tool?.handler({ famille: "labo" })).rejects.toThrow(
+    const tool = findTool("densite_sante");
+    await expect(tool?.handler({ cible: "etablissements", famille: "labo" })).rejects.toThrow(
       /Attendu.*code_dept|code_insee|nom_commune/i,
     );
   });
 
   it("V0.20 — famille manquante → RangeError", async () => {
-    const tool = findTool("densite_etablissements_sante");
-    await expect(tool?.handler({ code_dept: "75" })).rejects.toThrow(/famille/i);
+    const tool = findTool("densite_sante");
+    await expect(tool?.handler({ cible: "etablissements", code_dept: "75" })).rejects.toThrow(
+      /famille/i,
+    );
   });
 
-  it("V0.20 — required du schema = ['famille'] uniquement (code_dept retiré)", () => {
-    const tool = findTool("densite_etablissements_sante");
-    expect(tool?.inputSchema.required).toEqual(["famille"]);
+  it("required du schema = ['cible'] (fusion 0.21.0 ; famille validée dans le handler selon cible)", () => {
+    const tool = findTool("densite_sante");
+    expect(tool?.inputSchema.required).toEqual(["cible"]);
   });
 
   it("V0.20 — schema expose code_dept + code_insee + nom_commune", () => {
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     const props = tool?.inputSchema.properties as Record<string, unknown>;
     expect(props.code_dept).toBeDefined();
     expect(props.code_insee).toBeDefined();
@@ -151,7 +172,7 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
     // Garde-fou silent-failure-hunter (V0.20 review Medium 1) — jumeau exact
     // du test V0.19 panorama. Sans ce test, une régression future qui
     // re-substituerait `codeInsee` brut à `resolved.codeInsee` dans le
-    // handler densite_etablissements_sante ferait throw getHostedActivitiesInZone
+    // handler densite_sante ferait throw getHostedActivitiesInZone
     // (« departement OR codeInsee requis »), capturé silencieusement par
     // safeHostedFetch → champ activite_hebergee absent sans erreur visible.
     vi.spyOn(resolveModule, "resolveNomCommune").mockResolvedValueOnce({
@@ -173,8 +194,8 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
       count: 13,
       zone: { codeInsee: "59350" },
     } as Awaited<ReturnType<typeof hostedActivities.getHostedActivitiesInZone>>);
-    const tool = findTool("densite_etablissements_sante");
-    await tool?.handler({ nom_commune: "Lille", famille: "labo" });
+    const tool = findTool("densite_sante");
+    await tool?.handler({ cible: "etablissements", nom_commune: "Lille", famille: "labo" });
     expect(hostedSpy).toHaveBeenCalled();
     // Vérification load-bearing : codeInsee résolu transmis, JAMAIS undefined.
     const firstCall = hostedSpy.mock.calls[0]?.[0];
@@ -187,13 +208,23 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
     // Garde-fou silent-failure-hunter Medium 4 : l'ordre des asserts dans
     // le contrat resolver est load-bearing. Branch 1 (XOR redondant) DOIT
     // throw AVANT que assertNotPlmCommune ne soit considéré côté lib.
-    const tool = findTool("densite_etablissements_sante");
+    const tool = findTool("densite_sante");
     await expect(
-      tool?.handler({ nom_commune: "Paris", code_insee: "75056", famille: "labo" }),
+      tool?.handler({
+        cible: "etablissements",
+        nom_commune: "Paris",
+        code_insee: "75056",
+        famille: "labo",
+      }),
     ).rejects.toThrow(/redondants|SOIT/i);
     // Régression si throw "Paris/Lyon/Marseille" → ordre des asserts cassé
     await expect(
-      tool?.handler({ nom_commune: "Paris", code_insee: "75056", famille: "labo" }),
+      tool?.handler({
+        cible: "etablissements",
+        nom_commune: "Paris",
+        code_insee: "75056",
+        famille: "labo",
+      }),
     ).rejects.not.toThrow(/Paris\/Lyon\/Marseille/i);
   });
 
@@ -213,8 +244,12 @@ describe("V0.20 — densite_etablissements_sante + niveau commune", () => {
       parametres: { famille: "labo", methodologie: "test" },
       source: { etablissements: "FINESS DREES", population: "INSEE Melodi" },
     } as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>);
-    const tool = findTool("densite_etablissements_sante");
-    const result = (await tool?.handler({ code_insee: "59350", famille: "labo" })) as {
+    const tool = findTool("densite_sante");
+    const result = (await tool?.handler({
+      cible: "etablissements",
+      code_insee: "59350",
+      famille: "labo",
+    })) as {
       zone: { niveau: string };
     };
     expect(result?.zone?.niveau).toBe("commune");

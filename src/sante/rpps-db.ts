@@ -397,7 +397,7 @@ export async function assertKnownRppsCodes(input: AssertKnownRppsCodesInput): Pr
   }
   if (unknown.length > 0) {
     throw new RangeError(
-      `Code(s) ANS inconnu(s) dans la nomenclature RPPS : ${unknown.join(", ")}. Rappel : les codes Ameli (specialite_code / type_ps_code) sont une nomenclature DISTINCTE des codes ANS (profession_code / savoir_faire_code) — un même nombre y désigne des choses différentes. Découvrir les codes ANS valides via le tool lister_specialites_medicales (savoir_faire) ou la nomenclature publique ANS (https://annuaire.sante.fr/web/site-pro/extractions-publiques).`,
+      `Code(s) ANS inconnu(s) dans la nomenclature RPPS : ${unknown.join(", ")}. Rappel : les codes Ameli (specialite_code / type_ps_code) sont une nomenclature DISTINCTE des codes ANS (profession_code / savoir_faire_code) — un même nombre y désigne des choses différentes. Découvrir les codes ANS valides via le tool lister_nomenclature (referentiel: rpps_savoir_faire) ou la nomenclature publique ANS (https://annuaire.sante.fr/web/site-pro/extractions-publiques).`,
     );
   }
 }

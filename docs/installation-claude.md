@@ -112,11 +112,13 @@ Pour l'ingestion des CSV source (FINESS bimestriel ~95 K rows, Ameli hebdo ~462 
 
 **🏥 Établissements FINESS** : `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
 
-**👨‍⚕️ Professionnels Ameli (libéraux conventionnés)** : `professionnels_in_radius`, `professionnels_par_specialite_dept`, `lister_specialites_ameli`, `lister_types_ps_ameli`
+**👨‍⚕️ Professionnels Ameli (libéraux conventionnés)** : `professionnels_in_radius`, `professionnels_par_specialite_dept`
 
 **🩺 Tous les PS — RPPS / Annuaire Santé ANS** : `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name`, `professionnel_by_rpps`
 
-**📊 Démographie & densités — INSEE Melodi (V0.8 + V0.9)** : `population_par_commune`, `population_par_departement`, `densite_professionnels_sante` (département OU commune), `densite_etablissements_sante`, `lister_specialites_medicales`
+**📊 Démographie & densités — INSEE Melodi** : `population` (commune ou département, auto-détecté), `densite_sante` (`cible: professionnels` ou `etablissements`, département OU commune)
+
+**🔎 Découverte des nomenclatures** : `lister_nomenclature` (`referentiel: ameli_specialites | ameli_types_ps | rpps_savoir_faire`)
 
 **🧭 Agrégateur santé territoire (V0.9)** : `panorama_sante_territoire`
 

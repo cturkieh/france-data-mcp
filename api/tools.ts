@@ -79,6 +79,7 @@ import {
 import { applyCommuneResolver } from "./_lib/apply-commune-resolver.js";
 import {
   normalizeAliases,
+  requireEnumParam,
   requireFinessId,
   requireOneOf,
   requireRppsId,
@@ -804,7 +805,7 @@ const AMELI_SCOPE_WARNING =
  * Aide à la sélection des codes type_ps Ameli, intégrée à toutes les
  * descriptions de tools de prospection. Volontairement courte pour ne pas
  * bloater le token budget côté caller : la nomenclature exhaustive vit dans
- * les tools `lister_specialites_ameli` et `lister_types_ps_ameli`.
+ * les tools `lister_nomenclature(referentiel:'ameli_specialites')` et `lister_nomenclature(referentiel:'ameli_types_ps')`.
  *
  * Le code "2" est intentionnellement décrit comme "fourre-tout" — c'est le
  * piège récurrent (audit Charleville 2026-05-09). Sans cette précision, un
@@ -825,7 +826,7 @@ const AMELI_TYPE_PS_HELP =
  * RPPS prenant un code en paramètre.
  */
 const NOMENCLATURE_COLLISION_WARNING =
-  "ATTENTION nomenclatures : les codes ANS (`profession_code`, `savoir_faire_code`) sont une nomenclature DISTINCTE des codes Ameli (`specialite_code`, `type_ps_code`) — un même nombre désigne des choses différentes (ex: '10' = Médecin côté ANS, Neurochirurgien côté Ameli). Ne JAMAIS passer un code Ameli à un paramètre ANS : le filtre renverrait vide sans erreur. Découvrir les codes ANS via `lister_specialites_medicales`.";
+  "ATTENTION nomenclatures : les codes ANS (`profession_code`, `savoir_faire_code`) sont une nomenclature DISTINCTE des codes Ameli (`specialite_code`, `type_ps_code`) — un même nombre désigne des choses différentes (ex: '10' = Médecin côté ANS, Neurochirurgien côté Ameli). Ne JAMAIS passer un code Ameli à un paramètre ANS : le filtre renverrait vide sans erreur. Découvrir les codes ANS via `lister_nomenclature(referentiel:'rpps_savoir_faire')`.";
 
 /**
  * Extrait le code département d'un code commune INSEE.
@@ -1064,16 +1065,16 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
-    name: "population_par_commune",
+    name: "population",
     description:
-      "Population municipale (PMUN), population comptée à part (PCAP) et population totale (PTOT) d'une commune française par son code INSEE (5 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN est la base légale officielle utilisée pour les indicateurs DREES (densité médicale, etc.). Retourne un `LookupResult` discriminé par `found`. Si la commune a fusionné ou changé de code, `found: false` avec orientation vers `autocomplete_commune`.\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee` → `code`.",
+      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'une COMMUNE (code INSEE 5 caractères) OU d'un DÉPARTEMENT (code 2-3 caractères) — la granularité est auto-détectée par la longueur du `code`. Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN est la base légale officielle des indicateurs DREES (densité médicale, etc.). Retourne un `LookupResult` discriminé par `found`.\n\n- Commune (5 car., ex `75056` Paris, `13055` Marseille, `2A004` Ajaccio) : si elle a fusionné/changé de code, `found: false` + orientation `autocomplete_commune`. INSEE n'expose PAS la population des arrondissements PLM (75101-75120, 13201-13216, 69381-69389) → passer la commune-mère, ou le code département.\n- Département (2-3 car., ex `75`, `59`, `2A`, `971`) : Mayotte (`976`) est ABSENTE de Melodi → `lookupNotFound` (pas une erreur).\n\nAlias acceptés : `code_insee`/`codeInsee`/`insee` et `code_dept`/`dept`/`departement`/`code_departement` → `code`.",
     inputSchema: {
       type: "object",
       properties: {
         code: {
           type: "string",
           description:
-            'Code INSEE de la commune (5 caractères). Ex: "75056" Paris, "13055" Marseille, "59009" Villeneuve-d\'Ascq, "2A004" Ajaccio. INSEE n\'expose PAS la population des arrondissements PLM (75101-75120, 13201-13216, 69381-69389) : utiliser la commune-mère (75056/13055/69123).',
+            'Code INSEE — 5 caractères = commune (ex "75056"), 2-3 caractères = département (ex "75", "971", "2A"). Granularité auto-détectée par la longueur.',
         },
       },
       required: ["code"],
@@ -1085,37 +1086,23 @@ export const TOOLS: McpTool[] = [
         code_insee: "code",
         codeInsee: "code",
         insee: "code",
-      });
-      const code = requireString(args, "code", { code: "59009" });
-      return getPopulationByCommune(code);
-    },
-  },
-  {
-    name: "population_par_departement",
-    description:
-      "Population municipale (PMUN), comptée à part (PCAP) et totale (PTOT) d'un département français par son code INSEE (2-3 caractères). Source : INSEE Melodi (DS_POPULATIONS_REFERENCE). PMUN recommandée pour calculs de densité (méthodo DREES). Supporte la Corse (2A, 2B) et les DOM 971-974 ; Mayotte (976) est ABSENTE de DS_POPULATIONS_REFERENCE INSEE Melodi → retour `lookupNotFound` (pas une erreur).\n\nAlias acceptés : `code_dept`/`dept`/`departement`/`code_departement` → `code`.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        code: {
-          type: "string",
-          description:
-            'Code INSEE du département (2-3 caractères). Ex: "75" Paris, "59" Nord, "13" Bouches-du-Rhône, "2A" Corse-du-Sud, "971" Guadeloupe.',
-        },
-      },
-      required: ["code"],
-    },
-    outputSchema: LOOKUP_RESULT_OUTPUT_SCHEMA,
-    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (rawArgs) => {
-      const args = normalizeAliases(rawArgs, {
         code_dept: "code",
         dept: "code",
         departement: "code",
         code_departement: "code",
       });
-      const code = requireString(args, "code", { code: "59" });
-      return getPopulationByDept(code);
+      // Trim une fois : la longueur (choix de granularité) ET la valeur passée
+      // aux getters (regex ancrées strictes) restent cohérentes — un code
+      // whitespace-paddé ne produit plus un message « invalide » trompeur.
+      const code = requireString(args, "code", { code: "75056" }).trim();
+      // Auto-détection par longueur : commune = 5 (ex 75056), département = 2-3
+      // (75, 971, 2A). La granularité IRIS (9 car.) s'ajoutera en 0.22.0.
+      const len = code.length;
+      if (len === 5) return getPopulationByCommune(code);
+      if (len === 2 || len === 3) return getPopulationByDept(code);
+      throw new RangeError(
+        `Code "${code}" non reconnu : attendu 5 caractères (commune INSEE, ex "75056") ou 2-3 caractères (département, ex "75"/"971"/"2A").`,
+      );
     },
   },
   {
@@ -1654,7 +1641,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_in_radius",
-    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo HYBRIDE depuis le géocodage BAN (Chantier C) : ~77 % des PS sont géolocalisés à l'adresse précise (rue/bâtiment, \`distance_km\` exacte au m près), ~23 % restent au centroïde commune (~3 km, repli pour adresses non géocodables — DROM, Monaco, CEDEX, lieux-dits). Lire \`geo_precision\` PAR résultat — ne pas présumer une précision uniforme. ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). Chaque PS géolocalisé porte \`geo_precision\` ∈ {\`"adresse"\`, \`"centroide_commune"\`} : \`"adresse"\` = coords BAN précises, \`distance_km\` exacte, classement individuel fiable ; \`"centroide_commune"\` = ~3 km, \`distance_km\` IDENTIQUE pour tous les PS d'une même commune (non discriminante intra-commune — filtre de zone uniquement, pas de classement/choix d'un PS individuel). **Param \`precise_only\`** (défaut false) : à true, exclut les PS au centroïde commune et ne renvoie que les ~77 % géocodés à l'adresse BAN (\`distance_km\` exacte) — recommandé pour les rayons courts (<3 km) et le classement intra-commune. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Recherche de professionnels de santé libéraux conventionnés dans un rayon géographique. Précision géo HYBRIDE depuis le géocodage BAN (Chantier C) : ~77 % des PS sont géolocalisés à l'adresse précise (rue/bâtiment, \`distance_km\` exacte au m près), ~23 % restent au centroïde commune (~3 km, repli pour adresses non géocodables — DROM, Monaco, CEDEX, lieux-dits). Lire \`geo_precision\` PAR résultat — ne pas présumer une précision uniforme. ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls, kinés seuls, podologues seuls), passer par \`specialite_codes\` plutôt que \`type_ps_codes\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_nomenclature(referentiel:'ameli_specialites')\`. Multi-sites : par défaut un PS exerçant sur N adresses apparaît N fois — utiliser \`dedupe_by_ps=true\` pour regrouper par praticien et lister les sites en sous-objet. Distance retournée en km vol d'oiseau (haversine PostGIS) — pour distance routière, croiser avec un service externe (OSRM, ORS). Chaque PS géolocalisé porte \`geo_precision\` ∈ {\`"adresse"\`, \`"centroide_commune"\`} : \`"adresse"\` = coords BAN précises, \`distance_km\` exacte, classement individuel fiable ; \`"centroide_commune"\` = ~3 km, \`distance_km\` IDENTIQUE pour tous les PS d'une même commune (non discriminante intra-commune — filtre de zone uniquement, pas de classement/choix d'un PS individuel). **Param \`precise_only\`** (défaut false) : à true, exclut les PS au centroïde commune et ne renvoie que les ~77 % géocodés à l'adresse BAN (\`distance_km\` exacte) — recommandé pour les rayons courts (<3 km) et le classement intra-commune. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1735,7 +1722,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "professionnels_par_specialite_dept",
-    description: `Liste des professionnels de santé libéraux conventionnés d'un département, avec filtres optionnels par spécialité ou type de PS. Pour énumération administrative — pas de rayon. ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls), passer par \`specialite_code\` plutôt que \`type_ps_code\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_specialites_ameli\`. Pagination : utiliser \`offset\` pour récupérer les pages suivantes quand \`truncated=true\`. Multi-sites : utiliser \`dedupe_by_ps=true\` pour regrouper par praticien. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    description: `Liste des professionnels de santé libéraux conventionnés d'un département, avec filtres optionnels par spécialité ou type de PS. Pour énumération administrative — pas de rayon. ${AMELI_TYPE_PS_HELP} Pour cibler une profession précise (ex: IDE seuls), passer par \`specialite_code\` plutôt que \`type_ps_code\` qui ratisse plus large. Liste exhaustive des codes spécialité disponibles via le tool \`lister_nomenclature(referentiel:'ameli_specialites')\`. Pagination : utiliser \`offset\` pour récupérer les pages suivantes quand \`truncated=true\`. Multi-sites : utiliser \`dedupe_by_ps=true\` pour regrouper par praticien. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1747,12 +1734,12 @@ export const TOOLS: McpTool[] = [
         specialite_code: {
           type: "string",
           description:
-            "Code spécialité Ameli (ex: '01' MG, '24' IDE, '26' kiné, '03' cardio). Optionnel. Liste complète via `lister_specialites_ameli`.",
+            "Code spécialité Ameli (ex: '01' MG, '24' IDE, '26' kiné, '03' cardio). Optionnel. Liste complète via `lister_nomenclature(referentiel:'ameli_specialites')`.",
         },
         type_ps_code: {
           type: "string",
           description:
-            "Code type PS Ameli ('1' médecins, '2' auxiliaires médicaux, '5' chirurgiens-dentistes). Optionnel — préférer `specialite_code` pour un ciblage précis. Liste complète via `lister_types_ps_ameli`.",
+            "Code type PS Ameli ('1' médecins, '2' auxiliaires médicaux, '5' chirurgiens-dentistes). Optionnel — préférer `specialite_code` pour un ciblage précis. Liste complète via `lister_nomenclature(referentiel:'ameli_types_ps')`.",
         },
         limit: {
           type: "number",
@@ -1823,59 +1810,85 @@ export const TOOLS: McpTool[] = [
     },
   },
   {
-    name: "lister_specialites_ameli",
-    description: `Codes spécialité Ameli (libéraux conventionnés — Assurance Maladie / CNAM) effectivement présents en base, avec leur libellé natif, leur \`type_ps_code\` de rattachement et leur count. Triés par fréquence décroissante. NOMENCLATURE AMELI — NE PAS confondre avec les savoir-faire ANS/RPPS : pour les codes spécialité RPPS (ex \`SM04\` Cardiologie), voir \`lister_specialites_medicales\`. Sert à découvrir la nomenclature Ameli avant de filtrer un \`professionnels_in_radius\` ou \`professionnels_par_specialite_dept\` (param \`specialite_code\`/\`specialite_codes\`). Le champ \`libelle_clarifie\` désambigüise les libellés partagés par plusieurs codes (ex: "Médecin généraliste" regroupe les codes 01/22/23, "Chirurgien-dentiste" 19/53/54, "Psychiatre" 33/75, "Gynécologue / Obstétricien" 07/70/77/79). Format quand partagé : \`'{libelle} (code {code}, {count_compact})'\` (ex: "Médecin généraliste (code 01, 55K)"). Sinon identique à \`libelle\`. \`is_libelle_partage: true\` quand au moins 2 codes utilisent le même libellé — utiliser ce flag côté caller pour décider d'afficher le code à l'utilisateur. Paginé : \`limit\` (défaut ${NOMENCLATURE_DEFAULT_LIMIT}), la réponse expose \`total\` et \`truncated\`. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
+    name: "lister_nomenclature",
+    description: `Découverte des nomenclatures de codes du serveur (tool unique paramétré par \`referentiel\`) — à appeler avant de filtrer un autre tool plutôt que deviner les codes. ⚠️ Les 3 nomenclatures sont DISTINCTES : un même nombre y désigne des choses différentes (ex '10' = Médecin côté ANS, Neurochirurgien côté Ameli). Ne JAMAIS passer un code d'un référentiel à un paramètre d'un autre — le filtre renverrait vide sans erreur.
+
+\`referentiel\` :
+- \`ameli_specialites\` — codes \`specialite_code\` Ameli (libéraux conventionnés Assurance Maladie / CNAM) : libellé natif, \`type_ps_code\` de rattachement, count, \`libelle_clarifie\` (désambigüise les libellés partagés, ex "Médecin généraliste" = 01/22/23 ; "Psychiatre" = 33/75), \`is_libelle_partage\`. Pour filtrer \`professionnels_in_radius\` / \`professionnels_par_specialite_dept\` (param \`specialite_code(s)\`).
+- \`ameli_types_ps\` — codes \`type_ps\` Ameli : \`libelle_source\`, \`libelle_clarifie\` (résout l'ambiguïté du code "2" fourre-tout), count, et \`specialites_presentes\` (spécialités regroupées). Payload léger via \`include_specialites: false\` (→ \`nb_specialites\`).
+- \`rpps_savoir_faire\` — spécialités médicales \`savoir_faire_code\` RPPS / Annuaire Santé ANS (ex 'SM04' Cardiologie). Pour filtrer \`densite_sante\` (cible professionnels) / \`professionnels_rpps_*\`. Filtre par \`profession_code\` (défaut '${PROFESSION_CODE_MEDECIN}' Médecin ; string vide ou 'null' = tous savoir_faire).
+
+Paginé : \`limit\` (défaut ${NOMENCLATURE_DEFAULT_LIMIT}), réponse expose \`total\` et \`truncated\`. ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
     inputSchema: {
       type: "object",
       properties: {
+        referentiel: {
+          type: "string",
+          enum: ["ameli_specialites", "ameli_types_ps", "rpps_savoir_faire"],
+          description:
+            "Nomenclature à lister. `ameli_specialites` / `ameli_types_ps` = Ameli (libéraux conventionnés) ; `rpps_savoir_faire` = spécialités médicales ANS/RPPS (nomenclature DISTINCTE).",
+        },
         limit: NOMENCLATURE_LIMIT_SCHEMA,
         include_freshness: INCLUDE_FRESHNESS_SCHEMA,
-      },
-    },
-    outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
-    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
-      const specialites = await listAmeliSpecialites();
-      return withFreshness(limitNomenclature(specialites, args.limit), args.include_freshness, [
-        "ameli_ps",
-      ]);
-    },
-  },
-  {
-    name: "lister_types_ps_ameli",
-    description: `Liste les codes \`type_ps\` Ameli présents en base, avec leur libellé natif (\`libelle_source\`), un libellé clarifié (\`libelle_clarifie\`) résolvant l'ambiguïté du code "2" fourre-tout, leur count total, et \`specialites_presentes\` (la liste effective des spécialités regroupées sous chaque type_ps avec leurs counts). Pas de dictionnaire inventé : la clarification est dérivée de la donnée live à chaque appel. Payload léger possible via \`include_specialites: false\` (remplace le sous-tableau par \`nb_specialites\`). ${AMELI_SCOPE_WARNING} ${AMELI_CGU}`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        limit: NOMENCLATURE_LIMIT_SCHEMA,
         include_specialites: {
           type: "boolean",
           description:
-            "Inclure le sous-tableau `specialites_presentes` détaillé par type_ps (défaut true). Passer `false` pour un payload léger : `specialites_presentes` est remplacé par `nb_specialites` (compteur), ~6K tokens économisés.",
+            "Référentiel `ameli_types_ps` UNIQUEMENT : inclure le sous-tableau `specialites_presentes` détaillé (défaut true). `false` → remplacé par `nb_specialites` (compteur), ~6K tokens économisés.",
           default: true,
         },
-        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
+        profession_code: {
+          type: "string",
+          description: `Référentiel \`rpps_savoir_faire\` UNIQUEMENT : code profession ANS (TRE_R94). Défaut '${PROFESSION_CODE_MEDECIN}' (Médecin). String vide ou 'null' = tous savoir_faire, toutes professions.`,
+        },
       },
+      required: ["referentiel"],
     },
     outputSchema: QUERY_RESULT_OUTPUT_SCHEMA,
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (args) => {
-      const typesPs = await listAmeliTypesPs();
-      // Branches séparées (pas de ternaire) : chaque appel à limitNomenclature
-      // a un type concret, sinon TS unifie sur AmeliTypePsListEntry[] et
-      // rejette la projection allégée.
-      if (coerceBoolean(args.include_specialites, "include_specialites") === false) {
-        const light = typesPs.map(({ specialites_presentes, ...rest }) => ({
-          ...rest,
-          nb_specialites: specialites_presentes.length,
-        }));
-        return withFreshness(limitNomenclature(light, args.limit), args.include_freshness, [
+      const referentiel = requireEnumParam(
+        args,
+        "referentiel",
+        ["ameli_specialites", "ameli_types_ps", "rpps_savoir_faire"] as const,
+        "ameli_specialites",
+      );
+      if (referentiel === "ameli_specialites") {
+        const specialites = await listAmeliSpecialites();
+        return withFreshness(limitNomenclature(specialites, args.limit), args.include_freshness, [
           "ameli_ps",
         ]);
       }
-      return withFreshness(limitNomenclature(typesPs, args.limit), args.include_freshness, [
-        "ameli_ps",
-      ]);
+      if (referentiel === "ameli_types_ps") {
+        const typesPs = await listAmeliTypesPs();
+        // Branches séparées (pas de ternaire) : chaque appel à limitNomenclature
+        // a un type concret, sinon TS unifie sur AmeliTypePsListEntry[] et
+        // rejette la projection allégée.
+        if (coerceBoolean(args.include_specialites, "include_specialites") === false) {
+          const light = typesPs.map(({ specialites_presentes, ...rest }) => ({
+            ...rest,
+            nb_specialites: specialites_presentes.length,
+          }));
+          return withFreshness(limitNomenclature(light, args.limit), args.include_freshness, [
+            "ameli_ps",
+          ]);
+        }
+        return withFreshness(limitNomenclature(typesPs, args.limit), args.include_freshness, [
+          "ameli_ps",
+        ]);
+      }
+      // rpps_savoir_faire — sentinelle "null" (string) pour désactiver le filtre
+      // (JSON-RPC ne peut pas véhiculer un null dans un champ schema "string").
+      const raw = asString(args.profession_code);
+      let professionCode: string | null;
+      if (raw === "null") {
+        professionCode = null;
+      } else if (raw && raw.length > 0) {
+        professionCode = raw;
+      } else {
+        professionCode = PROFESSION_CODE_MEDECIN;
+      }
+      const results = await listSavoirFaireRpps(professionCode);
+      return { profession_code: professionCode, ...limitNomenclature(results, args.limit) };
     },
   },
   // --- V0.5 — RPPS / Annuaire Santé ANS (libéraux + salariés + ID stable) ---
@@ -2067,39 +2080,62 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
     },
   },
   {
-    name: "densite_professionnels_sante",
-    description: `Densité de professionnels de santé pour 100 000 habitants, au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\`, V0.9 / \`nom_commune\`, V0.19). Exactement un des trois requis. Méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (libéral + salarié + mixte, codes mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Croise RPPS (count) et INSEE Melodi (population municipale PMUN, recensement 2023).\n\nUsages : densité de cardiologues / dermatologues / infirmiers libéraux / pharmaciens / sages-femmes par dept ou commune. Pour une spécialité médicale, passer \`savoir_faire_code\` (ex 'SM04' Cardiologie — code 'SM02' est Anesthésie-réanimation, pas Cardiologie). Pour une autre profession que médecin, passer \`profession_code\` (60 infirmier, 21 pharmacien, etc.). Pour libéraux seuls, passer \`mode_exercice_codes: ['L']\`.\n\nV0.19.0 — **sémantique conditionnelle de \`code_dept\`** :\n- \`code_dept\` seul = scope de calcul (densité département entier, comme avant)\n- \`code_dept\` combiné avec \`nom_commune\` = hint de résolution UNIQUEMENT (filtre les communes homonymes), le calcul reste sur la commune résolue\n\nParis/Marseille/Lyon : la densité par \`code_insee\` est INDISPONIBLE (les praticiens RPPS sont rattachés aux arrondissements alors qu'INSEE n'expose la population qu'à la commune entière) — passer un code commune-mère (75056) ou arrondissement (75108) lève une RangeError explicite. Utiliser \`code_dept\` (75, 13, 69) pour la densité ville entière.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) et l'écart en % (positif = sur-doté vs France, négatif = sous-doté). Coût : 1 RPC count_rpps supplémentaire + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.\n\nNe renvoie AUCUNE interprétation métier (pas de seuil "désert médical" automatique). Le caller applique sa grille.\n\n${RPPS_INCLUDE_CATEGORIES_HINT}\n\n${NOMENCLATURE_COLLISION_WARNING}\n\n${RPPS_CGU_NOTICE}`,
+    name: "densite_sante",
+    description: `Densité de santé pour 100 000 habitants — \`cible: professionnels\` (RPPS) OU \`cible: etablissements\` (FINESS). Niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\` / \`nom_commune\`). Exactement un scope des trois requis. Croise le count (RPPS ou FINESS) et INSEE Melodi (population municipale PMUN, recensement 2023).
+
+**cible='professionnels'** (RPPS) — méthodo DREES par défaut : médecins (\`profession_code='${PROFESSION_CODE_MEDECIN}'\`) en activité régulière (mode_exercice ${MODE_EXERCICE_ACTIVITE_REGULIERE.join(", ")}), hors étudiants. Filtres : \`profession_code\` (60 infirmier, 21 pharmacien, 50 sage-femme…), \`savoir_faire_code\` (ex 'SM04' Cardiologie — 'SM02' = Anesthésie-réanimation ; voir \`lister_nomenclature\` referentiel rpps_savoir_faire), \`mode_exercice_codes\` (['L'] = libéraux seuls).
+
+**cible='etablissements'** (FINESS) — \`famille\` OBLIGATOIRE : labo, pharmacie, ehpad, mco, ssr, psychiatrie, dialyse, imagerie, had, msp_cpts, handicap_enfants, handicap_adultes, addictologie, pmi, prevention_sante, etc. Sans famille le ratio mélangerait labos/hôpitaux/EHPAD → non-sens.
+
+**Sémantique conditionnelle de \`code_dept\`** : seul = scope de calcul (dept entier) ; combiné avec \`nom_commune\` = hint de résolution UNIQUEMENT (filtre les homonymes), le calcul reste sur la commune résolue.
+
+Paris/Marseille/Lyon : densité par \`code_insee\` INDISPONIBLE (RPPS/FINESS rattachés aux arrondissements, INSEE n'expose la population qu'à la commune entière) → RangeError ; utiliser \`code_dept\` (75, 13, 69).
+
+\`compare_national: true\` ajoute la densité France entière (DOM inclus) + écart en % (positif = sur-doté, négatif = sous-doté).
+
+Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`. Ne renvoie AUCUNE interprétation métier (pas de seuil "désert médical" auto). ${RPPS_INCLUDE_CATEGORIES_HINT} ${NOMENCLATURE_COLLISION_WARNING} ${RPPS_CGU_NOTICE}`,
     inputSchema: {
       type: "object",
       properties: {
+        cible: {
+          type: "string",
+          enum: ["professionnels", "etablissements"],
+          description:
+            "`professionnels` = densité de PS (RPPS, filtres profession_code/savoir_faire_code/mode_exercice_codes) ; `etablissements` = densité d'établissements (FINESS, `famille` obligatoire).",
+        },
         code_dept: {
           type: "string",
           description:
-            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe. Sémantique conditionnelle (V0.19) : seul = scope dept entier ; combiné avec `nom_commune` = hint resolver pour désambiguer les homonymes. XOR avec `code_insee`.',
+            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe. Sémantique conditionnelle : seul = scope dept entier ; combiné avec `nom_commune` = hint resolver pour désambiguer les homonymes. XOR avec `code_insee`.',
         },
         code_insee: {
           type: "string",
           description:
-            'Code INSEE de la commune 5 caractères (V0.9). Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté au niveau commune (densité indisponible — voir description) : utiliser code_dept. XOR avec `code_dept` et `nom_commune`.',
+            'Code INSEE de la commune 5 caractères. Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté au niveau commune (densité indisponible — voir description) : utiliser code_dept. XOR avec `code_dept` et `nom_commune`.',
         },
         nom_commune: {
           type: "string",
           description:
-            'Nom officiel de commune (alternative à `code_insee`, V0.19). Ex: "Lille", "Villeneuve-d\'Ascq". Le serveur résout en interne via geo.api.gouv.fr. Combinable avec `code_dept` comme hint de désambiguïsation pour homonymes (ex "Saint-Martin" + dept "65"). XOR avec `code_insee` (paramètres redondants).',
+            'Nom officiel de commune (alternative à `code_insee`). Ex: "Lille", "Villeneuve-d\'Ascq". Le serveur résout en interne via geo.api.gouv.fr. Combinable avec `code_dept` comme hint de désambiguïsation pour homonymes (ex "Saint-Martin" + dept "65"). XOR avec `code_insee`.',
+        },
+        famille: {
+          type: "string",
+          description:
+            "cible='etablissements' UNIQUEMENT (obligatoire) : famille FINESS à compter (labo, pharmacie, ehpad, mco, ssr, psychiatrie, dialyse, imagerie, had, msp_cpts, handicap_enfants, handicap_adultes, addictologie, pmi, prevention_sante, etc.).",
         },
         profession_code: {
           type: "string",
-          description: `Code profession ANS (TRE_R94). Default '${PROFESSION_CODE_MEDECIN}' (Médecin). Ex : '60' Infirmier, '21' Pharmacien, '50' Sage-femme, '40' Chirurgien-dentiste, '70' Masseur-kinésithérapeute.`,
+          description: `cible='professionnels' UNIQUEMENT : code profession ANS (TRE_R94). Default '${PROFESSION_CODE_MEDECIN}' (Médecin). Ex : '60' Infirmier, '21' Pharmacien, '50' Sage-femme, '40' Chirurgien-dentiste, '70' Masseur-kinésithérapeute.`,
         },
         savoir_faire_code: {
           type: "string",
           description:
-            "Code spécialité (savoir_faire). Pertinent surtout pour profession_code=10 (médecin). Ex : 'SM04' Cardiologie, 'SM15' Dermatologie et vénéréologie, 'SM02' Anesthésie-réanimation, 'SM26' Médecine générale. Voir lister_specialites_medicales pour la liste exhaustive.",
+            "cible='professionnels' UNIQUEMENT : code spécialité (savoir_faire). Pertinent surtout pour profession_code=10 (médecin). Ex : 'SM04' Cardiologie, 'SM15' Dermatologie et vénéréologie, 'SM02' Anesthésie-réanimation, 'SM26' Médecine générale. Voir lister_nomenclature(referentiel:'rpps_savoir_faire') pour la liste exhaustive.",
         },
         mode_exercice_codes: {
           type: "array",
           items: { type: "string" },
-          description: `Codes mode_exercice ANS à inclure. Default ['L','S','M'] (libéral + salarié + mixte = activité régulière DREES). Passer ['L'] pour libéraux seuls. ${RPPS_MODE_EXERCICE_HINT}`,
+          description: `cible='professionnels' UNIQUEMENT : codes mode_exercice ANS à inclure. Default ['L','S','M'] (libéral + salarié + mixte = activité régulière DREES). Passer ['L'] pour libéraux seuls. ${RPPS_MODE_EXERCICE_HINT}`,
         },
         compare_national: {
           type: "boolean",
@@ -2109,27 +2145,69 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         },
         ...RPPS_INCLUDE_CATEGORIES_SCHEMA,
       },
+      required: ["cible"],
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
     handler: async (rawArgs) => {
+      const cible = requireEnumParam(
+        rawArgs,
+        "cible",
+        ["professionnels", "etablissements"] as const,
+        "professionnels",
+      );
       const args = normalizeAliases(rawArgs, {
         dept: "code_dept",
         departement: "code_dept",
         codeInsee: "code_insee",
         insee: "code_insee",
       });
-      // V0.19 — étend requireOneOf à `nom_commune` (3 alternatives au lieu de 2).
-      // Préserve le wording d'erreur historique du tool : "Attendu: code_dept ou code_insee ou nom_commune."
-      requireOneOf(args, ["code_dept", "code_insee", "nom_commune"], { code_dept: "59" });
+      // Préserve le wording d'erreur historique : "Attendu: code_dept ou code_insee ou nom_commune."
+      requireOneOf(
+        args,
+        ["code_dept", "code_insee", "nom_commune"],
+        cible === "etablissements"
+          ? { cible, code_dept: "59", famille: "labo" }
+          : { cible, code_dept: "59" },
+      );
       const codeDept = asString(args.code_dept);
       const codeInsee = asString(args.code_insee);
       const nomCommune = asString(args.nom_commune);
 
-      // V0.19.0 — résolution boundary + XOR strict. Si `nom_commune` fourni,
-      // `code_dept` agit comme HINT resolver (filtre les homonymes) et N'EST PAS
-      // réinjecté en scope de calcul — `applyCommuneResolver` retourne uniquement
-      // `{ codeInsee }`. resolveZone (lib densite.ts) prend le relais pour le XOR
-      // final code_dept vs code_insee côté lib (defense-in-depth).
+      // Validation croisée cible × filtres (fusion Phase A) : un filtre du mauvais
+      // côté filtrerait dans le vide sans erreur → RangeError explicite (doctrine
+      // anti-échec-silencieux, cf. garde-fous nomenclature V0.20.2).
+      // Présence BRUTE (`!== undefined`), PAS `asString(...) !== undefined` :
+      // asString renvoie undefined pour un non-string, donc un `profession_code: 10`
+      // (number, fréquent en JSON-RPC) serait silencieusement ignoré et le filtre
+      // PS passerait inaperçu sous cible=etablissements (faux ratio sans erreur).
+      // Symétrique du check `famille` ci-dessous.
+      const hasPsFilter =
+        args.profession_code !== undefined ||
+        args.savoir_faire_code !== undefined ||
+        args.mode_exercice_codes !== undefined;
+      if (cible === "etablissements" && hasPsFilter) {
+        throw new RangeError(
+          "Filtres `profession_code`/`savoir_faire_code`/`mode_exercice_codes` réservés à cible='professionnels'. Pour les établissements, filtrer par `famille`.",
+        );
+      }
+      if (cible === "professionnels" && args.famille !== undefined) {
+        throw new RangeError(
+          "Filtre `famille` réservé à cible='etablissements'. Pour les professionnels, filtrer par `profession_code`/`savoir_faire_code`.",
+        );
+      }
+
+      // famille (cible=etablissements) validée AVANT le resolver : une famille
+      // invalide est une faute caller déterministe → fail-fast sans I/O (le resolver
+      // appelle geo.api.gouv.fr quand `nom_commune` est fourni). Préserve l'ordre
+      // de validation de l'ex-densite_etablissements_sante (famille avant resolver).
+      const famille = cible === "etablissements" ? asFinessFamille(args.famille) : null;
+      if (cible === "etablissements" && !famille) {
+        throw new RangeError(`famille requise et valide — valeurs : ${FAMILLES_LIST}`);
+      }
+
+      // Résolution boundary + XOR strict. Si `nom_commune` fourni, `code_dept` agit
+      // comme HINT resolver (filtre les homonymes) et N'EST PAS réinjecté en scope
+      // de calcul — `applyCommuneResolver` retourne uniquement `{ codeInsee }`.
       const resolved = await applyCommuneResolver({
         nomCommune,
         codeInsee,
@@ -2138,121 +2216,54 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
         requireScope: false,
       });
 
-      const input: Parameters<typeof densiteProfessionnelsSante>[0] = {
-        categorieCodes: categorieCodesFromArgs(args),
-      };
-      if (resolved.departement) input.departement = resolved.departement;
-      if (resolved.codeInsee) input.codeInsee = resolved.codeInsee;
-      const professionCode = asString(args.profession_code);
-      if (professionCode) input.professionCode = professionCode;
-      const savoirFaireCode = asString(args.savoir_faire_code);
-      if (savoirFaireCode) input.savoirFaireCode = savoirFaireCode;
-      if (Array.isArray(args.mode_exercice_codes)) {
-        const filtered = args.mode_exercice_codes.filter((v): v is string => typeof v === "string");
-        if (filtered.length === 0) {
-          console.warn(
-            `[france-data-mcp] densite_professionnels_sante: mode_exercice_codes vide reçu — interprété comme 'pas de filtre' (tous statuts), pas la méthodo DREES par défaut`,
+      if (cible === "professionnels") {
+        const input: Parameters<typeof densiteProfessionnelsSante>[0] = {
+          categorieCodes: categorieCodesFromArgs(args),
+        };
+        if (resolved.departement) input.departement = resolved.departement;
+        if (resolved.codeInsee) input.codeInsee = resolved.codeInsee;
+        const professionCode = asString(args.profession_code);
+        if (professionCode) input.professionCode = professionCode;
+        const savoirFaireCode = asString(args.savoir_faire_code);
+        if (savoirFaireCode) input.savoirFaireCode = savoirFaireCode;
+        if (Array.isArray(args.mode_exercice_codes)) {
+          const filtered = args.mode_exercice_codes.filter(
+            (v): v is string => typeof v === "string",
           );
-          input.modeExerciceCodes = null;
-        } else {
-          input.modeExerciceCodes = filtered;
+          if (filtered.length === 0) {
+            console.warn(
+              `[france-data-mcp] densite_sante (professionnels): mode_exercice_codes vide reçu — interprété comme 'pas de filtre' (tous statuts), pas la méthodo DREES par défaut`,
+            );
+            input.modeExerciceCodes = null;
+          } else {
+            input.modeExerciceCodes = filtered;
+          }
         }
+        const compareNational = coerceBoolean(args.compare_national, "compare_national");
+        if (compareNational === true) input.compareNational = true;
+        const result = await densiteProfessionnelsSante(input);
+        return withPerimetre(result, RPPS_PERIMETRE);
       }
-      const compareNational = coerceBoolean(args.compare_national, "compare_national");
-      if (compareNational === true) input.compareNational = true;
-      // Source effective : RPPS (count) croisé INSEE Melodi (population).
-      const result = await densiteProfessionnelsSante(input);
-      return withPerimetre(result, RPPS_PERIMETRE);
-    },
-  },
-  {
-    name: "densite_etablissements_sante",
-    description: `Densité d'établissements de santé pour 100 000 habitants au niveau **département** (\`code_dept\`) OU **commune** (\`code_insee\` / \`nom_commune\`, V0.20), par famille FINESS. Croise FINESS DREES (count) et INSEE Melodi (population municipale PMUN, recensement 2023). Exactement un des trois requis.\n\nFamilles disponibles : \`labo\` (laboratoires de biologie médicale), \`pharmacie\`, \`ehpad\`, \`mco\` (court séjour médecine/chirurgie/obstétrique), \`ssr\` (soins de suite), \`psychiatrie\`, \`dialyse\`, \`imagerie\`, \`had\` (hospitalisation à domicile), \`msp_cpts\` (maisons de santé + CPTS), \`handicap_enfants\`, \`handicap_adultes\`, \`addictologie\`, \`pmi\`, \`prevention_sante\`, etc. Famille obligatoire — sans filtre, le ratio mélangerait labos / hôpitaux / EHPAD et n'aurait pas de sens.\n\nV0.20 — **sémantique conditionnelle de \`code_dept\`** :\n- \`code_dept\` seul = scope de calcul (densité département entier, comme avant)\n- \`code_dept\` combiné avec \`nom_commune\` = hint de résolution UNIQUEMENT (filtre les communes homonymes), le calcul reste sur la commune résolue\n\nParis/Marseille/Lyon : la densité par \`code_insee\` est INDISPONIBLE (les FINESS portent l'INSEE arrondissement 75101-75120 etc. alors qu'INSEE n'expose la population qu'à la commune entière) — passer un code commune-mère (75056) ou arrondissement (75108) lève une RangeError explicite. Utiliser \`code_dept\` (75, 13, 69) pour la densité ville entière.\n\n\`compare_national: true\` ajoute la densité France entière (DOM inclus) + écart en %. Coût : 1 RPC count_finess + 1 appel Melodi (cacheable).\n\nAlias acceptés : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → \`code_insee\`.`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        code_dept: {
-          type: "string",
-          description:
-            'Code INSEE du département 2-3 caractères. Ex: "75" Paris, "59" Nord, "2A" Corse-du-Sud, "971" Guadeloupe. Sémantique conditionnelle (V0.20) : seul = scope dept entier ; combiné avec `nom_commune` = hint resolver pour désambiguer les homonymes. XOR avec `code_insee`.',
-        },
-        code_insee: {
-          type: "string",
-          description:
-            'Code INSEE de la commune 5 caractères (V0.20). Ex: "59009" Villeneuve-d\'Ascq, "33063" Bordeaux, "2A004" Ajaccio. Paris/Lyon/Marseille NON supporté au niveau commune (densité indisponible — voir description) : utiliser code_dept. XOR avec `code_dept` et `nom_commune`.',
-        },
-        nom_commune: {
-          type: "string",
-          description:
-            'Nom officiel de commune (alternative à `code_insee`, V0.20). Ex: "Lille", "Villeneuve-d\'Ascq". Le serveur résout en interne via geo.api.gouv.fr. Combinable avec `code_dept` comme hint de désambiguïsation pour homonymes (ex "Saint-Martin" + dept "65"). XOR avec `code_insee` (paramètres redondants).',
-        },
-        famille: {
-          type: "string",
-          description:
-            "Famille FINESS à compter (labo, pharmacie, ehpad, mco, ssr, psychiatrie, dialyse, imagerie, had, msp_cpts, handicap_enfants, handicap_adultes, addictologie, pmi, prevention_sante, etc.).",
-        },
-        compare_national: {
-          type: "boolean",
-          description:
-            "Ajoute le calcul France entière + écart relatif en % (recommandé pour 'sous-doté'/'sur-doté').",
-          default: false,
-        },
-      },
-      required: ["famille"],
-    },
-    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (rawArgs) => {
-      const args = normalizeAliases(rawArgs, {
-        dept: "code_dept",
-        departement: "code_dept",
-        codeInsee: "code_insee",
-        insee: "code_insee",
-      });
-      // V0.20 — étend requireOneOf à `nom_commune` (3 alternatives au lieu de 1).
-      // Préserve wording d'erreur historique du tool.
-      requireOneOf(args, ["code_dept", "code_insee", "nom_commune"], {
-        code_dept: "59",
-        famille: "labo",
-      });
-      const famille = asFinessFamille(args.famille);
+
+      // cible === "etablissements" — `famille` validée avant le resolver (fail-fast).
+      // Re-narrow pour TS (`famille: FinessFamille | null` après la branche professionnels).
       if (!famille) {
         throw new RangeError(`famille requise et valide — valeurs : ${FAMILLES_LIST}`);
       }
-      const codeDept = asString(args.code_dept);
-      const codeInsee = asString(args.code_insee);
-      const nomCommune = asString(args.nom_commune);
-
-      // V0.20 — résolution boundary + XOR strict. Si `nom_commune` fourni,
-      // `code_dept` agit comme HINT resolver (filtre les homonymes) et N'EST PAS
-      // réinjecté en scope de calcul — `applyCommuneResolver` retourne uniquement
-      // `{ codeInsee }`. `resolveZone` (lib densite.ts) prend le relais pour le
-      // XOR final code_dept vs code_insee côté lib (defense-in-depth).
-      const resolved = await applyCommuneResolver({
-        nomCommune,
-        codeInsee,
-        departement: codeDept,
-        acceptsDepartementAsScope: true,
-        requireScope: false,
-      });
-
       const input: Parameters<typeof densiteEtablissementsSante>[0] = { famille };
       if (resolved.departement) input.departement = resolved.departement;
       if (resolved.codeInsee) input.codeInsee = resolved.codeInsee;
-
       const compareNational = coerceBoolean(args.compare_national, "compare_national");
       if (compareNational === true) input.compareNational = true;
-
-      // Phase 2 — activite_hebergee (parallélisé avec le fetch densité principal).
-      // Densité hostée calculée sur la même population que le compte principal
-      // (`result.zone.population`) pour cohérence dimensionnelle.
-      // V0.20 : utilise `resolved.departement`/`resolved.codeInsee` (jamais les
-      // variables brutes — fix anticipé du piège C1 review V0.19 panorama).
+      // Phase 2 — activite_hebergee parallélisée. Densité hostée sur la même
+      // population que le compte principal (cohérence dimensionnelle). Utilise
+      // resolved.* (jamais les variables brutes — piège C1 review V0.19).
       const hostedActivity = familleToHostedActivity(famille);
       const [result, hosted] = await Promise.all([
         densiteEtablissementsSante(input),
         hostedActivity
           ? safeHostedFetch(
-              "densite_etablissements_sante",
+              "densite_sante",
               getHostedActivitiesInZone({
                 activite: hostedActivity,
                 departement: resolved.departement,
@@ -2439,37 +2450,6 @@ Sortie compacte : \`coords\` et \`distance_km\` sont \`null\` (le tool est par �
       const historiqueDetail = coerceBoolean(args.historique_detail, "historique_detail");
       if (historiqueDetail !== undefined) input.historiqueDetail = historiqueDetail;
       return inspectSite(input);
-    },
-  },
-  {
-    name: "lister_specialites_medicales",
-    description: `Liste les spécialités médicales (savoir_faire RPPS) avec leur libellé et le nombre de PS qui les portent. Tool d'aide à la découverte pour le LLM : avant d'appeler densite_professionnels_sante ou professionnels_rpps_par_dept avec un \`savoir_faire_code\` précis (ex 'SM04' Cardiologie), utiliser ce tool pour obtenir la liste exhaustive. NOMENCLATURE ANS/RPPS — pour les codes spécialité Ameli (libéraux conventionnés, ex '03' Cardiologue), voir \`lister_specialites_ameli\` (nomenclature DISTINCTE, codes numériques homographes).\n\nFiltre par défaut : profession_code='${PROFESSION_CODE_MEDECIN}' (Médecin) — retourne donc les spécialités médicales (cardiologie, dermato, gynéco, etc.). Passer \`profession_code\` pour énumérer les spécialités d'une autre profession (ex '60' Infirmier → spécialités IDE), ou \`null\` pour tous savoir_faire confondus.\n\nRésultats triés par count_ps DESC (spécialités les plus représentées en premier). Paginé : \`limit\` (défaut ${NOMENCLATURE_DEFAULT_LIMIT}), la réponse expose \`total\` et \`truncated\`. Source : RPPS / Annuaire Santé ANS (Supabase dump mensuel).`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        profession_code: {
-          type: "string",
-          description: `Code profession ANS (TRE_R94). Default '${PROFESSION_CODE_MEDECIN}' (Médecin). Passer une string vide ou 'null' pour énumérer tous savoir_faire toutes professions confondues.`,
-        },
-        limit: NOMENCLATURE_LIMIT_SCHEMA,
-      },
-    },
-    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
-      // Sentinel "null" (string) pour désactiver le filtre — JSON-RPC ne peut
-      // pas véhiculer un null dans un champ schema "string". asString rejette
-      // les types invalides (number/boolean/null/undefined → undefined).
-      const raw = asString(args.profession_code);
-      let professionCode: string | null;
-      if (raw === "null") {
-        professionCode = null;
-      } else if (raw && raw.length > 0) {
-        professionCode = raw;
-      } else {
-        professionCode = PROFESSION_CODE_MEDECIN;
-      }
-      const results = await listSavoirFaireRpps(professionCode);
-      return { profession_code: professionCode, ...limitNomenclature(results, args.limit) };
     },
   },
   {
