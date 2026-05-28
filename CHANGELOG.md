@@ -4,6 +4,46 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.20.2] — 2026-05-28 (anti-confusion nomenclatures spécialité)
+
+### Changed — différenciation des descriptions de tools jumeaux (anti-collision tool_search)
+
+`lister_specialites_ameli` et `lister_specialites_medicales` (ANS) partageaient
+~90 % de leurs tokens distinctifs → le `tool_search` d'un client MCP pouvait
+surclasser le jumeau ANS sur une requête « codes spécialité Ameli » et ne jamais
+rendre la version Ameli (faux positif « outil absent » remonté par claude.ai —
+réfuté par la prod : l'outil est enregistré, indexé et fonctionnel).
+
+- Front-load des tokens distinctifs (`Ameli (libéraux conventionnés — Assurance
+  Maladie / CNAM)`) en tête de `lister_specialites_ameli`.
+- Cross-pointeurs réciproques explicites entre les deux tools (`api/tools.ts`).
+- Garde-fou test `tools.test.ts` (divergence 1er token + cross-pointeurs).
+
+### Added — garde-fous de nomenclature « code spécialité » (ferme un échec silencieux)
+
+Un `specialite_code` inexistant — ou un code ANS homographe (`savoir_faire_code`
+type `SM04`) passé par erreur à un paramètre spécialité — renvoyait 0 résultat
+INDISTINGUABLE d'un vrai zéro légitime (pas de validation au boundary, ≠ le côté
+ANS déjà gardé par `assertKnownRppsCodes`, dette #1). Fermé pour les callers
+programmatiques npm, pas seulement le LLM (que la signalétique des descriptions
+protège déjà).
+
+- Nouveau module `src/sante/specialite-nomenclature-guard.ts` (helper partagé
+  `findUnknownSpecialiteCodes` + `assertKnownAmeliSpecialiteCodes` +
+  `assertKnownCdsSpecialiteCodes`). `RangeError` → JSON-RPC `-32602` ;
+  message Niveau 2 (« tu confonds » + tool de découverte). No-op zéro-I/O si
+  aucun code fourni.
+- 2 RPC (migrations `20260528T150000` Ameli + `20260528T160000` CDS), validant
+  chacune contre **sa** source NON filtrée (matview `ameli_nomenclature_stats`
+  pour Ameli ; table `centres_sante` pour le CDS — **16 codes Annexe A CDS sont
+  absents de la matview Ameli**, prouvé prod, donc validation contre la source
+  CDS obligatoire sinon 16 faux positifs = re-régression dette #1). Garde
+  source-vide → 0 inconnu (anti faux positif).
+- Câblé dans `getAmeliInRadius` / `getAmeliBySpecialiteDept` (`specialite_code(s)`
+  Ameli) + `getCdsInRadius` (`specialite_codes` Annexe A CNAM). Distinction nette
+  vrai-zéro (pas d'erreur) / code-inconnu (`RangeError`) / erreur-RPC (`Error`),
+  testée live en prod (`03` valide → ∅, `SM04` → rejeté, code CDS hors-Ameli → valide).
+
 ## [0.20.1] — 2026-05-28 (fix cold-start 57014 timeouts)
 
 ### Fixed — élimination des 21 timeouts 57014 cold-start observés sur 14j

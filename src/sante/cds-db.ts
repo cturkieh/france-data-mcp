@@ -30,6 +30,7 @@ import {
   validateCoords,
   validateRadiusKm,
 } from "./db-helpers.js";
+import { assertKnownCdsSpecialiteCodes } from "./specialite-nomenclature-guard.js";
 
 /**
  * Codes type d'établissement CDS (Annexe B nomenclature CNAM). Source de
@@ -119,6 +120,7 @@ export async function getCdsInRadius(input: CdsInRadiusInput): Promise<CdsQueryR
   const limit = clampLimit(input.limit);
   validateCoords(input.center.lat, input.center.lon);
   validateRadiusKm(input.radiusKm);
+  await assertKnownCdsSpecialiteCodes(input.specialiteCodes);
 
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("centres_sante_in_radius", {

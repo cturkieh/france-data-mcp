@@ -35,6 +35,7 @@ import {
   validatePreciseOnly,
   validateRadiusKm,
 } from "./db-helpers.js";
+import { assertKnownAmeliSpecialiteCodes } from "./specialite-nomenclature-guard.js";
 
 export interface AmeliResult {
   id: number;
@@ -199,9 +200,11 @@ export interface AmeliTypePsListEntry {
  * filtré à l'ingestion) recevait silencieusement un résultat vide. On lève
  * un RangeError clair pour orienter vers la bonne dimension de filtre.
  *
- * Pas de validation côté `specialite_codes` : ~88 codes vivants en base, la
- * nomenclature live est exposée par `lister_specialites_ameli` — laisser
- * le SQL `= ANY(...)` retourner naturellement vide pour les codes invalides.
+ * Validation des `specialite_codes` : déléguée à `assertKnownAmeliSpecialiteCodes`
+ * (`specialite-nomenclature-guard.ts`), appelée par `getAmeliInRadius` /
+ * `getAmeliBySpecialiteDept`. Ferme l'échec silencieux où un code inexistant — ou
+ * un code ANS homographe (`savoir_faire_code`) passé par erreur — renvoyait 0
+ * résultat INDISTINGUABLE d'un vrai zéro (jumeau du garde-fou ANS dette #1).
  */
 function validateTypePsCodes(codes: readonly string[] | undefined): void {
   if (!codes || codes.length === 0) return;
@@ -220,6 +223,7 @@ export async function getAmeliInRadius(input: AmeliInRadiusInput): Promise<Ameli
   validateCoords(input.center.lat, input.center.lon);
   validateRadiusKm(input.radiusKm);
   validateTypePsCodes(input.typePsCodes);
+  await assertKnownAmeliSpecialiteCodes(input.specialiteCodes);
   // Garde lib publique (npm consumers hors MCP) : cf. `validatePreciseOnly`
   // (db-helpers) pour le rationale du silent failure.
   validatePreciseOnly(input.preciseOnly, "getAmeliInRadius");
@@ -278,6 +282,7 @@ export async function getAmeliBySpecialiteDept(
   const offset = clampOffset(input.offset);
   assertValidDept(input.departement);
   validateTypePsCodes(input.typePsCode ? [input.typePsCode] : undefined);
+  await assertKnownAmeliSpecialiteCodes(input.specialiteCode ? [input.specialiteCode] : undefined);
 
   const supabase = getAnonClient();
   const { data, error } = await supabase.rpc("ameli_by_specialite_dept", {

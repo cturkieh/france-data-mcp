@@ -7,7 +7,17 @@ vi.mock("../storage/supabase.js", () => ({
   getUntypedAnonClient: () => ({ rpc: mockRpc }),
 }));
 
+// Garde-fou nomenclature CDS neutralisé pour tester getCdsInRadius en isolation
+// (son comportement propre est gardé par specialite-nomenclature-guard.test.ts ;
+// le câblage est gardé par les assertions dédiées plus bas).
+vi.mock("./specialite-nomenclature-guard.js", () => ({
+  assertKnownCdsSpecialiteCodes: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { getCdsByFiness, getCdsInRadius } from "./cds-db.js";
+import { assertKnownCdsSpecialiteCodes } from "./specialite-nomenclature-guard.js";
+
+const cdsGuardSpy = vi.mocked(assertKnownCdsSpecialiteCodes);
 
 const VALID_FINESS = "750000123";
 
@@ -37,10 +47,41 @@ function fakeRow(overrides: Partial<Record<string, unknown>> = {}) {
 
 beforeEach(() => {
   mockRpc.mockReset();
+  cdsGuardSpy.mockReset();
+  cdsGuardSpy.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("câblage garde-fou nomenclature CDS (specialite_code Annexe A)", () => {
+  it("getCdsInRadius valide les specialite_codes via le garde-fou CDS", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    await getCdsInRadius({
+      center: { lat: 48.872, lon: 2.317 },
+      radiusKm: 5,
+      specialiteCodes: ["01"],
+    });
+    expect(cdsGuardSpy).toHaveBeenCalledWith(["01"]);
+  });
+
+  it("getCdsInRadius : une RangeError du garde-fou remonte (code inconnu → -32602)", async () => {
+    cdsGuardSpy.mockRejectedValueOnce(new RangeError("Code(s) spécialité CDS inconnu(s)"));
+    await expect(
+      getCdsInRadius({
+        center: { lat: 48.872, lon: 2.317 },
+        radiusKm: 5,
+        specialiteCodes: ["SM04"],
+      }),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it("getCdsInRadius : garde-fou appelé avec undefined si aucun specialite_code (no-op)", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    await getCdsInRadius({ center: { lat: 48.872, lon: 2.317 }, radiusKm: 5 });
+    expect(cdsGuardSpy).toHaveBeenCalledWith(undefined);
+  });
 });
 
 describe("getCdsByFiness", () => {

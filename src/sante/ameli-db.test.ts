@@ -8,6 +8,16 @@ vi.mock("../storage/supabase.js", () => ({
   getUntypedAnonClient: () => ({ rpc: mockRpc }),
 }));
 
+// Le garde-fou nomenclature Ameli vit dans un module séparé : on le neutralise
+// ici pour tester getAmeliInRadius/getAmeliBySpecialiteDept en isolation (son
+// comportement propre est gardé par specialite-nomenclature-guard.test.ts ; le
+// câblage est gardé par les assertions dédiées plus bas). Jumeau du pattern
+// densite.test.ts qui spy assertKnownRppsCodes.
+vi.mock("./specialite-nomenclature-guard.js", () => ({
+  assertKnownAmeliSpecialiteCodes: vi.fn().mockResolvedValue(undefined),
+  assertKnownCdsSpecialiteCodes: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { _resetRefineAmeliWarnings } from "../core/query-metadata.js";
 import {
   _resetAmeliGeoPrecisionMissingWarning,
@@ -16,6 +26,9 @@ import {
   listAmeliSpecialites,
   listAmeliTypesPs,
 } from "./ameli-db.js";
+import { assertKnownAmeliSpecialiteCodes } from "./specialite-nomenclature-guard.js";
+
+const guardSpy = vi.mocked(assertKnownAmeliSpecialiteCodes);
 
 const sampleRow = {
   id: 1234,
@@ -42,6 +55,8 @@ const sampleRow = {
 
 beforeEach(() => {
   mockRpc.mockReset();
+  guardSpy.mockReset();
+  guardSpy.mockResolvedValue(undefined);
   _resetAmeliGeoPrecisionMissingWarning();
   // Reset des flags 1-shot du module query-metadata (fix /review Passe 1
   // silent-failure-hunter H-2 : sans ça, un test précédent qui brûle le flag
@@ -333,6 +348,41 @@ describe("getAmeliBySpecialiteDept", () => {
       /offset must be between/,
     );
     expect(mockRpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("câblage garde-fou nomenclature Ameli (Niveau 1 — specialite_code)", () => {
+  it("getAmeliInRadius valide les specialite_codes via le garde-fou", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    await getAmeliInRadius({
+      center: { lat: 49.77, lon: 4.72 },
+      radiusKm: 5,
+      specialiteCodes: ["03"],
+    });
+    expect(guardSpy).toHaveBeenCalledWith(["03"]);
+  });
+
+  it("getAmeliInRadius : une RangeError du garde-fou remonte (code inconnu → -32602)", async () => {
+    guardSpy.mockRejectedValueOnce(new RangeError("Code(s) spécialité Ameli inconnu(s)"));
+    await expect(
+      getAmeliInRadius({
+        center: { lat: 49.77, lon: 4.72 },
+        radiusKm: 5,
+        specialiteCodes: ["SM04"],
+      }),
+    ).rejects.toBeInstanceOf(RangeError);
+  });
+
+  it("getAmeliBySpecialiteDept valide le specialite_code (emballé en tableau)", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    await getAmeliBySpecialiteDept({ departement: "75", specialiteCode: "03" });
+    expect(guardSpy).toHaveBeenCalledWith(["03"]);
+  });
+
+  it("getAmeliBySpecialiteDept : garde-fou appelé avec undefined si aucun specialite_code (no-op)", async () => {
+    mockRpc.mockResolvedValue({ data: [], error: null });
+    await getAmeliBySpecialiteDept({ departement: "75" });
+    expect(guardSpy).toHaveBeenCalledWith(undefined);
   });
 });
 
