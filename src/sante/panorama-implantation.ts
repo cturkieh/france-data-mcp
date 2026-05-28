@@ -228,7 +228,10 @@ async function sectionPourvoyeurs(point: { lat: number; lon: number }, rayonKm: 
   });
   const groupes: Record<string, FinessResult[]> = {};
   for (const f of r.results) {
-    (groupes[f.categorie.famille] ??= []).push(f);
+    const fam = f.categorie.famille;
+    const bucket = groupes[fam] ?? [];
+    bucket.push(f);
+    groupes[fam] = bucket;
   }
   const mk = (fam: FinessFamille) => {
     const list = groupes[fam] ?? [];

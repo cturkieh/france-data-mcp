@@ -86,15 +86,14 @@ async function enrichirUn(finess: string): Promise<ConcurrentEnrichi> {
 
     const siren = extractSiren(inspectR);
     const groupeR = siren ? await getEntrepriseBySiren(siren) : null;
-    const groupe: ConcurrentGroupe | null =
-      groupeR && groupeR.found
-        ? {
-            siren: groupeR.siren,
-            denomination: groupeR.nomComplet,
-            nombre_etablissements: groupeR.nombreEtablissements ?? null,
-            est_grand_groupe: (groupeR.nombreEtablissements ?? 0) >= GRAND_GROUPE_SEUIL,
-          }
-        : null;
+    const groupe: ConcurrentGroupe | null = groupeR?.found
+      ? {
+          siren: groupeR.siren,
+          denomination: groupeR.nomComplet,
+          nombre_etablissements: groupeR.nombreEtablissements ?? null,
+          est_grand_groupe: (groupeR.nombreEtablissements ?? 0) >= GRAND_GROUPE_SEUIL,
+        }
+      : null;
 
     const ma_signal: ConcurrentMaSignal | null = compareR.found
       ? {
