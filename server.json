@@ -6,12 +6,12 @@
     "url": "https://github.com/cturkieh/france-data-mcp",
     "source": "github"
   },
-  "version": "0.22.0",
+  "version": "0.23.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "france-data-mcp",
-      "version": "0.22.0",
+      "version": "0.23.1",
       "transport": {
         "type": "stdio"
       }

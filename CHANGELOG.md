@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Fix succession M&A : recalibrage rayon co-localisation (50 → 100 m)
+## [0.23.1] — 2026-05-30 (Fix succession M&A : recalibrage rayon co-localisation 50 → 100 m)
 
 Corrige des **faux négatifs `verdict_site: "ferme"`** de `verifier_site_actif` (et
 des 3 autres consommateurs du resolver SIRET) sur des sites **repris** (M&A) dont
@@ -36,6 +36,14 @@ GEO Intel, 2 cas prouvés prod 2026-05-29. Code TypeScript pur — **pas de migr
   RPPS), EYLAU 96,6 m (Mécanisme B / RPPS vide, `by_active_succession`), garde-fou
   bande même-site (prédécesseur fermé 30 m + voisin actif 80 m → reste `ferme`). Le
   garde-fou faux positif inverse historique (voisin ~110 m) reste vert.
+
+### Release
+
+- Réconciliation des sources de version : `package.json` (0.23.0 jamais publié npm/MCP
+  ni tagué) + `server.json` + `src/core/version.ts` (restés à 0.22.0) alignés à
+  **0.23.1**. npm/registry MCP passent donc de 0.22.0 → 0.23.1 ; 0.23.0 (panoramas
+  composites, déjà déployé Vercel) reste un jalon interne non publié — son contenu est
+  inclus dans l'artefact 0.23.1.
 
 ## [0.23.0] — 2026-05-28 (Panoramas composites — étude d'implantation en 1 appel, 32 → 34)
 
