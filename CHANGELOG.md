@@ -4,6 +4,39 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — Fix succession M&A : recalibrage rayon co-localisation (50 → 100 m)
+
+Corrige des **faux négatifs `verdict_site: "ferme"`** de `verifier_site_actif` (et
+des 3 autres consommateurs du resolver SIRET) sur des sites **repris** (M&A) dont
+le repreneur actif est co-localisé **juste au-dessus de 50 m** du FINESS. Demande
+GEO Intel, 2 cas prouvés prod 2026-05-29. Code TypeScript pur — **pas de migration**.
+
+### Fixed
+
+- **`COLOCATION_RADIUS_M` 50 → 100 m** (`src/sante/siret-resolver.ts`). Le géocodage
+  DREES (Lambert93, grossier) décale le point FINESS de plusieurs dizaines de mètres
+  du point BAN de l'adresse réelle — décalage **partagé par tous les SIRET de cette
+  adresse**. Deux repreneurs réels ressortaient à la distance IDENTIQUE de leur ancien
+  exploitant fermé mais au-dessus de 50 m : **Cerballiance Paris & IDF Est** (FINESS
+  930023627, Aulnay, repreneur SIRET 32838652900312 à **52,1 m**) et **EYLAU Unilabs**
+  (FINESS 920028354, Courbevoie, SIRET 78465202600336 à **96,6 m**, pire cas — le name
+  filter tuait en plus le repreneur car le libellé FINESS dit encore « Parc Monceau »).
+  Les deux ressortent désormais `actif` + `succession.detected: true`.
+- **Garde-fou faux positif inverse au rayon élargi** : nouvelle constante
+  `COLOCATION_SAME_SITE_TOLERANCE_M` (30 m) + bande « même site » dans
+  `disambiguateFallbackCandidates`. Parmi les candidats co-localisés (≤ 100 m), seuls
+  ceux à `≤ min(distance) + 30 m` sont éligibles au `best_match`. Un voisin actif d'une
+  AUTRE adresse (numéro de voie distinct), ramené dans le rayon mais plus loin qu'un
+  prédécesseur fermé co-localisé, **ne bascule pas** le verdict en `actif` — un site
+  réellement fermé reste `ferme`.
+
+### Tests
+
+- 3 tests de régression (`cross-source.test.ts`) : Cerballiance 52,1 m (Mécanisme A /
+  RPPS), EYLAU 96,6 m (Mécanisme B / RPPS vide, `by_active_succession`), garde-fou
+  bande même-site (prédécesseur fermé 30 m + voisin actif 80 m → reste `ferme`). Le
+  garde-fou faux positif inverse historique (voisin ~110 m) reste vert.
+
 ## [0.23.0] — 2026-05-28 (Panoramas composites — étude d'implantation en 1 appel, 32 → 34)
 
 Ajoute **2 outils composites** taillés pour l'étude d'implantation d'un labo par

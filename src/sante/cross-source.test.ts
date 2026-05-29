@@ -1450,6 +1450,447 @@ describe("verifierSiteActif — Resolver V2 fallback géo (V0.13.0)", () => {
       expect(result.candidates.some((c) => c.siret === SIRET_VOISIN_ACTIF)).toBe(true);
     }
   });
+
+  // === V0.16.1 — recalibrage rayon co-localisation (50 → 100 m) + bande même-site
+  // Prod 2026-05-29 : 2 faux négatifs M&A où le repreneur actif et l'ancien
+  // exploitant fermé partagent la MÊME adresse → ressortent à la même distance
+  // du FINESS (offset géocodage DREES Lambert93 ↔ point BAN), juste AU-DESSUS
+  // de l'ancien seuil 50 m. Le repreneur était donc écarté de l'étape « actif
+  // prime ». Cf. docs/plans/verifier-site-actif-succession-fix.md § recalibrage.
+
+  it("V0.16.1 Cerballiance Aulnay (FINESS 930023627) — repreneur actif co-localisé à 52,1 m retenu (Mécanisme A, RPPS)", async () => {
+    // Prod : 45214478500055 (fermé, déclaré RPPS) + 32838652900312 (CERBALLIANCE,
+    // actif) + 41350666800016 (Karsenty, fermé), TOUS à 52,1 m du FINESS. À 50 m
+    // l'actif était écarté (verdict ferme, by_rpps_signal). À 100 m « actif prime »
+    // le retient + détecte la succession (2 exploitants fermés co-localisés).
+    const SIRET_ANCIEN = "45214478500055";
+    const SIRET_REPRENEUR = "32838652900312";
+    const SIRET_KARSENTY = "41350666800016";
+    // 2e SIRET fermé du SIREN ancien, AUTRE adresse (81 rue Princet) → score_adresse
+    // ~0,66 (gated) mais SANS point GPS (distance null, non co-localisé). Reproduit
+    // la cascade prod : il survit au name filter (même UL, score_nom 0,23 ≥ 0,2)
+    // donc le pool reste > 1 → départage par by_rpps_signal → l'ANCIEN fermé est
+    // retenu (le faux négatif). Sans lui, le name filter collapserait sur le seul
+    // repreneur et masquerait le bug à 50 m.
+    const SIRET_PRINCET = "45214478500030";
+    const POINT = { lat: 50.6704685, lon: 3.13 }; // ~52,1 m au nord du FINESS
+    const NOM_PAR_SIREN: Record<string, string> = {
+      // Nom UL exact prod (long) → score_nom 0,23 vs le libellé FINESS (≥ 0,2,
+      // survit au name filter). Un nom court le ferait chuter < 0,2 et masquerait
+      // le bug (le repreneur gagnerait par défaut).
+      [SIRET_ANCIEN.slice(0, 9)]:
+        "SOCIETE D'EXERCICE LIBERAL DE LABORATOIRES DE BIOLOGIE MEDICALE-LABORATOIRES DES FRANCILIENS",
+      [SIRET_REPRENEUR.slice(0, 9)]: "CERBALLIANCE PARIS ET IDF EST",
+      [SIRET_KARSENTY.slice(0, 9)]: "JEAN-YVES KARSENTY",
+    };
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        raison_sociale: "CERBALLIANCE PARIS ET IDF EST SITE BON",
+        adresse: {
+          voie: "1 R DE BONDY",
+          code_postal: "93600",
+          ville: "AULNAY SOUS BOIS",
+          code_departement: "93",
+          code_insee: "93005",
+        },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_ANCIEN }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => {
+      if (siren === SIRET_ANCIEN.slice(0, 9)) {
+        return {
+          ...fakeEntrepriseDinum({
+            siren,
+            actif: false,
+            etablissements: [
+              {
+                siret: SIRET_ANCIEN,
+                adresse: "1 RTE DE BONDY 93600 AULNAY-SOUS-BOIS",
+                actif: false,
+                dateCreation: "2004-05-22",
+                naf: "8690B",
+              },
+            ],
+          }),
+          nomComplet: NOM_PAR_SIREN[siren] ?? "X",
+        };
+      }
+      return {
+        ...fakeEntrepriseDinum({ siren, actif: siren === SIRET_REPRENEUR.slice(0, 9) }),
+        nomComplet: NOM_PAR_SIREN[siren] ?? "X",
+      };
+    });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_ANCIEN.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_ANCIEN,
+              adresse: "1 RTE DE BONDY 93600 AULNAY-SOUS-BOIS",
+              actif: false,
+              dateCreation: "2004-05-22",
+              naf: "8690B",
+              point: POINT,
+            },
+            {
+              // Autre adresse même SIREN, sans point GPS → distance null (non
+              // co-localisé) mais score_adresse gated. Survit au name filter.
+              siret: SIRET_PRINCET,
+              adresse: "81 RUE JULES PRINCET 93600 AULNAY-SOUS-BOIS",
+              actif: false,
+              dateCreation: "2004-05-22",
+              naf: "8690B",
+            },
+          ],
+        },
+        {
+          siren: SIRET_REPRENEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_REPRENEUR,
+              adresse: "1 ROUTE DE BONDY 93600 AULNAY-SOUS-BOIS",
+              actif: true,
+              dateCreation: "2017-09-13",
+              naf: "8690B",
+              point: POINT,
+            },
+          ],
+        },
+        {
+          siren: SIRET_KARSENTY.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_KARSENTY,
+              adresse: "1 ROUTE DE BONDY 93600 AULNAY-SOUS-BOIS",
+              actif: false,
+              dateCreation: "1997-07-01",
+              naf: "8690B",
+              point: POINT,
+            },
+          ],
+        },
+      ]),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_REPRENEUR);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.succession.detected).toBe(true);
+      expect(result.succession.exploitants_precedents.map((c) => c.siret)).toContain(SIRET_ANCIEN);
+      // Co-localisation prouvée : ~52 m, dans le rayon 100 m (et au-dessus de 50 m
+      // = l'ancien seuil qui produisait le faux négatif).
+      expect(result.best_match?.distance_finess_m).toBeGreaterThan(50);
+      expect(result.best_match?.distance_finess_m).toBeLessThan(100);
+    }
+  });
+
+  it("V0.16.1 EYLAU Unilabs Courbevoie (FINESS 920028354) — repreneur actif à 96,6 m retenu malgré score nom 0,09 (Mécanisme B, RPPS vide)", async () => {
+    // Prod : 39483357800161 (Parc Monceau, fermé) + 78465202600336 (EYLAU UNILABS,
+    // actif), à la MÊME adresse → 96,6 m du FINESS. Pire cas : le name filter
+    // tuait EYLAU (score_nom 0,09, le libellé FINESS dit encore « Parc Monceau »).
+    // « Actif prime » placé avant le name filter le retient.
+    const SIRET_FERME = "39483357800161";
+    const SIRET_REPRENEUR = "78465202600336";
+    const POINT = { lat: 50.6708687, lon: 3.13 }; // ~96,6 m au nord du FINESS
+    const NOM_PAR_SIREN: Record<string, string> = {
+      [SIRET_FERME.slice(0, 9)]: "LABORATOIRE BIOLOGIE PARC MONCEAU",
+      [SIRET_REPRENEUR.slice(0, 9)]: "EYLAU UNILABS",
+    };
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({
+        raison_sociale: "LBM PARC MONCEAU SITE DE L'ARCHE",
+        adresse: {
+          voie: "24 BD DE LA MISSION MARCHAND",
+          code_postal: "92400",
+          ville: "COURBEVOIE",
+          code_departement: "92",
+          code_insee: "92026",
+        },
+      }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null }); // RPPS vide → fallback géo
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => ({
+      ...fakeEntrepriseDinum({ siren, actif: siren === SIRET_REPRENEUR.slice(0, 9) }),
+      nomComplet: NOM_PAR_SIREN[siren] ?? "X",
+    }));
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_FERME.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_FERME,
+              adresse: "24 BOULEVARD DE LA MISSION MARCHAND 92400 COURBEVOIE",
+              actif: false,
+              dateCreation: "2021-12-01",
+              naf: "8690B",
+              point: POINT,
+            },
+          ],
+        },
+        {
+          siren: SIRET_REPRENEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_REPRENEUR,
+              adresse: "24 BOULEVARD DE LA MISSION MARCHAND 92400 COURBEVOIE",
+              actif: true,
+              dateCreation: "2025-06-30",
+              naf: "8690B",
+              point: POINT,
+            },
+          ],
+        },
+      ]),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_REPRENEUR);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.disambiguation_status).toBe("by_active_succession");
+      expect(result.succession.detected).toBe(true);
+      expect(result.best_match?.distance_finess_m).toBeGreaterThan(90);
+      expect(result.best_match?.distance_finess_m).toBeLessThan(100);
+    }
+  });
+
+  it("V0.16.1 garde-fou bande même-site — prédécesseur fermé à 30 m + voisin actif à 80 m (autre adresse, dans le rayon 100 m) → reste « ferme »", async () => {
+    // L'élargissement à 100 m ramène désormais dans le rayon un voisin actif d'une
+    // AUTRE adresse (numéro de voie distinct). Sans la bande « même site » (distance
+    // la plus proche + tolérance), il serait promu à tort. Le prédécesseur fermé
+    // étant nettement plus près (30 m vs 80 m), le site reste « ferme ».
+    const SIRET_FERME = "42371781800300";
+    const SIRET_VOISIN_ACTIF = "99999999900001";
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "LBM DIAGNOVIE" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_FERME.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_FERME,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2010-01-01",
+              naf: "8690B",
+              point: { lat: 50.6702698, lon: 3.13 }, // ~30 m
+            },
+          ],
+        },
+        {
+          siren: SIRET_VOISIN_ACTIF.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_VOISIN_ACTIF,
+              adresse: "29 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2015-01-01",
+              naf: "8690B",
+              point: { lat: 50.6707195, lon: 3.13 }, // ~80 m
+            },
+          ],
+        },
+      ]),
+    );
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) =>
+      fakeEntrepriseDinum({ siren, actif: true }),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_FERME);
+      expect(result.verdict_site).toBe("ferme");
+      expect(result.succession.detected).toBe(false);
+      // Le voisin actif reste exposé pour audit, jamais best_match.
+      expect(result.candidates.some((c) => c.siret === SIRET_VOISIN_ACTIF)).toBe(true);
+    }
+  });
+
+  it("V0.16.1 succession alignée sur la bande — un voisin FERMÉ d'une autre adresse (90 m, hors bande) n'est PAS listé comme ancien exploitant", async () => {
+    // Garde-fou cohérence best_match ↔ succession : le repreneur actif et son
+    // prédécesseur fermé sont à la même adresse (52 m) ; un AUTRE labo fermé est
+    // co-localisé au sens large (90 m ≤ 100 m) mais hors bande même-site (> 52+30).
+    // Il ne doit pas polluer `exploitants_precedents` (sinon le faux positif inverse
+    // écarté du best_match rouvrirait côté succession).
+    const SIRET_REPRENEUR = "40309320600726"; // actif, même site (52 m)
+    const SIRET_PREDECESSEUR = "42371781800235"; // fermé, même site (52 m)
+    const SIRET_VOISIN_FERME = "88888888800001"; // fermé, autre adresse (90 m)
+    const POINT_SITE = { lat: 50.6704685, lon: 3.13 }; // ~52 m
+    const POINT_VOISIN = { lat: 50.6708094, lon: 3.13 }; // ~90 m (hors bande 52+30)
+    const NOM_PAR_SIREN: Record<string, string> = {
+      [SIRET_REPRENEUR.slice(0, 9)]: "BIOGROUP PARIS OUEST",
+      [SIRET_PREDECESSEUR.slice(0, 9)]: "BIO EPINE",
+      [SIRET_VOISIN_FERME.slice(0, 9)]: "LABO VOISIN FERME",
+    };
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "BIOEPINE" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => ({
+      ...fakeEntrepriseDinum({ siren, actif: siren === SIRET_REPRENEUR.slice(0, 9) }),
+      nomComplet: NOM_PAR_SIREN[siren] ?? "X",
+    }));
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_REPRENEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_REPRENEUR,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2018-12-21",
+              naf: "8690B",
+              point: POINT_SITE,
+            },
+          ],
+        },
+        {
+          siren: SIRET_PREDECESSEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_PREDECESSEUR,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2017-07-27",
+              naf: "8690B",
+              point: POINT_SITE,
+            },
+          ],
+        },
+        {
+          siren: SIRET_VOISIN_FERME.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_VOISIN_FERME,
+              adresse: "29 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2012-01-01",
+              naf: "8690B",
+              point: POINT_VOISIN,
+            },
+          ],
+        },
+      ]),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_REPRENEUR);
+      expect(result.verdict_site).toBe("actif");
+      expect(result.succession.detected).toBe(true);
+      const precedents = result.succession.exploitants_precedents.map((c) => c.siret);
+      expect(precedents).toContain(SIRET_PREDECESSEUR); // même site → exploitant
+      expect(precedents).not.toContain(SIRET_VOISIN_FERME); // autre adresse → exclu
+      // Le voisin fermé reste exposé dans candidates[] pour audit.
+      expect(result.candidates.some((c) => c.siret === SIRET_VOISIN_FERME)).toBe(true);
+    }
+  });
+
+  it("V0.16.1 succession cohérente best_match↔succession — un candidat co-localisé PLUS PROCHE mais recalé par l'address-gate ne décale pas la bande (prédécesseur préservé)", async () => {
+    // Cohérence d'altitude : `buildSuccession` doit appliquer le MÊME pool que
+    // l'arbitrage (address-gate PUIS sameSiteBand). Un candidat GPS-proche (10 m)
+    // mais hors-sujet adresse (score < 0,6, recalé du best_match) ne doit pas
+    // abaisser le `minDist` de la bande de succession et faire tomber le vrai
+    // prédécesseur (52 m) hors fenêtre. Sans le gate dans buildSuccession, le
+    // prédécesseur serait droppé et le candidat parasite listé à sa place.
+    const SIRET_REPRENEUR = "40309320600726"; // actif, même site (52 m), adresse OK
+    const SIRET_PREDECESSEUR = "42371781800235"; // fermé, même site (52 m), adresse OK
+    const SIRET_PARASITE = "77777777700001"; // fermé, GPS 10 m mais adresse hors-sujet
+    const POINT_SITE = { lat: 50.6704685, lon: 3.13 }; // ~52 m
+    const POINT_PARASITE = { lat: 50.6700899, lon: 3.13 }; // ~10 m (plus proche)
+    const NOM_PAR_SIREN: Record<string, string> = {
+      [SIRET_REPRENEUR.slice(0, 9)]: "BIOGROUP PARIS OUEST",
+      [SIRET_PREDECESSEUR.slice(0, 9)]: "BIO EPINE",
+      [SIRET_PARASITE.slice(0, 9)]: "ENTREPRISE HORS SUJET",
+    };
+    vi.spyOn(finessDb, "getFinessByNumFiness").mockResolvedValue(
+      fakeFinessLookupFound({ raison_sociale: "BIOEPINE" }),
+    );
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren) => ({
+      ...fakeEntrepriseDinum({ siren, actif: siren === SIRET_REPRENEUR.slice(0, 9) }),
+      nomComplet: NOM_PAR_SIREN[siren] ?? "X",
+    }));
+    vi.spyOn(dinum, "searchEntreprises").mockResolvedValue(
+      fakeNearPointResult([
+        {
+          siren: SIRET_REPRENEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_REPRENEUR,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: true,
+              dateCreation: "2018-12-21",
+              naf: "8690B",
+              point: POINT_SITE,
+            },
+          ],
+        },
+        {
+          siren: SIRET_PREDECESSEUR.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              siret: SIRET_PREDECESSEUR,
+              adresse: "27 BD BIZET 59290 WASQUEHAL",
+              actif: false,
+              dateCreation: "2017-07-27",
+              naf: "8690B",
+              point: POINT_SITE,
+            },
+          ],
+        },
+        {
+          siren: SIRET_PARASITE.slice(0, 9),
+          naf: "8690B",
+          etabs: [
+            {
+              // GPS très proche (10 m) MAIS adresse sans aucun token commun →
+              // score_adresse < 0,6 → recalé par l'address-gate.
+              siret: SIRET_PARASITE,
+              adresse: "LIEU DIT LES CHAMPS 00000 AILLEURS",
+              actif: false,
+              dateCreation: "2012-01-01",
+              naf: "8690B",
+              point: POINT_PARASITE,
+            },
+          ],
+        },
+      ]),
+    );
+
+    const result = await verifierSiteActif(VALID_FINESS);
+    expect(result.found).toBe(true);
+    if (result.found) {
+      expect(result.best_match?.siret).toBe(SIRET_REPRENEUR);
+      expect(result.succession.detected).toBe(true);
+      const precedents = result.succession.exploitants_precedents.map((c) => c.siret);
+      expect(precedents).toContain(SIRET_PREDECESSEUR); // vrai prédécesseur préservé
+      expect(precedents).not.toContain(SIRET_PARASITE); // parasite hors-gate exclu
+    }
+  });
 });
 
 describe("diceCoefficient (V0.6.2 — primitive de similarité)", () => {

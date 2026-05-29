@@ -259,3 +259,67 @@ d'intégration touchant cette table (convention `CLAUDE.md`).
    prod, ou imposer une valeur d'emblée ? (reco : calibrage L0.)
 4. Ce fix part-il en **release dédiée** (V0.15.1 / V0.16.0) ou groupé avec
    d'autres travaux ?
+
+---
+
+## 13. Recalibrage V0.16.1 — rayon 50 → 100 m + bande « même site » (2026-05-30)
+
+> **Statut** : implémenté, tests verts. Demande GEO Intel (2 faux négatifs prouvés
+> prod 2026-05-29). Code TypeScript pur — **pas de migration**.
+
+### Le problème résiduel après V0.16
+
+Le seuil `COLOCATION_RADIUS_M = 50 m` calibré en V0.16 (L0) sous-estimait le
+**décalage de géocodage DREES**. Le point FINESS (Lambert93 DREES, souvent grossier)
+est décalé de plusieurs dizaines de mètres du point BAN de l'adresse réelle — et ce
+décalage est **partagé par tous les SIRET de cette adresse** (ils géocodent au même
+point BAN). Conséquence : un repreneur actif et son ancien exploitant fermé, **à la
+même adresse**, ressortent à la distance IDENTIQUE du FINESS — mais si cette distance
+dépasse 50 m, l'étape « actif prime » ne s'arme pas → faux négatif `ferme`.
+
+### Preuve prod (2026-05-29, mesures `verifier_site_actif`)
+
+| FINESS | Site | Repreneur actif manqué | Distance | Cascade pré-fix |
+|---|---|---|---|---|
+| 930023627 | Cerballiance Aulnay | SIRET 32838652900312 | **52,1 m** | `by_rpps_signal` → ancien fermé 45214478500055 (52,1 m) |
+| 920028354 | EYLAU Courbevoie | SIRET 78465202600336 | **96,6 m** | `by_name_score` → ancien fermé 39483357800161 (96,6 m, EYLAU score_nom 0,09) |
+
+Dans les deux cas, **tous** les SIRET de l'adresse sont à la distance unique
+(52,1 / 96,6 m) — confirmant que la distance mesure l'offset FINESS↔adresse, pas un
+étalement intra-adresse. Le cas 2 est le pire : le name filter disqualifiait EYLAU
+(le libellé FINESS dit encore « Parc Monceau ») — d'où l'importance de l'« actif
+prime » placé AVANT le name filter (déjà acquis en V0.16, juste hors de portée à 50 m).
+
+### Le fix (2 leviers indissociables)
+
+1. **`COLOCATION_RADIUS_M` 50 → 100 m.** Couvre les décalages DREES observés (≤ 97 m)
+   tout en restant sous le **voisin-piège** d'une autre adresse, testé à ~110 m
+   (garde-fou faux positif inverse V0.16 conservé, reste vert). Le site EYLAU légitime
+   à 46,6 m (V0.16) reste co-localisé dans les deux calibrations.
+
+2. **Bande « même site » relative — `COLOCATION_SAME_SITE_TOLERANCE_M = 30 m`.** Le
+   rayon élargi ramène désormais dans le périmètre des voisins d'une autre adresse à
+   50-100 m (plan §5 : voisins « 50-250 m »). Sans garde-fou, un voisin actif y serait
+   promu. La bande restreint l'arbitrage du `best_match` aux co-localisés à `≤
+   min(distance) + 30 m` : un prédécesseur fermé nettement plus proche qu'un actif
+   lointain garde le verdict `ferme`. 30 m absorbe le bruit de géocodage intra-adresse
+   (nul sur les 2 cas prod, où l'écart actif↔fermé est de 0 m).
+
+### Pourquoi pas un simple bump à 150 m (rejet du « bump aveugle »)
+
+À 150 m le voisin-piège à 110 m entrerait dans le rayon → faux positif. La fenêtre
+sûre est (96,6 ; 110) m → **100 m**, étroite mais ancrée sur 4 points (2 repreneurs
+réels + voisin-piège testé + EYLAU légitime). La bande relative (levier 2) fait le
+travail de discrimination fine que le rayon absolu ne peut pas faire seul.
+
+### Garde-fous
+
+`cross-source.test.ts` : 3 tests V0.16.1 (Cerballiance 52,1 m, EYLAU 96,6 m, bande
+même-site voisin 80 m / prédécesseur 30 m → `ferme`) + le faux positif inverse
+historique (~110 m) inchangé. Constantes documentées inline dans `siret-resolver.ts`.
+
+### Impact aval (GEO Intel)
+
+`enrichir_concurrents` consomme ce verdict pour ses `competitor_alerts` M&A — le fix
+améliore directement la qualité des rapports d'implantation, sans changement côté
+GEO Intel (contrat de sortie inchangé : `verdict_site`, `succession`).

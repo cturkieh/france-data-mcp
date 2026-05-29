@@ -335,18 +335,46 @@ const BEST_MATCH_THRESHOLD = 0.6;
  * M&A). Deux établissements SIRENE dont les points GPS sont à ≤ `COLOCATION_RADIUS_M`
  * des coordonnées FINESS sont considérés sur LE MÊME site physique.
  *
- * **Valeur 50 m** calibrée sur prod (cf. `docs/plans/verifier-site-actif-succession-fix.md`,
- * lot L0) : un SIRET repreneur mesuré à 0,2 / 1,3 / 17 m du FINESS (le 17 m =
- * bruit du double géocodage Lambert93 DREES vs BAN DINUM) ; un voisin de rue
- * (autre numéro de voie) à ~110 m. 50 m = large marge au-dessus du pire
- * repreneur, bien en dessous d'un voisin.
+ * **Valeur 100 m** (V0.16.1, recalibrée prod 2026-05-29 — cf.
+ * `docs/plans/verifier-site-actif-succession-fix.md` § recalibrage). La valeur
+ * initiale 50 m produisait des FAUX NÉGATIFS de succession M&A : le géocodage
+ * DREES (Lambert93, souvent grossier) place le point FINESS à plusieurs dizaines
+ * de mètres du point BAN de l'adresse — décalage PARTAGÉ par tous les SIRET de
+ * cette adresse. Deux repreneurs réels mesurés à 52,1 m (Cerballiance Aulnay) et
+ * 96,6 m (EYLAU Courbevoie), à la distance IDENTIQUE de leur ancien exploitant
+ * (même adresse) → tous deux écartés à 50 m. 100 m couvre ces décalages tout en
+ * restant sous le voisin-piège testé à ~110 m (autre numéro de voie). Le faux
+ * positif inverse que ce rayon élargi pourrait ouvrir (voisin actif d'un autre
+ * bâtiment) est neutralisé par la bande RELATIVE `COLOCATION_SAME_SITE_TOLERANCE_M`.
  *
  * Pourquoi la distance géo et pas le score d'adresse Dice : le Dice ne
  * discrimine PAS le numéro de voie (prouvé prod — un voisin au n°48 d'une
  * avenue score 0,90 contre le n°85 du FINESS). La distance GPS est le seul
  * juge fiable de « même site ».
  */
-const COLOCATION_RADIUS_M = 50;
+const COLOCATION_RADIUS_M = 100;
+
+/**
+ * Tolérance de distance, en mètres, de la bande « même site » (V0.16.1). Au sein
+ * des candidats co-localisés (≤ `COLOCATION_RADIUS_M`), seuls ceux à `≤
+ * min(distance) + COLOCATION_SAME_SITE_TOLERANCE_M` sont considérés comme occupant
+ * le même bâtiment que le FINESS. Au-delà = adresse voisine.
+ *
+ * **Garde-fou faux positif inverse au rayon élargi.** Le passage de 50 → 100 m
+ * (fix succession M&A V0.16.1, cf. `docs/plans/verifier-site-actif-succession-fix.md`)
+ * ramène désormais dans le rayon des voisins d'une AUTRE adresse (numéro de voie
+ * distinct, géocodés à un point BAN différent). Sans cette bande, un voisin actif
+ * du même métier promouvrait un verdict « actif » sur un site réellement fermé
+ * (prouvé : test garde-fou `cross-source.test.ts` voisin 80 m / prédécesseur 30 m).
+ *
+ * **Valeur 30 m** : les SIRET d'une MÊME adresse partagent le même point géocodé
+ * (prouvé prod 2026-05-29 — Cerballiance Aulnay et EYLAU Courbevoie : repreneur
+ * actif et ancien fermé ressortent à la distance IDENTIQUE du FINESS, 52,1 m resp.
+ * 96,6 m). 30 m absorbe le bruit de géocodage intra-adresse résiduel sans englober
+ * une adresse voisine. NE PAS confondre avec `COLOCATION_RADIUS_M` (gate absolu) :
+ * la bande est RELATIVE au candidat le plus proche.
+ */
+const COLOCATION_SAME_SITE_TOLERANCE_M = 30;
 
 /**
  * Un candidat n'est éligible best_match que si son `score_adresse` atteint
@@ -670,11 +698,20 @@ export async function resolveSiretsForFiness(
  * est « détectée » quand le `best_match` retenu est un SIRET ACTIF et qu'au
  * moins un SIRET FERMÉ est co-localisé avec lui — l'ancien exploitant du site.
  *
- * Le prédicat de co-localisation est `isColocated` (distance géo prouvée ≤
- * `COLOCATION_RADIUS_M`) — strictement le même que celui de l'arbitrage du
- * best_match : un fermé sans `distance_finess_m` n'est jamais inscrit comme
- * exploitant précédent (on n'invente pas une co-localisation que Geo Intel
- * interprétera).
+ * Le prédicat est `sameSiteBand` appliqué au pool **address-gaté** (V0.16.1) —
+ * STRICTEMENT le même filtre composite que l'arbitrage du best_match
+ * (`disambiguateFallbackCandidates` : `meetsBestMatchAddressGate` PUIS `sameSiteBand`).
+ * Crucial depuis le rayon 100 m sur les DEUX axes :
+ * - `sameSiteBand` (vs `isColocated` ≤ 100 m brut) écarte un voisin fermé d'une
+ *   AUTRE adresse (50-100 m, hors bande) que l'arbitrage vient d'écarter — sinon
+ *   le faux positif inverse rouvre côté succession.
+ * - le gate adresse (vs `allCandidates` brut) évite qu'un candidat co-localisé
+ *   recalé par le gate (score_adresse < 0.6) mais GPS-proche fausse le `minDist`
+ *   de la bande — il abaisserait la fenêtre et POURRAIT dropper un prédécesseur
+ *   légitime / en faire entrer un autre. Aligner l'ensemble d'entrée garantit que
+ *   `succession` reflète exactement le pool qui a produit le best_match.
+ * Un fermé sans `distance_finess_m` n'entre pas dans la bande (on n'invente pas
+ * une co-localisation que Geo Intel interprétera).
  */
 function buildSuccession(
   bestMatch: SiretCandidate | null,
@@ -683,8 +720,8 @@ function buildSuccession(
   if (!bestMatch || bestMatch.actif !== true) {
     return { detected: false, exploitants_precedents: [] };
   }
-  const exploitantsPrecedents = allCandidates
-    .filter((c) => c.siret !== bestMatch.siret && c.actif === false && isColocated(c))
+  const exploitantsPrecedents = sameSiteBand(allCandidates.filter(meetsBestMatchAddressGate))
+    .filter((c) => c.siret !== bestMatch.siret && c.actif === false)
     .sort((a, b) => {
       // Tri chronologique décroissant ; tie-break SIRET ascendant pour un ordre
       // DÉTERMINISTE quand `date_creation` est absente — l'absence de date n'est
@@ -1152,16 +1189,45 @@ function isColocated(c: SiretCandidate): boolean {
 }
 
 /**
+ * Bande « même site » (V0.16.1) : parmi un ensemble de candidats, ceux qui sont
+ * co-localisés (`isColocated`) ET à la distance la plus proche du FINESS, à
+ * `COLOCATION_SAME_SITE_TOLERANCE_M` près. Source UNIQUE de ce prédicat, partagée
+ * par l'arbitrage du best_match (`disambiguateFallbackCandidates`, étape 1) ET la
+ * construction de la succession (`buildSuccession`).
+ *
+ * Pourquoi factoriser : sans prédicat commun, les deux divergent — un voisin fermé
+ * d'une AUTRE adresse (dans le rayon 100 m mais hors bande), correctement écarté du
+ * best_match, ressurgirait comme « ancien exploitant » dans `succession` exposé au
+ * caller (le faux positif inverse rouvert côté succession). Le décalage de géocodage
+ * DREES étant PARTAGÉ par tous les SIRET d'une même adresse, c'est la distance
+ * RELATIVE au plus proche — pas le rayon absolu — qui distingue « même site » d'un
+ * voisin. Un candidat sans `distance_finess_m` n'entre jamais dans la bande (ni ne
+ * tire le min : `?? +Infinity`).
+ */
+function sameSiteBand(candidates: SiretCandidate[]): SiretCandidate[] {
+  const colocated = candidates.filter(isColocated);
+  if (colocated.length === 0) return [];
+  const minDist = Math.min(
+    ...colocated.map((c) => c.distance_finess_m ?? Number.POSITIVE_INFINITY),
+  );
+  return colocated.filter(
+    (c) =>
+      (c.distance_finess_m ?? Number.POSITIVE_INFINITY) <=
+      minDist + COLOCATION_SAME_SITE_TOLERANCE_M,
+  );
+}
+
+/**
  * Cascade de désambiguïsation pour les candidats post-gate NAF du fallback géo.
  * Sortie : statut + best_match (ou null si ambigu). Logique linéaire, chaque
  * étape n'est essayée que si la précédente n'a pas tranché.
  *
- * **V0.16 — « actif prime » (fix succession M&A).** Étape pivot ajoutée AVANT
- * le name filter : si ≥ 1 candidat ACTIF est co-localisé avec le FINESS
- * (cf. `isColocated`), le pool d'arbitrage du best_match est restreint à ces
- * actifs co-localisés. Les SIRET fermés du site (ancien exploitant) ne sont
- * alors plus best_match-éligibles — ils restent dans `candidates[]` pour la
- * timeline / succession.
+ * **V0.16 — « actif prime » (fix succession M&A), recalibré V0.16.1.** Étape pivot
+ * ajoutée AVANT le name filter : si ≥ 1 candidat ACTIF est sur la bande « même
+ * site » (`sameSiteBand` : co-localisés les plus proches du FINESS), le pool
+ * d'arbitrage du best_match est restreint à ces actifs. Les SIRET fermés du site
+ * (ancien exploitant) ne sont alors plus best_match-éligibles — ils restent dans
+ * `candidates[]` pour la timeline / succession.
  *
  * Pourquoi AVANT le name filter : le libellé FINESS conserve l'ancienne
  * enseigne (latence DREES). Un repreneur dont la raison sociale ne ressemble
@@ -1169,12 +1235,14 @@ function isColocated(c: SiretCandidate): boolean {
  * de l'ancien exploitant fermé — régression M&A prouvée prod (Neuilly Sablons /
  * Pont de Neuilly, cf. `docs/plans/verifier-site-actif-succession-fix.md`).
  *
- * Garde-fou faux positif inverse : on ne promeut un actif QUE s'il est
- * réellement co-localisé (distance géo). Un voisin actif du même métier à une
- * autre adresse (numéro de voie distinct) n'est pas promu. Et plusieurs actifs
- * co-localisés de SIREN distincts = entreprises concurrentes, pas une
- * succession → l'étape 1 ne tranche pas (la cascade name/RPPS continue, sinon
- * `ambiguous`). Préserve le test "2 labos co-localisés ex-aequo → ambiguous".
+ * Garde-fou faux positif inverse : on ne promeut un actif que s'il est sur la
+ * bande « même site » (distance la plus proche du FINESS + tolérance). Un voisin
+ * actif du même métier à une AUTRE adresse — même ramené dans le rayon 100 m —
+ * ressort plus loin que le prédécesseur co-localisé et reste hors bande, donc
+ * non promu. Et plusieurs actifs sur bande de SIREN distincts = entreprises
+ * concurrentes, pas une succession → l'étape 1 ne tranche pas (la cascade
+ * name/RPPS continue, sinon `ambiguous`). Préserve le test "2 labos co-localisés
+ * ex-aequo → ambiguous".
  */
 function disambiguateFallbackCandidates(
   candidates: SiretCandidate[],
@@ -1197,24 +1265,28 @@ function disambiguateFallbackCandidates(
     return { status: "single_after_gate", best_match: firstGated };
   }
 
-  // Étape 1 — ACTIF PRIME (V0.16). Si ≥ 1 candidat actif est co-localisé avec
-  // le FINESS, le site est exploité : le pool d'arbitrage est restreint aux
-  // actifs co-localisés. `succession` = vrai s'il y avait aussi ≥ 1 fermé
-  // co-localisé écarté (ancien exploitant) — détermine le statut retourné.
-  const colocated = addressGated.filter(isColocated);
-  const colocatedActifs = colocated.filter((c) => c.actif === true);
+  // Étape 1 — ACTIF PRIME (V0.16, recalibré V0.16.1). On restreint l'arbitrage à
+  // la bande « même site » (`sameSiteBand` : co-localisés les plus proches, cf.
+  // helper). Si ≥ 1 candidat actif y figure, le site est exploité → le pool est
+  // restreint à ces actifs ; les SIRET fermés du site restent dans candidates[]
+  // pour la timeline / succession. `succession` = vrai s'il y avait aussi ≥ 1
+  // fermé sur la bande (ancien exploitant écarté) — détermine le statut retourné.
+  const sameSite = sameSiteBand(addressGated);
   let pool = addressGated;
   let succession = false;
-  if (colocatedActifs.length > 0) {
-    pool = colocatedActifs;
-    succession = colocated.some((c) => c.actif === false);
-  } else if (colocated.length > 0) {
-    // Aucun actif co-localisé, mais ≥ 1 candidat co-localisé (site fermé ou
-    // statut inconnu) : on restreint quand même le pool aux co-localisés pour
-    // qu'un voisin actif lointain (autre bâtiment, dans le rayon /near_point)
-    // ne pollue pas l'arbitrage du best_match — garde-fou faux positif
-    // inverse : un site vraiment fermé ne doit jamais basculer en « actif ».
-    pool = colocated;
+  if (sameSite.length > 0) {
+    const sameSiteActifs = sameSite.filter((c) => c.actif === true);
+    if (sameSiteActifs.length > 0) {
+      pool = sameSiteActifs;
+      succession = sameSite.some((c) => c.actif === false);
+    } else {
+      // Aucun actif sur la bande la plus proche (que des fermés / statut inconnu) :
+      // on garde cette bande. Un candidat actif plus lointain (autre adresse, dans
+      // le rayon 100 m mais hors bande) ne peut PAS basculer le verdict en
+      // « actif » — un site vraiment fermé reste fermé (garde-fou faux positif
+      // inverse au rayon élargi).
+      pool = sameSite;
+    }
   }
   const [firstPool] = pool;
   if (pool.length === 1 && firstPool) {
