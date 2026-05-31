@@ -131,6 +131,7 @@ Séquence (voir `scripts/release.sh` qui automatise) :
 
 1. ☐ `pnpm typecheck && pnpm lint && pnpm test:unit` verts
 2. ☐ Bump version sur 3 sources : `package.json`, `server.json`, `src/core/version.ts`
+   - ⚠️ **`server.json.description` ≤ 100 caractères (limite DURE du schéma registry MCP)** — `mcp-publisher publish` rejette en `422 expected length <= 100` sinon (prouvé V0.23.2 : une description enrichie ~230 car. publiait OK sur npm — pas de limite — mais bloquait le registry). npm/README portent le détail long ; `server.json` reste un pitch court. Vérifier : `jq -r '.description|length' server.json` + `mcp-publisher validate` (read-only, hit le schéma registry) AVANT le commit de release.
 3. ☐ Éditer `CHANGELOG.md` (nouvelle section en haut)
 4. ☐ `git commit + git tag -a vX.Y.Z + git push + git push origin vX.Y.Z`
 5. ☐ Attendre CI vert (`gh run watch --exit-status`)

@@ -32,6 +32,11 @@ annonçait encore « 6 sources / 32 tools » alors que le serveur expose **8 sou
   vers npm + registry MCP (ces canaux affichent la description figée au dernier publish ;
   GitHub se met à jour au push). Smithery et les agrégateurs (Glama, mcp.so, PulseMCP)
   re-synchronisent ensuite seuls depuis npm/registry.
+- **Fix process registry** : `server.json.description` raccourcie à ≤ 100 caractères
+  (limite DURE du schéma registry MCP — `mcp-publisher` rejette en `422 expected length
+  <= 100`). La 1re tentative de publish avec la description enrichie ~230 car. passait sur
+  npm (pas de limite) mais bloquait le registry. Règle gravée dans `CLAUDE.md` (Release
+  process, étape 2). Le détail long vit dans `package.json` + README.
 
 
 
