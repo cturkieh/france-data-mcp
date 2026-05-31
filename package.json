@@ -1,8 +1,8 @@
 {
   "name": "france-data-mcp",
-  "version": "0.23.1",
+  "version": "0.23.2",
   "mcpName": "io.github.cturkieh/france-data-mcp",
-  "description": "MCP TypeScript pour combiner et réconcilier 6 référentiels publics français (INSEE SIRENE, FINESS DREES, RPPS Annuaire Santé ANS, Annuaire Santé Ameli, IGN, DINUM) — avec cross-source FINESS↔RPPS↔SIRENE, détection des SIRET fermés invisibles côté DREES, scoring d'adresse Dice, rate limit & observabilité structurée. Production-ready pour Claude, Cursor et toute app TypeScript.",
+  "description": "MCP TypeScript pour combiner et réconcilier 8 référentiels publics français (INSEE SIRENE & IRIS, FINESS DREES, RPPS Annuaire Santé ANS, Annuaire Santé Ameli, Centres de Santé CNAM, IGN, DINUM) — avec cross-source FINESS↔RPPS↔SIRENE↔CNAM, démographie infracommunale au quartier, détection des SIRET fermés invisibles côté DREES, scoring d'adresse Dice, rate limit & observabilité structurée. Production-ready pour Claude, Cursor et toute app TypeScript.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -14,6 +14,11 @@
     "rpps",
     "annuaire-sante",
     "ameli",
+    "cnam",
+    "centres-sante",
+    "iris",
+    "demographie",
+    "population",
     "ign",
     "geocodage",
     "sirene",

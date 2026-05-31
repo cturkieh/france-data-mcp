@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cturkieh/france-data-mcp",
-  "description": "French territorial intelligence MCP: cross-reference health, business & geo public registries.",
+  "description": "French territorial intelligence MCP: cross-reference health establishments (FINESS), professionals (RPPS/ANS, Ameli), CNAM health centers, infra-communal demographics (INSEE IRIS), businesses (SIRENE) & geocoding — French public registries.",
   "repository": {
     "url": "https://github.com/cturkieh/france-data-mcp",
     "source": "github"
   },
-  "version": "0.23.1",
+  "version": "0.23.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "france-data-mcp",
-      "version": "0.23.1",
+      "version": "0.23.2",
       "transport": {
         "type": "stdio"
       }

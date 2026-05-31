@@ -1,6 +1,6 @@
 # france-data-mcp
 
-> MCP TypeScript qui **croise et réconcilie** 6 référentiels publics français (INSEE SIRENE, FINESS DREES, RPPS / Annuaire Santé ANS, Annuaire Santé Ameli, IGN, DINUM). Détecte les SIRET fermés invisibles côté DREES, distingue site vs groupe, expose la fraîcheur de chaque source.
+> MCP TypeScript qui **croise et réconcilie** 8 référentiels publics français (INSEE SIRENE & IRIS, FINESS DREES, RPPS / Annuaire Santé ANS, Annuaire Santé Ameli, Centres de Santé CNAM, IGN, DINUM). Détecte les SIRET fermés invisibles côté DREES, distingue site vs groupe, croise l'offre de soins avec la démographie au quartier, expose la fraîcheur de chaque source.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
@@ -45,23 +45,25 @@ Détails par client + self-hosting : [docs/installation-claude.md](docs/installa
 
 ## Pourquoi ce projet
 
-Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM) existent mais sont **éclatées, sous-documentées et pleines de pièges** : rate limits, formats CSV propriétaires, latence DREES de 1-2 mois, diffusion partielle INSEE, mappings inconsistants Ameli ↔ RPPS.
+Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, Centres de Santé CNAM, IGN, DINUM) existent mais sont **éclatées, sous-documentées et pleines de pièges** : rate limits, formats CSV propriétaires, latence DREES de 1-2 mois, diffusion partielle INSEE, mappings inconsistants Ameli ↔ RPPS.
 
 `france-data-mcp` est **le premier MCP qui croise factuellement ces sources** pour répondre à des questions concrètes — cartographie d'offre de soins, étude de marché territoriale, journalisme local, civic-tech.
 
 ---
 
-## Périmètre — 6 sources publiques croisées
+## Périmètre — 8 sources publiques croisées
 
 - 🗺️ **Territoire** : geo.api.gouv.fr (DINUM, communes), IGN Géoplateforme (géocodage)
 - 🏥 **Santé** : FINESS / DREES (~95 K établissements), Annuaire Santé Ameli (~462 K libéraux), RPPS / ANS (~2,2 M PS actifs)
+- 🩺 **Centres de Santé** : Annuaire santé CNAM (~3 K structures L.6323-1 CSP, sync hebdomadaire)
+- 📊 **Démographie infracommunale** : INSEE IRIS (~48,6 K quartiers — RP 2022, FILOSOFI 2021 revenu, contours IGN) + INSEE Melodi (population de référence)
 - 🏢 **Entreprises** : DINUM Recherche Entreprises + INSEE SIRENE V3.11
 
 **Cross-source** : réconciliation FINESS ↔ RPPS ↔ SIRENE pour détecter SIRET fermés, rebrandings, raisons sociales périmées.
 
 ---
 
-## Outils MCP (32 tools)
+## Outils MCP (34 tools)
 
 ### 🗺️ Territoire (4)
 `autocomplete_commune` · `get_commune_by_code` · `geocode_adresse` · `reverse_geocode`
@@ -84,6 +86,11 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, IGN, DINUM)
 
 > ~2,2 M PS actifs (libéraux + salariés privés + hospitaliers contractuels + agents publics). Par défaut : Civils uniquement.
 
+### 🩺 Centres de Santé — Annuaire CNAM (2)
+`centres_sante_in_radius` · `centres_sante_by_finess`
+
+> Structures de soins ambulatoires non lucratives (L.6323-1 CSP, ~3 K). Différenciateur vs FINESS famille=124 : expose **carte Vitale**, **APCV** et **spécialités exercées sur place** (Annexe A CNAM, ~70 codes). Coords = centroïde commune. Sync hebdomadaire.
+
 ### 📊 Démographie & densités — INSEE Melodi + IRIS (3)
 Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DREES (ratios pour 100 k hab.). Maille **IRIS** (quartier, ~48,6K zones) pour la DEMANDE, à croiser avec l'offre de soins.
 
@@ -92,13 +99,16 @@ Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DR
 ### 🔎 Découverte des nomenclatures (1)
 `lister_nomenclature` (`referentiel: ameli_specialites | ameli_types_ps | rpps_savoir_faire`) — codes spécialité/type_ps Ameli **et** savoir_faire RPPS dans un seul tool (remplace les 3 anciens `lister_*`).
 
-### 🧭 Agrégateur santé territoire (1) — V0.9
-`panorama_sante_territoire` — 1 call pour population + densités médecins/infirmiers/pharmaciens vs national + count FINESS par famille (labo, pharmacie, EHPAD, MCO, MSP/CPTS) + **bloc demande IRIS** (profil démo de la commune : âge, CSP, familles, revenu, agrégé depuis ses IRIS). Granularité explicite (`niveau: commune`, `niveauEtablissements: departement | indisponible`).
+### 🧭 Agrégateurs & études composites (4)
+- `panorama_sante_territoire` (V0.9) — 1 call : population + densités médecins/infirmiers/pharmaciens vs national + count FINESS par famille (labo, pharmacie, EHPAD, MCO, MSP/CPTS) + **bloc demande IRIS** (profil démo commune : âge, CSP, familles, revenu). Granularité explicite (`niveau: commune`, `niveauEtablissements: departement | indisponible`).
+- `inspect_site` (V0.10) — vue 360 d'un établissement en 1 call : identification FINESS + statut administratif SIRENE (resolver SIRET) + PS rattachés + historique INSEE.
+- `panorama_implantation_complet` (V0.23) — étude d'implantation labo en 1 call : 7 sections (territoire, demande IRIS du bassin, concurrents, pourvoyeurs MCO/EHPAD/SSR, prescripteurs RPPS+IDEL, centres de santé, qualité référentiels). Résumés, jamais de listes brutes ; dégradation par section.
+- `enrichir_concurrents` (V0.23) — enquête sur le top concurrents (statut actif + équipe + signal M&A + groupe parent), cap dur `max=3`.
 
-### 🔀 Croisement multi-source (6)
-Réconciliation FINESS ↔ RPPS ↔ SIRENE — faits bruts sans interprétation métier.
+### 🔀 Croisement multi-source (7)
+Réconciliation FINESS ↔ RPPS ↔ SIRENE ↔ CNAM — faits bruts sans interprétation métier.
 
-`data_freshness` · `verifier_site_actif` · `compare_raison_sociale_finess_vs_rpps` · `historique_etablissement` · `reconcilier_finess_sirene` · `finess_sirene_coverage_in_radius`
+`data_freshness` · `verifier_site_actif` · `compare_raison_sociale_finess_vs_rpps` · `compare_adresse_cnam_vs_finess` · `historique_etablissement` · `reconcilier_finess_sirene` · `finess_sirene_coverage_in_radius`
 
 ---
 
@@ -115,11 +125,12 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.22.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.23.2 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
 - [x] **V0.22.0** : INSEE IRIS (métropole) — démographie au quartier (âge, CSP, familles, revenu).
+- [x] **V0.23.0** : panoramas composites (`panorama_implantation_complet`, `enrichir_concurrents`) — études d'implantation en 1 call.
 - [ ] **V1.0+** : DOM-COM (IRIS + santé), DPC.
 
 ---

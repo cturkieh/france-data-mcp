@@ -4,7 +4,36 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [0.23.1] — 2026-05-30 (Fix succession M&A : recalibrage rayon co-localisation 50 → 100 m)
+## [0.23.2] — 2026-05-31 (Doc-only : synchronisation des sources publiques — Centres de Santé CNAM + INSEE IRIS)
+
+Release **documentaire uniquement** (aucun changement de code, aucune migration). Met
+la documentation publique en cohérence avec le périmètre réel depuis l'ajout des
+**Centres de Santé (CNAM)** et de la **démographie infracommunale INSEE IRIS** : la doc
+annonçait encore « 6 sources / 32 tools » alors que le serveur expose **8 sources et
+34 tools** en production.
+
+### Changed
+
+- **README.md + README.en.md** : périmètre « 6 → 8 sources publiques croisées » (ajout
+  Centres de Santé CNAM ~3 K + Démographie infracommunale INSEE IRIS ~48,6 K quartiers).
+  Décompte d'outils « 32 → 34 ». Nouvelle section **🩺 Centres de Santé — CNAM (2)**
+  (`centres_sante_in_radius`, `centres_sante_by_finess`). Section agrégateurs élargie à
+  **4 tools** (ajout `inspect_site`, `panorama_implantation_complet`, `enrichir_concurrents`).
+  Croisement multi-source « 6 → 7 » (ajout `compare_adresse_cnam_vs_finess`).
+- **server.json** : description du registry MCP enrichie (santé, centres de santé CNAM,
+  démographie IRIS, entreprises, géocodage explicités).
+- **package.json** : description « 6 → 8 référentiels » + nouveaux keywords (`cnam`,
+  `centres-sante`, `iris`, `demographie`, `population`).
+
+### Release
+
+- Doc-only : bump des 3 sources de version (`package.json`, `server.json`,
+  `src/core/version.ts`) 0.23.1 → **0.23.2** pour propager les descriptions enrichies
+  vers npm + registry MCP (ces canaux affichent la description figée au dernier publish ;
+  GitHub se met à jour au push). Smithery et les agrégateurs (Glama, mcp.so, PulseMCP)
+  re-synchronisent ensuite seuls depuis npm/registry.
+
+
 
 Corrige des **faux négatifs `verdict_site: "ferme"`** de `verifier_site_actif` (et
 des 3 autres consommateurs du resolver SIRET) sur des sites **repris** (M&A) dont
