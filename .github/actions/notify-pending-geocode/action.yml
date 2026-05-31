@@ -1,0 +1,162 @@
+# Composite action — alerte ops "adresses restant à géocoder (BAN)".
+#
+# Factorise les 3 steps (check → email → issue) partagés par les crons RPPS et
+# Ameli (seuls à poser des adresses BAN). En attendant l'automatisation du
+# re-géocodage récurrent (backlog P1, `docs/plans/ban-join.md`), prévient qu'il
+# faut lancer `node scripts/ban-backfill.mjs` à la main.
+#
+# Best-effort de bout en bout : tourne APRÈS une ingestion déjà réussie (swap
+# fait), donc ne doit JAMAIS re-marquer le cron en échec. Le check ne throw pas
+# (script exit 0), l'email avale son échec en `::warning::`, l'issue try/catch →
+# `core.warning`. Le call-site ajoute `continue-on-error: true` en ceinture-
+# bretelles. NB : `continue-on-error` par-step n'existe PAS dans une composite
+# action (limitation GitHub) — d'où la non-fatalité gérée à la main.
+name: Notify pending BAN geocoding
+description: >
+  Alerte (email Resend + issue GitHub idempotente) quand un cron d'ingestion a
+  posé de nouvelles adresses restant à géocoder via BAN.
+
+inputs:
+  source:
+    description: "Slug source (arg CLI du script) : rpps | ameli."
+    required: true
+  source-label:
+    description: "Libellé humain pour les sujets/titres : RPPS | Ameli."
+    required: true
+  supabase-url:
+    description: "URL du projet Supabase."
+    required: true
+  supabase-service-role-key:
+    description: "Clé service_role (lecture ingest_log)."
+    required: true
+  resend-api-key:
+    description: "Clé API Resend. Vide → email skippé avec ::warning:: (l'issue reste créée)."
+    required: false
+    default: ""
+  email-to:
+    description: "Destinataire de l'alerte mail."
+    required: false
+    default: "cturkieh@gmail.com"
+  email-from:
+    description: "Expéditeur (domaine vérifié Resend, sinon onboarding@resend.dev)."
+    required: false
+    default: "France Data MCP <onboarding@resend.dev>"
+  github-token:
+    description: "Token pour créer/commenter l'issue."
+    required: true
+  run-url:
+    description: "URL du run GitHub Actions (traçabilité)."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check pending BAN geocoding
+      id: pending_geocode
+      shell: bash
+      env:
+        SUPABASE_URL: ${{ inputs.supabase-url }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase-service-role-key }}
+      run: pnpm notify:pending-geocode ${{ inputs.source }}
+
+    - name: Email — adresses à géocoder
+      if: steps.pending_geocode.outputs.should_notify == 'true'
+      shell: bash
+      env:
+        RESEND_API_KEY: ${{ inputs.resend-api-key }}
+        NOTIFY_EMAIL_TO: ${{ inputs.email-to }}
+        NOTIFY_EMAIL_FROM: ${{ inputs.email-from }}
+        SOURCE_LABEL: ${{ inputs.source-label }}
+        PENDING: ${{ steps.pending_geocode.outputs.pending }}
+        MEASUREMENT_UNAVAILABLE: ${{ steps.pending_geocode.outputs.measurement_unavailable }}
+        RUN_URL: ${{ inputs.run-url }}
+      run: |
+        if [ -z "$RESEND_API_KEY" ]; then
+          echo "::warning::RESEND_API_KEY absent — email non envoyé. Ajoute le secret pour activer l'alerte mail (l'issue GitHub est créée quand même)."
+          exit 0
+        fi
+        # Mesure amont indisponible (compte null/corrompu sur un run réussi) :
+        # message DÉGRADÉ — surtout pas "0 adresses" (trompeur).
+        if [ "$MEASUREMENT_UNAVAILABLE" = "true" ]; then
+          subject="[france-data-mcp] $SOURCE_LABEL : ⚠️ mesure des adresses à géocoder indisponible"
+          text="Le cron $SOURCE_LABEL a RÉUSSI mais la mesure du nombre d'adresses à géocoder (BAN) a échoué (RPC de mesure). Comptage INCONNU — vérifier le cron / la RPC ; un re-géocodage (node scripts/ban-backfill.mjs) reste peut-être nécessaire. Run : $RUN_URL"
+        else
+          subject="[france-data-mcp] $SOURCE_LABEL : $PENDING adresses à géocoder"
+          text="Le cron $SOURCE_LABEL a ingéré de nouvelles données. $PENDING adresses distinctes restent à géocoder (BAN). En attendant l'automatisation, lancer manuellement : node scripts/ban-backfill.mjs — Run : $RUN_URL"
+        fi
+        payload=$(jq -n \
+          --arg from "$NOTIFY_EMAIL_FROM" \
+          --arg to "$NOTIFY_EMAIL_TO" \
+          --arg subject "$subject" \
+          --arg text "$text" \
+          '{from:$from, to:[$to], subject:$subject, text:$text}')
+        # `|| ::warning::` : un échec d'envoi ne doit pas court-circuiter le step
+        # issue qui suit (sinon une panne Resend supprimerait AUSSI l'issue).
+        curl -sS --fail-with-body -X POST https://api.resend.com/emails \
+          -H "Authorization: Bearer $RESEND_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d "$payload" || echo "::warning::Envoi email Resend échoué (best-effort) — voir l'issue GitHub."
+
+    - name: Issue — adresses à géocoder
+      if: steps.pending_geocode.outputs.should_notify == 'true'
+      uses: actions/github-script@v9
+      env:
+        SOURCE: ${{ inputs.source }}
+        SOURCE_LABEL: ${{ inputs.source-label }}
+        PENDING: ${{ steps.pending_geocode.outputs.pending }}
+        MEASUREMENT_UNAVAILABLE: ${{ steps.pending_geocode.outputs.measurement_unavailable }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const source = process.env.SOURCE;
+          const label = process.env.SOURCE_LABEL;
+          const pending = process.env.PENDING;
+          const degraded = process.env.MEASUREMENT_UNAVAILABLE === 'true';
+          const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+          // Message DÉGRADÉ quand la mesure amont a échoué : surtout pas
+          // "0 adresses à géocoder" (trompeur) — on signale une anomalie.
+          const comment = degraded
+            ? `⚠️ Run #${context.runId} : mesure des adresses ${label} à géocoder INDISPONIBLE (RPC de mesure échouée) — comptage inconnu, vérifier le cron.\n\nRun : ${runUrl}`
+            : `🔄 Mise à jour : **${pending}** adresses ${label} à géocoder après le run #${context.runId}.\n\nRun : ${runUrl}`;
+          const newTitle = degraded
+            ? `[pending-geocode] ${label} : ⚠️ mesure des adresses à géocoder indisponible`
+            : `[pending-geocode] ${label} : adresses à géocoder manuellement`;
+          const newBody = degraded
+            ? `Le cron ${label} a RÉUSSI mais la **mesure** du nombre d'adresses à géocoder (BAN) a échoué (RPC de mesure). Comptage INCONNU — vérifier le cron / la RPC.\n\n` +
+              `Un re-géocodage (\`node scripts/ban-backfill.mjs\`) reste peut-être nécessaire.\n\nRun : ${runUrl}`
+            : `Le cron ${label} a ingéré de nouvelles données. **${pending}** adresses distinctes restent à géocoder (BAN).\n\n` +
+              `En attendant l'automatisation du re-géocodage récurrent (backlog P1), lancer manuellement :\n\n` +
+              '```bash\nnode scripts/ban-backfill.mjs\n```\n\n' +
+              `Run : ${runUrl}\n\n` +
+              `_Fermer cette issue une fois le backfill lancé — le prochain cron la rouvrira si besoin._`;
+          try {
+            // Idempotence : réutiliser une issue ouverte (AND sur les labels)
+            // pour ne pas en empiler une à chaque cron tant que le backfill
+            // n'a pas été lancé.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: `pending-geocode,${source}`,
+              per_page: 1,
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body: comment,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: newTitle,
+                body: newBody,
+                labels: ['pending-geocode', source],
+              });
+            }
+          } catch (err) {
+            // Best-effort : une panne de l'API issues ne casse pas un cron réussi.
+            core.warning(`Création/màj de l'issue pending-geocode échouée (best-effort) : ${err.message}`);
+          }

@@ -50,6 +50,24 @@ jobs:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: pnpm ingest:ameli
 
+      # Alerte ops : adresses restant à géocoder (BAN) après ce run — logique
+      # partagée RPPS/Ameli dans la composite action. `continue-on-error` :
+      # une notif KO ne re-rouge jamais un cron déjà réussi (swap fait).
+      - name: Notify pending BAN geocoding
+        if: success()
+        continue-on-error: true
+        uses: ./.github/actions/notify-pending-geocode
+        with:
+          source: ameli
+          source-label: Ameli
+          supabase-url: ${{ secrets.SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
       - name: Open issue on failure
         if: failure()
         uses: actions/github-script@v9

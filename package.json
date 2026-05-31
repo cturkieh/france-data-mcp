@@ -87,6 +87,7 @@
     "ingest:rpps": "tsx scripts/ingest/rpps.ts",
     "ingest:cds": "tsx scripts/ingest/cds.ts",
     "ingest:iris": "tsx scripts/ingest/iris.ts",
+    "notify:pending-geocode": "tsx scripts/ingest/notify-pending-geocode.ts",
     "cleanup:stale-previous": "tsx scripts/ingest/drop-stale-previous.ts"
   },
   "engines": {
