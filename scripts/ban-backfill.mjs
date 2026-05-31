@@ -110,6 +110,27 @@ function buildServiceClient() {
 }
 
 /**
+ * Descripteur par source : table LIVE d'éligibilité + les 2 RPC jumelles
+ * (énumération skip-scan + count backstop S-1). Le cache `geocoded_addresses`
+ * est PARTAGÉ (clé = adresse normalisée) → la lecture cache (`rpps_geocoded_
+ * cache_lookup`) reste commune aux 2 sources, hors de ce descripteur. Ajouter
+ * une source = une entrée ici + ses 2 RPC en base (migration). RPPS reste le
+ * défaut (back-compat : `runBanBackfill(client, {})` inchangé).
+ */
+const SOURCES = {
+  rpps: {
+    table: "rpps",
+    enumRpc: "rpps_distinct_eligible_keys",
+    countRpc: "rpps_count_ban_eligible_rows",
+  },
+  ameli: {
+    table: "annuaire_ameli",
+    enumRpc: "ameli_distinct_eligible_keys",
+    countRpc: "ameli_count_ban_eligible_rows",
+  },
+};
+
+/**
  * Backfill cache-only, idempotent.
  *
  * Fail-loud BY DESIGN : une erreur (ou un timeout) de lecture d'éligibilité
@@ -118,15 +139,19 @@ function buildServiceClient() {
  * le cache persistant.
  *
  * @param {import("@supabase/supabase-js").SupabaseClient} supabase
- * @param {{ maxNew?: number, sourceTable?: string }} [opts]
+ * @param {{ maxNew?: number, source?: "rpps"|"ameli", sourceTable?: string }} [opts]
  *   - maxNew : borne le nb de NOUVELLES adresses distinctes soumises ce run
  *     (slice déterministe de la tête triée → permet de lancer en tranches ;
  *     un re-run reprend où il en est via le cache). Défaut : illimité.
- *   - sourceTable : table d'éligibilité, passée en `p_source_table` à
- *     `rpps_distinct_eligible_keys` (validée par le whitelist SQL ;
- *     hors-whitelist → erreur RPC → throw, contrat fail-loud). Défaut
- *     `"rpps"` (table LIVE peuplée entre deux runs ; `rpps_staging` n'existe
- *     que PENDANT l'ingestion, donc un backfill standalone DOIT lire `rpps`).
+ *   - source : "rpps" (défaut) | "ameli" — sélectionne la table LIVE + les 2
+ *     RPC jumelles (énumération + count) via `SOURCES`. Le cache visé est le
+ *     MÊME pour les deux (partagé par clé d'adresse normalisée).
+ *   - sourceTable : SURCHARGE explicite de la table d'éligibilité, passée en
+ *     `p_source_table` aux RPC (validée par le whitelist SQL ; hors-whitelist →
+ *     throw, contrat fail-loud). Défaut = la table LIVE de `source`. Permet de
+ *     viser une staging (`rpps_staging`/`annuaire_ameli_staging`) en test ; un
+ *     backfill standalone DOIT lire la table LIVE (la staging n'existe que
+ *     PENDANT l'ingestion).
  * @returns {Promise<{ totalEligibleDistinct:number, geocoded:number,
  *   skippedCached:number, accepted:number, rejected:number, unresolved:number,
  *   contractBreached:number, apiFailures:number, transientRetries:number,
@@ -137,7 +162,16 @@ export async function runBanBackfill(supabase, opts = {}) {
     typeof opts.maxNew === "number" && Number.isFinite(opts.maxNew) && opts.maxNew > 0
       ? Math.floor(opts.maxNew)
       : Number.POSITIVE_INFINITY;
-  const sourceTable = opts.sourceTable ?? "rpps";
+  // Résolution de la source : table LIVE + RPC jumelles. `source` inconnue =
+  // throw (fail-loud : un appel mal câblé doit être BRUYANT, jamais un no-op).
+  const sourceKey = opts.source ?? "rpps";
+  const srcCfg = SOURCES[sourceKey];
+  if (!srcCfg) {
+    throw new Error(
+      `[ban-backfill] unknown source ${JSON.stringify(sourceKey)} (expected: ${Object.keys(SOURCES).join("|")})`,
+    );
+  }
+  const sourceTable = opts.sourceTable ?? srcCfg.table;
 
   // (1)+(2)+(3) Énumération keyset SERVER-SIDE des clés DISTINCTES éligibles
   // via `rpps_distinct_eligible_keys` (remplace la pagination
@@ -185,8 +219,8 @@ export async function runBanBackfill(supabase, opts = {}) {
   let loggedKeyMultiple = 0;
   // Nom de la RPC d'énumération : string load-bearing réutilisée pour le label
   // withTimeout, le label retryTransient et le message d'erreur (une seule
-  // source — pas 3 littéraux à garder synchrones).
-  const RPC_LABEL = "rpps_distinct_eligible_keys";
+  // source — pas 3 littéraux à garder synchrones). Dérivé de la source.
+  const RPC_LABEL = srcCfg.enumRpc;
   for (;;) {
     // Chaque tentative est INDÉPENDAMMENT bornée par `withTimeout` : un hang
     // réel (socket figé) → rejet `TimeoutError` NON transitoire → throw
@@ -247,7 +281,7 @@ export async function runBanBackfill(supabase, opts = {}) {
   // qui retourne exit 0 « success » avec geocoded:0 = signature EXACTE de la
   // panne TOTALE silencieuse S-1 (le point unique de panne de cette feature).
   // Le backfill est fail-loud → throw (≠ best-effort `partial` du cron).
-  const COUNT_LABEL = "rpps_count_ban_eligible_rows";
+  const COUNT_LABEL = srcCfg.countRpc;
   const { data: countData, error: countError } = await retryTransient(
     () =>
       withTimeout(
@@ -479,6 +513,28 @@ export async function runBanBackfill(supabase, opts = {}) {
   };
 }
 
+/**
+ * Parse `--source rpps|ameli` depuis argv (tolère `--source=ameli`). Défaut
+ * `"rpps"`. Une valeur hors `SOURCES` → throw (fail-loud : un drainage mal
+ * ciblé doit être BRUYANT, jamais silencieusement redirigé sur RPPS).
+ */
+function parseSourceArg(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    let v;
+    if (a === "--source") v = argv[i + 1];
+    else if (a?.startsWith("--source=")) v = a.slice("--source=".length);
+    else continue;
+    if (!v || !(v in SOURCES)) {
+      throw new Error(
+        `[ban-backfill] --source invalide ${JSON.stringify(v)} (attendu: ${Object.keys(SOURCES).join("|")})`,
+      );
+    }
+    return v;
+  }
+  return "rpps";
+}
+
 /** Parse `--max N` depuis argv (tolère `--max=N`). */
 function parseMaxArg(argv) {
   for (let i = 0; i < argv.length; i++) {
@@ -499,8 +555,11 @@ function parseMaxArg(argv) {
 // par le test). Pas de wiring CI/cron — script jeté, lancé manuellement.
 const invokedDirectly = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 if (invokedDirectly) {
-  const maxNew = parseMaxArg(process.argv.slice(2));
-  runBanBackfill(buildServiceClient(), maxNew ? { maxNew } : {})
+  const argv = process.argv.slice(2);
+  const maxNew = parseMaxArg(argv);
+  const source = parseSourceArg(argv);
+  console.log(`[ban-backfill] source=${source}${maxNew ? ` --max ${maxNew}` : ""}`);
+  runBanBackfill(buildServiceClient(), { source, ...(maxNew ? { maxNew } : {}) })
     .then((r) => {
       // Sortie non-zéro si un backlog reste (CI/scripts peuvent re-lancer).
       process.exitCode = r.remaining > 0 ? 2 : 0;
