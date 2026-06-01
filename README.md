@@ -125,12 +125,13 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.23.2 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.24.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
 - [x] **V0.22.0** : INSEE IRIS (métropole) — démographie au quartier (âge, CSP, familles, revenu).
 - [x] **V0.23.0** : panoramas composites (`panorama_implantation_complet`, `enrichir_concurrents`) — études d'implantation en 1 call.
+- [x] **V0.24.0** : géocodage BAN des adresses Ameli — précision bâtiment/rue au lieu du centroïde commune (acceptation BAN 0,37 % → 67 %).
 - [ ] **V1.0+** : DOM-COM (IRIS + santé), DPC.
 
 ---
