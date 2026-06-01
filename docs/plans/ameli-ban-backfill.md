@@ -119,3 +119,36 @@ si absents ; cohérent avec la philosophie warn-only du ban_join Ameli existant)
   dédié est le patron prouvé RPPS.
 - *Géocodage SQL-side / autre seuil* → hors scope : on réutilise tel quel le client
   BAN + les seuils prouvés (`BAN_ACCEPT_SCORE=0.5`, types `housenumber/street/locality`).
+
+## 7. Résolution prod (2026-06-01) — SHIPPÉ & DRAINÉ
+
+3 PR mergées sur `main` (CHANGELOG/bump différés à la prochaine release groupée) :
+
+| PR | Objet | Impact |
+|---|---|---|
+| #35 | Feature backfill (3 fonctions SQL + `--source ameli`) | Énumération/drainage Ameli possibles |
+| #36 | Dézérotage n° de tête (`0002 BD MARIN`→`2 BD MARIN`) | Correct mais MARGINAL (1er drain : **0,37 %**) |
+| #38 | **Troncature nom de structure post-virgule** | **0,37 % → 67 %** (~180×) |
+
+**Découverte clé (vrai levier)** — le bloqueur BAN dominant des adresses Ameli n'est PAS
+les zéros de tête mais le **nom de structure suffixé après une virgule**
+(`116 RUE JEAN MERMOZ, CLINIQUE JUGE SELARL` → BAN NONE ; `116 RUE JEAN MERMOZ` → 0,976,
+prouvé 4/4). `normalizeAddressForBan` tronque au 1er virgule **GATÉE leading-digit**
+(sinon structure-en-tête `CLINIQUE X, 5 RUE Y` → POI faux ; 15 % du corpus, silent-failure
+HIGH fermé en revue). 88 % des éligibles ont une virgule, 73 % = voie numérotée.
+
+**Drainage final** : 60 479 géocodées → **40 532 acceptées (67 %)** / 7 925 rejetées /
+10 022 introuvables / 1 api_failure (1 chunk header CSV, repris au prochain run). Cache
+vérifié : **40 758** clés éligibles ont une entrée acceptée (62 % des 65 683). Application
+au live = **prochain cron Ameli hebdo (~08/06)** via `ban_join` (choix Cyril, pas de
+FORCE_REINGEST manuel). Les ~25k restantes = lieux-dits / structures sans voie → centroïde
+(repli honnête).
+
+**Incident inter-swap (confirme le follow-up §4 nécessaire)** — un cron Ameli a swappé la
+table (09:24 UTC) ENTRE deux drainages → les 2 index BAN créés à la main sur la LIVE ont
+été orphelinés sur `annuaire_ameli_previous` (la nouvelle table issue de la staging ne les
+porte pas) → `ameli_distinct_eligible_keys` seq-scan (50 s) → timeout. Recovery appliqué :
+`DROP` des orphelins + recréation des 2 index `CONCURRENTLY` sur la live (1ère page repassée
+à **2,2 ms**). **Tant que le follow-up §4 (câblage `ameli.ts`) n'est pas livré, recréer les
+2 index sur la live AVANT chaque drainage manuel** (runbook §5). Le cache, lui, survit aux
+swaps — le DATA est durable indépendamment des index (qui ne servent qu'au backfill).
