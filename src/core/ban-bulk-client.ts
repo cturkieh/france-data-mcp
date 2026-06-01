@@ -73,42 +73,71 @@ function csvEscape(value: string): string {
 type InputRow = { key: string; adresse: string; codePostal: string; codeInsee: string };
 
 /**
- * Normalise le numéro de voie de TÊTE pour la requête BAN UNIQUEMENT — jamais la
- * clé de cache (`r.key`, byte-identique au ban_join, intouchable).
+ * Normalise l'adresse pour la requête BAN UNIQUEMENT — jamais la clé de cache
+ * (`r.key`, byte-identique au ban_join, intouchable). Le mapping réponse se
+ * faisant par `key` échoué (pas par adresse), réécrire l'adresse envoyée ne
+ * casse aucun appariement. Exportée pour test direct.
  *
- * Les adresses Ameli portent massivement des zéros de tête (`0002 BD MARIN`,
- * `03 RUE RAPHAEL ELIZE`) que la BAN rejette alors que `2 BD MARIN` / `3 RUE
- * RAPHAEL ELIZE` résolvent au bâtiment. Un numéro TOUT-À-ZÉRO (`0`, `00`) =
- * absence de numéro civique réel → on retire le token (la voie seule résout en
- * `street`, précision > centroïde commune). Un `8` interne (`RUE DU 8 MAI`)
- * n'est jamais touché (l'ancre `^` + séparateur obligatoire le protègent).
+ * Deux normalisations, dans l'ordre :
  *
- * DOCTRINE ANTI-FAUX-POSITIF (santé) — la règle d'or est « ne jamais fabriquer
- * une adresse DIFFÉRENTE qui géocoderait confidemment FAUX » (acceptée au seuil
- * permissif ≥0,5, mise en cache, servie comme point précis). Deux garde-fous :
- *   1. Le numéro doit être suivi d'un SÉPARATEUR (`\s`/`,`/fin) : on ne gère PAS
- *      les suffixes accolés (`0002B`) — préférer « pas d'amélioration »
- *      (laissé intact, BAN fera au mieux) à une corruption type `0RUE` →
- *      `DE PARIS` (un groupe suffixe avalerait un mot de rue collé au numéro).
- *   2. Si la normalisation ne laisse AUCUN token de voie alphabétique
- *      (adresse dégénérée `"0"`, `"0,13008"`), on renvoie l'ORIGINAL : un
- *      fragment numérique seul géocoderait en `locality`/`street` faux ;
- *      l'original sera classé `municipality`/unresolved par BAN → rejeté.
+ * 1. TRONCATURE AU 1er VIRGULE, GATÉE « la ligne de voie commence par un n° »
+ *    (levier dominant — 73 % des lignes éligibles Ameli prouvé prod). Les
+ *    adresses Ameli sont massivement suffixées du NOM DE STRUCTURE après une
+ *    virgule (`116 RUE JEAN MERMOZ, CLINIQUE JUGE SELARL`, `38 RUE …, MSP LES
+ *    HIRONDELLES`). BAN géocode la chaîne ENTIÈRE → le nom de structure fait
+ *    chuter le score sous le seuil voire renvoie 0 résultat. La ligne de voie
+ *    seule résout au bâtiment (mesuré : `…, CLINIQUE JUGE` → NONE vs
+ *    `116 RUE JEAN MERMOZ` → 0,976 ; 4 cas testés tous NONE/rejeté → 0,76-0,98).
+ *    Sûr : le `code_insee` voyage en colonne `citycode` séparée → la commune est
+ *    déjà épinglée, le complément post-virgule (résidence, bâtiment, structure)
+ *    n'apporte rien au géocodage de voie.
+ *    GATE LOAD-BEARING (anti-faux-positif, silent-failure-hunter HIGH) : on ne
+ *    tronque QUE si l'adresse commence par un chiffre. Sinon l'ordre peut être
+ *    STRUCTURE-EN-TÊTE (`CLINIQUE SAINT-JEAN, 5 RUE DURAND` — 15 % prouvé prod) :
+ *    tronquer donnerait `CLINIQUE SAINT-JEAN`, que BAN matcherait en POI/locality
+ *    confidemment FAUX (≥0,5, mis en cache, servi précis) en JETANT la vraie voie.
+ *    Démarrer par un n° = signal haute précision « c'est bien une voie numérotée ».
+ *    Une voie sans n° (`RUE X, HAMEAU Y`) reste envoyée ENTIÈRE (pas d'amélioration
+ *    plutôt qu'un faux positif). Résidu accepté : un n° de voie ambigu intra-commune
+ *    dont le hameau post-virgule était le désambiguïsateur (rare sur voie numérotée).
+ *    Résidu LOW « nom de structure À CHIFFRE EN TÊTE » (`2 PASTEUR CENTRE, 10 RUE …`,
+ *    `13008 MARSEILLE, RUE …`) : le gate tronque à tort, MAIS neutralisé en aval —
+ *    le fragment ne résout pas en housenumber/street/locality à la commune épinglée
+ *    → `municipality`/unresolved → REJETÉ → repli centroïde (statu quo), jamais un
+ *    faux positif précis (acceptance gate `ACCEPTED_PRECISION_TYPES` = filet).
  *
- * Exporté pour test direct. Le mapping réponse se faisant par `key` échoué (pas
- * par adresse), modifier l'adresse envoyée ne casse aucun appariement.
+ * 2. DÉZÉROTAGE du n° de voie de TÊTE (`0002 BD MARIN` → `2 BD MARIN`) — la BAN
+ *    rejette les zéros de tête. Un n° TOUT-À-ZÉRO (`0`, `00`) = pas de n° civique
+ *    réel → token retiré (la voie seule résout en `street`). Un `8` interne
+ *    (`RUE DU 8 MAI`) n'est jamais touché (ancre `^` + séparateur obligatoire).
+ *
+ * DOCTRINE ANTI-FAUX-POSITIF (santé) — « ne jamais fabriquer une adresse
+ * DIFFÉRENTE qui géocoderait confidemment FAUX » (acceptée au seuil permissif
+ * ≥0,5, mise en cache, servie comme point précis). Garde-fous additionnels :
+ *   a. Le numéro doit être suivi d'un SÉPARATEUR : on ne gère PAS les suffixes
+ *      accolés (`0002B`) — préférer « pas d'amélioration » (laissé intact) à une
+ *      corruption type `0RUE` → `DE PARIS` (un groupe suffixe avalerait un mot
+ *      de rue collé au numéro).
+ *   b. Si la normalisation ne laisse AUCUN token de voie alphabétique (`"0"`,
+ *      `"0,13008"`), on renvoie l'ORIGINAL : un fragment numérique seul
+ *      géocoderait en `locality`/`street` faux ; l'original sera classé
+ *      `municipality`/unresolved par BAN → rejeté proprement.
  */
-export function normalizeHouseNumberForBan(adresse: string): string {
-  const out = adresse.replace(
-    /^(\s*)0*(\d+)(\s|,|$)/,
+export function normalizeAddressForBan(adresse: string): string {
+  // 1. Troncature GATÉE : seulement si la ligne de voie démarre par un n°
+  //    (`/^\s*\d/`) — sinon risque structure-en-tête (cf. doctrine ci-dessus).
+  const commaIdx = adresse.indexOf(",");
+  const streetLine = commaIdx >= 0 && /^\s*\d/.test(adresse) ? adresse.slice(0, commaIdx) : adresse;
+  // 2. Dézérotage du n° de tête sur la ligne de voie.
+  const out = streetLine.replace(
+    /^(\s*)0*(\d+)(\s|$)/,
     (_full, lead: string, digits: string, sep: string) =>
       // `0*` a déjà mangé les zéros de tête : `digits` ne vaut `"0"` que dans le
-      // cas TOUT-À-ZÉRO (`0`, `00` → `0*` backtrack, `(\d+)` capture `"0"`) →
-      // pas de numéro civique réel, on retire le token (voie seule). Sinon on
-      // émet le numéro déjà dézéroté par le regex.
+      // cas TOUT-À-ZÉRO (`0`, `00` → backtrack, `(\d+)` capture `"0"`) → pas de
+      // n° civique réel, token retiré. Sinon on émet le n° déjà dézéroté.
       digits === "0" ? lead : `${lead}${digits}${sep}`,
   );
-  // Garde-fou 2 : sortie sans aucune lettre = fragment ininterprétable → original.
+  // Garde-fou b : sortie sans aucune lettre = fragment ininterprétable → original.
   return /[A-Za-z]/.test(out) ? out : adresse;
 }
 
@@ -121,12 +150,12 @@ export function normalizeHouseNumberForBan(adresse: string): string {
 function buildFormData(chunk: InputRow[]): FormData {
   const header = "key,adresse,code_postal,citycode";
   // `buildFormData` est PARTAGÉ par les backfills RPPS et Ameli (via
-  // geocodeAddressesBatch) : `normalizeHouseNumberForBan` s'applique donc aux
-  // DEUX sources. Inoffensif côté RPPS (regex conservatrice : sans zéro de tête,
-  // l'adresse passe inchangée), nécessaire côté Ameli (zéros de tête massifs).
+  // geocodeAddressesBatch) : `normalizeAddressForBan` s'applique donc aux DEUX
+  // sources. Inoffensif côté RPPS (pas de complément virgule ni de zéro de tête
+  // → adresse inchangée), nécessaire côté Ameli (nom de structure + zéros massifs).
   const dataRows = chunk.map(
     (r) =>
-      `${csvEscape(r.key)},${csvEscape(normalizeHouseNumberForBan(r.adresse))},${csvEscape(r.codePostal)},${csvEscape(r.codeInsee)}`,
+      `${csvEscape(r.key)},${csvEscape(normalizeAddressForBan(r.adresse))},${csvEscape(r.codePostal)},${csvEscape(r.codeInsee)}`,
   );
   const csvContent = [header, ...dataRows].join("\n");
 
