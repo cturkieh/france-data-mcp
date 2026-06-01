@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { ACCEPTED_PRECISION_TYPES, geocodeAddressesBatch } from "./ban-bulk-client.js";
+import {
+  ACCEPTED_PRECISION_TYPES,
+  geocodeAddressesBatch,
+  normalizeHouseNumberForBan,
+} from "./ban-bulk-client.js";
 
 // Retour sous forme d'objet (pas bare Map) : P5 exige que apiFailures soit
 // observable même quand results est vide (ex : BAN-down total). Un bare Map
@@ -594,6 +598,94 @@ describe("geocodeAddressesBatch", () => {
       expect(warnCalls.some((m) => m.includes("0 mapped rows"))).toBe(false);
     } finally {
       warnSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("normalizeHouseNumberForBan", () => {
+  it("retire les zéros de tête d'un numéro de voie réel", () => {
+    expect(normalizeHouseNumberForBan("0002 BD MARIN, RES VILLA STE ANNE BT A")).toBe(
+      "2 BD MARIN, RES VILLA STE ANNE BT A",
+    );
+    expect(normalizeHouseNumberForBan("03 RUE RAPHAEL ELIZE")).toBe("3 RUE RAPHAEL ELIZE");
+    expect(normalizeHouseNumberForBan("007 AVENUE DE LA GARE")).toBe("7 AVENUE DE LA GARE");
+  });
+
+  it("retire un numéro TOUT-À-ZÉRO (pas de numéro civique réel) → voie seule", () => {
+    expect(normalizeHouseNumberForBan("0 GRAND RUE")).toBe("GRAND RUE");
+    expect(normalizeHouseNumberForBan("00 RUE DU CENTRE")).toBe("RUE DU CENTRE");
+  });
+
+  it("suffixe accolé (sans séparateur) NON géré = laissé intact (jamais de corruption)", () => {
+    // Le n° doit être suivi d'un séparateur ; un suffixe bis/ter accolé bloque le
+    // match → on préfère « pas d'amélioration » à une corruption de rue collée.
+    expect(normalizeHouseNumberForBan("0002B BD MARIN")).toBe("0002B BD MARIN");
+    expect(normalizeHouseNumberForBan("02TER RUE NEUVE")).toBe("02TER RUE NEUVE");
+  });
+
+  it("HAZARD: un mot de rue collé au numéro (0RUE) n'est JAMAIS avalé", () => {
+    // Garde-fou anti-corruption (silent-failure-hunter MEDIUM) : sans le groupe
+    // suffixe, `0RUE` ne matche pas (pas de séparateur après le 0) → intact.
+    expect(normalizeHouseNumberForBan("0RUE DE PARIS")).toBe("0RUE DE PARIS");
+  });
+
+  it("HAZARD: fragment dégénéré sans token de voie → renvoie l'ORIGINAL (jamais un faux positif)", () => {
+    // Garde-fou anti-faux-positif (silent-failure-hunter HIGH) : un fragment
+    // numérique seul géocoderait en street/locality confidemment FAUX. On renvoie
+    // l'original → BAN le classe municipality/unresolved → rejeté proprement.
+    expect(normalizeHouseNumberForBan("0")).toBe("0");
+    expect(normalizeHouseNumberForBan("00")).toBe("00");
+    expect(normalizeHouseNumberForBan("0,13008")).toBe("0,13008");
+  });
+
+  it("laisse intactes les adresses déjà propres ou sans numéro de tête", () => {
+    expect(normalizeHouseNumberForBan("12 RUE DE PARIS")).toBe("12 RUE DE PARIS");
+    expect(normalizeHouseNumberForBan("LE BOURG")).toBe("LE BOURG");
+    expect(normalizeHouseNumberForBan("RUE DU 8 MAI 1945")).toBe("RUE DU 8 MAI 1945");
+    expect(normalizeHouseNumberForBan('"LE BOURG"')).toBe('"LE BOURG"');
+  });
+
+  it("ne touche JAMAIS un chiffre interne (numéro de tête uniquement)", () => {
+    // Le "8" interne reste ; aucun token de tête numérique → chaîne intacte.
+    expect(normalizeHouseNumberForBan("PLACE DU 11 NOVEMBRE")).toBe("PLACE DU 11 NOVEMBRE");
+  });
+
+  it("buildFormData : envoie l'adresse NORMALISÉE à BAN mais garde la clé de cache INTACTE", async () => {
+    const csv = [
+      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      '"0002 BD MARIN|13008|13055",2 BD MARIN,13008,13055,43.27,5.39,0.74,housenumber,2 Bd Marin 13008 Marseille',
+    ].join("\n");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(csv, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await geocodeAddressesBatch(
+        // La clé de cache porte les zéros de tête (byte-identique au ban_join) ;
+        // l'adresse envoyée à BAN doit en être expurgée.
+        [
+          {
+            key: "0002 BD MARIN|13008|13055",
+            adresse: "0002 BD MARIN",
+            codePostal: "13008",
+            codeInsee: "13055",
+          },
+        ],
+        { chunkSize: 1, scoreThreshold: 0.5 },
+      );
+
+      const body = fetchMock.mock.calls[0]?.[1]?.body as FormData;
+      const blob = body.get("data") as Blob;
+      const sent = await blob.text();
+
+      // L'adresse envoyée est normalisée (numéro sans zéros de tête)…
+      expect(sent).toContain("2 BD MARIN");
+      // …tandis que la clé de cache (1ère colonne) conserve ses zéros de tête.
+      expect(sent).toContain("0002 BD MARIN|13008|13055");
+      // Le numéro brut à zéros de tête ne doit PAS apparaître dans la colonne adresse
+      // (séquence "0002 BD MARIN," sans pipe = colonne adresse, jamais émise telle quelle).
+      expect(sent).not.toContain(",0002 BD MARIN,");
+    } finally {
       vi.unstubAllGlobals();
     }
   });
