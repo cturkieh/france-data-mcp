@@ -7,4 +7,4 @@
  * Une déclaration en TS pur évite la friction des import attributes JSON
  * (instables entre tsup/esbuild/@vercel/node).
  */
-export const VERSION = "0.23.2";
+export const VERSION = "0.24.0";

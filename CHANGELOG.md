@@ -4,6 +4,42 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.24.0] — 2026-06-01 (Géocodage Ameli : backfill BAN + correctif du levier de précision)
+
+Donne aux adresses **propres à l'annuaire Ameli** (sans professionnel RPPS partagé, donc
+sans chemin de géocodage jusqu'ici) un accès au cache BAN partagé, et corrige le **vrai
+bloqueur de précision** du géocodage. Résultat prouvé prod : l'acceptation BAN des adresses
+Ameli passe de **0,37 % à 67 %** ; le cache `geocoded_addresses` gagne ~40 700 coordonnées
+précises (62 % de l'éligible). Elles sont posées sur la table servie au prochain cron Ameli
+via `ban_join` — aucun changement de la surface MCP (8 sources / 34 tools inchangés).
+
+### Added
+
+- **`scripts/ban-backfill.mjs --source ameli`** — drainage BAN des adresses Ameli restées
+  au centroïde commune. Migration `ameli_ban_backfill` : 3 fonctions SQL jumelles strictes
+  du dispositif RPPS (`ameli_distinct_eligible_keys` énumération skip-scan O(clés),
+  `ameli_count_ban_eligible_rows` backstop S-1, `ingest_build_ameli_staging_ban_indexes`),
+  prédicat d'éligibilité Ameli dédié, clé d'adresse byte-identique au `ban_join` (parité
+  prouvée). Cache-only, idempotent, fail-loud. (#35)
+
+### Fixed
+
+- **Géocodage BAN — troncature du nom de structure** (levier dominant) : les adresses Ameli
+  suffixées d'un nom de structure après une virgule (`116 RUE JEAN MERMOZ, CLINIQUE JUGE
+  SELARL`) faisaient échouer BAN (NONE / score sous le seuil). `normalizeAddressForBan`
+  tronque à la ligne de voie — **requête BAN uniquement, jamais la clé de cache** ; le
+  `code_insee` voyage en `citycode` (commune épinglée). Garde-fou anti-faux-positif : la
+  troncature n'opère que si la ligne commence par un n° de voie (sinon ordre
+  structure-en-tête `CLINIQUE X, 5 RUE Y` → POI faux). (#38)
+- **Géocodage BAN — zéros de tête** : `0002 BD MARIN` → `2 BD MARIN` (rejeté par BAN sinon),
+  avec garde-fous (séparateur obligatoire, repli sur l'original si aucun token de voie). (#36)
+
+### Docs
+
+- `docs/plans/ameli-ban-backfill.md` — cadrage, résolution prod, runbook OPS (dont la
+  recréation des index de backfill sur la table live avant chaque drainage manuel, tant que
+  le câblage cron de durabilité inter-swap n'est pas livré). (#39)
+
 ## [0.23.2] — 2026-05-31 (Doc-only : synchronisation des sources publiques — Centres de Santé CNAM + INSEE IRIS)
 
 Release **documentaire uniquement** (aucun changement de code, aucune migration). Met
