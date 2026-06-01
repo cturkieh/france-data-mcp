@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ACCEPTED_PRECISION_TYPES,
   geocodeAddressesBatch,
-  normalizeHouseNumberForBan,
+  normalizeAddressForBan,
 } from "./ban-bulk-client.js";
 
 // Retour sous forme d'objet (pas bare Map) : P5 exige que apiFailures soit
@@ -603,52 +603,83 @@ describe("geocodeAddressesBatch", () => {
   });
 });
 
-describe("normalizeHouseNumberForBan", () => {
+describe("normalizeAddressForBan", () => {
   it("retire les zéros de tête d'un numéro de voie réel", () => {
-    expect(normalizeHouseNumberForBan("0002 BD MARIN, RES VILLA STE ANNE BT A")).toBe(
-      "2 BD MARIN, RES VILLA STE ANNE BT A",
+    expect(normalizeAddressForBan("03 RUE RAPHAEL ELIZE")).toBe("3 RUE RAPHAEL ELIZE");
+    expect(normalizeAddressForBan("007 AVENUE DE LA GARE")).toBe("7 AVENUE DE LA GARE");
+  });
+
+  it("tronque au 1er virgule (nom de structure) — levier dominant prouvé prod BAN 4/4", () => {
+    // BAN géocode toute la chaîne ; le nom de structure post-virgule fait chuter
+    // le score sous le seuil voire renvoie 0 résultat. Cas réels mesurés contre
+    // l'API BAN : tous NONE/rejeté en brut → 0,76-0,98 après troncature.
+    expect(normalizeAddressForBan("116 RUE JEAN MERMOZ, CLINIQUE JUGE SELARL")).toBe(
+      "116 RUE JEAN MERMOZ",
     );
-    expect(normalizeHouseNumberForBan("03 RUE RAPHAEL ELIZE")).toBe("3 RUE RAPHAEL ELIZE");
-    expect(normalizeHouseNumberForBan("007 AVENUE DE LA GARE")).toBe("7 AVENUE DE LA GARE");
+    expect(normalizeAddressForBan("38 RUE ANDRE RIDDERS, MSP  LES HIRONDELLES")).toBe(
+      "38 RUE ANDRE RIDDERS",
+    );
+    expect(normalizeAddressForBan("65 RUE DES CONTAMINES, POLYCLINIQUE LYON NORD")).toBe(
+      "65 RUE DES CONTAMINES",
+    );
+    // Troncature + dézérotage combinés (résidence + zéro de tête).
+    expect(normalizeAddressForBan("0002 BD MARIN, RES VILLA STE ANNE BT A")).toBe("2 BD MARIN");
+  });
+
+  it("HAZARD: structure-en-tête (ne commence PAS par un n°) → JAMAIS tronqué (gate)", () => {
+    // Garde-fou anti-faux-positif (silent-failure-hunter HIGH, 15 % du corpus) :
+    // tronquer `CLINIQUE SAINT-JEAN, 5 RUE DURAND` donnerait `CLINIQUE SAINT-JEAN`
+    // → BAN matcherait un POI/locality FAUX. Le gate `/^\s*\d/` l'en empêche :
+    // l'adresse entière est envoyée (pas d'amélioration > faux positif).
+    expect(normalizeAddressForBan("CLINIQUE SAINT-JEAN, 5 RUE DURAND")).toBe(
+      "CLINIQUE SAINT-JEAN, 5 RUE DURAND",
+    );
+    expect(normalizeAddressForBan("RESIDENCE LES TILLEULS, AVENUE DES FLEURS")).toBe(
+      "RESIDENCE LES TILLEULS, AVENUE DES FLEURS",
+    );
+    // Voie SANS numéro suffixée d'un hameau : non tronquée non plus (pas de n° de tête).
+    expect(normalizeAddressForBan("RUE DE L'EGLISE, HAMEAU DE X")).toBe(
+      "RUE DE L'EGLISE, HAMEAU DE X",
+    );
   });
 
   it("retire un numéro TOUT-À-ZÉRO (pas de numéro civique réel) → voie seule", () => {
-    expect(normalizeHouseNumberForBan("0 GRAND RUE")).toBe("GRAND RUE");
-    expect(normalizeHouseNumberForBan("00 RUE DU CENTRE")).toBe("RUE DU CENTRE");
+    expect(normalizeAddressForBan("0 GRAND RUE")).toBe("GRAND RUE");
+    expect(normalizeAddressForBan("00 RUE DU CENTRE")).toBe("RUE DU CENTRE");
   });
 
   it("suffixe accolé (sans séparateur) NON géré = laissé intact (jamais de corruption)", () => {
     // Le n° doit être suivi d'un séparateur ; un suffixe bis/ter accolé bloque le
     // match → on préfère « pas d'amélioration » à une corruption de rue collée.
-    expect(normalizeHouseNumberForBan("0002B BD MARIN")).toBe("0002B BD MARIN");
-    expect(normalizeHouseNumberForBan("02TER RUE NEUVE")).toBe("02TER RUE NEUVE");
+    expect(normalizeAddressForBan("0002B BD MARIN")).toBe("0002B BD MARIN");
+    expect(normalizeAddressForBan("02TER RUE NEUVE")).toBe("02TER RUE NEUVE");
   });
 
   it("HAZARD: un mot de rue collé au numéro (0RUE) n'est JAMAIS avalé", () => {
     // Garde-fou anti-corruption (silent-failure-hunter MEDIUM) : sans le groupe
     // suffixe, `0RUE` ne matche pas (pas de séparateur après le 0) → intact.
-    expect(normalizeHouseNumberForBan("0RUE DE PARIS")).toBe("0RUE DE PARIS");
+    expect(normalizeAddressForBan("0RUE DE PARIS")).toBe("0RUE DE PARIS");
   });
 
   it("HAZARD: fragment dégénéré sans token de voie → renvoie l'ORIGINAL (jamais un faux positif)", () => {
     // Garde-fou anti-faux-positif (silent-failure-hunter HIGH) : un fragment
     // numérique seul géocoderait en street/locality confidemment FAUX. On renvoie
     // l'original → BAN le classe municipality/unresolved → rejeté proprement.
-    expect(normalizeHouseNumberForBan("0")).toBe("0");
-    expect(normalizeHouseNumberForBan("00")).toBe("00");
-    expect(normalizeHouseNumberForBan("0,13008")).toBe("0,13008");
+    expect(normalizeAddressForBan("0")).toBe("0");
+    expect(normalizeAddressForBan("00")).toBe("00");
+    expect(normalizeAddressForBan("0,13008")).toBe("0,13008");
   });
 
   it("laisse intactes les adresses déjà propres ou sans numéro de tête", () => {
-    expect(normalizeHouseNumberForBan("12 RUE DE PARIS")).toBe("12 RUE DE PARIS");
-    expect(normalizeHouseNumberForBan("LE BOURG")).toBe("LE BOURG");
-    expect(normalizeHouseNumberForBan("RUE DU 8 MAI 1945")).toBe("RUE DU 8 MAI 1945");
-    expect(normalizeHouseNumberForBan('"LE BOURG"')).toBe('"LE BOURG"');
+    expect(normalizeAddressForBan("12 RUE DE PARIS")).toBe("12 RUE DE PARIS");
+    expect(normalizeAddressForBan("LE BOURG")).toBe("LE BOURG");
+    expect(normalizeAddressForBan("RUE DU 8 MAI 1945")).toBe("RUE DU 8 MAI 1945");
+    expect(normalizeAddressForBan('"LE BOURG"')).toBe('"LE BOURG"');
   });
 
   it("ne touche JAMAIS un chiffre interne (numéro de tête uniquement)", () => {
     // Le "8" interne reste ; aucun token de tête numérique → chaîne intacte.
-    expect(normalizeHouseNumberForBan("PLACE DU 11 NOVEMBRE")).toBe("PLACE DU 11 NOVEMBRE");
+    expect(normalizeAddressForBan("PLACE DU 11 NOVEMBRE")).toBe("PLACE DU 11 NOVEMBRE");
   });
 
   it("buildFormData : envoie l'adresse NORMALISÉE à BAN mais garde la clé de cache INTACTE", async () => {
