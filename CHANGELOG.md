@@ -4,6 +4,52 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.25.0] — 2026-06-05 (Incident cron RPPS : bombe OID matview + automatisation du drain BAN)
+
+Le cron RPPS du 5 juin (run #27003446829) a réussi son swap mais terminé en `partial`,
+et l'alerte mail « adresses à géocoder INDISPONIBLE » s'est déclenchée. Diagnostic : **deux
+régressions silencieuses distinctes** + un dead-end d'automatisation. Cette version les corrige
+et **automatise le re-géocodage BAN RPPS** via un bouton GitHub. Surface MCP inchangée
+(8 sources / 34 tools).
+
+### Fixed
+
+- **Bombe OID `finess_hosted_activities` (P1, prouvé prod, sévérité haute)** — la RPC de
+  rebuild post-swap `ingest_rebuild_finess_hosted_activities` était la **seule** des 3 RPC de
+  rebuild en `SECURITY INVOKER` (ses jumelles RPPS/Ameli sont `DEFINER`). Appelée comme
+  `service_role`, son `CREATE MATERIALIZED VIEW` échouait en `42501 permission denied for
+  schema public` → rollback → la matview restait collée à l'OID de l'**ancienne** table
+  (`rpps_previous`) = données `activite_hebergee` périmées + destruction programmée au prochain
+  swap (`DROP CASCADE`). Fix : `SECURITY DEFINER` + `SET search_path` + lockdown (migration
+  `fix_hosted_rebuild_security_definer`), matview reconstruite et re-pointée sur `rpps`. Garde-fou
+  de parité sécurité des 3 RPC de rebuild.
+- **Mesure du delta BAN (P2)** — `rpps_measure_ban_to_geocode` tournait pré-swap sur
+  `rpps_staging` (~1,29 M lignes éligibles) → 57014 systématique au 1er run réel →
+  `ban_to_geocode_distinct=NULL` → alerte dégradée à chaque cron. Déplacée **post-swap sur
+  `rpps`** (résidu = vraie file Phase 2, <1 s). Commentaires de colonnes `ingest_log` réalignés.
+
+### Added
+
+- **Bouton GitHub « Backfill BAN RPPS » (`workflow_dispatch`)** — automatise le drain BAN
+  RPPS (géocode le résidu d'adresses éligibles non cachées → remplit `geocoded_addresses` ;
+  les coords sont posées dans `rpps` au prochain cron via `ban_join`). Reste déclenché à la
+  main (1 clic, canari `max` puis complet), secrets gérés par la CI, `concurrency: ingest-rpps`
+  (jamais concurrent du swap). Exit non-zéro si drain incomplet (backlog `--max` = 2,
+  `apiFailures` = 3) → pas de « vert mensonger ».
+- **RPC `rpps_eligible_rows_after_id`** — énumération **keyset sur `id` (PK)** des lignes
+  éligibles BAN, **sans index BAN sur la table live** (~4,4 s / 5000 lignes, coût constant
+  prouvé prod). Résout deux dead-ends : (a) keyset sur la clé exige un index BAN absent sur
+  `rpps` live et inconstruisible via RPC (cap passerelle PostgREST 60 s) ; (b) passe unique =
+  ~147k évals de la clé Unicode (~880 µs) en 1 requête > 55 s. Garde-fou de parité dédié.
+
+### Changed
+
+- **`ban-backfill.mjs` — curseur d'énumération générique** (`cursorParam`/`cursorField`/
+  `cursorInit` par source) : RPPS passe au keyset-`id` robuste ; Ameli garde le keyset-clé.
+  Descripteur `SOURCES` exporté (source de vérité unique partagée avec les tests) + garde
+  structurelle fail-loud. Clés d'adresse vides/nulles désormais SKIPPÉES + signalées (anti
+  drain partiel silencieux).
+
 ## [0.24.0] — 2026-06-01 (Géocodage Ameli : backfill BAN + correctif du levier de précision)
 
 Donne aux adresses **propres à l'annuaire Ameli** (sans professionnel RPPS partagé, donc
