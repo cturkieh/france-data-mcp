@@ -519,23 +519,28 @@ function deptFromPostal(codePostal: string | undefined): string | undefined {
 }
 
 /**
- * Normalise un code NAF vers le format attendu par l'API DINUM (`XX.XXY`).
+ * Normalise un code NAF vers le format attendu par l'API DINUM (`XX.XXY`), ou
+ * `throw RangeError` si l'entrée n'est pas une sous-classe NAF rév.2 complète.
  *
- * L'API DINUM rejette les codes en format INSEE compact (`8690B`) avec un
- * HTTP 400 et la liste des valeurs valides. La nomenclature officielle utilise
- * des points (`86.90B`), donc on accepte les deux entrées et on convertit.
- *
- * On exige la lettre finale (`[A-Z]`) parce que les codes NAF sans lettre
- * (ex: `"8690"`) ne correspondent à aucune sous-classe valide — laisser passer
- * un tel code en le réécrivant `"86.90"` produirait toujours un 400, sans gain.
+ * L'API DINUM (`/near_point` et `/search`) n'accepte QUE les sous-classes
+ * pointées (`62.01Z`, `86.90B`). Elle accepte aussi le format INSEE compact
+ * (`8690B`) qu'on convertit. Tout autre code — division à 2 chiffres (`62`),
+ * code tronqué sans lettre (`8690`), libellé — est REJETÉ ICI plutôt que laissé
+ * filer vers l'API : un code partiel y produit un HTTP 400 capté en Sentry
+ * `error` (faute caller déguisée en panne serveur — issue FRANCE-DATA-MCP-A).
+ * Rejeter au boundary mappe sur JSON-RPC `-32602` (invalid params), erreur
+ * exploitable par le LLM appelant. Tous les codes valides DINUM matchent
+ * `\d{2}\.\d{2}[A-Z]` après normalisation, donc aucun code légitime n'est
+ * écarté (call-sites internes : `nafsForFamille` → sous-classes du mapping).
  */
 function normalizeNafCode(naf: string): string {
   // Déjà au format pointé : "86.90B"
   if (/^\d{2}\.\d{2}[A-Z]$/.test(naf)) return naf;
   // Format compact : "8690B" → "86.90B"
   if (/^\d{4}[A-Z]$/.test(naf)) return `${naf.slice(0, 2)}.${naf.slice(2)}`;
-  // Format inconnu : on laisse passer, l'API renverra une erreur claire
-  return naf;
+  throw new RangeError(
+    `searchEntreprises: code NAF invalide \`${naf}\`. L'API DINUM exige une sous-classe NAF complète à 5 caractères (ex. \`62.01Z\` ou \`8690B\`), pas une division à 2 chiffres ni un code tronqué.`,
+  );
 }
 
 function toEntreprise(api: ApiEntreprise): Entreprise {

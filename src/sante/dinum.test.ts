@@ -233,6 +233,35 @@ describe("searchEntreprises", () => {
     await searchEntreprises({ naf: "86.90B", departement: "08" });
     expect(lastFetchUrl()).toMatch(/activite_principale=86\.?90B/);
   });
+
+  it("rejette une division NAF (`62`) en RangeError SANS appel réseau (near_point)", async () => {
+    // Reproduction Sentry FRANCE-DATA-MCP-A : un caller passe la division `62`
+    // (2 chiffres) au lieu d'une sous-classe. L'API DINUM /near_point renvoie un
+    // HTTP 400 capté en Sentry `error` (faute caller déguisée en panne serveur).
+    // On rejette en amont (RangeError → JSON-RPC -32602) avant tout appel réseau.
+    await expect(
+      searchEntreprises({ naf: "62", center: { lon: -1.566578, lat: 47.236299 }, radiusKm: 10 }),
+    ).rejects.toThrow(RangeError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejette un code NAF tronqué sans lettre (`8690`) en RangeError (mode /search)", async () => {
+    await expect(searchEntreprises({ naf: "8690", departement: "08" })).rejects.toThrow(
+      /code NAF invalide/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepte la sous-classe complète `62.01Z` (1 appel /near_point)", async () => {
+    fetchMock.mockResolvedValue(apiResponse({}));
+    await searchEntreprises({
+      naf: "62.01Z",
+      center: { lon: -1.566578, lat: 47.236299 },
+      radiusKm: 10,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastFetchUrl()).toContain("activite_principale=62.01Z");
+  });
 });
 
 describe("getEntrepriseBySiren", () => {

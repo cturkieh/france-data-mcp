@@ -4,6 +4,22 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+### Fixed
+
+- **Code NAF invalide → `-32602` propre au lieu d'un 400 Sentry (issue FRANCE-DATA-MCP-A)** —
+  `searchEntreprises` (tools `entreprises_in_radius` / `finess_sirene_coverage_in_radius`)
+  laissait filer un code NAF qui n'est pas une sous-classe (division `62`, code tronqué `8690`)
+  jusqu'à l'API DINUM `/near_point`, qui le rejette en HTTP 400 → remonté en Sentry `error`
+  (faute caller déguisée en panne serveur). `normalizeNafCode` (`src/sante/dinum.ts`) **throw
+  désormais un `RangeError`** au lieu de `return naf` sur format inconnu → mappé JSON-RPC
+  `-32602` (`bad_request`, level `warn`, **sans** `captureMcpError`) au boundary `api/mcp.ts`,
+  avec un message actionnable pour le LLM appelant (« sous-classe NAF complète à 5 caractères,
+  ex. `62.01Z` ou `8690B` »). Behavior-preserving sur tous les codes valides DINUM (tous au
+  format `\d{2}\.\d{2}[A-Z]` après normalisation). Garde-fous : 3 tests `dinum.test.ts` (rejet
+  `62` sans appel réseau = reproduction Sentry, rejet `8690`, acceptation `62.01Z`).
+
 ## [0.25.0] — 2026-06-05 (Incident cron RPPS : bombe OID matview + automatisation du drain BAN)
 
 Le cron RPPS du 5 juin (run #27003446829) a réussi son swap mais terminé en `partial`,
