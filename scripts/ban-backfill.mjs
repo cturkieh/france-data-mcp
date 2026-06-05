@@ -117,18 +117,56 @@ function buildServiceClient() {
  * une source = une entrée ici + ses 2 RPC en base (migration). RPPS reste le
  * défaut (back-compat : `runBanBackfill(client, {})` inchangé).
  */
-const SOURCES = {
+export const SOURCES = {
   rpps: {
     table: "rpps",
-    enumRpc: "rpps_distinct_eligible_keys",
+    // Énumération KEYSET SUR `id` (PK) — ROBUSTE sans index BAN sur la table LIVE.
+    // 2 dead-ends prouvés prod 2026-06-05 : (a) keyset sur la CLÉ exige un index BAN
+    // (orphelin au swap, build-via-RPC = cap passerelle 60 s) ; (b) passe unique =
+    // ~147k évals de la clé Unicode (~880 µs) en 1 requête > 55 s. Le keyset sur la
+    // PK borne le nb d'évals/page (~5000 → 4,4 s, MESURÉ) → coût constant, sûr.
+    // Curseur = `id`. Cf. rpps_eligible_rows_after_id (migration keyset).
+    enumRpc: "rpps_eligible_rows_after_id",
+    cursorParam: "p_after_id",
+    cursorField: "id",
+    cursorInit: 0,
     countRpc: "rpps_count_ban_eligible_rows",
   },
   ameli: {
     table: "annuaire_ameli",
+    // Énumération KEYSET SUR la clé d'adresse — exige l'index BAN sur la table LIVE
+    // (posé hors cron, cf. runbook ameli). Curseur = `address_key`. Migration vers
+    // id-keyset = follow-up (hors scope du bouton RPPS).
     enumRpc: "ameli_distinct_eligible_keys",
+    cursorParam: "p_after",
+    cursorField: "address_key",
+    cursorInit: null,
     countRpc: "ameli_count_ban_eligible_rows",
   },
 };
+
+// Garde-fou STRUCTUREL fail-loud (au chargement du module) : un descripteur de
+// source mal formé (champ oublié pour une future source, cursorInit incohérent)
+// provoquerait une MIS-PAGINATION SILENCIEUSE (`after = undefined` → 1ʳᵉ page en
+// boucle, ou clés ratées). On exige les 6 champs + un cursorInit cohérent avec le
+// type du curseur AVANT tout run. Doctrine : une config cassée doit être BRUYANTE
+// au démarrage, jamais un drain partiel sous le radar. cursorInit DOIT être une
+// sentinelle strictement < toute valeur réelle : 0 (curseur numérique id) ou null
+// (curseur texte clé).
+for (const [name, cfg] of Object.entries(SOURCES)) {
+  for (const k of ["table", "enumRpc", "cursorParam", "cursorField", "cursorInit", "countRpc"]) {
+    if (!(k in cfg)) {
+      throw new Error(
+        `[ban-backfill] SOURCES.${name} : champ "${k}" manquant (mis-pagination silencieuse)`,
+      );
+    }
+  }
+  if (cfg.cursorInit !== 0 && cfg.cursorInit !== null) {
+    throw new Error(
+      `[ban-backfill] SOURCES.${name}.cursorInit doit être 0 (curseur id) ou null (curseur clé), reçu ${JSON.stringify(cfg.cursorInit)}`,
+    );
+  }
+}
 
 /**
  * Backfill cache-only, idempotent.
@@ -196,8 +234,14 @@ export async function runBanBackfill(supabase, opts = {}) {
   // lecture est BORNÉE par `withTimeout` (fail-loud : un dépassement throw,
   // PAS un statut "partial").
   const distinctKeyInputs = new Map();
-  let after = null;
+  // Curseur keyset GÉNÉRIQUE : `id` (PK) pour rpps, `address_key` pour ameli — cf.
+  // `srcCfg.cursorParam`/`cursorField`/`cursorInit`. Le client déduplique TOUJOURS
+  // par `address_key` (les 2 RPC le renvoient) ; le curseur ne sert qu'à paginer.
+  let after = srcCfg.cursorInit;
   let pageCount = 0;
+  // F-1 (silent-failure review) : compte les lignes éligibles à clé vide/nulle,
+  // SKIPPÉES (cf. boucle) — signalées LOUD en fin d'énumération, jamais avalées.
+  let emptyKeyRows = 0;
   // MEDIUM-6 (review P1) : agrège les retries transport ABSORBÉS sur tout le
   // run. Un blip isolé est un `console.warn` ; une dégradation réseau chronique
   // SOUS le seuil d'épuisement (le run frôle la panne en continu mais réussit)
@@ -231,7 +275,7 @@ export async function runBanBackfill(supabase, opts = {}) {
         withTimeout(
           supabase.rpc(RPC_LABEL, {
             p_source_table: sourceTable,
-            p_after: after,
+            [srcCfg.cursorParam]: after,
             p_limit: KEYSET_PAGE,
           }),
           RPC_READ_TIMEOUT_MS,
@@ -246,6 +290,14 @@ export async function runBanBackfill(supabase, opts = {}) {
     const rows = data ?? [];
     if (rows.length === 0) break;
     for (const r of rows) {
+      // F-1 : une clé vide/nulle (ex. commune_centroid à adresse NULL → clé
+      // dégénérée) collapserait N lignes distinctes en UNE entrée Map → drain
+      // PARTIEL sous le radar du backstop S-1 (distinctKeys.length ≥ 1). On SKIP +
+      // compte (jamais géocodable sans adresse) ; warn LOUD après la boucle.
+      if (!r.address_key) {
+        emptyKeyRows++;
+        continue;
+      }
       if (!distinctKeyInputs.has(r.address_key)) {
         distinctKeyInputs.set(r.address_key, {
           adresse: r.adresse ?? "",
@@ -254,7 +306,7 @@ export async function runBanBackfill(supabase, opts = {}) {
         });
       }
     }
-    after = rows[rows.length - 1].address_key;
+    after = rows[rows.length - 1][srcCfg.cursorField];
     pageCount++;
     const keyMultiple = Math.floor(distinctKeyInputs.size / PROGRESS_EVERY);
     if (keyMultiple > loggedKeyMultiple) {
@@ -264,12 +316,17 @@ export async function runBanBackfill(supabase, opts = {}) {
       );
     }
   }
-  // Pas de `.sort()` : la RPC + le keyset garantissent déjà l'ordre croissant
-  // global des clés. Le SEUL tri de service est le tri attempt-first plus bas
-  // (l.~190) — un re-tri lexicographique ici l'écraserait. Un re-run partiel
-  // (--max) reste déterministe : les clés cachées au run précédent sont
-  // filtrées AVANT le slice → la tête avance, le backlog draine de façon
-  // monotone.
+  if (emptyKeyRows > 0) {
+    console.warn(
+      `[ban-backfill] ${emptyKeyRows} ligne(s) éligible(s) à address_key vide/nulle — non géocodables (adresse source manquante), SKIPPÉES`,
+    );
+  }
+  // Pas de `.sort()` ici : l'ORDRE d'énumération dépend du curseur (id pour rpps,
+  // clé pour ameli) et n'est PAS load-bearing — l'ordre de SERVICE déterministe est
+  // posé par le tri attempt-first plus bas (`keysToSubmit.sort`, tie-break
+  // `address_key` total + stable), INDÉPENDANT de l'ordre d'arrivée. Un re-run
+  // partiel (--max) reste déterministe : les clés cachées au run précédent sont
+  // filtrées AVANT le slice → la tête avance, le backlog draine de façon monotone.
   const distinctKeys = [...distinctKeyInputs.keys()];
   const totalEligibleDistinct = distinctKeys.length;
 
@@ -561,8 +618,15 @@ if (invokedDirectly) {
   console.log(`[ban-backfill] source=${source}${maxNew ? ` --max ${maxNew}` : ""}`);
   runBanBackfill(buildServiceClient(), { source, ...(maxNew ? { maxNew } : {}) })
     .then((r) => {
-      // Sortie non-zéro si un backlog reste (CI/scripts peuvent re-lancer).
-      process.exitCode = r.remaining > 0 ? 2 : 0;
+      // Sortie non-zéro si le drain n'est pas COMPLET, pour que le bouton CI ne
+      // mente PAS « vert = 100 % géocodé » (F-2 silent-failure review) :
+      //  3 = des chunks BAN ont échoué (apiFailures) → re-run (idempotent, reprend
+      //      via le cache non écrit pour ces chunks) ;
+      //  2 = backlog --max restant (tranche volontaire) → re-run pour continuer ;
+      //  0 = drain complet.
+      if (r.apiFailures > 0) process.exitCode = 3;
+      else if (r.remaining > 0) process.exitCode = 2;
+      else process.exitCode = 0;
     })
     .catch((err) => {
       console.error(`[ban-backfill] FATAL: ${err instanceof Error ? err.message : String(err)}`);

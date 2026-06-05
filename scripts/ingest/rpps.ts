@@ -430,55 +430,8 @@ async function main(): Promise<void> {
       );
     }
 
-    // 5b-bis. PHASE 1 MESURE — chiffre le delta BAN mensuel pour dimensionner
-    // la future automatisation (Phase 2). BEST-EFFORT : un échec (timeout, RPC
-    // absente, contrat cassé) → console.warn + log NULL + on continue. Mesuré
-    // post-FINESS / pre-ban_join (état où ban_join verrait l'éligibilité brute).
-    // Locales préservent une mesure partielle : si parseRpcCount #2 throw, #1
-    // reste posé (au lieu d'être écrasé par les assignations en branche `catch`).
-    // Cf. migration 20260520T000000_rpps_measure_ban_to_geocode.
-    let eligibleDistinct: number | null = null;
-    let toGeocodeDistinct: number | null = null;
-    try {
-      const { data: deltaData, error: deltaErr } = await withTimeout(
-        supabase.rpc("rpps_measure_ban_to_geocode", { p_source_table: "rpps_staging" }),
-        RPC_READ_TIMEOUT_MS,
-        "rpps_measure_ban_to_geocode",
-      );
-      if (deltaErr) {
-        console.warn(
-          `[rpps] BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}`,
-        );
-      } else {
-        const row = (
-          deltaData as Array<{
-            eligible_distinct: number | string;
-            to_geocode_distinct: number | string;
-          }> | null
-        )?.[0];
-        // Throw de parseRpcCount → attrapé par le catch outer = best-effort
-        // (Phase 1 = observabilité, pas gating ; cf. JSDoc src/core/parse-rpc-count.ts).
-        eligibleDistinct = parseRpcCount(
-          row?.eligible_distinct,
-          "rpps_measure_ban_to_geocode.eligible_distinct",
-        );
-        toGeocodeDistinct = parseRpcCount(
-          row?.to_geocode_distinct,
-          "rpps_measure_ban_to_geocode.to_geocode_distinct",
-        );
-        console.log(
-          `[rpps] BAN delta measure: ${eligibleDistinct} distinct eligible addresses in staging, ${toGeocodeDistinct} not yet in cache (Phase 2 size)`,
-        );
-      }
-    } catch (err) {
-      console.warn(
-        `[rpps] BAN delta measurement failed (best-effort, run continues): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-    log.ban_eligible_distinct = eligibleDistinct;
-    log.ban_to_geocode_distinct = toGeocodeDistinct;
+    // 5b-bis. (mesure du delta BAN déplacée POST-SWAP — cf. step 6d ; le détail
+    // du « pourquoi pré-swap = 57014 » y est documenté.)
 
     // 5c. BAN_JOIN — pose ensembliste du cache `geocoded_addresses` (déjà
     // rempli par `ban-backfill.mjs`, hors cron) dans `rpps_staging`, jumeau de
@@ -556,6 +509,59 @@ async function main(): Promise<void> {
     // bloquant (ancienne matview préservée par rollback) ; échec structurel =
     // throw → "failed" + exit(1) (LOUD, fin de l'avalement silencieux).
     await rebuildRppsMatviews(supabase, log);
+
+    // 6d. PHASE 1 MESURE du delta BAN — POST-SWAP sur `rpps` (le résidu après
+    // ban_join = la vraie taille de file que la future automatisation Phase 2
+    // aurait à géocoder). BEST-EFFORT : un échec (timeout, RPC absente, contrat
+    // cassé) → console.warn + log NULL + on continue (Phase 1 = observabilité,
+    // pas gating). Mesuré sur `rpps` (résidu ~150k éligibles, <1 s) et NON sur
+    // `rpps_staging` pré-ban_join (~1,29 M → 57014 systématique, prouvé prod run
+    // #27003446829). `rpps_measure_ban_to_geocode` fait une passe DISTINCT +
+    // anti-jointure (PAS de skip-scan) → aucun index BAN requis. Locales
+    // préservent une mesure partielle : si parseRpcCount #2 throw, #1 reste posé.
+    // Cf. migration 20260520T000000_rpps_measure_ban_to_geocode.
+    let eligibleDistinct: number | null = null;
+    let toGeocodeDistinct: number | null = null;
+    try {
+      const { data: deltaData, error: deltaErr } = await withTimeout(
+        supabase.rpc("rpps_measure_ban_to_geocode", { p_source_table: "rpps" }),
+        RPC_READ_TIMEOUT_MS,
+        "rpps_measure_ban_to_geocode",
+      );
+      if (deltaErr) {
+        console.warn(
+          `[rpps] BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}`,
+        );
+      } else {
+        const row = (
+          deltaData as Array<{
+            eligible_distinct: number | string;
+            to_geocode_distinct: number | string;
+          }> | null
+        )?.[0];
+        // Throw de parseRpcCount → attrapé par le catch outer = best-effort
+        // (Phase 1 = observabilité, pas gating ; cf. JSDoc src/core/parse-rpc-count.ts).
+        eligibleDistinct = parseRpcCount(
+          row?.eligible_distinct,
+          "rpps_measure_ban_to_geocode.eligible_distinct",
+        );
+        toGeocodeDistinct = parseRpcCount(
+          row?.to_geocode_distinct,
+          "rpps_measure_ban_to_geocode.to_geocode_distinct",
+        );
+        console.log(
+          `[rpps] BAN delta measure: ${eligibleDistinct} distinct eligible addresses in rpps, ${toGeocodeDistinct} not yet in cache (Phase 2 residual queue)`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[rpps] BAN delta measurement failed (best-effort, run continues): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    log.ban_eligible_distinct = eligibleDistinct;
+    log.ban_to_geocode_distinct = toGeocodeDistinct;
 
     // 6c. CANARY POST-SWAP. Cibles seedées dans la migration `_canary_seed_rpps`
     // (placeholders à valider post 1er run prod — log warn non-bloquant si

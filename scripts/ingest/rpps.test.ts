@@ -1,7 +1,13 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildCommuneIndex } from "../../src/territoire/commune-index.js";
 import type { Commune } from "../../src/territoire/communes.js";
+import { ingestDir } from "./migration-sql.js";
 import { IngestError, type IngestLogEntry } from "./shared.js";
+
+// `ingestDir` (helper partagé migration-sql.ts) — même pattern que
+// rpps-matview-rebuild.test.ts / finess-hosted-rebuild.test.ts pour lire un source.
+const RPPS_SRC = readFileSync(`${ingestDir}/rpps.ts`, "utf8");
 
 const { __TESTING__ } = await import("./rpps.js");
 const { parseRppsRecord, COL, rebuildRppsMatviews, evaluateBanJoinOutcome } = __TESTING__;
@@ -466,5 +472,36 @@ describe("evaluateBanJoinOutcome — sentinelle cohérence ban_join (pure, /revi
     // (c'était le seul chemin sans aucune trace avant le correctif).
     expect(o.warn).toBeTruthy();
     expect(o.logMessage).toBeTruthy();
+  });
+});
+
+// Garde-fou de WIRING de la mesure BAN delta (best-effort, observabilité Phase 1).
+//
+// Classe de bug (PROUVÉE PROD run #27003446829, 2026-06-05) : mesurée pré-swap sur
+// `rpps_staging`, la RPC `rpps_measure_ban_to_geocode` scanne ~1,29 M lignes
+// éligibles (tout en `commune_centroid` avant ban_join) → DISTINCT + anti-jointure
+// > 55 s → 57014 → `ban_to_geocode_distinct = NULL` → alerte dégradée à CHAQUE
+// cron. Le chiffre UTILE est le RÉSIDU post-ban_join (la file que la Phase 2
+// géocoderait), mesuré sur `rpps` post-swap en <1 s. Ces 2 invariants verrouillent
+// le fix : cible `rpps` (pas staging) ET appel APRÈS le swap.
+describe("rpps.ts wiring mesure BAN delta : post-swap, sur rpps", () => {
+  it('cible p_source_table:"rpps" (jamais rpps_staging — 57014 prouvé prod)', () => {
+    // Regex ancrée sur le nom de la RPC + l'arg "rpps" (sans capture) : lie le
+    // littéral à CET appel — le count ban_join voisin garde, lui, "rpps_staging".
+    expect(
+      RPPS_SRC,
+      "la mesure doit cibler `rpps` (résidu post-ban_join), pas `rpps_staging` (~1,29 M → 57014)",
+    ).toMatch(/rpps_measure_ban_to_geocode["']\s*,\s*\{\s*p_source_table:\s*["']rpps["']/);
+  });
+
+  it("appelée APRÈS atomicSwapTables (pré-swap = re-régression 57014)", () => {
+    const swapIdx = RPPS_SRC.indexOf('atomicSwapTables({ prodTable: "rpps" })');
+    const measureIdx = RPPS_SRC.indexOf("rpps_measure_ban_to_geocode");
+    expect(swapIdx, "atomicSwapTables({ prodTable: 'rpps' }) introuvable").toBeGreaterThan(0);
+    expect(measureIdx, "appel rpps_measure_ban_to_geocode introuvable").toBeGreaterThan(0);
+    expect(
+      measureIdx,
+      "la mesure BAN delta doit venir APRÈS le swap (sinon scan staging 1,29 M → 57014)",
+    ).toBeGreaterThan(swapIdx);
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   allMigrationsSql,
   latestFunctionBodyLoose as latestFunctionBody,
+  latestFunctionDef,
 } from "./migration-sql.js";
 
 // Garde-fou structurel — sans DB, lit les migrations.
@@ -83,4 +84,39 @@ describe("fix matview/swap finess_hosted_activities : reconstruction post-swap (
       `SELECT de finess_hosted_activities_rebuild dans la fonction rebuild diverge de la migration canonique (drift = données fausses servies en prod). Canonique="${canonical}" Rebuild="${rebuilt}"`,
     ).toBe(canonical);
   });
+});
+
+// Garde-fou de parité SÉCURITÉ des 3 RPC de rebuild post-swap.
+//
+// Classe de bug (PROUVÉE PROD run #27003446829, 2026-06-05, status `partial`) :
+// une RPC de rebuild appelée via supabase-js clé service_role fait un
+// `CREATE MATERIALIZED VIEW ..._rebuild` — qui exige le privilège CREATE sur le
+// schéma `public`, refusé à `service_role`. En SECURITY INVOKER →
+// `42501 permission denied for schema public` → rollback de la transaction
+// PL/pgSQL → la matview reste collée à l'OID de l'ANCIENNE table swappée =
+// bombe OID armée. `ingest_rebuild_finess_hosted_activities` a vécu ce bug (écrite
+// en INVOKER alors que ses jumelles rpps/ameli étaient DEFINER — omission
+// copier-coller, jamais exécutée avant le 1er cron RPPS post-câblage).
+// `SECURITY DEFINER` (owner postgres, qui possède schéma + matview) découple
+// l'exécution du caller → le CREATE réussit. `SET search_path` fixé = OBLIGATOIRE
+// pour toute fonction SECURITY DEFINER (sinon hijack via search_path + advisor).
+describe("parité sécurité : les 3 RPC de rebuild post-swap DOIVENT être SECURITY DEFINER", () => {
+  for (const fn of [
+    "ingest_rebuild_finess_hosted_activities",
+    "ingest_rebuild_rpps_matviews",
+    "ingest_rebuild_ameli_matviews",
+  ]) {
+    it(`${fn} est SECURITY DEFINER + SET search_path`, () => {
+      const def = latestFunctionDef(fn);
+      expect(def.length, `${fn} introuvable dans les migrations`).toBeGreaterThan(0);
+      expect(
+        def,
+        `${fn} n'est PAS SECURITY DEFINER — un CREATE MATERIALIZED VIEW via service_role échouera en 42501 (bombe OID, prouvé prod run #27003446829)`,
+      ).toMatch(/security\s+definer/i);
+      expect(
+        def,
+        `${fn} est SECURITY DEFINER sans SET search_path (vuln hijack + advisor Supabase)`,
+      ).toMatch(/set\s+search_path\s*=/i);
+    });
+  }
 });

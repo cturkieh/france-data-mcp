@@ -29,7 +29,7 @@ vi.mock("../src/core/index.js", async (importOriginal) => {
   };
 });
 
-const { runBanBackfill } = await import("./ban-backfill.mjs");
+const { runBanBackfill, SOURCES } = await import("./ban-backfill.mjs");
 
 function banOutcome(
   results: Array<
@@ -51,8 +51,9 @@ function banOutcome(
 }
 
 // Fixtures adresses RPPS RÉELLES (style ANS). On NE passe plus par
-// `.range()` : on alimente directement le dataset de clés DISTINCTES de la RPC
-// `rpps_distinct_eligible_keys`. Les helpers `realKey` fabriquent une clé
+// `.range()` : on alimente directement le dataset de l'énumération keyset
+// (rpps → `rpps_eligible_rows_after_id` / ameli → `ameli_distinct_eligible_keys`,
+// cf. `SRC` par source). Les helpers `realKey` fabriquent une clé
 // byte-exacte avec le jumeau JS (parité octet-à-octet garantie par le HARD
 // GATE Task 1) pour des assertions réalistes côté tests.
 const ROW_A = { adresse: "60 AV DE JASSERON", code_postal: "08000", code_insee: "08105" };
@@ -94,8 +95,8 @@ function makeTransientGate(count: number): () => Promise<never> | null {
 /**
  * Stub supabase chaînable couvrant exactement les appels de `runBanBackfill`
  * APRÈS Task 5 :
- *  - rpc("rpps_distinct_eligible_keys", {p_source_table,p_after,p_limit})
- *      → énumération keyset des clés DISTINCTES (PLUS de `.range()`)
+ *  - rpc(SRC.enumRpc, {p_source_table, [SRC.cursorParam], p_limit})
+ *      → énumération keyset (rpps: id-cursor / ameli: key-cursor ; PLUS de `.range()`)
  *  - from("geocoded_addresses").select().in()   → cache reads
  *  - from("geocoded_addresses").upsert()        → cache writes
  *
@@ -150,26 +151,29 @@ function makeStub(opts: {
   // (RPPS par défaut → tests existants inchangés). La lecture cache
   // (`rpps_geocoded_cache_lookup`) est PARTAGÉE. Les écritures vers la table
   // source de chaque source restent INTERDITES (backfill cache-only).
-  const SRC = (
-    {
-      rpps: {
-        enumRpc: "rpps_distinct_eligible_keys",
-        countRpc: "rpps_count_ban_eligible_rows",
-        forbid: ["rpps", "rpps_staging"],
-      },
-      ameli: {
-        enumRpc: "ameli_distinct_eligible_keys",
-        countRpc: "ameli_count_ban_eligible_rows",
-        forbid: ["annuaire_ameli", "annuaire_ameli_staging"],
-      },
-    } as const
-  )[opts.source ?? "rpps"];
-  // Dataset trié ascendant par clé (la RPC garantit l'ordre croissant keyset).
-  const sorted = [...opts.distinctRows].sort((a, b) =>
-    a.address_key < b.address_key ? -1 : a.address_key > b.address_key ? 1 : 0,
-  );
+  // SOURCE OF TRUTH PARTAGÉE : on consomme le VRAI descripteur `SOURCES` (importé
+  // de ban-backfill.mjs), plus une copie locale — sinon le mock testerait un
+  // jumeau qui peut diverger silencieusement du prod (finding type-design HIGH).
+  // `forbid` (tables d'écriture interdites) reste test-local.
+  const sourceKey = opts.source ?? "rpps";
+  const FORBID = {
+    rpps: ["rpps", "rpps_staging"],
+    ameli: ["annuaire_ameli", "annuaire_ameli_staging"],
+  };
+  const SRC = { ...SOURCES[sourceKey], forbid: FORBID[sourceKey] };
+  // Curseur keyset GÉNÉRIQUE : id (numérique) pour rpps, address_key (string) pour
+  // ameli. On assigne un id stable (ordre fourni) puis on trie par le champ curseur
+  // de la source — le mock pagine `> cursor` EXACTEMENT comme la RPC réelle.
+  const withIds = opts.distinctRows.map((r, i) => ({ ...r, id: i + 1 }));
+  const cursorVal = (r: (typeof withIds)[number]): number | string | null => r[SRC.cursorField];
+  const sorted = [...withIds].sort((a, b) => {
+    const av = cursorVal(a);
+    const bv = cursorVal(b);
+    if (typeof av === "number" && typeof bv === "number") return av - bv;
+    return (av ?? "") < (bv ?? "") ? -1 : (av ?? "") > (bv ?? "") ? 1 : 0;
+  });
   const upserts: unknown[][] = [];
-  const rpcCalls: Array<{ p_after: string | null; returned: number }> = [];
+  const rpcCalls: Array<{ p_after: unknown; returned: number }> = [];
   const cache = new Map<
     string,
     { address_key: string; accepted: boolean; ban_attempt_count: number }
@@ -212,19 +216,26 @@ function makeStub(opts: {
     const callIndex = rpcCalls.length + 1;
     if (opts.rpcHangOnCall === callIndex) {
       // Promesse qui ne résout JAMAIS → withTimeout doit rejeter.
-      rpcCalls.push({ p_after: (args.p_after as string | null) ?? null, returned: -1 });
+      rpcCalls.push({ p_after: args[SRC.cursorParam] ?? null, returned: -1 });
       return new Promise(() => {});
     }
     if (opts.rpcErrorOnCall === callIndex) {
-      rpcCalls.push({ p_after: (args.p_after as string | null) ?? null, returned: -1 });
+      rpcCalls.push({ p_after: args[SRC.cursorParam] ?? null, returned: -1 });
       return Promise.resolve({ data: null, error: { message: "simulated rpc failure" } });
     }
-    const after = (args.p_after as string | null) ?? null;
+    const after = args[SRC.cursorParam] ?? SRC.cursorInit;
     const limit = args.p_limit as number;
-    const startIdx = after === null ? 0 : sorted.findIndex((r) => r.address_key > after);
+    const startIdx =
+      after === null || after === undefined
+        ? 0
+        : sorted.findIndex((r) => {
+            const v = cursorVal(r);
+            if (v === null) return false;
+            return typeof v === "number" ? v > Number(after) : v > String(after);
+          });
     const page =
       startIdx === -1 ? [] : sorted.slice(startIdx, startIdx + Math.min(limit, serverCap));
-    rpcCalls.push({ p_after: after, returned: page.length });
+    rpcCalls.push({ p_after: after ?? null, returned: page.length });
     return Promise.resolve({ data: page, error: null });
   });
 
@@ -427,7 +438,7 @@ describe("runBanBackfill", () => {
     });
 
     await expect(runBanBackfill(stub.client, {})).rejects.toThrow(
-      /\[ban-backfill\] rpps_distinct_eligible_keys failed/,
+      /\[ban-backfill\] rpps_eligible_rows_after_id failed/,
     );
     // Fail-loud : BAN jamais appelé (le run avorte AVANT le géocodage).
     expect(geocodeAddressesBatchMock).not.toHaveBeenCalled();
@@ -759,9 +770,9 @@ describe("runBanBackfill", () => {
     );
 
     // source=ameli → le stub n'accepte QUE les RPC AMELI : si runBanBackfill
-    // appelait par erreur `rpps_distinct_eligible_keys`, le stub throw
-    // "unexpected rpc" (preuve implicite du routage par source). La table
-    // d'écriture interdite devient `annuaire_ameli` (cache-only préservé).
+    // appelait par erreur l'énumération rpps (`rpps_eligible_rows_after_id`), le
+    // stub throw "unexpected rpc" (preuve implicite du routage par source). La
+    // table d'écriture interdite devient `annuaire_ameli` (cache-only préservé).
     const stub = makeStub({
       source: "ameli",
       distinctRows: [distinctKeyRow(ROW_A), distinctKeyRow(ROW_B)],
@@ -779,7 +790,7 @@ describe("runBanBackfill", () => {
     );
     expect(calledRpcs.has("ameli_distinct_eligible_keys")).toBe(true);
     expect(calledRpcs.has("ameli_count_ban_eligible_rows")).toBe(true);
-    expect(calledRpcs.has("rpps_distinct_eligible_keys")).toBe(false);
+    expect(calledRpcs.has("rpps_eligible_rows_after_id")).toBe(false);
     // La lecture cache reste l'RPC PARTAGÉE (cache commun aux 2 sources).
     expect(calledRpcs.has("rpps_geocoded_cache_lookup")).toBe(true);
 
