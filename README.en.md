@@ -81,13 +81,14 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.24.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+✅ **v0.25.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
 ### Roadmap
 
 - [x] **v0.22.0**: INSEE IRIS (mainland) — neighbourhood-level demographics (age, occupation, families, income).
 - [x] **v0.23.0**: composite panoramas (`panorama_implantation_complet`, `enrichir_concurrents`) — siting studies in one call.
 - [x] **v0.24.0**: BAN geocoding of Ameli addresses — building/street precision instead of the commune centroid (BAN acceptance 0.37% → 67%).
+- [x] **v0.25.0**: RPPS cron hardening (hosted-activities matview, geocoding measurement) + BAN re-geocoding automation (GitHub button).
 - [ ] **v1.0+**: DOM-COM (IRIS + health), DPC.
 
 ---
