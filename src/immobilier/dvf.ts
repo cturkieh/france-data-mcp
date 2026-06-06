@@ -16,6 +16,7 @@
  */
 
 import { parseCsv } from "../core/csv.js";
+import { DEFAULT_USER_AGENT } from "../core/http.js";
 import { formatRpcError, validateCoords, validateRadiusKm } from "../sante/db-helpers.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
 
@@ -118,9 +119,7 @@ export async function fetchCommuneCsv(insee: string): Promise<FetchCommuneCsvRes
     try {
       // fetch suit les redirections (302) par défaut (redirect: "follow" est le défaut)
       response = await fetch(url, {
-        headers: {
-          "User-Agent": "france-data-mcp/0.1.0 (+https://github.com/cturkieh/france-data-mcp)",
-        },
+        headers: { "User-Agent": DEFAULT_USER_AGENT },
         redirect: "follow",
       });
     } catch (err) {
@@ -400,9 +399,7 @@ export async function fetchCommunesInRadius(
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: {
-        "User-Agent": "france-data-mcp/0.1.0 (+https://github.com/cturkieh/france-data-mcp)",
-      },
+      headers: { "User-Agent": DEFAULT_USER_AGENT },
     });
   } catch (err) {
     const msg = `[france-data-mcp] fetchCommunesInRadius: network error: ${(err as Error).message}`;
@@ -442,9 +439,7 @@ export function aggregatePrix(rows: DvfMutation[]): DvfAggregate {
   const prix_m2_p75 = n_ventes > 0 ? percentile(prixM2s, 75) : null;
 
   // Terrains
-  const terrainRows = rows.filter(
-    (r) => r.surface_terrain !== null && (r.surface_terrain ?? 0) > 0,
-  );
+  const terrainRows = rows.filter((r) => r.surface_terrain !== null && r.surface_terrain > 0);
   const n_terrains = terrainRows.length;
 
   const terrainPrix = terrainRows
