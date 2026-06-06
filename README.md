@@ -129,11 +129,9 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ### Roadmap
 
-- [x] **V0.22.0** : INSEE IRIS (métropole) — démographie au quartier (âge, CSP, familles, revenu).
-- [x] **V0.23.0** : panoramas composites (`panorama_implantation_complet`, `enrichir_concurrents`) — études d'implantation en 1 call.
-- [x] **V0.24.0** : géocodage BAN des adresses Ameli — précision bâtiment/rue au lieu du centroïde commune (acceptation BAN 0,37 % → 67 %).
-- [x] **V0.25.0** : fiabilisation du cron RPPS (matview activités hébergées, mesure géocodage) + automatisation du re-géocodage BAN (bouton GitHub).
 - [ ] **V1.0+** : DOM-COM (IRIS + santé), DPC.
+
+Historique des versions livrées : [CHANGELOG](CHANGELOG.md).
 
 ---
 
