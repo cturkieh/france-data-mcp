@@ -13,7 +13,7 @@ export {
 export type { DvfAggregate, DvfCacheRow, DvfMutation } from "./dvf.js";
 
 export { getZonesAU } from "./apicarto-plu.js";
-export type { ZonesAUResult } from "./apicarto-plu.js";
+export type { ZonesAUEntry, ZonesAUResult } from "./apicarto-plu.js";
 
 export { permitsForCommune } from "./sitadel.js";
 export type { PermitsResult } from "./sitadel.js";
