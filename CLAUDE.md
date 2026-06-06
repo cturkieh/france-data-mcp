@@ -149,6 +149,7 @@ Séquence (voir `scripts/release.sh` qui automatise) :
        cur=$(echo "$r" | jq -r '.metadata.nextCursor // empty'); [ -z "$cur" ] && { echo "❌ $V absente"; break; }; done
      ```
    - `mcp-publisher publish` qui renvoie `400 cannot publish duplicate version` = la version EST DÉJÀ publiée (garde d'idempotence, succès déguisé), PAS un échec — re-vérifier via la pagination ci-dessus avant de re-tenter.
+10. ☐ **Glama** (annuaire MCP tiers, fiche publique [glama.ai/mcp/servers/cturkieh/france-data-mcp](https://glama.ai/mcp/servers/cturkieh/france-data-mcp)) — **3 étapes distinctes, la release est MANUELLE** : Glama sépare **sync** (récupère le dernier commit GitHub) → **build** (auto, depuis un commit ÉPINGLÉ, ne suit PAS les tags ; email « Build succeeded ») → **« Create a release »** (manuelle — sans elle la fiche reste gelée MÊME build OK). Après chaque version : admin → onglet **Repository → Sync** → attendre le build vert → **Create a release**. Le sync auto quotidien **peut se figer silencieusement** (vécu 2026-06 : bloqué depuis 2026-06-04, fiche restée à 0.23.1 alors que npm/registry = 0.26.1) → sync jammé > 15-20 min = **Discord Glama #support** (leur worker, PAS le repo ; icône Discord nav glama.ai — ce n'est PAS le serveur « Model Context Protocol » officiel). `glama.json` (racine, `maintainers`) lève l'item du score + aide le re-pickup. Détail : mémoire `glama-listing-update-mechanism`.
 
 ## Contribuer
 
