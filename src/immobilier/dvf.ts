@@ -76,6 +76,46 @@ const GEO_DVF_BASE = "https://files.data.gouv.fr/geo-dvf/latest/csv";
 /** Année de départ pour le fallback (on essaie CURRENT_YEAR → CURRENT_YEAR - 1). */
 const CURRENT_YEAR = new Date().getFullYear();
 
+/**
+ * Clés de `DvfMutation` dont la valeur est `string` — les seules valides dans une
+ * clé de dédup `join` (un champ NUMERIC sérialisé en string par PostgREST, ou un
+ * `number`/`null`, produirait une clé instable). Contraint `DVF_PK_COLS` au
+ * compile-time (cf. `satisfies` ci-dessous).
+ */
+type DvfStringKey = {
+  [K in keyof DvfMutation]: DvfMutation[K] extends string ? K : never;
+}[keyof DvfMutation];
+
+/**
+ * Colonnes de la clé primaire composite de `dvf_mutations` — SOURCE UNIQUE qui
+ * pilote À LA FOIS la clé de déduplication en mémoire ET la cible `onConflict`
+ * de l'upsert. Les deux DOIVENT rester identiques : une clé de dédup qui diverge
+ * de la cible de conflit réveille silencieusement le SQLSTATE 21000 (cf.
+ * `upsertMutations`). Doit refléter le `PRIMARY KEY` de la migration
+ * `20260606T120000_immobilier.sql`. Le `satisfies` interdit d'y mettre une
+ * colonne non-`string` (qui casserait la clé `join` — garde-fou compile-time).
+ */
+const DVF_PK_COLS = [
+  "id_mutation",
+  "code_commune",
+  "date_mutation",
+  "type_local",
+] as const satisfies readonly DvfStringKey[];
+
+/** Cible `onConflict` de l'upsert, dérivée de la PK (source unique ci-dessus). */
+export const DVF_ON_CONFLICT = DVF_PK_COLS.join(",");
+
+/**
+ * Clé de déduplication d'une mutation, dérivée de la même PK (source unique).
+ * `date_mutation` est comparée comme STRING ISO `YYYY-MM-DD` (format canonique
+ * geo-dvf, déjà `.trim()` au parse) — aligné sur le cast `DATE` de la PK Postgres.
+ * Une représentation non canonique du même jour (`2025-1-2`) divergerait du cast
+ * DB et pourrait ré-armer le 21000 ; geo-dvf garantit l'ISO.
+ */
+export function dvfPkKey(r: DvfMutation): string {
+  return DVF_PK_COLS.map((c) => r[c]).join("|");
+}
+
 // ---------------------------------------------------------------------------
 // Dept prefix derivation
 // ---------------------------------------------------------------------------
@@ -240,19 +280,37 @@ export async function getCacheRow(insee: string): Promise<DvfCacheRow | null> {
 /**
  * Upsert un lot de mutations dans `dvf_mutations`.
  * Utilise le client untyped car la table n'est pas encore dans les types générés.
+ * Retourne le nombre de lignes RÉELLEMENT écrites (après dédoublonnage par PK) —
+ * pour que le `row_count` du cache reflète l'état de la table, pas le nombre de
+ * lignes CSV source (3107 lignes → 2073 écrites sur 50129, cf. dédup ci-dessous).
  */
-export async function upsertMutations(rows: DvfMutation[]): Promise<void> {
-  if (rows.length === 0) return;
+export async function upsertMutations(rows: DvfMutation[]): Promise<number> {
+  if (rows.length === 0) return 0;
 
   // Écriture du cache → client service (RLS bypass). Le rôle anon public n'a
   // PAS le droit d'écrire `dvf_mutations` (sinon n'importe quel porteur de la
   // clé anon pourrait polluer le cache de prix). Doctrine : anon lit, service écrit.
   const supabase = getUntypedServiceClient();
 
+  // Dédoublonnage par clé primaire AVANT l'upsert. Le CSV DVF peut contenir
+  // plusieurs lignes partageant la PK (ex. une vente à plusieurs lots du même
+  // type) → Postgres `INSERT … ON CONFLICT` REJETTE TOUT le lot (« cannot affect
+  // row a second time », SQLSTATE 21000 — prouvé prod sur 50129 : 3107 lignes →
+  // 2073 clés uniques). Keep-last : on perd au plus 1 lot BÂTI par collision
+  // (2 « Maison » distinctes même vente+date) → biais négligeable sur la médiane
+  // €/m² communale, pas strictement nul. Dédup sur l'ENSEMBLE avant le batching
+  // (clé `dvfPkKey` = cible `DVF_ON_CONFLICT`, même source) → couvre aussi une
+  // collision inter-batch (même PK dans 2 slices différents).
+  const byKey = new Map<string, DvfMutation>();
+  for (const r of rows) {
+    byKey.set(dvfPkKey(r), r);
+  }
+  const deduped = [...byKey.values()];
+
   // On insère par batch de 500 pour éviter les payloads trop lourds
   const BATCH = 500;
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const batch = rows.slice(i, i + BATCH);
+  for (let i = 0; i < deduped.length; i += BATCH) {
+    const batch = deduped.slice(i, i + BATCH);
 
     // `geom` est une colonne GENERATED STORED (calculée par Postgres depuis
     // longitude/latitude) — elle NE DOIT PAS figurer dans le payload (Postgres
@@ -272,13 +330,15 @@ export async function upsertMutations(rows: DvfMutation[]): Promise<void> {
         longitude: r.longitude,
         latitude: r.latitude,
       })),
-      { onConflict: "id_mutation,code_commune,date_mutation,type_local" },
+      { onConflict: DVF_ON_CONFLICT },
     );
 
     if (error) {
       throw new Error(formatRpcError("dvf_mutations upsert", error));
     }
   }
+
+  return deduped.length;
 }
 
 /**
@@ -325,10 +385,11 @@ export async function ensureCommuneCached(insee: string, maxAgeDays = 180): Prom
     }
   }
 
-  // Cache absent ou périmé → ingestion
+  // Cache absent ou périmé → ingestion. `row_count` du cache = lignes réellement
+  // écrites (après dédup PK), pas le nombre de lignes CSV source.
   const { mutations, year } = await fetchCommuneCsv(insee);
-  await upsertMutations(mutations);
-  await markCommuneCached(insee, year, mutations.length);
+  const written = await upsertMutations(mutations);
+  await markCommuneCached(insee, year, written);
 }
 
 // ---------------------------------------------------------------------------

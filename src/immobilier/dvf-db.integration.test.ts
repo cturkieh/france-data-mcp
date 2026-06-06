@@ -23,6 +23,7 @@ import {
   getUntypedAnonClient,
   getUntypedServiceClient,
 } from "../storage/supabase.js";
+import { DVF_ON_CONFLICT } from "./dvf.js";
 
 // Point de test : centre de Charleville-Mézières (aligné finess integration).
 const CENTER = { lat: 49.7724, lon: 4.7203 };
@@ -117,7 +118,7 @@ describe.skipIf(!hasKey)("dvf_in_radius (PostGIS integration)", () => {
     // Insert via service_role (le rôle anon n'a PAS de policy INSERT — c'est
     // précisément l'invariant de sécurité : seul service écrit le cache).
     const { error: insertError } = await svc.from("dvf_mutations").upsert(rows, {
-      onConflict: "id_mutation,code_commune,date_mutation,type_local",
+      onConflict: DVF_ON_CONFLICT,
     });
     expect(insertError).toBeNull();
 
