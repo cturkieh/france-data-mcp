@@ -25,3 +25,6 @@ export type {
   DynamiqueImmobiliereInfo,
   DynamiqueImmobiliereResult,
 } from "./dynamique-immobiliere.js";
+
+export { coutFoncier } from "./cout-foncier.js";
+export type { CoutFoncierInput, CoutFoncierResult } from "./cout-foncier.js";
