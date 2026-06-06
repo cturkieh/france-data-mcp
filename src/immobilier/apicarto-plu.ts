@@ -44,7 +44,7 @@ export type ZonesAUResult = {
   /** "ok" = PLU présent (même si aucune zone AU à cet endroit). "indisponible:no_plu" = pas de PLU dématérialisé. */
   couverture: "ok" | "indisponible:no_plu";
   n_zones_au: number;
-  zones_au: { libelle: string; libelong: string | null }[];
+  zones_au: { libelle: string; libelong: string | null; typezone: string }[];
   /** GeoJSON FeatureCollection contenant uniquement les features AU (pour couche carto). */
   geojson: { type: "FeatureCollection"; features: unknown[] };
 };
@@ -73,10 +73,38 @@ function isZoneAU(typezone: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Retourne les zones AU (à urbaniser) au niveau d'un point géographique.
+ * Construit un GeoJSON Polygon bbox autour d'un point.
+ * Offsets en degrés : dLat = radiusKm/111, dLon = radiusKm/(111*cos(lat)).
+ */
+function bboxPolygon(lat: number, lon: number, radiusKm: number): object {
+  const dLat = radiusKm / 111;
+  const dLon = radiusKm / (111 * Math.cos((lat * Math.PI) / 180));
+  const minLat = lat - dLat;
+  const maxLat = lat + dLat;
+  const minLon = lon - dLon;
+  const maxLon = lon + dLon;
+  return {
+    type: "Polygon",
+    coordinates: [
+      [
+        [minLon, minLat],
+        [maxLon, minLat],
+        [maxLon, maxLat],
+        [minLon, maxLat],
+        [minLon, minLat],
+      ],
+    ],
+  };
+}
+
+/**
+ * Retourne les zones AU (à urbaniser) au niveau d'un point géographique ou
+ * dans un rayon donné.
  *
  * @param lat - Latitude WGS84
  * @param lon - Longitude WGS84
+ * @param opts.radiusKm - Si fourni, interroge apicarto sur un bbox Polygon
+ *   (zones intersectant la zone) plutôt que sur le Point seul.
  *
  * Comportement :
  * - features[] vide → commune sans PLU dématérialisé (RNU) : couverture "indisponible:no_plu"
@@ -84,14 +112,18 @@ function isZoneAU(typezone: unknown): boolean {
  * - erreur réseau/HTTP → console.warn + re-throw (le composite caller gère la dégradation)
  *
  * @param options - Options HTTP transmises à `fetchJson` (signal d'annulation,
- *   baseDelayMs pour les tests, etc.).
+ *   baseDelayMs pour les tests, etc.) + `radiusKm` pour mode zone.
  */
 export async function getZonesAU(
   lat: number,
   lon: number,
-  options?: RateLimitOptions & { signal?: AbortSignal },
+  options?: RateLimitOptions & { signal?: AbortSignal; radiusKm?: number },
 ): Promise<ZonesAUResult> {
-  const geom = encodeURIComponent(JSON.stringify({ type: "Point", coordinates: [lon, lat] }));
+  const geomObj =
+    options?.radiusKm !== undefined
+      ? bboxPolygon(lat, lon, options.radiusKm)
+      : { type: "Point", coordinates: [lon, lat] };
+  const geom = encodeURIComponent(JSON.stringify(geomObj));
   const url = `${BASE_URL}?geom=${geom}`;
 
   let data: ZoneUrbaResponse;
@@ -121,6 +153,7 @@ export async function getZonesAU(
     couverture: "ok",
     n_zones_au: auFeatures.length,
     zones_au: auFeatures.map((f) => ({
+      typezone: f.properties.typezone,
       libelle: f.properties.libelle,
       libelong: f.properties.libelong,
     })),

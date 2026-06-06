@@ -118,9 +118,9 @@ describe("getZonesAU", () => {
     // AU + AUc + AUs retenues ; U / A / N exclues
     expect(result.n_zones_au).toBe(3);
     expect(result.zones_au).toEqual([
-      { libelle: "1AU", libelong: "Zone à urbaniser" },
-      { libelle: "1AUc", libelong: "Zone à urbaniser ouverte" },
-      { libelle: "2AUs", libelong: "Zone à urbaniser stricte" },
+      { typezone: "AU", libelle: "1AU", libelong: "Zone à urbaniser" },
+      { typezone: "AUc", libelle: "1AUc", libelong: "Zone à urbaniser ouverte" },
+      { typezone: "AUs", libelle: "2AUs", libelong: "Zone à urbaniser stricte" },
     ]);
     // geojson ne contient que les features AU (préfixe AU, casse-insensible)
     expect(result.geojson.type).toBe("FeatureCollection");
@@ -192,5 +192,18 @@ describe("getZonesAU", () => {
     // coordinates[0]=lon, coordinates[1]=lat
     expect(point.coordinates[0]).toBe(lon);
     expect(point.coordinates[1]).toBe(lat);
+  });
+
+  it("radiusKm → geom est un Polygon bbox (pas un Point)", async () => {
+    fetchMock.mockResolvedValue(jsonOk({ type: "FeatureCollection", features: [] }));
+
+    await getZonesAU(43.6, 3.87, { radiusKm: 2 });
+
+    const calledUrl = fetchMock.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain("Polygon");
+
+    const geomParam = new URL(calledUrl).searchParams.get("geom");
+    const geom = JSON.parse(geomParam ?? "{}") as { type: string };
+    expect(geom.type).toBe("Polygon");
   });
 });

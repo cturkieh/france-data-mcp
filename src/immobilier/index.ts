@@ -17,3 +17,11 @@ export type { ZonesAUResult } from "./apicarto-plu.js";
 
 export { permitsForCommune } from "./sitadel.js";
 export type { PermitsResult } from "./sitadel.js";
+
+export { dynamiqueImmobiliere } from "./dynamique-immobiliere.js";
+export type {
+  DynamiqueImmobiliereInput,
+  DynamiqueImmobiliereNote,
+  DynamiqueImmobiliereInfo,
+  DynamiqueImmobiliereResult,
+} from "./dynamique-immobiliere.js";
