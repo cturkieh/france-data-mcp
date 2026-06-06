@@ -1,0 +1,324 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// ---------------------------------------------------------------------------
+// Mock supabase — must be hoisted before imports of the module under test
+// ---------------------------------------------------------------------------
+
+const mockFrom = vi.fn();
+const mockRpc = vi.fn();
+
+vi.mock("../storage/supabase.js", () => ({
+  getUntypedAnonClient: () => ({
+    from: mockFrom,
+    rpc: mockRpc,
+  }),
+}));
+
+// ---------------------------------------------------------------------------
+// Imports (after mocks)
+// ---------------------------------------------------------------------------
+
+import {
+  type DvfMutation,
+  aggregatePrix,
+  deptPrefixFromInsee,
+  ensureCommuneCached,
+  fetchCommuneCsv,
+} from "./dvf.js";
+
+// ---------------------------------------------------------------------------
+// fetch mock — pattern aligné sur src/core/http.test.ts
+// ---------------------------------------------------------------------------
+
+const fetchMock = vi.fn<typeof fetch>();
+
+beforeEach(() => {
+  vi.stubGlobal("fetch", fetchMock);
+  fetchMock.mockReset();
+  mockFrom.mockReset();
+  mockRpc.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+// ---------------------------------------------------------------------------
+// Fixtures CSV
+// ---------------------------------------------------------------------------
+
+const CSV_HEADER =
+  "id_mutation,date_mutation,nature_mutation,valeur_fonciere,code_commune,type_local,surface_reelle_bati,surface_terrain,longitude,latitude";
+
+/** 4 rows : 2 bâties avec prix_m2, 1 terrain, 1 sans lon/lat (doit être ignorée). */
+const CSV_BODY = [
+  // Appartement valide : 200 000 / 50 = 4 000 €/m²
+  "M001,2024-03-01,Vente,200000,75056,Appartement,50,,2.3,48.8",
+  // Maison valide : 300 000 / 100 = 3 000 €/m²
+  "M002,2024-04-01,Vente,300000,75056,Maison,100,,2.35,48.85",
+  // Terrain (pas de surface_reelle_bati)
+  "M003,2024-05-01,Vente,80000,75056,,,,2.32,48.82",
+  // Ligne sans lon/lat → doit être ignorée
+  "M004,2024-06-01,Vente,150000,75056,Appartement,40,,,",
+].join("\n");
+
+const FULL_CSV = `${CSV_HEADER}\n${CSV_BODY}`;
+
+function csvResponse(body: string): Response {
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/csv" } });
+}
+
+// ---------------------------------------------------------------------------
+// Tests deptPrefixFromInsee
+// ---------------------------------------------------------------------------
+
+describe("deptPrefixFromInsee", () => {
+  it("métropole standard", () => {
+    expect(deptPrefixFromInsee("75056")).toBe("75");
+    expect(deptPrefixFromInsee("01001")).toBe("01");
+  });
+
+  it("Corse 2A/2B", () => {
+    expect(deptPrefixFromInsee("2A004")).toBe("2A");
+    expect(deptPrefixFromInsee("2B033")).toBe("2B");
+  });
+
+  it("DOM 97x", () => {
+    expect(deptPrefixFromInsee("97105")).toBe("971");
+    expect(deptPrefixFromInsee("97209")).toBe("972");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests fetchCommuneCsv
+// ---------------------------------------------------------------------------
+
+describe("fetchCommuneCsv", () => {
+  it("parse le CSV, calcule prix_m2 et ignore les lignes sans lon/lat", async () => {
+    fetchMock.mockResolvedValueOnce(csvResponse(FULL_CSV));
+
+    const mutations = await fetchCommuneCsv("75056");
+
+    // 3 lignes conservées (M004 sans lon/lat ignorée)
+    expect(mutations).toHaveLength(3);
+
+    const apt = mutations.find((m) => m.id_mutation === "M001");
+    expect(apt).toBeDefined();
+    expect(apt?.type_local).toBe("Appartement");
+    // 200000 / 50 = 4000
+    expect(apt?.prix_m2).toBeCloseTo(4000, 0);
+
+    const maison = mutations.find((m) => m.id_mutation === "M002");
+    expect(maison?.prix_m2).toBeCloseTo(3000, 0);
+
+    const terrain = mutations.find((m) => m.id_mutation === "M003");
+    // Terrain sans surface_reelle_bati → prix_m2 = null
+    expect(terrain?.prix_m2).toBeNull();
+    expect(terrain?.longitude).toBeCloseTo(2.32, 4);
+    // type_local absent côté CSV → normalisé en '' (PK NOT NULL DEFAULT '')
+    expect(terrain?.type_local).toBe("");
+    // date_mutation toujours peuplée (skip si absente)
+    expect(terrain?.date_mutation).toBe("2024-05-01");
+
+    // M004 sans coordonnées ne doit pas figurer
+    expect(mutations.find((m) => m.id_mutation === "M004")).toBeUndefined();
+  });
+
+  it("retente CURRENT_YEAR-1 sur 404 et renvoie [] si les deux années sont absentes", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("Not Found", { status: 404 }))
+      .mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
+
+    const mutations = await fetchCommuneCsv("99999");
+    expect(mutations).toHaveLength(0);
+    // 2 appels : year N puis year N-1
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throw sur erreur HTTP non-404", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("Server Error", { status: 500 }));
+
+    await expect(fetchCommuneCsv("75056")).rejects.toThrow("HTTP 500");
+  });
+
+  it("skip les rows sans date_mutation (composant NOT NULL de la PK)", async () => {
+    const csv = `${CSV_HEADER}\nM010,,Vente,200000,75056,Appartement,50,,2.3,48.8`;
+    fetchMock.mockResolvedValueOnce(csvResponse(csv));
+
+    const mutations = await fetchCommuneCsv("75056");
+    // La row sans date est rejetée (ne peut pas être insérée dans la PK)
+    expect(mutations).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests ensureCommuneCached — short-circuit si cache frais
+// ---------------------------------------------------------------------------
+
+describe("ensureCommuneCached", () => {
+  it("short-circuit : fetch NOT called si cache frais (< 180 jours)", async () => {
+    const freshFetchedAt = new Date().toISOString();
+    const cacheChain: Record<string, unknown> = {};
+    cacheChain.select = () => cacheChain;
+    cacheChain.eq = () => cacheChain;
+    cacheChain.limit = () =>
+      Promise.resolve({
+        data: [
+          { code_commune: "75056", fetched_at: freshFetchedAt, source_year: 2025, row_count: 10 },
+        ],
+        error: null,
+      });
+    mockFrom.mockReturnValue(cacheChain);
+
+    await ensureCommuneCached("75056", 180);
+
+    // fetch (réseau) NE doit PAS avoir été appelé
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("déclenche le fetch si cache absent", async () => {
+    const selectChain: Record<string, unknown> = {};
+    selectChain.select = () => selectChain;
+    selectChain.eq = () => selectChain;
+    selectChain.limit = () => Promise.resolve({ data: [], error: null });
+
+    const upsertChain: Record<string, unknown> = {};
+    upsertChain.upsert = () => Promise.resolve({ error: null });
+
+    const upsertChain2: Record<string, unknown> = {};
+    upsertChain2.upsert = () => Promise.resolve({ error: null });
+
+    mockFrom
+      .mockReturnValueOnce(selectChain) // getCacheRow
+      .mockReturnValueOnce(upsertChain) // upsertMutations (batch)
+      .mockReturnValueOnce(upsertChain2); // markCommuneCached
+
+    fetchMock.mockResolvedValueOnce(csvResponse(FULL_CSV));
+
+    await ensureCommuneCached("75056", 180);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("déclenche le fetch si cache périmé depuis > maxAgeDays", async () => {
+    const oldDate = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString();
+    const selectChain: Record<string, unknown> = {};
+    selectChain.select = () => selectChain;
+    selectChain.eq = () => selectChain;
+    selectChain.limit = () =>
+      Promise.resolve({
+        data: [{ code_commune: "75056", fetched_at: oldDate, source_year: 2024, row_count: 5 }],
+        error: null,
+      });
+
+    const upsertChain: Record<string, unknown> = {};
+    upsertChain.upsert = () => Promise.resolve({ error: null });
+
+    const upsertChain2: Record<string, unknown> = {};
+    upsertChain2.upsert = () => Promise.resolve({ error: null });
+
+    mockFrom
+      .mockReturnValueOnce(selectChain)
+      .mockReturnValueOnce(upsertChain)
+      .mockReturnValueOnce(upsertChain2);
+
+    fetchMock.mockResolvedValueOnce(csvResponse(FULL_CSV));
+
+    await ensureCommuneCached("75056", 180);
+
+    // Cache périmé → fetch déclenché
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests aggregatePrix
+// ---------------------------------------------------------------------------
+
+describe("aggregatePrix", () => {
+  const makeMutation = (overrides: Partial<DvfMutation>): DvfMutation => ({
+    id_mutation: "X",
+    date_mutation: "2024-01-01",
+    nature_mutation: "Vente",
+    valeur_fonciere: null,
+    code_commune: "75056",
+    type_local: "",
+    surface_reelle_bati: null,
+    surface_terrain: null,
+    prix_m2: null,
+    longitude: 2.3,
+    latitude: 48.8,
+    ...overrides,
+  });
+
+  it("calcule la médiane sur un nombre impair de ventes", () => {
+    const rows: DvfMutation[] = [
+      makeMutation({ prix_m2: 1000 }),
+      makeMutation({ prix_m2: 3000 }),
+      makeMutation({ prix_m2: 2000 }),
+    ];
+    const agg = aggregatePrix(rows);
+    expect(agg.prix_m2_median).toBeCloseTo(2000, 0);
+    expect(agg.n_ventes).toBe(3);
+  });
+
+  it("calcule la médiane sur un nombre pair de ventes (interpolation)", () => {
+    const rows: DvfMutation[] = [
+      makeMutation({ prix_m2: 1000 }),
+      makeMutation({ prix_m2: 2000 }),
+      makeMutation({ prix_m2: 3000 }),
+      makeMutation({ prix_m2: 4000 }),
+    ];
+    const agg = aggregatePrix(rows);
+    // Médiane pair = (2000 + 3000) / 2 = 2500
+    expect(agg.prix_m2_median).toBeCloseTo(2500, 0);
+  });
+
+  it("retourne null pour les médianes quand aucune vente bâtie", () => {
+    const rows: DvfMutation[] = [
+      makeMutation({ prix_m2: null, surface_terrain: 500, valeur_fonciere: 50000 }),
+    ];
+    const agg = aggregatePrix(rows);
+    expect(agg.prix_m2_median).toBeNull();
+    expect(agg.n_ventes).toBe(0);
+    expect(agg.n_terrains).toBe(1);
+  });
+
+  it("calcule prix_terrain_median", () => {
+    const rows: DvfMutation[] = [
+      makeMutation({ surface_terrain: 200, valeur_fonciere: 40000 }),
+      makeMutation({ surface_terrain: 300, valeur_fonciere: 60000 }),
+      makeMutation({ surface_terrain: 100, valeur_fonciere: 20000 }),
+    ];
+    const agg = aggregatePrix(rows);
+    expect(agg.n_terrains).toBe(3);
+    // Médiane de [20000, 40000, 60000] = 40000
+    expect(agg.prix_terrain_median).toBeCloseTo(40000, 0);
+  });
+
+  it("calcule p25 et p75", () => {
+    // 4 valeurs : 1000, 2000, 3000, 4000
+    const rows: DvfMutation[] = [
+      makeMutation({ prix_m2: 1000 }),
+      makeMutation({ prix_m2: 2000 }),
+      makeMutation({ prix_m2: 3000 }),
+      makeMutation({ prix_m2: 4000 }),
+    ];
+    const agg = aggregatePrix(rows);
+    // p25 index = 0.25 * 3 = 0.75 → interpolation entre 1000 et 2000 = 1750
+    expect(agg.prix_m2_p25).toBeCloseTo(1750, 0);
+    // p75 index = 0.75 * 3 = 2.25 → interpolation entre 3000 et 4000 = 3250
+    expect(agg.prix_m2_p75).toBeCloseTo(3250, 0);
+  });
+
+  it("tableau vide → tout null sauf n_ventes/n_terrains = 0", () => {
+    const agg = aggregatePrix([]);
+    expect(agg.prix_m2_median).toBeNull();
+    expect(agg.prix_m2_p25).toBeNull();
+    expect(agg.prix_m2_p75).toBeNull();
+    expect(agg.n_ventes).toBe(0);
+    expect(agg.n_terrains).toBe(0);
+    expect(agg.prix_terrain_median).toBeNull();
+  });
+});
