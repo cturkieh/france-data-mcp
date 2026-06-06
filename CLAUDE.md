@@ -140,7 +140,15 @@ Séquence (voir `scripts/release.sh` qui automatise) :
 6. ☐ `pnpm build && pnpm publish --no-git-checks` (entrer OTP 2FA)
 7. ☐ `mcp-publisher login github` (device code) → `mcp-publisher publish`
 8. ☐ GitHub Release : **auto-créée par `release.yml` sur le push du tag** (étape 4) avec les notes du CHANGELOG. NE PAS lancer `gh release create` (422 `tag_name already exists`). Vérifier : `gh release view vX.Y.Z`
-9. ☐ Vérifier : `npm view france-data-mcp version`, `/healthz`, et registry MCP via `curl -s 'https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp' | jq -r '[.servers[]|select(.server.name=="io.github.cturkieh/france-data-mcp")]|sort_by(._meta."io.modelcontextprotocol.registry/official".updatedAt)|last|.server.version'` (PAS `.servers[0]` = plus ancienne entrée, fausse alerte)
+9. ☐ Vérifier : `npm view france-data-mcp version`, `/healthz`, et registry MCP.
+   - ⚠️ **Le `search` registry PAGINE par 30 et n'est PAS trié globalement (updatedAt/semver) — la version qu'on vient de publier peut tomber PAGE 2** (faux négatif prouvé V0.26.1 2026-06-06 : `sort_by(updatedAt).last` sur la page 1 renvoyait 0.26.0 alors que 0.26.1 était active page 2). NE PAS se fier à une requête mono-page. Vérifier en **paginant via `metadata.nextCursor`** (camelCase, PAS `next_cursor`) ET en cherchant la version cible explicitement :
+     ```bash
+     V=0.26.1; base='https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp'; cur=''
+     while :; do url="$base"; [ -n "$cur" ] && url="$base&cursor=$(printf %s "$cur"|jq -sRr @uri)"
+       r=$(curl -s "$url"); echo "$r" | jq -e --arg v "$V" '.servers[]|select(.server.name=="io.github.cturkieh/france-data-mcp" and .server.version==$v)' >/dev/null && { echo "✅ $V registry"; break; }
+       cur=$(echo "$r" | jq -r '.metadata.nextCursor // empty'); [ -z "$cur" ] && { echo "❌ $V absente"; break; }; done
+     ```
+   - `mcp-publisher publish` qui renvoie `400 cannot publish duplicate version` = la version EST DÉJÀ publiée (garde d'idempotence, succès déguisé), PAS un échec — re-vérifier via la pagination ci-dessus avant de re-tenter.
 
 ## Contribuer
 
