@@ -4,34 +4,42 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — feat/immobilier-potentiel (composite `dynamique_immobiliere`)
+## [0.26.0] — 2026-06-06 — Domaine Immobilier (intelligence pour rapports d'implantation)
+
+Nouveau domaine **Immobilier** : 2 outils MCP exposés (34 → **36 tools**, 8 → **10 référentiels**).
+Surface santé/territoire inchangée.
 
 ### Added
 
-- **Composite `dynamique_immobiliere`** (`src/immobilier/dynamique-immobiliere.ts`) — orchestre
-  3 briques leaf (Sit@del permis · Apicarto PLU · DVF foncier) en parallèle et retourne un
-  résultat à **2 registres distincts** : `note` (volume → scoring LLM) + `info` (quartiers AU,
-  prix → contexte). Doctrine de dégradation `runSection` : échec d'une section →
-  `couverture.<section>` = `"indisponible:<raison>"`, composite ne throw pas. Géocodage inverse
-  = ancrage obligatoire (throw si `codeCommune` absent). Signal heuristic : `"fort"` /
-  `"modéré"` / `"faible"` sur logements autorisés + zones AU ouvertes (AUC).
+- **`dynamique_immobiliere(lat, lon, rayon_km)`** (`src/immobilier/dynamique-immobiliere.ts`) —
+  composite à **2 registres distincts** : `note` (volume → scoring LLM : logements
+  autorisés/commencés, zones AU ouvertes, `signal` `fort`/`modéré`/`faible`) + `info` (quartiers
+  AU, prix €/m², ventes terrains → contexte). Orchestre 3 briques en parallèle ; `geojson` =
+  polygones des zones AU. Ancrage = géocodage inverse obligatoire. Dégradation par section
+  (`couverture.<section>` = `ok | indisponible:<raison>`), jamais de throw global.
+- **`cout_foncier(lat, lon, rayon_km)`** (`src/immobilier/cout-foncier.ts`) — prix médian €/m²
+  DVF (P25/P75, `n_ventes`, période) — info seule, hors score.
+- **3 sources immobilières** : ventes foncières **DVF / DGFiP** (cache paresseux Postgres/PostGIS),
+  permis de construire **Sit@del via API DiDo / SDES** (live par commune), zones AU du **PLU via
+  apicarto / IGN** (live). `getZonesAU` étendu avec `radiusKm` (bbox Polygon).
+- **2 migrations** : `dvf_mutations` (`geom` GENERATED STORED) + `dvf_commune_cache` + RPC
+  `dvf_in_radius` (`ST_DWithin(::geography)`, mètres) ; addendum RLS.
 
-- **Extension `getZonesAU` avec `radiusKm`** (`src/immobilier/apicarto-plu.ts`) — nouvel
-  `opts.radiusKm` : construit un bbox Polygon (offsets degrés via `bboxPolygon`) au lieu d'un
-  Point, pour récupérer toutes les zones AU intersectant le rayon. Backward-compatible (sans
-  `radiusKm` → comportement Point inchangé). `ZonesAUResult.zones_au` enrichi de `typezone`
-  (requis par le composite pour compter les zones AUC sans ré-accéder au geojson).
+### Infra & doctrine
 
-- **32 tests verts** (4 fichiers) : `dvf.test.ts` (16), `apicarto-plu.test.ts` (7 dont test
-  Polygon bbox), `sitadel.test.ts` (6), `dynamique-immobiliere.test.ts` (3 : all-ok / PLU-fail
-  / centroïde-fail-partiel). tsc strict + Biome clean.
+- **Cache paresseux DVF** rempli au serve-time selon la doctrine du projet **anon lit /
+  service_role écrit** : policy SELECT anon sur `dvf_mutations`, écritures via
+  `getUntypedServiceClient` (jamais d'écriture exposée au rôle public). 1ʳᵉ utilisation
+  serve-time de la clé service (ajoutée à l'env Vercel Production + Preview).
+- **Dédoublonnage PK des mutations DVF** avant upsert : le CSV geo-dvf partage la clé primaire
+  composite sur plusieurs lots d'une même vente → corrige le rejet `ON CONFLICT` (SQLSTATE
+  21000). Source unique `DVF_PK_COLS` pilotant clé de dédup **et** cible `onConflict`.
 
-### Quality (post-review)
+### Quality
 
-- `couverture` fields typés `SectionStatus` (pas `string`) · `bboxPolygon` return type précis ·
-  `n_terrains` issu de `aggregatePrix` (supprime le re-filter redondant) · index drift
-  `zones_au/features` éliminé (dérivé de `topZones` seul) · log `console.warn` ajouté sur
-  `reverseGeocode → null` (hors couverture IGN).
+- **1685 tests** verts (tsc strict 2 configs + Biome clean). Pipeline `/review-fix` complet
+  (simplify + code-reviewer + silent-failure-hunter + type-design-analyzer) → PASS.
+- Prouvé en prod : `cout_foncier` Cherbourg **2411 €/m²** (234 ventes), La Hague **2200 €/m²**.
 
 ---
 
