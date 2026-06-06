@@ -4,6 +4,7 @@ import type { Database } from "./supabase-types.js";
 let anonClient: SupabaseClient<Database> | null = null;
 let serviceClient: SupabaseClient<Database> | null = null;
 let untypedAnonClient: SupabaseClient | null = null;
+let untypedServiceClient: SupabaseClient | null = null;
 
 /**
  * Read a required environment variable, distinguishing "absent" from "set
@@ -78,9 +79,28 @@ export function getUntypedAnonClient(): SupabaseClient {
   return untypedAnonClient;
 }
 
+/**
+ * Privileged client SANS typage Database — jumeau de `getUntypedAnonClient`
+ * mais avec la clé service_role (bypass RLS). Utilisé pour les ÉCRITURES de
+ * cache paresseux côté serveur (ex. `dvf_mutations` / `dvf_commune_cache`),
+ * quand la table n'est pas encore dans les types générés. Comme
+ * `getServiceClient`, ne JAMAIS exposer aux end users : réservé au runtime
+ * serveur (endpoint Vercel, scripts). Doctrine du projet : le rôle anon reste
+ * en lecture seule ; toute écriture passe par service_role.
+ */
+export function getUntypedServiceClient(): SupabaseClient {
+  if (!untypedServiceClient) {
+    const url = requireEnv("SUPABASE_URL");
+    const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+    untypedServiceClient = createClient(url, key, { auth: { persistSession: false } });
+  }
+  return untypedServiceClient;
+}
+
 /** Test-only helper: forces clients to be re-created on next call. */
 export function __resetClientsForTesting(): void {
   anonClient = null;
   serviceClient = null;
   untypedAnonClient = null;
+  untypedServiceClient = null;
 }
