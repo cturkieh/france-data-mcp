@@ -38,12 +38,25 @@ import {
  *   - `annuaire_ameli_previous` existe ; `ameli_ps_previous` n'a jamais existé.
  *   - `centres_sante_previous` existe ; `ingest_log.source='cds'`.
  *   - `finess_previous` / `rpps_previous` existent ; source = même que prodTable.
+ *
+ * Ajout IRIS 2026-06-06 : l'ingestion IRIS produit QUATRE tables prod
+ * (`iris`, `iris_population`, `iris_familles`, `iris_revenu`) — chacune swappée
+ * → chacune a son propre `<prodTable>_previous` — mais toutes loguées sous une
+ * SEULE `ingest_log.source='iris'`. Elles étaient absentes de ce mapping : leurs
+ * `_previous` (~320 MB) n'étaient donc JAMAIS nettoyés (gap fermé après un DROP
+ * manuel prouvé prod). IRIS = source INSEE statique sans cron récurrent → le
+ * seuil d'âge (7 j depuis le dernier `ingest_log` success) déclenche le DROP au
+ * prochain run de maintenance. Les 4 partagent `source: "iris"` à dessein.
  */
 const SOURCES: Array<{ prodTable: string; source: string }> = [
   { prodTable: "finess", source: "finess" },
   { prodTable: "annuaire_ameli", source: "ameli_ps" },
   { prodTable: "rpps", source: "rpps" },
   { prodTable: "centres_sante", source: "cds" },
+  { prodTable: "iris", source: "iris" },
+  { prodTable: "iris_population", source: "iris" },
+  { prodTable: "iris_familles", source: "iris" },
+  { prodTable: "iris_revenu", source: "iris" },
 ];
 
 function parseMaxAgeDaysFromArgv(): number {
