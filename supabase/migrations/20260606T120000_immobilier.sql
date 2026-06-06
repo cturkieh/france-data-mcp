@@ -49,23 +49,10 @@ CREATE TABLE IF NOT EXISTS dvf_commune_cache (
 );
 
 -- ---------------------------------------------------------------------------
--- 3. Table sitadel_logements (Sit@del2 autorisations/commencements)
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS sitadel_logements (
-  code_commune         TEXT NOT NULL,
-  periode              TEXT NOT NULL,
-  logements_autorises  INT,
-  logements_commences  INT,
-  PRIMARY KEY (code_commune, periode)
-);
-
-CREATE INDEX IF NOT EXISTS sitadel_logements_code_commune_idx
-  ON sitadel_logements (code_commune);
-
--- ---------------------------------------------------------------------------
--- 4. RPC dvf_in_radius — même idiome que finess_in_radius :
+-- 3. RPC dvf_in_radius — même idiome que finess_in_radius :
 --    geometry(Point,4326) → cast ::geography pour ST_DWithin (distance en mètres)
+-- Note : plus de table sitadel_logements — les permis de construire sont requêtés
+-- en direct via l'API DiDo SDES (live par commune, pas d'ingestion).
 -- ---------------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION dvf_in_radius(
