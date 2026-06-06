@@ -194,24 +194,33 @@ export async function dynamiqueImmobiliere(
   ).length;
 
   // --- Quartiers AU (centroïde + reverse-geocode, ≤ 5) --------------------
-  const topFeatures = auFeatures.slice(0, 5);
-  const auLibelles = (zonesData?.zones_au ?? []).slice(0, 5).map((z) => z.libelle);
+  // Pair (libelle, feature) from the same source slice to avoid cross-array index drift.
+  // zones_au and geojson.features are built from the same auFeatures in getZonesAU
+  // so they're aligned, but we derive both from zones_au to make it structurally safe.
+  const topZones = (zonesData?.zones_au ?? []).slice(0, 5);
 
   const centroidsResults = await Promise.allSettled(
-    topFeatures.map(async (feat, i) => {
+    topZones.map(async (zone, i) => {
+      const feat = auFeatures[i]; // parallel by construction — same index, same AU source
       const centroid = featureCentroid(feat);
-      if (!centroid) return { libelle: auLibelles[i] ?? "", secteur: null };
+      if (!centroid) return { libelle: zone.libelle, secteur: null };
       const rg = await reverseGeocode({ lat: centroid.lat, lon: centroid.lon });
+      // rg === null means coords outside IGN coverage (e.g. centroid in sea) — log + null
+      if (!rg) {
+        console.warn(
+          `${LOG_TAG}: reverse-geocode centroïde AU[${i}] hors couverture IGN — secteur:null`,
+        );
+      }
       const secteur = rg ? (rg.commune ?? rg.label) : null;
-      return { libelle: auLibelles[i] ?? "", secteur };
+      return { libelle: zone.libelle, secteur };
     }),
   );
 
   const quartiersAu = centroidsResults.map((r, i) => {
     if (r.status === "fulfilled") return r.value;
-    // Reverse-geocode du centroïde a échoué → secteur null
+    // Reverse-geocode du centroïde a rejeté (erreur réseau) → secteur null
     console.warn(`${LOG_TAG}: reverse-geocode centroïde AU[${i}] échoué — secteur:null`);
-    return { libelle: auLibelles[i] ?? "", secteur: null };
+    return { libelle: topZones[i]?.libelle ?? "", secteur: null };
   });
 
   // --- DVF foncier --------------------------------------------------------
