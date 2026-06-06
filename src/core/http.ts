@@ -47,14 +47,24 @@ type FetchJsonOptions = RateLimitOptions & {
 };
 
 /**
- * GET une URL et parse la réponse JSON, avec retry exponentiel sur 429 et 5xx.
+ * Boucle de retry partagée par `fetchJson` et `fetchText`.
  *
  * - Sur 429 : respecte `retry-after` (secondes) si présent, sinon backoff exponentiel.
  * - Sur 5xx : backoff exponentiel.
- * - Sur 4xx (sauf 429) : throw immédiatement (erreur logique, pas un retry).
- * - User-Agent par défaut identifie la lib et le repo (pour traçabilité).
+ * - Sur 4xx (sauf 429) : throw `HttpError` immédiatement (erreur logique, pas un retry).
+ * - `accept` : valeur du header `Accept` (`application/json` pour JSON, `text/csv` pour CSV…).
+ * - `parseBody(response)` : extrait le corps de réponse `2xx`. Peut throw (ex.
+ *   `response.json()` → `SyntaxError` sur un body non-JSON) : une telle erreur
+ *   est retentée comme une panne transitoire (cf. commentaire P3 ci-dessous).
+ *   Pour `fetchText`, `response.text()` ne peut pas produire de `SyntaxError`
+ *   donc ce chemin reste inerte — comportement identique préservé.
  */
-export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}): Promise<T> {
+async function fetchWithRetry<T>(
+  url: string,
+  accept: string,
+  parseBody: (response: Response) => Promise<T>,
+  options: FetchJsonOptions,
+): Promise<T> {
   const {
     maxRetries = 3,
     baseDelayMs = 500,
@@ -69,7 +79,7 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
     try {
       const response = await fetch(url, {
         headers: {
-          Accept: "application/json",
+          Accept: accept,
           "User-Agent": userAgent,
           ...headers,
         },
@@ -77,7 +87,7 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
       });
 
       if (response.ok) {
-        return (await response.json()) as T;
+        return await parseBody(response);
       }
 
       if (response.status === 429) {
@@ -155,6 +165,38 @@ export async function fetchJson<T>(url: string, options: FetchJsonOptions = {}):
 
   console.error(`[france-data-mcp] giving up on ${url} after ${maxRetries + 1} attempts`);
   throw lastError ?? new Error(`Unknown failure fetching ${url}`);
+}
+
+/**
+ * GET une URL et parse la réponse JSON, avec retry exponentiel sur 429 et 5xx.
+ *
+ * - Sur 429 : respecte `retry-after` (secondes) si présent, sinon backoff exponentiel.
+ * - Sur 5xx : backoff exponentiel.
+ * - Sur 4xx (sauf 429) : throw immédiatement (erreur logique, pas un retry).
+ * - User-Agent par défaut identifie la lib et le repo (pour traçabilité).
+ */
+export function fetchJson<T>(url: string, options: FetchJsonOptions = {}): Promise<T> {
+  return fetchWithRetry<T>(
+    url,
+    "application/json",
+    (response) => response.json() as Promise<T>,
+    options,
+  );
+}
+
+/**
+ * GET une URL et retourne la réponse en texte brut, avec EXACTEMENT la même
+ * politique de retry/backoff/429/timeout que `fetchJson`. Conçu pour les
+ * endpoints CSV (geo-DVF) — sans ça, un 429/5xx amont sur le téléchargement
+ * commune produisait un échec sec (raw `fetch`, zéro retry).
+ *
+ * `response.text()` ne peut pas produire de `SyntaxError` : le chemin de retry
+ * "body non-parsable" de la boucle partagée reste donc inerte ici (un body
+ * texte est toujours lisible) — seuls 429/5xx/réseau déclenchent un retry.
+ */
+export function fetchText(url: string, options: FetchJsonOptions = {}): Promise<string> {
+  const accept = options.headers?.Accept ?? options.headers?.accept ?? "text/csv, text/plain, */*";
+  return fetchWithRetry<string>(url, accept, (response) => response.text(), options);
 }
 
 function parseRetryAfter(header: string | null): number {

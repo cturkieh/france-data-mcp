@@ -18,14 +18,20 @@ vi.mock("../storage/supabase.js", () => ({
 // Imports (after mocks)
 // ---------------------------------------------------------------------------
 
+import { runWithFakeTimers } from "../core/test-helpers.js";
 import {
   type DvfMutation,
   type FetchCommuneCsvResult,
   aggregatePrix,
   deptPrefixFromInsee,
+  dvfInRadius,
   ensureCommuneCached,
   fetchCommuneCsv,
 } from "./dvf.js";
+
+// Spy module pour mocker fetchCommunesInRadius/ensureCommuneCached dans les
+// tests dvfInRadius (échec total vs partiel) sans toucher au réseau.
+import * as dvfModule from "./dvf.js";
 
 // ---------------------------------------------------------------------------
 // fetch mock — pattern aligné sur src/core/http.test.ts
@@ -38,6 +44,10 @@ beforeEach(() => {
   fetchMock.mockReset();
   mockFrom.mockReset();
   mockRpc.mockReset();
+  // Les chemins d'erreur (5xx épuisé, échec total ingestion, réseau) loggent —
+  // on les silence pour garder la sortie de test propre (aligné http.test.ts).
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -154,10 +164,49 @@ describe("fetchCommuneCsv", () => {
     expect(mutations.length).toBeGreaterThan(0);
   });
 
-  it("throw sur erreur HTTP non-404", async () => {
-    fetchMock.mockResolvedValueOnce(new Response("Server Error", { status: 500 }));
+  it("throw sur erreur HTTP non-404 (5xx retenté puis épuisé via fetchText)", async () => {
+    vi.useFakeTimers();
+    try {
+      // fetchText retente les 5xx (retry/backoff partagé avec fetchJson) : tous
+      // les essais renvoient 500 → HttpError(500) épuisé → fetchCommuneCsv le
+      // remappe en "HTTP 500". Réponse fraîche par appel (un body se lit 1×).
+      fetchMock.mockImplementation(async () =>
+        Promise.resolve(new Response("Server Error", { status: 500 })),
+      );
 
-    await expect(fetchCommuneCsv("75056")).rejects.toThrow("HTTP 500");
+      await expect(runWithFakeTimers(fetchCommuneCsv("75056"))).rejects.toThrow("HTTP 500");
+      // 4 essais (maxRetries=3 par défaut) sur l'année CURRENT_YEAR — le 5xx
+      // épuisé throw AVANT le fallback année N-1 (un 5xx n'est pas un 404).
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejette avec un message réseau quand fetch échoue (TypeError net failure)", async () => {
+    vi.useFakeTimers();
+    try {
+      // fetchText retente les erreurs réseau puis les épuise → fetchCommuneCsv
+      // remappe en message contenant "network error".
+      fetchMock.mockRejectedValue(new TypeError("net failure"));
+
+      await expect(runWithFakeTimers(fetchCommuneCsv("75056"))).rejects.toThrow(/network/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("prix_m2 = null quand surface_reelle_bati = 0 (garde anti-division)", async () => {
+    const csv = `${CSV_HEADER}\nM020,2024-07-01,Vente,200000,75056,Appartement,0,,2.3,48.8`;
+    fetchMock.mockResolvedValueOnce(csvResponse(csv));
+
+    const { mutations } = await fetchCommuneCsv("75056");
+    // La row est conservée (lon/lat/date présents) mais surface = 0 → prix_m2 null
+    // (pas d'Infinity ni de division par zéro).
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]?.prix_m2).toBeNull();
+    // surface_reelle_bati normalisée en null (srb > 0 requis pour la stocker).
+    expect(mutations[0]?.surface_reelle_bati).toBeNull();
   });
 
   it("skip les rows sans date_mutation (composant NOT NULL de la PK)", async () => {
@@ -247,6 +296,57 @@ describe("ensureCommuneCached", () => {
 
     // Cache périmé → fetch déclenché
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests dvfInRadius — échec total ingestion ≠ « zéro vente » (Fix A2)
+// ---------------------------------------------------------------------------
+
+describe("dvfInRadius", () => {
+  it("REJETTE quand TOUTES les communes échouent à l'ingestion (pas un zéro confiant)", async () => {
+    // 2 communes résolues, les 2 ensureCommuneCached rejettent → échec total.
+    vi.spyOn(dvfModule, "fetchCommunesInRadius").mockResolvedValueOnce(["75056", "92044"]);
+    vi.spyOn(dvfModule, "ensureCommuneCached")
+      .mockRejectedValueOnce(new Error("ingest fail 75056"))
+      .mockRejectedValueOnce(new Error("ingest fail 92044"));
+
+    // La RPC ne DOIT PAS être atteinte (on throw avant) — on l'arme quand même
+    // pour prouver qu'elle n'est pas appelée.
+    mockRpc.mockResolvedValue({ data: [], error: null });
+
+    await expect(dvfInRadius(48.8, 2.3, 2)).rejects.toThrow(/ingestion totale/);
+    expect(mockRpc).not.toHaveBeenCalled();
+  });
+
+  it("PROCÈDE (appelle la RPC) quand au moins une commune réussit (échec partiel)", async () => {
+    vi.spyOn(dvfModule, "fetchCommunesInRadius").mockResolvedValueOnce(["75056", "92044"]);
+    vi.spyOn(dvfModule, "ensureCommuneCached")
+      .mockResolvedValueOnce(undefined) // 75056 OK
+      .mockRejectedValueOnce(new Error("ingest fail 92044")); // 92044 KO
+
+    const rpcRows: DvfMutation[] = [
+      {
+        id_mutation: "M100",
+        date_mutation: "2024-03-01",
+        nature_mutation: "Vente",
+        valeur_fonciere: 200000,
+        code_commune: "75056",
+        type_local: "Appartement",
+        surface_reelle_bati: 50,
+        surface_terrain: null,
+        prix_m2: 4000,
+        longitude: 2.3,
+        latitude: 48.8,
+      },
+    ];
+    mockRpc.mockResolvedValue({ data: rpcRows, error: null });
+
+    const rows = await dvfInRadius(48.8, 2.3, 2);
+    // Échec partiel → on procède : la RPC est appelée et ses rows remontent.
+    expect(mockRpc).toHaveBeenCalledTimes(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id_mutation).toBe("M100");
   });
 });
 

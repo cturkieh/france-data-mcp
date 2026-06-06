@@ -16,9 +16,16 @@
  */
 
 import { parseCsv } from "../core/csv.js";
-import { DEFAULT_USER_AGENT } from "../core/http.js";
+import { DEFAULT_USER_AGENT, HttpError, fetchJson, fetchText } from "../core/http.js";
 import { formatRpcError, validateCoords, validateRadiusKm } from "../sante/db-helpers.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
+// Auto-import du module pour que `dvfInRadius` appelle `fetchCommunesInRadius`
+// et `ensureCommuneCached` via la table d'exports — sinon ces appels intra-module
+// se lient à la fonction locale et `vi.spyOn(dvfModule, …)` ne peut pas les
+// intercepter (les tests devraient sinon descendre jusqu'au réseau/Supabase).
+// Runtime strictement identique : c'est la même fonction, atteinte par le même
+// binding ESM (live binding sur le namespace du module courant).
+import * as self from "./dvf.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -115,33 +122,36 @@ export async function fetchCommuneCsv(insee: string): Promise<FetchCommuneCsvRes
 
   for (const year of [CURRENT_YEAR, CURRENT_YEAR - 1]) {
     const url = `${GEO_DVF_BASE}/${year}/communes/${dept}/${insee}.csv`;
-    let response: Response;
+    let text: string;
     try {
-      // fetch suit les redirections (302) par défaut (redirect: "follow" est le défaut)
-      response = await fetch(url, {
-        headers: { "User-Agent": DEFAULT_USER_AGENT },
-        redirect: "follow",
-      });
+      // `fetchText` applique la MÊME politique retry/backoff/429/5xx que `fetchJson`
+      // (geo-DVF est sujet aux 429/5xx transitoires sous charge). `fetch` suit les
+      // redirections (302) par défaut. Un 404 throw un `HttpError` immédiat (non
+      // transitoire → pas de retry) que l'on rattrape pour le fallback année N-1.
+      text = await fetchText(url, { headers: { "User-Agent": DEFAULT_USER_AGENT } });
     } catch (err) {
+      if (err instanceof HttpError && err.status === 404) {
+        // Essai année précédente seulement si c'est la première tentative
+        if (year === CURRENT_YEAR) continue;
+        // Année précédente aussi absente → commune sans données DVF (cas
+        // attendu, pas une erreur : on distingue « pas de données » de « panne »).
+        console.warn(
+          `[france-data-mcp] dvf fetchCommuneCsv(${insee}): aucune donnée DVF (404 sur ${CURRENT_YEAR} et ${CURRENT_YEAR - 1})`,
+        );
+        return { mutations: [], year };
+      }
+      if (err instanceof HttpError) {
+        // 5xx épuisé après retries OU autre 4xx → erreur amont non récupérable.
+        const msg = `[france-data-mcp] dvf fetchCommuneCsv(${insee}, year=${year}): HTTP ${err.status}`;
+        console.error(msg);
+        throw new Error(msg);
+      }
+      // Erreur réseau (DNS, socket, timeout) déjà retentée et épuisée par fetchText.
       const msg = `[france-data-mcp] dvf fetchCommuneCsv(${insee}, year=${year}): network error: ${(err as Error).message}`;
       console.error(msg);
       throw new Error(msg);
     }
 
-    if (response.status === 404) {
-      // Essai année précédente seulement si c'est la première tentative
-      if (year === CURRENT_YEAR) continue;
-      // Année précédente aussi absente → commune sans données DVF
-      return { mutations: [], year };
-    }
-
-    if (!response.ok) {
-      throw new Error(
-        `[france-data-mcp] dvf fetchCommuneCsv(${insee}, year=${year}): HTTP ${response.status}`,
-      );
-    }
-
-    const text = await response.text();
     return { mutations: parseDvfCsv(insee, text, year), year };
   }
 
@@ -333,21 +343,39 @@ export async function dvfInRadius(
   validateCoords(lat, lon);
   validateRadiusKm(radiusKm);
 
-  // Résolution des communes dans le cercle via geo.api.gouv.fr
-  const communeCodes = await fetchCommunesInRadius(lat, lon, radiusKm);
+  // Résolution des communes dans le cercle via geo.api.gouv.fr.
+  // Appel via `self.` (namespace du module) pour la testabilité — cf. import.
+  const communeCodes = await self.fetchCommunesInRadius(lat, lon, radiusKm);
 
   // Cache paresseux : parallélisation plafonnée (Promise.allSettled pour ne pas
   // bloquer sur une commune sans données)
-  const results = await Promise.allSettled(communeCodes.map((code) => ensureCommuneCached(code)));
+  const results = await Promise.allSettled(
+    communeCodes.map((code) => self.ensureCommuneCached(code)),
+  );
 
-  // Log les échecs sans bloquer la requête principale
+  // Log les échecs sans bloquer la requête principale, en comptant les rejets.
+  let rejectedCount = 0;
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r && r.status === "rejected") {
+      rejectedCount++;
       console.warn(
         `[france-data-mcp] dvfInRadius: ensureCommuneCached(${communeCodes[i] ?? "?"}) failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
       );
     }
+  }
+
+  // Échec TOTAL de l'ingestion (toutes les communes ont échoué) : on NE PEUT PAS
+  // distinguer « zéro vente » de « rien n'a pu être ingéré ». Retourner les rows
+  // de la RPC ici afficherait un « 0 vente » faussement confiant (sous-estimation
+  // silencieuse — la table peut contenir un cache périmé partiel ou rien). On
+  // throw → `runSection("terrains")` dégrade en `indisponible:<raison>` au lieu
+  // d'un `ok` mensonger. Échec PARTIEL (≥1 commune ok) : on procède avec la RPC
+  // (les communes ingérées sont représentatives, les warns ci-dessus tracent le reste).
+  if (communeCodes.length > 0 && rejectedCount === communeCodes.length) {
+    const msg = `[france-data-mcp] dvfInRadius: ingestion totale échouée (${rejectedCount}/${communeCodes.length} communes) — section terrains indisponible (pas un « zéro vente »)`;
+    console.error(msg);
+    throw new Error(msg);
   }
 
   // Appel RPC
@@ -396,22 +424,22 @@ export async function fetchCommunesInRadius(
   const distanceMax = Math.round(radiusKm * 1000);
   const url = `https://geo.api.gouv.fr/communes?lat=${lat}&lon=${lon}&distance_max=${distanceMax}&fields=code&format=json&limit=50`;
 
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      headers: { "User-Agent": DEFAULT_USER_AGENT },
-    });
-  } catch (err) {
-    const msg = `[france-data-mcp] fetchCommunesInRadius: network error: ${(err as Error).message}`;
-    console.error(msg);
-    throw new Error(msg);
+  // `fetchJson` applique retry/backoff/429/5xx (geo.api.gouv.fr renvoie parfois
+  // une page d'erreur HTML transitoire → retentée comme un 5xx) + log non-silencieux.
+  const communes = await fetchJson<GeoApiCommune[]>(url, {
+    headers: { "User-Agent": DEFAULT_USER_AGENT },
+  });
+
+  // Garde-fou contrat : geo.api.gouv.fr DOIT renvoyer un tableau. Un objet
+  // d'erreur (`{ code, message }`) passerait `.map` en runtime avec un crash
+  // opaque — on échoue ici avec un message explicite (miroir du guard
+  // `Array.isArray(data)` sur le retour RPC `dvf_in_radius`).
+  if (!Array.isArray(communes)) {
+    throw new Error(
+      `[france-data-mcp] fetchCommunesInRadius: réponse inattendue (non-array) de ${url} — got ${typeof communes}`,
+    );
   }
 
-  if (!response.ok) {
-    throw new Error(`[france-data-mcp] fetchCommunesInRadius: HTTP ${response.status} on ${url}`);
-  }
-
-  const communes = (await response.json()) as GeoApiCommune[];
   return communes.map((c) => c.code);
 }
 
