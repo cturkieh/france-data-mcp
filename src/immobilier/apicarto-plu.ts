@@ -76,7 +76,11 @@ function isZoneAU(typezone: unknown): boolean {
  * Construit un GeoJSON Polygon bbox autour d'un point.
  * Offsets en degrés : dLat = radiusKm/111, dLon = radiusKm/(111*cos(lat)).
  */
-function bboxPolygon(lat: number, lon: number, radiusKm: number): object {
+function bboxPolygon(
+  lat: number,
+  lon: number,
+  radiusKm: number,
+): { type: "Polygon"; coordinates: [number, number][][] } {
   const dLat = radiusKm / 111;
   const dLon = radiusKm / (111 * Math.cos((lat * Math.PI) / 180));
   const minLat = lat - dLat;

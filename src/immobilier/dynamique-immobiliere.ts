@@ -13,7 +13,7 @@
  *     le reste du résultat est préservé.
  */
 
-import { runSection } from "../sante/panorama-implantation.js";
+import { type SectionStatus, runSection } from "../sante/panorama-implantation.js";
 import { reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
 import { aggregatePrix, dvfInRadius } from "./dvf.js";
@@ -66,9 +66,9 @@ export interface DynamiqueImmobiliereResult {
     rayon_km: number;
   };
   couverture: {
-    permis: string;
-    zones_au: string;
-    terrains: string;
+    permis: SectionStatus;
+    zones_au: SectionStatus;
+    terrains: SectionStatus;
   };
   note: DynamiqueImmobiliereNote;
   info: DynamiqueImmobiliereInfo;
@@ -193,9 +193,6 @@ export async function dynamiqueImmobiliere(
     z.typezone.toUpperCase().startsWith("AUC"),
   ).length;
 
-  // zones_au_surface_ha : no external area lib → null (best-effort)
-  const zonesAuSurfaceHa: number | null = null;
-
   // --- Quartiers AU (centroïde + reverse-geocode, ≤ 5) --------------------
   const topFeatures = auFeatures.slice(0, 5);
   const auLibelles = (zonesData?.zones_au ?? []).slice(0, 5).map((z) => z.libelle);
@@ -219,23 +216,15 @@ export async function dynamiqueImmobiliere(
 
   // --- DVF foncier --------------------------------------------------------
   const dvfRows = dvfOut.data ?? [];
-  const terrainRows = dvfRows.filter(
-    (r) => r.surface_terrain !== null && (r.surface_terrain ?? 0) > 0,
-  );
   const agg = aggregatePrix(dvfRows);
+  // n_terrains comes directly from aggregatePrix — no redundant re-filter
   const terrainsInfo = {
-    n: terrainRows.length,
+    n: agg.n_terrains,
     prix_terrain_median: agg.prix_terrain_median,
   };
 
-  // --- Signal -------------------------------------------------------------
+  // --- Signal + result ---------------------------------------------------
   const signal = computeSignal(logAuth, zonesImm, permisAvailable);
-
-  // --- GeoJSON (zones AU pour la carte) -----------------------------------
-  const geojson: { type: "FeatureCollection"; features: unknown[] } = {
-    type: "FeatureCollection",
-    features: auFeatures,
-  };
 
   return {
     meta: { code_commune, commune, lat, lon, rayon_km },
@@ -245,7 +234,7 @@ export async function dynamiqueImmobiliere(
       logements_commences_recent: logCom,
       zones_au_nombre: zonesNombre,
       zones_au_immediates: zonesImm,
-      zones_au_surface_ha: zonesAuSurfaceHa,
+      zones_au_surface_ha: null, // no external area lib available
       signal,
     },
     info: {
@@ -254,6 +243,6 @@ export async function dynamiqueImmobiliere(
       prix_m2_median: agg.prix_m2_median,
       terrains: terrainsInfo,
     },
-    geojson,
+    geojson: { type: "FeatureCollection", features: auFeatures },
   };
 }
