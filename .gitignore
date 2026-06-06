@@ -13,6 +13,9 @@ coverage
 *.tgz
 docs/backlog.md
 docs/superpowers/
+# Guide perso/interne — jamais publié sur le repo OSS public
+docs/guide-outils.html
+docs/guide-outils.md
 .env*.local
 .phase2-case4-baseline.json
 

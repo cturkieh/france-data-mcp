@@ -4,6 +4,40 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.26.1] — 2026-06-06 — Immobilier : dégradation gracieuse point côtier + robustesse boundary
+
+Patch de robustesse sur le domaine Immobilier. Surface inchangée (10 référentiels / 36 tools).
+
+### Fixed
+
+- **`dynamique_immobiliere` ne plante plus sur un point sans commune** (côtier/isolé — ex. site
+  industriel en bord de mer). Le géocodage inverse ne sert QU'AUX permis Sit@del (maille commune) ;
+  les zones AU (apicarto) et terrains (DVF) sont calculés **par rayon** et n'ont pas besoin de la
+  commune. Avant : `RangeError` → tout l'appel échouait en JSON-RPC `-32602` (rapport d'implantation
+  avec card + carte AU vides, prouvé prod). Après : `couverture.permis = "indisponible:commune_introuvable"`,
+  `meta.code_commune`/`commune` → `null`, et zones AU + terrains restent servis ; `note.signal`
+  recalculé sur les zones seules. La distinction est préservée : un **null** du reverse-geocode (hors
+  couverture IGN, attendu) dégrade ; un **throw** (panne réseau IGN) remonte toujours en erreur
+  (garde-fou test dédié). `src/immobilier/dynamique-immobiliere.ts`.
+
+### Changed
+
+- **Alias d'entrée tolérés sur `dynamique_immobiliere` + `cout_foncier`** : `latitude`→`lat`,
+  `longitude`→`lon`, `rayon`/`rayonKm`→`rayon_km` (via `normalizeAliases` + constante partagée
+  `IMMOBILIER_LATLON_ALIASES`, source unique anti-drift). Aligne ces 2 tools sur le reste de la
+  surface MCP. `api/tools.ts`.
+- **Description `cout_foncier` précisée** : le prix médian €/m² couvre le **résidentiel bâti
+  (maisons + appartements uniquement, hors locaux commerciaux/professionnels)** — pour un local pro
+  (labo, cabinet) c'est un proxy indicatif. Doc LLM-facing. `dynamique_immobiliere` documente la
+  dégradation côtière.
+
+### Quality
+
+- Pipeline `/review-fix` complet (`/simplify` + `code-reviewer` + `silent-failure-hunter` +
+  `type-design-analyzer`) : factorisation alias/`communeLabel`, garde-fou silent-failure (panne
+  réseau IGN doit remonter), resserrement de type. **1689 tests** verts (tsc strict 2 configs +
+  Biome clean).
+
 ## [0.26.0] — 2026-06-06 — Domaine Immobilier (intelligence pour rapports d'implantation)
 
 Nouveau domaine **Immobilier** : 2 outils MCP exposés (34 → **36 tools**, 8 → **10 référentiels**).

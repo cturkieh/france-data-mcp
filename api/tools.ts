@@ -164,6 +164,18 @@ function requireLonLatStrict(args: Record<string, unknown>): { lon: number; lat:
 }
 
 /**
+ * Alias d'entrée tolérés par les 2 tools immobilier (`dynamique_immobiliere`,
+ * `cout_foncier`) : un LLM peut envoyer `latitude`/`longitude` ou `rayon`/
+ * `rayonKm`. Source unique pour éviter le drift entre les deux handlers.
+ */
+const IMMOBILIER_LATLON_ALIASES: Record<string, string> = {
+  latitude: "lat",
+  longitude: "lon",
+  rayonKm: "rayon_km",
+  rayon: "rayon_km",
+};
+
+/**
  * Traduit les flags MCP `include_etudiants` / `include_agents_publics` en
  * array `categorieCodes` consommable par les 3 RPCs RPPS. Source unique
  * pour garantir la même sémantique sur les 3 handlers.
@@ -2785,7 +2797,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
   {
     name: "dynamique_immobiliere",
     description:
-      "Dynamique immobilière et potentiel de croissance d'une zone (point + rayon). Combine 3 sources officielles : permis de construire (Sit@del/SDES, maille COMMUNE — logements autorisés/commencés récents → habitants attendus), zones AU du PLU (Géoportail de l'Urbanisme/IGN — futurs quartiers réservés, géolocalisés), ventes de terrains à bâtir (DGFiP DVF, géolocalisées). Sortie en 2 registres : 'note' = VOLUME (logements autorisés/commencés, nombre et immédiateté des zones AU) destiné au scoring de potentiel ; 'info' = quartiers concernés (nommés), habitants attendus, prix indicatifs (contexte, hors score). En ville dense les permis-commune sont grossiers → s'appuyer sur zones AU + terrains (géolocalisés). 'geojson' = polygones des zones AU pour la carte. Sources : SDES, IGN/GPU, DGFiP.",
+      "Dynamique immobilière et potentiel de croissance d'une zone (point + rayon). Combine 3 sources officielles : permis de construire (Sit@del/SDES, maille COMMUNE — logements autorisés/commencés récents → habitants attendus), zones AU du PLU (Géoportail de l'Urbanisme/IGN — futurs quartiers réservés, géolocalisés), ventes de terrains à bâtir (DGFiP DVF, géolocalisées). Sortie en 2 registres : 'note' = VOLUME (logements autorisés/commencés, nombre et immédiateté des zones AU) destiné au scoring de potentiel ; 'info' = quartiers concernés (nommés), habitants attendus, prix indicatifs (contexte, hors score). En ville dense les permis-commune sont grossiers → s'appuyer sur zones AU + terrains (géolocalisés). Point côtier/isolé sans commune au géocodage inverse → `couverture.permis`='indisponible:commune_introuvable' et `meta.code_commune`=null, MAIS zones AU + terrains restent servis (calcul par rayon) — l'outil ne plante jamais pour ça. 'geojson' = polygones des zones AU pour la carte. Sources : SDES, IGN/GPU, DGFiP.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2829,7 +2841,8 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
       required: ["couverture"],
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, IMMOBILIER_LATLON_ALIASES);
       const { lon, lat } = requireLonLatStrict(args);
       const rayon_km = coerceNumber(args.rayon_km, "rayon_km") ?? 3;
       if (rayon_km < 0.1 || rayon_km > 10) {
@@ -2841,7 +2854,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
   {
     name: "cout_foncier",
     description:
-      "Coût du foncier d'une zone (point + rayon) : prix médian au m² bâti (+ quartiles p25/p75), volume de ventes, période couverte. Source DGFiP DVF (ventes réelles géolocalisées). INFORMATION pour le business case d'implantation — NE PAS intégrer à une note d'attractivité : le coût d'installation est distinct du potentiel de marché.",
+      "Coût du foncier d'une zone (point + rayon) : prix médian au m² RÉSIDENTIEL bâti — maisons + appartements UNIQUEMENT, PAS les locaux commerciaux/professionnels (+ quartiles p25/p75), volume de ventes, période couverte. Source DGFiP DVF (ventes réelles géolocalisées). Pour un local pro (labo, cabinet), ce prix résidentiel est un PROXY indicatif, pas le prix d'un local commercial. INFORMATION pour le business case d'implantation — NE PAS intégrer à une note d'attractivité : le coût d'installation est distinct du potentiel de marché.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2878,7 +2891,8 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
       required: ["couverture", "n_ventes"],
     },
     annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
-    handler: async (args) => {
+    handler: async (rawArgs) => {
+      const args = normalizeAliases(rawArgs, IMMOBILIER_LATLON_ALIASES);
       const { lon, lat } = requireLonLatStrict(args);
       const rayon_km = coerceNumber(args.rayon_km, "rayon_km") ?? 3;
       if (rayon_km < 0.1 || rayon_km > 10) {

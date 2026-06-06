@@ -284,23 +284,73 @@ describe("dynamiqueImmobiliere", () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b2) Ancrage reverse-geocode → null : RangeError (coordonnées hors France)
+  // (b2)(b3) Ancrage sans commune (point côtier/isolé) → dégradation gracieuse
+  //   La commune ne sert QU'AUX permis Sit@del ; zones AU + terrains sont par
+  //   rayon → l'outil NE doit PAS throw (fix régression géo : -32602 sur tout
+  //   l'appel à un point en mer). couverture.permis='indisponible:commune_introuvable',
+  //   permitsForCommune jamais appelé, zones_au + terrains servis.
   // -------------------------------------------------------------------------
 
-  it("(b2) reverseGeocode null → RangeError (coordonnées hors couverture IGN)", async () => {
-    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(null);
+  it("(b2) reverseGeocode null (point en mer) → permis indisponible, zones+terrains servis, PAS de throw", async () => {
+    // Anchor ET centroïdes AU hors couverture IGN → tous null
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(null);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
 
-    await expect(dynamiqueImmobiliere(BASE_INPUT)).rejects.toThrow(RangeError);
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    // Pas de throw — composite résolu
+    expect(result).toBeDefined();
+    // Permis dégradé précisément + brique jamais appelée (pas de commune)
+    expect(result.couverture.permis).toBe("indisponible:commune_introuvable");
+    expect(sitadelModule.permitsForCommune).not.toHaveBeenCalled();
+    // Zones AU + terrains servis par rayon (n'ont pas besoin de la commune)
+    expect(result.couverture.zones_au).toBe("ok");
+    expect(result.couverture.terrains).toBe("ok");
+    expect(result.note.zones_au_nombre).toBe(2);
+    expect(result.info.prix_m2_median).toBe(5000);
+    expect(result.info.terrains.n).toBe(1);
+    // meta sans commune
+    expect(result.meta.code_commune).toBeNull();
+    expect(result.meta.commune).toBeNull();
+    // note permis à 0 ; signal sur zones uniquement (1 AUc → "modéré")
+    expect(result.note.logements_autorises_recent).toBe(0);
+    expect(result.note.signal).toBe("modéré");
   });
 
-  it("(b3) reverseGeocode ok mais codeCommune absent → RangeError", async () => {
-    const revGeoNoCcommune: GeocodeResult = {
-      ...REV_GEO_OK,
-      codeCommune: undefined,
-    };
-    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(revGeoNoCcommune);
+  it("(b3) reverseGeocode OK mais codeCommune absent → permis indisponible, nom commune conservé, zones+terrains servis", async () => {
+    const revGeoNoCcommune: GeocodeResult = { ...REV_GEO_OK, codeCommune: undefined };
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(revGeoNoCcommune);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
 
-    await expect(dynamiqueImmobiliere(BASE_INPUT)).rejects.toThrow(RangeError);
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.couverture.permis).toBe("indisponible:commune_introuvable");
+    expect(sitadelModule.permitsForCommune).not.toHaveBeenCalled();
+    // code INSEE absent (Sit@del impossible) mais nom de commune reste connu (informatif)
+    expect(result.meta.code_commune).toBeNull();
+    expect(result.meta.commune).toBe("Paris");
+    expect(result.couverture.zones_au).toBe("ok");
+    expect(result.couverture.terrains).toBe("ok");
+  });
+
+  // -------------------------------------------------------------------------
+  // (b4) Garde-fou silent-failure : un THROW réseau de l'ancrage (≠ null) DOIT
+  //   remonter, JAMAIS être dégradé en succès partiel. Distingue "pas de commune"
+  //   (null, attendu → dégrade permis) de "panne IGN" (throw → échec bruyant).
+  //   Verrouille l'intention : empêche une future refacto d'envelopper l'ancrage
+  //   dans runSection (transformerait silencieusement une panne IGN en 'permis
+  //   indisponible' servi OK — régression inverse interdite par la doctrine).
+  // -------------------------------------------------------------------------
+
+  it("(b4) reverseGeocode ancrage THROW (panne réseau IGN) → REJETTE, permitsForCommune non appelé", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockRejectedValue(new Error("IGN 503"));
+
+    await expect(dynamiqueImmobiliere(BASE_INPUT)).rejects.toThrow(/503/);
+    expect(sitadelModule.permitsForCommune).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
