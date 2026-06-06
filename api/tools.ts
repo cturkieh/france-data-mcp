@@ -8,6 +8,7 @@
  */
 
 import { INCLUDE_FRESHNESS_SCHEMA, withFreshness } from "../src/core/freshness.js";
+import { coutFoncier, dynamiqueImmobiliere } from "../src/immobilier/index.js";
 import {
   type AmeliQueryResult,
   type AmeliResult,
@@ -2779,6 +2780,105 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
       }
       const max = coerceNumber(rawArgs.max, "max");
       return enrichirConcurrents({ finess, ...(max !== undefined ? { max } : {}) });
+    },
+  },
+  {
+    name: "dynamique_immobiliere",
+    description:
+      "Dynamique immobilière et potentiel de croissance d'une zone (point + rayon). Combine 3 sources officielles : permis de construire (Sit@del/SDES, maille COMMUNE — logements autorisés/commencés récents → habitants attendus), zones AU du PLU (Géoportail de l'Urbanisme/IGN — futurs quartiers réservés, géolocalisés), ventes de terrains à bâtir (DGFiP DVF, géolocalisées). Sortie en 2 registres : 'note' = VOLUME (logements autorisés/commencés, nombre et immédiateté des zones AU) destiné au scoring de potentiel ; 'info' = quartiers concernés (nommés), habitants attendus, prix indicatifs (contexte, hors score). En ville dense les permis-commune sont grossiers → s'appuyer sur zones AU + terrains (géolocalisés). 'geojson' = polygones des zones AU pour la carte. Sources : SDES, IGN/GPU, DGFiP.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lat: { type: "number", description: "Latitude du centre (WGS84)." },
+        lon: { type: "number", description: "Longitude du centre (WGS84)." },
+        rayon_km: {
+          type: "number",
+          description: "Rayon en km (0.1-10, défaut 3).",
+          minimum: 0.1,
+          maximum: 10,
+          default: 3,
+        },
+      },
+      required: ["lat", "lon"],
+    },
+    outputSchema: {
+      type: "object",
+      description:
+        "Résultat de dynamique immobilière à 2 registres (note = scoring, info = contexte) + couverture de dégradation par section.",
+      properties: {
+        note: {
+          type: "object",
+          description:
+            "Données de VOLUME — à utiliser pour le scoring LLM. logements_autorises_recent, logements_commences_recent, zones_au_nombre, zones_au_immediates, zones_au_surface_ha, signal.",
+        },
+        info: {
+          type: "object",
+          description:
+            "Contexte non-scorable : habitants_attendus, quartiers_au (libellés), prix_m2_median, terrains. Ne PAS intégrer à une note d'attractivité.",
+        },
+        geojson: {
+          type: "object",
+          description: "FeatureCollection GeoJSON des polygones des zones AU (pour la carte).",
+        },
+        couverture: {
+          type: "object",
+          description:
+            "Statut de dégradation par section : 'ok' | 'indisponible:<raison>'. Lire avant d'interpréter note/info.",
+        },
+      },
+      required: ["couverture"],
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      const { lon, lat } = requireLonLatStrict(args);
+      const rayon_km = coerceNumber(args.rayon_km, "rayon_km") ?? 3;
+      return dynamiqueImmobiliere({ lat, lon, rayon_km });
+    },
+  },
+  {
+    name: "cout_foncier",
+    description:
+      "Coût du foncier d'une zone (point + rayon) : prix médian au m² bâti (+ quartiles p25/p75), volume de ventes, période couverte. Source DGFiP DVF (ventes réelles géolocalisées). INFORMATION pour le business case d'implantation — NE PAS intégrer à une note d'attractivité : le coût d'installation est distinct du potentiel de marché.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        lat: { type: "number", description: "Latitude du centre (WGS84)." },
+        lon: { type: "number", description: "Longitude du centre (WGS84)." },
+        rayon_km: {
+          type: "number",
+          description: "Rayon en km (0.1-10, défaut 3).",
+          minimum: 0.1,
+          maximum: 10,
+          default: 3,
+        },
+      },
+      required: ["lat", "lon"],
+    },
+    outputSchema: {
+      type: "object",
+      description:
+        "Prix foncier DVF dans le rayon. couverture='indisponible:no_data' si aucune vente.",
+      properties: {
+        couverture: {
+          type: "string",
+          enum: ["ok", "indisponible:no_data"],
+          description:
+            "Statut : 'ok' = données disponibles, 'indisponible:no_data' = pas de ventes DVF dans le rayon.",
+        },
+        prix_m2_median: { type: ["number", "null"], description: "Prix médian au m² bâti." },
+        prix_m2_p25: { type: ["number", "null"], description: "1er quartile prix au m²." },
+        prix_m2_p75: { type: ["number", "null"], description: "3ème quartile prix au m²." },
+        n_ventes: { type: "number", description: "Volume de ventes dans le rayon." },
+        periode: { type: ["string", "null"], description: "Années couvertes (ex: '2019–2024')." },
+        source: { type: "string", description: "Toujours 'DGFiP DVF'." },
+      },
+      required: ["couverture", "n_ventes"],
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      const { lon, lat } = requireLonLatStrict(args);
+      const rayon_km = coerceNumber(args.rayon_km, "rayon_km") ?? 3;
+      return coutFoncier({ lat, lon, rayon_km });
     },
   },
 ];

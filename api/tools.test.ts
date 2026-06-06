@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as immobilierMod from "../src/immobilier/index.js";
 import * as ameliDb from "../src/sante/ameli-db.js";
 import * as coverage from "../src/sante/coverage.js";
 import * as crossSource from "../src/sante/cross-source.js";
@@ -1315,7 +1316,7 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
 });
 
 describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
-  it("expose un outputSchema sur les tools object-root (27 tools attendus)", () => {
+  it("expose un outputSchema sur les tools object-root (29 tools attendus)", () => {
     const withOutput = TOOLS.filter((t) => t.outputSchema !== undefined);
     // Phase A 0.21.0 — fusions :
     //  - 3 listers (2 avec outputSchema, 1 sans) → 1 `lister_nomenclature` AVEC
@@ -1323,8 +1324,9 @@ describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
     //  - 2 `population_par_*` (avec outputSchema) → 1 `population` (avec) → Δ -1.
     //  - 2 `densite_*` (sans outputSchema) → 1 `densite_sante` (sans) → Δ 0.
     // 28 (0.20.x) - 1 - 1 = 26. Phase B 0.22.0 — +1 `profil_iris` (LookupResult) = 27.
+    // Phase immobilier — +2 (dynamique_immobiliere + cout_foncier) = 29.
     // Reste sans outputSchema : densite_sante (objet riche imbriqué).
-    expect(withOutput).toHaveLength(27);
+    expect(withOutput).toHaveLength(29);
   });
 
   it("omet volontairement l'outputSchema pour les tools array-root ou nullable", () => {
@@ -2317,5 +2319,78 @@ describe("enrichir_concurrents (MCP tool)", () => {
     const tool = findTool("enrichir_concurrents");
     await expect(tool?.handler({})).rejects.toThrow(RangeError);
     await expect(tool?.handler({ finess: [] })).rejects.toThrow(RangeError);
+  });
+});
+
+describe("dynamique_immobiliere (MCP tool)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("est enregistré dans la liste des tools", () => {
+    const tool = findTool("dynamique_immobiliere");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["lat", "lon"]);
+  });
+
+  it("délègue à dynamiqueImmobiliere avec les bons arguments", async () => {
+    const spy = vi
+      .spyOn(immobilierMod, "dynamiqueImmobiliere")
+      .mockResolvedValueOnce({ couverture: {} } as never);
+    const tool = findTool("dynamique_immobiliere");
+    await tool?.handler({ lat: 48.87, lon: 2.35, rayon_km: 2 });
+    expect(spy).toHaveBeenCalledWith({ lat: 48.87, lon: 2.35, rayon_km: 2 });
+  });
+
+  it("applique le défaut rayon_km=3 si absent", async () => {
+    const spy = vi
+      .spyOn(immobilierMod, "dynamiqueImmobiliere")
+      .mockResolvedValueOnce({ couverture: {} } as never);
+    const tool = findTool("dynamique_immobiliere");
+    await tool?.handler({ lat: 48.87, lon: 2.35 });
+    expect(spy).toHaveBeenCalledWith({ lat: 48.87, lon: 2.35, rayon_km: 3 });
+  });
+
+  it("rejette les appels sans lat/lon", async () => {
+    const tool = findTool("dynamique_immobiliere");
+    await expect(tool?.handler({})).rejects.toThrow(/lon et lat/);
+    await expect(tool?.handler({ lat: 48.87 })).rejects.toThrow(/lon et lat/);
+  });
+});
+
+describe("cout_foncier (MCP tool)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("est enregistré dans la liste des tools", () => {
+    const tool = findTool("cout_foncier");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["lat", "lon"]);
+  });
+
+  it("la description contient la caveat NE PAS (garde séparation scoring/coût)", () => {
+    const tool = findTool("cout_foncier");
+    expect(tool?.description).toMatch(/NE PAS/);
+  });
+
+  it("délègue à coutFoncier avec les bons arguments", async () => {
+    const spy = vi
+      .spyOn(immobilierMod, "coutFoncier")
+      .mockResolvedValueOnce({ couverture: "ok", n_ventes: 42 } as never);
+    const tool = findTool("cout_foncier");
+    await tool?.handler({ lat: 48.87, lon: 2.35, rayon_km: 5 });
+    expect(spy).toHaveBeenCalledWith({ lat: 48.87, lon: 2.35, rayon_km: 5 });
+  });
+
+  it("applique le défaut rayon_km=3 si absent", async () => {
+    const spy = vi
+      .spyOn(immobilierMod, "coutFoncier")
+      .mockResolvedValueOnce({ couverture: "ok", n_ventes: 0 } as never);
+    const tool = findTool("cout_foncier");
+    await tool?.handler({ lat: 48.87, lon: 2.35 });
+    expect(spy).toHaveBeenCalledWith({ lat: 48.87, lon: 2.35, rayon_km: 3 });
+  });
+
+  it("rejette les appels sans lat/lon", async () => {
+    const tool = findTool("cout_foncier");
+    await expect(tool?.handler({})).rejects.toThrow(/lon et lat/);
+    await expect(tool?.handler({ lon: 2.35 })).rejects.toThrow(/lon et lat/);
   });
 });
