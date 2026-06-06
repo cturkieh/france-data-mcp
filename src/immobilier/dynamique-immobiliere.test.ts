@@ -108,9 +108,10 @@ const ZONES_OK: ZonesAUResult = {
   couverture: "ok",
   n_zones_au: 2,
   zones_au: [
-    { typezone: "AUc", libelle: "1AUc", libelong: "Zone ouverte" },
-    { typezone: "AUs", libelle: "2AUs", libelong: "Zone stricte" },
+    { typezone: "AUc", libelle: "1AUc", libelong: "Zone ouverte", feature: AU_FEATURE_AUC },
+    { typezone: "AUs", libelle: "2AUs", libelong: "Zone stricte", feature: AU_FEATURE_AUS },
   ],
+  // geojson.features dérivé de zones_au.map(z=>z.feature) — source unique (B1)
   geojson: { type: "FeatureCollection", features: [AU_FEATURE_AUC, AU_FEATURE_AUS] },
 };
 
@@ -224,12 +225,14 @@ describe("dynamiqueImmobiliere", () => {
     expect(result.note.zones_au_immediates).toBe(1);
     // signal : 120 >= 100 → "fort"
     expect(result.note.signal).toBe("fort");
-    // zones_au_surface_ha : null (pas de lib d'aire)
-    expect(result.note.zones_au_surface_ha).toBeNull();
+    // B2 : zones_au_surface_ha (toujours null, non calculé) a été RETIRÉ de note
+    expect("zones_au_surface_ha" in result.note).toBe(false);
 
     // info — quartiers
     expect(result.info.habitants_attendus).toBe(264);
     expect(result.info.quartiers_au).toHaveLength(2);
+    // B1 : le centroïde de chaque quartier provient de la feature portée par SA
+    // propre entrée zones_au (AU_FEATURE_AUC → Montrouge, AU_FEATURE_AUS → Kremlin-Bicêtre)
     expect(result.info.quartiers_au[0]).toEqual({ libelle: "1AUc", secteur: "Montrouge" });
     expect(result.info.quartiers_au[1]).toEqual({ libelle: "2AUs", secteur: "Kremlin-Bicêtre" });
 
@@ -238,9 +241,10 @@ describe("dynamiqueImmobiliere", () => {
     expect(result.info.terrains.n).toBe(1);
     expect(result.info.terrains.prix_terrain_median).toBe(150000);
 
-    // geojson forwarde les features AU
+    // geojson forwarde les features AU — B1 : égal à zones_au.map(z=>z.feature)
     expect(result.geojson.type).toBe("FeatureCollection");
     expect(result.geojson.features).toHaveLength(2);
+    expect(result.geojson.features).toEqual(ZONES_OK.zones_au.map((z) => z.feature));
   });
 
   // -------------------------------------------------------------------------
@@ -331,5 +335,135 @@ describe("dynamiqueImmobiliere", () => {
     // Le composite ne throw pas malgré l'échec partiel
     expect(result.couverture.permis).toBe("ok");
     expect(result.couverture.zones_au).toBe("ok");
+  });
+
+  // -------------------------------------------------------------------------
+  // (B3) Garde structurelle : note = VOLUME uniquement, jamais de clé « prix »
+  // -------------------------------------------------------------------------
+
+  it("(B3) note ne contient AUCUNE clé prix-like (contrat note=VOLUME, prix→info)", async () => {
+    vi.mocked(geocodeModule.reverseGeocode)
+      .mockResolvedValueOnce(REV_GEO_OK)
+      .mockResolvedValueOnce(REV_GEO_CENTROID_AUC)
+      .mockResolvedValueOnce(REV_GEO_CENTROID_AUS);
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    const priceLike = /prix|price|cout|euro|m2/i;
+    const offending = Object.keys(result.note).filter((k) => priceLike.test(k));
+    expect(offending).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // (B4) computeSignal — couverture des branches (seuils réels lus du code)
+  //   permisAvailable : logAuth>=100 || zonesImm>=3 → fort ;
+  //                     logAuth>=30  || zonesImm>=1 → modéré ; sinon faible.
+  //   permis indispo  : zonesImm>=3 → fort ; zonesImm>=1 → modéré ; sinon faible.
+  // -------------------------------------------------------------------------
+
+  it("(B4) logAuth=50, zones_au_immediates=0 → signal 'modéré' (30<=50<100, aucune AUc)", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(REV_GEO_OK);
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue({
+      ...PERMITS_OK,
+      logements_autorises_recent: 50,
+    });
+    // Aucune zone AUc → zones_au_immediates = 0
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue({
+      couverture: "ok",
+      n_zones_au: 0,
+      zones_au: [],
+      geojson: { type: "FeatureCollection", features: [] },
+    });
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+    expect(result.note.zones_au_immediates).toBe(0);
+    expect(result.note.signal).toBe("modéré");
+  });
+
+  it("(B4) logAuth=29, zones_au_immediates=0 → signal 'faible' (29<30, aucune AUc)", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(REV_GEO_OK);
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue({
+      ...PERMITS_OK,
+      logements_autorises_recent: 29,
+    });
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue({
+      couverture: "ok",
+      n_zones_au: 0,
+      zones_au: [],
+      geojson: { type: "FeatureCollection", features: [] },
+    });
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+    expect(result.note.zones_au_immediates).toBe(0);
+    expect(result.note.signal).toBe("faible");
+  });
+
+  it("(B4) permis indisponible + 3 zones AUc → signal 'fort' (fallback zones-only)", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(REV_GEO_OK);
+    // permis throws → section indisponible → permisAvailable=false
+    vi.mocked(sitadelModule.permitsForCommune).mockRejectedValue(new Error("sitadel down"));
+    const aucFeature = {
+      type: "Feature",
+      geometry: { type: "Polygon", coordinates: [] },
+      properties: { typezone: "AUc", libelle: "AUc", libelong: null },
+    };
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue({
+      couverture: "ok",
+      n_zones_au: 3,
+      zones_au: [
+        { typezone: "AUc", libelle: "1AUc", libelong: null, feature: aucFeature },
+        { typezone: "AUc", libelle: "2AUc", libelong: null, feature: aucFeature },
+        { typezone: "AUc", libelle: "3AUc", libelong: null, feature: aucFeature },
+      ],
+      geojson: { type: "FeatureCollection", features: [aucFeature, aucFeature, aucFeature] },
+    });
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+    expect(result.couverture.permis).toMatch(/indisponible/);
+    expect(result.note.zones_au_immediates).toBe(3);
+    expect(result.note.signal).toBe("fort");
+  });
+
+  // -------------------------------------------------------------------------
+  // (B6) featureCentroid null path : feature sans géométrie → secteur null,
+  //      reverseGeocode N'EST PAS appelé pour cette zone (pas de centroïde).
+  // -------------------------------------------------------------------------
+
+  it("(B6) zone avec geometry:null → secteur null ET reverseGeocode non appelé pour la zone", async () => {
+    const FEATURE_NO_GEOM = {
+      type: "Feature",
+      geometry: null,
+      properties: { typezone: "AUc", libelle: "1AUc", libelong: null },
+    };
+    const rgSpy = vi
+      .mocked(geocodeModule.reverseGeocode)
+      // Seul l'ancrage est résolu ; aucun appel centroïde attendu.
+      .mockResolvedValueOnce(REV_GEO_OK);
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue({
+      couverture: "ok",
+      n_zones_au: 1,
+      zones_au: [{ typezone: "AUc", libelle: "1AUc", libelong: null, feature: FEATURE_NO_GEOM }],
+      geojson: { type: "FeatureCollection", features: [FEATURE_NO_GEOM] },
+    });
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.info.quartiers_au).toHaveLength(1);
+    expect(result.info.quartiers_au[0]).toEqual({ libelle: "1AUc", secteur: null });
+    // reverseGeocode appelé UNE seule fois (ancrage) — pas pour le centroïde sans géométrie
+    expect(rgSpy).toHaveBeenCalledTimes(1);
   });
 });

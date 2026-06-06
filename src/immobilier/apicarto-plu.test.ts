@@ -117,14 +117,28 @@ describe("getZonesAU", () => {
     expect(result.couverture).toBe("ok");
     // AU + AUc + AUs retenues ; U / A / N exclues
     expect(result.n_zones_au).toBe(3);
+    // B1 : chaque entrée zones_au PORTE sa propre feature (source unique).
+    // Le payload passe par JSON (fetch mock) → les features sont des copies deep-equal.
     expect(result.zones_au).toEqual([
-      { typezone: "AU", libelle: "1AU", libelong: "Zone à urbaniser" },
-      { typezone: "AUc", libelle: "1AUc", libelong: "Zone à urbaniser ouverte" },
-      { typezone: "AUs", libelle: "2AUs", libelong: "Zone à urbaniser stricte" },
+      { typezone: "AU", libelle: "1AU", libelong: "Zone à urbaniser", feature: FEATURE_AU },
+      {
+        typezone: "AUc",
+        libelle: "1AUc",
+        libelong: "Zone à urbaniser ouverte",
+        feature: FEATURE_AUC,
+      },
+      {
+        typezone: "AUs",
+        libelle: "2AUs",
+        libelong: "Zone à urbaniser stricte",
+        feature: FEATURE_AUS,
+      },
     ]);
     // geojson ne contient que les features AU (préfixe AU, casse-insensible)
     expect(result.geojson.type).toBe("FeatureCollection");
     expect(result.geojson.features).toHaveLength(3);
+    // B1 : geojson.features === zones_au.map(z=>z.feature) — alignement structurel garanti
+    expect(result.geojson.features).toEqual(result.zones_au.map((z) => z.feature));
     const typezones = (result.geojson.features as { properties: { typezone: string } }[]).map(
       (f) => f.properties.typezone,
     );

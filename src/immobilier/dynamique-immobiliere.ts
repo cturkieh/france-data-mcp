@@ -45,8 +45,6 @@ export interface DynamiqueImmobiliereNote {
    * immédiatement urbanisable) alimentent ce compteur.
    */
   zones_au_immediates: number;
-  /** Surface totale des zones AU en hectares, ou null si non calculable. */
-  zones_au_surface_ha: number | null;
   /** Signal synthétique fondé sur le volume. */
   signal: "fort" | "modéré" | "faible";
 }
@@ -190,7 +188,6 @@ export async function dynamiqueImmobiliere(
 
   // --- PLU zones AU -------------------------------------------------------
   const zonesData = zonesOut.data;
-  const auFeatures: unknown[] = zonesData?.geojson.features ?? [];
   const zonesNombre = zonesData?.n_zones_au ?? 0;
 
   // zones_au_immediates : seules les zones AUc (ouverte / immédiatement urbanisable)
@@ -201,21 +198,18 @@ export async function dynamiqueImmobiliere(
   ).length;
 
   // --- Quartiers AU (centroïde + reverse-geocode, ≤ 5) --------------------
-  // Pair (libelle, feature) from the same source slice to avoid cross-array index drift.
-  // zones_au and geojson.features are built from the same auFeatures in getZonesAU
-  // so they're aligned, but we derive both from zones_au to make it structurally safe.
+  // Each zone entry carries its own feature (single source of truth — no parallel-array index).
   const topZones = (zonesData?.zones_au ?? []).slice(0, 5);
 
   const centroidsResults = await Promise.allSettled(
-    topZones.map(async (zone, i) => {
-      const feat = auFeatures[i]; // parallel by construction — same index, same AU source
-      const centroid = featureCentroid(feat);
+    topZones.map(async (zone) => {
+      const centroid = featureCentroid(zone.feature);
       if (!centroid) return { libelle: zone.libelle, secteur: null };
       const rg = await reverseGeocode({ lat: centroid.lat, lon: centroid.lon });
       // rg === null means coords outside IGN coverage (e.g. centroid in sea) — log + null
       if (!rg) {
         console.warn(
-          `${LOG_TAG}: reverse-geocode centroïde AU[${i}] hors couverture IGN — secteur:null`,
+          `${LOG_TAG}: reverse-geocode centroïde AU "${zone.libelle}" hors couverture IGN — secteur:null`,
         );
       }
       const secteur = rg ? (rg.commune ?? rg.label) : null;
@@ -250,7 +244,6 @@ export async function dynamiqueImmobiliere(
       logements_commences_recent: logCom,
       zones_au_nombre: zonesNombre,
       zones_au_immediates: zonesImm,
-      zones_au_surface_ha: null, // no external area lib available
       signal,
     },
     info: {
@@ -259,6 +252,9 @@ export async function dynamiqueImmobiliere(
       prix_m2_median: agg.prix_m2_median,
       terrains: terrainsInfo,
     },
-    geojson: { type: "FeatureCollection", features: auFeatures },
+    geojson: {
+      type: "FeatureCollection",
+      features: (zonesData?.zones_au ?? []).map((z) => z.feature),
+    },
   };
 }

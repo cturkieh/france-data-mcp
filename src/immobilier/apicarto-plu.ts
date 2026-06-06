@@ -40,12 +40,20 @@ type ZoneUrbaResponse = {
   features: ZoneUrbaFeature[];
 };
 
+export type ZonesAUEntry = {
+  libelle: string;
+  libelong: string | null;
+  typezone: string;
+  /** Feature GeoJSON brute associée à cette zone (source unique pour le centroïde). */
+  feature: unknown;
+};
+
 export type ZonesAUResult = {
   /** "ok" = PLU présent (même si aucune zone AU à cet endroit). "indisponible:no_plu" = pas de PLU dématérialisé. */
   couverture: "ok" | "indisponible:no_plu";
   n_zones_au: number;
-  zones_au: { libelle: string; libelong: string | null; typezone: string }[];
-  /** GeoJSON FeatureCollection contenant uniquement les features AU (pour couche carto). */
+  zones_au: ZonesAUEntry[];
+  /** GeoJSON FeatureCollection contenant uniquement les features AU (source = zones_au.map(z=>z.feature)). */
   geojson: { type: "FeatureCollection"; features: unknown[] };
 };
 
@@ -153,17 +161,20 @@ export async function getZonesAU(
   // PLU présent : filtrer les zones AU (préfixe insensible casse — cf. isZoneAU)
   const auFeatures = data.features.filter((f) => isZoneAU(f.properties.typezone));
 
+  const zones_au = auFeatures.map((f) => ({
+    typezone: f.properties.typezone,
+    libelle: f.properties.libelle,
+    libelong: f.properties.libelong,
+    feature: f as unknown,
+  }));
+
   return {
     couverture: "ok",
-    n_zones_au: auFeatures.length,
-    zones_au: auFeatures.map((f) => ({
-      typezone: f.properties.typezone,
-      libelle: f.properties.libelle,
-      libelong: f.properties.libelong,
-    })),
+    n_zones_au: zones_au.length,
+    zones_au,
     geojson: {
       type: "FeatureCollection",
-      features: auFeatures,
+      features: zones_au.map((z) => z.feature),
     },
   };
 }

@@ -2809,7 +2809,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
         note: {
           type: "object",
           description:
-            "Données de VOLUME — à utiliser pour le scoring LLM. logements_autorises_recent, logements_commences_recent, zones_au_nombre, zones_au_immediates, zones_au_surface_ha, signal.",
+            "Données de VOLUME — à utiliser pour le scoring LLM. logements_autorises_recent, logements_commences_recent, zones_au_nombre, zones_au_immediates, signal.",
         },
         info: {
           type: "object",

@@ -2403,4 +2403,14 @@ describe("cout_foncier (MCP tool)", () => {
     await expect(tool?.handler({})).rejects.toThrow(/lon et lat/);
     await expect(tool?.handler({ lon: 2.35 })).rejects.toThrow(/lon et lat/);
   });
+
+  it("rejette rayon_km hors borne [0.1, 10] avec RangeError (parité dynamique_immobiliere)", async () => {
+    const tool = findTool("cout_foncier");
+    await expect(tool?.handler({ lat: 48.87, lon: 2.35, rayon_km: 0.05 })).rejects.toThrow(
+      RangeError,
+    );
+    await expect(tool?.handler({ lat: 48.87, lon: 2.35, rayon_km: 11 })).rejects.toThrow(
+      RangeError,
+    );
+  });
 });
