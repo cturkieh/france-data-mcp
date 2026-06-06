@@ -280,6 +280,26 @@ describe("dynamiqueImmobiliere", () => {
   });
 
   // -------------------------------------------------------------------------
+  // (b2) Ancrage reverse-geocode → null : RangeError (coordonnées hors France)
+  // -------------------------------------------------------------------------
+
+  it("(b2) reverseGeocode null → RangeError (coordonnées hors couverture IGN)", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(null);
+
+    await expect(dynamiqueImmobiliere(BASE_INPUT)).rejects.toThrow(RangeError);
+  });
+
+  it("(b3) reverseGeocode ok mais codeCommune absent → RangeError", async () => {
+    const revGeoNoCcommune: GeocodeResult = {
+      ...REV_GEO_OK,
+      codeCommune: undefined,
+    };
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(revGeoNoCcommune);
+
+    await expect(dynamiqueImmobiliere(BASE_INPUT)).rejects.toThrow(RangeError);
+  });
+
+  // -------------------------------------------------------------------------
   // (c) Reverse-geocode d'un centroïde échoue pour une zone → secteur:null
   // -------------------------------------------------------------------------
 

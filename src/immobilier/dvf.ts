@@ -96,12 +96,20 @@ export function deptPrefixFromInsee(codeInsee: string): string {
 // CSV download & parse
 // ---------------------------------------------------------------------------
 
+export interface FetchCommuneCsvResult {
+  mutations: DvfMutation[];
+  /** Année effectivement utilisée (CURRENT_YEAR ou CURRENT_YEAR - 1 sur fallback). */
+  year: number;
+}
+
 /**
  * Télécharge et parse le CSV DVF pour une commune.
  * Essaie CURRENT_YEAR en premier, puis CURRENT_YEAR - 1 sur 404.
- * Retourne un tableau de mutations (vide si la commune n'a aucune vente).
+ * Retourne `{ mutations, year }` — `year` est l'année RÉELLEMENT utilisée
+ * (peut être CURRENT_YEAR - 1 sur fallback 404) pour que le cache estampille
+ * la bonne valeur `source_year`.
  */
-export async function fetchCommuneCsv(insee: string): Promise<DvfMutation[]> {
+export async function fetchCommuneCsv(insee: string): Promise<FetchCommuneCsvResult> {
   const dept = deptPrefixFromInsee(insee);
 
   for (const year of [CURRENT_YEAR, CURRENT_YEAR - 1]) {
@@ -125,7 +133,7 @@ export async function fetchCommuneCsv(insee: string): Promise<DvfMutation[]> {
       // Essai année précédente seulement si c'est la première tentative
       if (year === CURRENT_YEAR) continue;
       // Année précédente aussi absente → commune sans données DVF
-      return [];
+      return { mutations: [], year };
     }
 
     if (!response.ok) {
@@ -135,11 +143,11 @@ export async function fetchCommuneCsv(insee: string): Promise<DvfMutation[]> {
     }
 
     const text = await response.text();
-    return parseDvfCsv(insee, text, year);
+    return { mutations: parseDvfCsv(insee, text, year), year };
   }
 
-  // Les deux années ont retourné 404
-  return [];
+  // Les deux années ont retourné 404 (loop exhausted via continue above)
+  return { mutations: [], year: CURRENT_YEAR - 1 };
 }
 
 /**
@@ -302,9 +310,9 @@ export async function ensureCommuneCached(insee: string, maxAgeDays = 180): Prom
   }
 
   // Cache absent ou périmé → ingestion
-  const mutations = await fetchCommuneCsv(insee);
+  const { mutations, year } = await fetchCommuneCsv(insee);
   await upsertMutations(mutations);
-  await markCommuneCached(insee, CURRENT_YEAR, mutations.length);
+  await markCommuneCached(insee, year, mutations.length);
 }
 
 // ---------------------------------------------------------------------------

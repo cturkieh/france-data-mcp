@@ -20,6 +20,7 @@ vi.mock("../storage/supabase.js", () => ({
 
 import {
   type DvfMutation,
+  type FetchCommuneCsvResult,
   aggregatePrix,
   deptPrefixFromInsee,
   ensureCommuneCached,
@@ -98,7 +99,11 @@ describe("fetchCommuneCsv", () => {
   it("parse le CSV, calcule prix_m2 et ignore les lignes sans lon/lat", async () => {
     fetchMock.mockResolvedValueOnce(csvResponse(FULL_CSV));
 
-    const mutations = await fetchCommuneCsv("75056");
+    const result: FetchCommuneCsvResult = await fetchCommuneCsv("75056");
+    const { mutations, year } = result;
+
+    // year = CURRENT_YEAR (première tentative réussie)
+    expect(year).toBe(new Date().getFullYear());
 
     // 3 lignes conservées (M004 sans lon/lat ignorée)
     expect(mutations).toHaveLength(3);
@@ -125,15 +130,28 @@ describe("fetchCommuneCsv", () => {
     expect(mutations.find((m) => m.id_mutation === "M004")).toBeUndefined();
   });
 
-  it("retente CURRENT_YEAR-1 sur 404 et renvoie [] si les deux années sont absentes", async () => {
+  it("retente CURRENT_YEAR-1 sur 404 et renvoie [] + year=CURRENT_YEAR-1 si les deux années sont absentes", async () => {
     fetchMock
       .mockResolvedValueOnce(new Response("Not Found", { status: 404 }))
       .mockResolvedValueOnce(new Response("Not Found", { status: 404 }));
 
-    const mutations = await fetchCommuneCsv("99999");
+    const { mutations, year } = await fetchCommuneCsv("99999");
     expect(mutations).toHaveLength(0);
+    // year = CURRENT_YEAR - 1 (fallback utilisé)
+    expect(year).toBe(new Date().getFullYear() - 1);
     // 2 appels : year N puis year N-1
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retourne year=CURRENT_YEAR-1 sur fallback 404 réussi", async () => {
+    const CURRENT_YEAR = new Date().getFullYear();
+    fetchMock
+      .mockResolvedValueOnce(new Response("Not Found", { status: 404 })) // CURRENT_YEAR → 404
+      .mockResolvedValueOnce(csvResponse(FULL_CSV)); // CURRENT_YEAR-1 → ok
+
+    const { mutations, year } = await fetchCommuneCsv("75056");
+    expect(year).toBe(CURRENT_YEAR - 1);
+    expect(mutations.length).toBeGreaterThan(0);
   });
 
   it("throw sur erreur HTTP non-404", async () => {
@@ -146,7 +164,7 @@ describe("fetchCommuneCsv", () => {
     const csv = `${CSV_HEADER}\nM010,,Vente,200000,75056,Appartement,50,,2.3,48.8`;
     fetchMock.mockResolvedValueOnce(csvResponse(csv));
 
-    const mutations = await fetchCommuneCsv("75056");
+    const { mutations } = await fetchCommuneCsv("75056");
     // La row sans date est rejetée (ne peut pas être insérée dans la PK)
     expect(mutations).toHaveLength(0);
   });

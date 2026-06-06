@@ -2832,6 +2832,9 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
     handler: async (args) => {
       const { lon, lat } = requireLonLatStrict(args);
       const rayon_km = coerceNumber(args.rayon_km, "rayon_km") ?? 3;
+      if (rayon_km < 0.1 || rayon_km > 10) {
+        throw new RangeError("rayon_km doit être entre 0.1 et 10 km");
+      }
       return dynamiqueImmobiliere({ lat, lon, rayon_km });
     },
   },
@@ -2878,6 +2881,9 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
     handler: async (args) => {
       const { lon, lat } = requireLonLatStrict(args);
       const rayon_km = coerceNumber(args.rayon_km, "rayon_km") ?? 3;
+      if (rayon_km < 0.1 || rayon_km > 10) {
+        throw new RangeError("rayon_km doit être entre 0.1 et 10 km");
+      }
       return coutFoncier({ lat, lon, rayon_km });
     },
   },

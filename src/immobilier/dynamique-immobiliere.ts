@@ -38,7 +38,12 @@ export interface DynamiqueImmobiliereNote {
   logements_commences_recent: number;
   /** Nombre total de zones AU dans le rayon. */
   zones_au_nombre: number;
-  /** Zones AU « ouvertes » (typezone upper commence par "AUC"). */
+  /**
+   * Zones AU « ouvertes » (typezone upper commence par "AUC").
+   * Note : les zones purement `AU` (sans suffixe) sont comptées dans
+   * `zones_au_nombre` mais PAS ici — seules les `AUc` (ouverte /
+   * immédiatement urbanisable) alimentent ce compteur.
+   */
   zones_au_immediates: number;
   /** Surface totale des zones AU en hectares, ou null si non calculable. */
   zones_au_surface_ha: number | null;
@@ -150,13 +155,13 @@ export async function dynamiqueImmobiliere(
   // Géocodage inverse : commune requise (code_commune pour Sit@del, label pour meta)
   const revGeo = await reverseGeocode({ lat, lon });
   if (!revGeo) {
-    throw new Error(
+    throw new RangeError(
       `${LOG_TAG}: géocodage inverse sans résultat (${lat},${lon}) — commune introuvable, impossible de continuer`,
     );
   }
   const code_commune = revGeo.codeCommune ?? "";
   if (!code_commune) {
-    throw new Error(
+    throw new RangeError(
       `${LOG_TAG}: géocodage inverse OK mais codeCommune absent (${lat},${lon}, label="${revGeo.label}")`,
     );
   }
@@ -188,7 +193,9 @@ export async function dynamiqueImmobiliere(
   const auFeatures: unknown[] = zonesData?.geojson.features ?? [];
   const zonesNombre = zonesData?.n_zones_au ?? 0;
 
-  // zones_au_immediates : typezone upper starts with "AUC"
+  // zones_au_immediates : seules les zones AUc (ouverte / immédiatement urbanisable)
+  // sont comptées. Les zones bare `AU` figurent dans zones_au_nombre mais PAS ici
+  // (délibérément, cohérent avec la doctrine PLU : AU strict ≠ constructible immédiatement).
   const zonesImm = (zonesData?.zones_au ?? []).filter((z) =>
     z.typezone.toUpperCase().startsWith("AUC"),
   ).length;
