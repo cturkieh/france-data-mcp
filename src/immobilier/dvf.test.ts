@@ -31,8 +31,10 @@ import {
   aggregatePrix,
   deptPrefixFromInsee,
   dvfInRadius,
+  dvfPkKey,
   ensureCommuneCached,
   fetchCommuneCsv,
+  upsertMutations,
 } from "./dvf.js";
 
 // Spy module pour mocker fetchCommunesInRadius/ensureCommuneCached dans les
@@ -302,6 +304,70 @@ describe("ensureCommuneCached", () => {
 
     // Cache périmé → fetch déclenché
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests upsertMutations — dédoublonnage PK (régression prod : ON CONFLICT 21000)
+// ---------------------------------------------------------------------------
+
+describe("upsertMutations", () => {
+  it("dédoublonne par clé primaire composite avant l'upsert (évite ON CONFLICT 21000)", async () => {
+    // Capture le payload réellement envoyé à `.upsert(...)`.
+    const captured: DvfMutation[] = [];
+    const upsertChain: Record<string, unknown> = {};
+    upsertChain.upsert = (payload: DvfMutation[]) => {
+      captured.push(...payload);
+      return Promise.resolve({ error: null });
+    };
+    mockFrom.mockReturnValue(upsertChain);
+
+    const mk = (over: Partial<DvfMutation>): DvfMutation => ({
+      id_mutation: "M1",
+      date_mutation: "2025-01-02",
+      nature_mutation: "Vente",
+      valeur_fonciere: 1,
+      code_commune: "50129",
+      type_local: "Dépendance",
+      surface_reelle_bati: null,
+      surface_terrain: null,
+      prix_m2: null,
+      longitude: -1.6,
+      latitude: 49.6,
+      ...over,
+    });
+
+    // 4 lignes partageant la MÊME clé PK (M1|50129|2025-01-02|Dépendance) — le cas
+    // réel DVF qui faisait throw Postgres 21000 — + 1 ligne de clé distincte.
+    const rows = [
+      mk({ valeur_fonciere: 1 }),
+      mk({ valeur_fonciere: 2 }),
+      mk({ valeur_fonciere: 3 }),
+      mk({ valeur_fonciere: 4 }), // keep-last
+      mk({ type_local: "Maison", valeur_fonciere: 9 }),
+    ];
+
+    const written = await upsertMutations(rows);
+
+    // Retourne le nombre RÉELLEMENT écrit (dédupé), pas les lignes d'entrée.
+    expect(written).toBe(2);
+    // 5 lignes en entrée → 2 clés uniques en sortie.
+    expect(captured).toHaveLength(2);
+    // Aucune clé PK en double dans le payload envoyé à Postgres (invariant 21000).
+    // Utilise `dvfPkKey` (la MÊME source que le dédup de prod) → garde le test et
+    // le code couplés à la définition unique de la clé.
+    const keys = captured.map(dvfPkKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    // keep-last : la dernière occurrence de la clé dupliquée est conservée.
+    const dep = captured.find((r) => r.type_local === "Dépendance");
+    expect(dep?.valeur_fonciere).toBe(4);
+  });
+
+  it("no-op si aucune ligne (n'appelle pas le client, retourne 0)", async () => {
+    mockFrom.mockClear();
+    const written = await upsertMutations([]);
+    expect(written).toBe(0);
+    expect(mockFrom).not.toHaveBeenCalled();
   });
 });
 
