@@ -345,7 +345,7 @@ export async function dvfInRadius(
     const r = results[i];
     if (r && r.status === "rejected") {
       console.warn(
-        `[france-data-mcp] dvfInRadius: ensureCommuneCached(${communeCodes[i]}) failed: ${(r.reason as Error).message}`,
+        `[france-data-mcp] dvfInRadius: ensureCommuneCached(${communeCodes[i] ?? "?"}) failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
       );
     }
   }
