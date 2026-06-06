@@ -18,7 +18,7 @@
 import { parseCsv } from "../core/csv.js";
 import { DEFAULT_USER_AGENT, HttpError, fetchJson, fetchText } from "../core/http.js";
 import { formatRpcError, validateCoords, validateRadiusKm } from "../sante/db-helpers.js";
-import { getUntypedAnonClient } from "../storage/supabase.js";
+import { getUntypedAnonClient, getUntypedServiceClient } from "../storage/supabase.js";
 // Auto-import du module pour que `dvfInRadius` appelle `fetchCommunesInRadius`
 // et `ensureCommuneCached` via la table d'exports — sinon ces appels intra-module
 // se lient à la fonction locale et `vi.spyOn(dvfModule, …)` ne peut pas les
@@ -219,7 +219,10 @@ function parseDvfCsv(codeCommune: string, csvText: string, _year: number): DvfMu
  * Lit la ligne de cache pour une commune (null si absente).
  */
 export async function getCacheRow(insee: string): Promise<DvfCacheRow | null> {
-  const supabase = getUntypedAnonClient();
+  // Client service : `dvf_commune_cache` est une table INTERNE (RLS ON, aucune
+  // policy anon — doctrine cache, cf. geocoded_addresses). Lecture/écriture du
+  // cache via service_role uniquement ; le rôle anon n'y touche jamais.
+  const supabase = getUntypedServiceClient();
   const { data, error } = await supabase
     .from("dvf_commune_cache")
     .select("code_commune, fetched_at, source_year, row_count")
@@ -241,7 +244,10 @@ export async function getCacheRow(insee: string): Promise<DvfCacheRow | null> {
 export async function upsertMutations(rows: DvfMutation[]): Promise<void> {
   if (rows.length === 0) return;
 
-  const supabase = getUntypedAnonClient();
+  // Écriture du cache → client service (RLS bypass). Le rôle anon public n'a
+  // PAS le droit d'écrire `dvf_mutations` (sinon n'importe quel porteur de la
+  // clé anon pourrait polluer le cache de prix). Doctrine : anon lit, service écrit.
+  const supabase = getUntypedServiceClient();
 
   // On insère par batch de 500 pour éviter les payloads trop lourds
   const BATCH = 500;
@@ -283,7 +289,8 @@ export async function markCommuneCached(
   year: number,
   rowCount: number,
 ): Promise<void> {
-  const supabase = getUntypedAnonClient();
+  // Écriture du registre de cache → client service (table interne, cf. getCacheRow).
+  const supabase = getUntypedServiceClient();
   const { error } = await supabase.from("dvf_commune_cache").upsert(
     {
       code_commune: insee,
@@ -378,7 +385,9 @@ export async function dvfInRadius(
     throw new Error(msg);
   }
 
-  // Appel RPC
+  // Appel RPC — chemin de LECTURE public : client anon (couvert par la policy
+  // "anon read dvf_mutations" FOR SELECT, miroir de finess_in_radius). La RPC
+  // est SECURITY INVOKER → s'exécute sous anon → la policy SELECT est requise.
   const supabase = getUntypedAnonClient();
   const { data, error } = await supabase.rpc("dvf_in_radius", {
     p_lat: lat,

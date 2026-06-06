@@ -18,7 +18,11 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { __resetClientsForTesting, getUntypedAnonClient } from "../storage/supabase.js";
+import {
+  __resetClientsForTesting,
+  getUntypedAnonClient,
+  getUntypedServiceClient,
+} from "../storage/supabase.js";
 
 // Point de test : centre de Charleville-Mézières (aligné finess integration).
 const CENTER = { lat: 49.7724, lon: 4.7203 };
@@ -36,8 +40,12 @@ const INSIDE_ID = `${ITEST_PREFIX}inside`;
 const OUTSIDE_ID = `${ITEST_PREFIX}outside`;
 const ITEST_COMMUNE = "08105";
 
-// Skip tant que la clé anon n'est pas fournie (web/remote ou CI sans secret).
-const hasKey = (process.env.SUPABASE_ANON_KEY ?? "") !== "";
+// Skip tant que les clés ne sont pas fournies (web/remote ou CI sans secret).
+// Le test ÉCRIT le cache via service_role (doctrine : anon lit, service écrit) et
+// LIT via anon (RPC) → les DEUX clés sont requises.
+const hasKey =
+  (process.env.SUPABASE_ANON_KEY ?? "") !== "" &&
+  (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "") !== "";
 
 beforeAll(() => {
   // Tests run against Supabase Local (started by `pnpm db:start`) ou la prod au
@@ -49,7 +57,8 @@ beforeAll(() => {
 
 async function cleanup(): Promise<void> {
   if (!hasKey) return;
-  const supabase = getUntypedAnonClient();
+  // Suppression via service_role : RLS ON sur dvf_mutations sans policy DELETE anon.
+  const supabase = getUntypedServiceClient();
   // `geom` est GENERATED → on ne supprime que par les colonnes de la PK.
   const { error } = await supabase
     .from("dvf_mutations")
@@ -67,7 +76,9 @@ afterAll(async () => {
 
 describe.skipIf(!hasKey)("dvf_in_radius (PostGIS integration)", () => {
   it("ne retourne que la mutation DANS le rayon, avec une position geom peuplée", async () => {
-    const supabase = getUntypedAnonClient();
+    // Écriture du cache → service_role (RLS bypass) ; lecture → anon (policy SELECT).
+    const svc = getUntypedServiceClient();
+    const anon = getUntypedAnonClient();
 
     // Idempotence : purge d'éventuels résidus d'un run précédent interrompu.
     await cleanup();
@@ -103,14 +114,17 @@ describe.skipIf(!hasKey)("dvf_in_radius (PostGIS integration)", () => {
       },
     ];
 
-    const { error: insertError } = await supabase.from("dvf_mutations").upsert(rows, {
+    // Insert via service_role (le rôle anon n'a PAS de policy INSERT — c'est
+    // précisément l'invariant de sécurité : seul service écrit le cache).
+    const { error: insertError } = await svc.from("dvf_mutations").upsert(rows, {
       onConflict: "id_mutation,code_commune,date_mutation,type_local",
     });
     expect(insertError).toBeNull();
 
-    // RPC via getUntypedAnonClient : `dvf_in_radius` n'est pas encore dans les
-    // types générés (pattern documenté du projet — cf. dvf.ts production).
-    const { data, error } = await supabase.rpc("dvf_in_radius", {
+    // RPC via getUntypedAnonClient (chemin de LECTURE public, couvert par la
+    // policy "anon read dvf_mutations") : `dvf_in_radius` n'est pas encore dans
+    // les types générés (pattern documenté du projet — cf. dvf.ts production).
+    const { data, error } = await anon.rpc("dvf_in_radius", {
       p_lat: CENTER.lat,
       p_lon: CENTER.lon,
       p_radius_meters: RADIUS_METERS,

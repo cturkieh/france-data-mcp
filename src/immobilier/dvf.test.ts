@@ -7,8 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mockFrom = vi.fn();
 const mockRpc = vi.fn();
 
+// anon (lecture RPC) ET service (écritures cache) routent vers les MÊMES mocks :
+// les assertions portent sur mockFrom/mockRpc quelle que soit la clé utilisée.
 vi.mock("../storage/supabase.js", () => ({
   getUntypedAnonClient: () => ({
+    from: mockFrom,
+    rpc: mockRpc,
+  }),
+  getUntypedServiceClient: () => ({
     from: mockFrom,
     rpc: mockRpc,
   }),

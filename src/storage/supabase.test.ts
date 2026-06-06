@@ -69,3 +69,35 @@ describe("getServiceClient", () => {
     expect(typeof client.from).toBe("function");
   });
 });
+
+describe("getUntypedServiceClient", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    // biome-ignore lint/performance/noDelete: env vars must be removed (assigning undefined coerces to "undefined" string).
+    delete process.env.SUPABASE_URL;
+    // biome-ignore lint/performance/noDelete: env vars must be removed (assigning undefined coerces to "undefined" string).
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  });
+
+  it("throws a clear error when SUPABASE_SERVICE_ROLE_KEY is missing", async () => {
+    process.env.SUPABASE_URL = "https://example.supabase.co";
+    const mod = await import("./supabase");
+    expect(() => mod.getUntypedServiceClient()).toThrow(/SUPABASE_SERVICE_ROLE_KEY/);
+  });
+
+  it("returns a SupabaseClient when env vars are present", async () => {
+    process.env.SUPABASE_URL = "https://example.supabase.co";
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "service-key";
+    const mod = await import("./supabase");
+    const client = mod.getUntypedServiceClient();
+    expect(client).toBeDefined();
+    expect(typeof client.from).toBe("function");
+  });
+
+  it("memoizes the client (returns same instance on second call)", async () => {
+    process.env.SUPABASE_URL = "https://example.supabase.co";
+    process.env.SUPABASE_SERVICE_ROLE_KEY = "service-key";
+    const mod = await import("./supabase");
+    expect(mod.getUntypedServiceClient()).toBe(mod.getUntypedServiceClient());
+  });
+});

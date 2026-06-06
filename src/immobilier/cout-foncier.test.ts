@@ -10,6 +10,10 @@ vi.mock("../storage/supabase.js", () => ({
     from: vi.fn(),
     rpc: vi.fn(),
   }),
+  getUntypedServiceClient: () => ({
+    from: vi.fn(),
+    rpc: vi.fn(),
+  }),
 }));
 
 import { coutFoncier } from "./cout-foncier.js";
