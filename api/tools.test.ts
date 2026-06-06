@@ -2349,6 +2349,15 @@ describe("dynamique_immobiliere (MCP tool)", () => {
     expect(spy).toHaveBeenCalledWith({ lat: 48.87, lon: 2.35, rayon_km: 3 });
   });
 
+  it("normalise les alias latitude/longitude/rayon → lat/lon/rayon_km", async () => {
+    const spy = vi
+      .spyOn(immobilierMod, "dynamiqueImmobiliere")
+      .mockResolvedValueOnce({ couverture: {} } as never);
+    const tool = findTool("dynamique_immobiliere");
+    await tool?.handler({ latitude: 49.64, longitude: -1.62, rayon: 2 });
+    expect(spy).toHaveBeenCalledWith({ lat: 49.64, lon: -1.62, rayon_km: 2 });
+  });
+
   it("rejette les appels sans lat/lon", async () => {
     const tool = findTool("dynamique_immobiliere");
     await expect(tool?.handler({})).rejects.toThrow(/lon et lat/);
@@ -2380,6 +2389,12 @@ describe("cout_foncier (MCP tool)", () => {
     expect(tool?.description).toMatch(/NE PAS/);
   });
 
+  it("la description précise le périmètre RÉSIDENTIEL (maisons + appartements, pas locaux pro)", () => {
+    const tool = findTool("cout_foncier");
+    expect(tool?.description).toMatch(/RÉSIDENTIEL/);
+    expect(tool?.description).toMatch(/maisons \+ appartements/i);
+  });
+
   it("délègue à coutFoncier avec les bons arguments", async () => {
     const spy = vi
       .spyOn(immobilierMod, "coutFoncier")
@@ -2396,6 +2411,15 @@ describe("cout_foncier (MCP tool)", () => {
     const tool = findTool("cout_foncier");
     await tool?.handler({ lat: 48.87, lon: 2.35 });
     expect(spy).toHaveBeenCalledWith({ lat: 48.87, lon: 2.35, rayon_km: 3 });
+  });
+
+  it("normalise les alias latitude/longitude/rayonKm → lat/lon/rayon_km", async () => {
+    const spy = vi
+      .spyOn(immobilierMod, "coutFoncier")
+      .mockResolvedValueOnce({ couverture: "ok", n_ventes: 0 } as never);
+    const tool = findTool("cout_foncier");
+    await tool?.handler({ latitude: 49.64, longitude: -1.62, rayonKm: 4 });
+    expect(spy).toHaveBeenCalledWith({ lat: 49.64, lon: -1.62, rayon_km: 4 });
   });
 
   it("rejette les appels sans lat/lon", async () => {

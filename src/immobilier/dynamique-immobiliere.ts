@@ -8,16 +8,26 @@
  *   - `info`  = contexte / localisation (quartiers AU, prix) → n'alimente PAS le score
  *
  * Doctrine de dégradation (identique à panorama_implantation) :
- *   - Échec géocodage inverse → rejet total (pas de commune → rien n'est calculable)
+ *   - Échec géocodage inverse → SEULE la section `permis` est dégradée
+ *     (`indisponible:commune_introuvable`). La commune ne sert QU'AUX permis
+ *     Sit@del (maille commune) ; les zones AU (apicarto) et les terrains (DVF)
+ *     sont calculés PAR RAYON (lat/lon) → ils restent servis. Un point côtier /
+ *     isolé (ex. site industriel en bord de mer) n'a pas de commune au géocodage
+ *     inverse mais a des zones AU / ventes dans son rayon → l'outil NE doit pas
+ *     échouer en entier (régression prouvée : -32602 sur tout l'appel).
  *   - Échec d'une section → `couverture.<section>` = "indisponible:<raison>",
  *     le reste du résultat est préservé.
  */
 
-import { type SectionStatus, runSection } from "../sante/panorama-implantation.js";
+import {
+  type SectionOutcome,
+  type SectionStatus,
+  runSection,
+} from "../sante/panorama-implantation.js";
 import { reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
 import { aggregatePrix, dvfInRadius } from "./dvf.js";
-import { permitsForCommune } from "./sitadel.js";
+import { type PermitsResult, permitsForCommune } from "./sitadel.js";
 
 const LOG_TAG = "[france-data-mcp] dynamique_immobiliere";
 
@@ -62,8 +72,10 @@ export interface DynamiqueImmobiliereInfo {
 
 export interface DynamiqueImmobiliereResult {
   meta: {
-    code_commune: string;
-    commune: string;
+    /** `null` si le point n'est rattaché à aucune commune (côtier/isolé) — cf. couverture.permis. */
+    code_commune: string | null;
+    /** `null` si le point n'est rattaché à aucune commune (côtier/isolé). */
+    commune: string | null;
     lat: number;
     lon: number;
     rayon_km: number;
@@ -121,6 +133,15 @@ function featureCentroid(feature: unknown): { lat: number; lon: number } | null 
   return { lon: sumLon / pairs.length, lat: sumLat / pairs.length };
 }
 
+/**
+ * Libellé de commune d'un reverse-geocode : `commune` si présent, sinon le
+ * `label` complet, sinon `null` (point hors couverture). Factorisé : utilisé
+ * pour l'ancrage ET pour le secteur de chaque quartier AU.
+ */
+function communeLabel(rg: { commune?: string; label: string } | null): string | null {
+  return rg ? (rg.commune ?? rg.label) : null;
+}
+
 // ---------------------------------------------------------------------------
 // Signal heuristic
 // ---------------------------------------------------------------------------
@@ -150,24 +171,33 @@ export async function dynamiqueImmobiliere(
 ): Promise<DynamiqueImmobiliereResult> {
   const { lat, lon, rayon_km } = input;
 
-  // Géocodage inverse : commune requise (code_commune pour Sit@del, label pour meta)
+  // Géocodage inverse : la commune ne sert QU'AUX permis Sit@del (maille
+  // commune). Un point sans commune (côtier/isolé : reverseGeocode null en mer,
+  // ou codeCommune absent) NE doit PAS faire échouer tout l'outil — zones AU et
+  // terrains sont par rayon. On dégrade alors `permis` et on continue (régression
+  // prouvée : un point côtier rendait l'appel entier en -32602, card + carte vides).
   const revGeo = await reverseGeocode({ lat, lon });
-  if (!revGeo) {
-    throw new RangeError(
-      `${LOG_TAG}: géocodage inverse sans résultat (${lat},${lon}) — commune introuvable, impossible de continuer`,
-    );
-  }
-  const code_commune = revGeo.codeCommune ?? "";
+  // `|| null` (pas `??`) : un codeCommune "" est aussi inexploitable que absent.
+  const code_commune = revGeo?.codeCommune || null;
+  const commune = communeLabel(revGeo);
   if (!code_commune) {
-    throw new RangeError(
-      `${LOG_TAG}: géocodage inverse OK mais codeCommune absent (${lat},${lon}, label="${revGeo.label}")`,
+    const detail = revGeo
+      ? `géocodage inverse OK mais codeCommune absent (label="${revGeo.label}")`
+      : "géocodage inverse sans résultat";
+    console.warn(
+      `${LOG_TAG}: ${detail} (${lat},${lon}) — section 'permis' indisponible:commune_introuvable, zones_au + terrains servis par rayon`,
     );
   }
-  const commune = revGeo.commune ?? revGeo.label;
 
-  // --- 3 sections en parallèle -------------------------------------------
+  // --- 3 sections en parallèle (permis seulement si la commune est connue) -
+  // Pas de commune → outcome pré-dégradé (jamais appelé), aligné sur le contrat
+  // SectionOutcome des deux autres sections — le LLM lit `couverture.permis`.
+  const permisSection: Promise<SectionOutcome<PermitsResult>> = code_commune
+    ? runSection("permis", () => permitsForCommune(code_commune))
+    : Promise.resolve({ data: null, status: "indisponible:commune_introuvable" });
+
   const [permisOut, zonesOut, dvfOut] = await Promise.all([
-    runSection("permis", () => permitsForCommune(code_commune)),
+    permisSection,
     runSection("zones_au", () => getZonesAU(lat, lon, { radiusKm: rayon_km })),
     runSection("terrains", () => dvfInRadius(lat, lon, rayon_km)),
   ]);
@@ -212,7 +242,7 @@ export async function dynamiqueImmobiliere(
           `${LOG_TAG}: reverse-geocode centroïde AU "${zone.libelle}" hors couverture IGN — secteur:null`,
         );
       }
-      const secteur = rg ? (rg.commune ?? rg.label) : null;
+      const secteur = communeLabel(rg);
       return { libelle: zone.libelle, secteur };
     }),
   );
