@@ -1,0 +1,13 @@
+{
+  "name": "France Data MCP",
+  "short_name": "France Data",
+  "description": "Serveur MCP qui croise 10 référentiels publics français : santé, démographie, entreprises, géo, immobilier.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#142844",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

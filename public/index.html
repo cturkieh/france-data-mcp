@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>France Data MCP — données publiques françaises pour agents IA</title>
+  <meta name="description" content="Serveur MCP TypeScript qui croise et réconcilie 10 référentiels publics français (INSEE, FINESS, RPPS, Ameli, DVF, IGN, DINUM…) : santé, démographie, entreprises, géo et immobilier." />
+  <link rel="canonical" href="https://france-data-mcp.vercel.app/" />
+
+  <!-- Favicons -->
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+  <link rel="manifest" href="/site.webmanifest" />
+  <meta name="theme-color" content="#142844" />
+
+  <!-- Open Graph / partage -->
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="France Data MCP" />
+  <meta property="og:description" content="10 référentiels publics français croisés et réconciliés, exposés en MCP : santé, démographie, entreprises, géo, immobilier." />
+  <meta property="og:url" content="https://france-data-mcp.vercel.app/" />
+  <meta property="og:image" content="https://france-data-mcp.vercel.app/og-image.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="France Data MCP" />
+  <meta name="twitter:description" content="10 référentiels publics français croisés et réconciliés, exposés en MCP." />
+  <meta name="twitter:image" content="https://france-data-mcp.vercel.app/og-image.png" />
+
+  <style>
+    :root {
+      --navy: #142844; --navy-2: #1f3a5f; --ink: #1a2230; --muted: #5b6b80;
+      --bg: #f6f8fb; --card: #ffffff; --line: #e3e9f1;
+      --bleu: #0055a4; --rouge: #ef4135;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.55; -webkit-font-smoothing: antialiased;
+    }
+    .tricolore { height: 4px; background: linear-gradient(90deg, var(--bleu) 0 33.3%, #fff 33.3% 66.6%, var(--rouge) 66.6% 100%); }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 0 20px; }
+    header { text-align: center; padding: 56px 20px 32px; }
+    header img { width: 84px; height: 84px; border-radius: 18px; box-shadow: 0 8px 28px rgba(20,40,68,.18); }
+    h1 { font-size: clamp(26px, 5vw, 38px); margin: 18px 0 6px; color: var(--navy); letter-spacing: -.5px; }
+    .lede { color: var(--muted); font-size: 17px; max-width: 620px; margin: 0 auto; }
+    .endpoint {
+      display: flex; align-items: center; gap: 10px; justify-content: center;
+      margin: 26px auto 0; flex-wrap: wrap;
+    }
+    code.url {
+      background: var(--navy); color: #eaf1fb; padding: 10px 14px; border-radius: 10px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 14px;
+    }
+    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 8px 0 34px; }
+    .stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; text-align: center; }
+    .stat b { display: block; font-size: 26px; color: var(--navy); }
+    .stat span { color: var(--muted); font-size: 13px; }
+    h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 28px 0 12px; }
+    .sources { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+    .chip { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px; font-size: 13px; color: var(--ink); }
+    .cta { display: flex; flex-wrap: wrap; gap: 10px; margin: 26px 0 10px; }
+    .btn {
+      text-decoration: none; padding: 11px 16px; border-radius: 10px; font-size: 14px; font-weight: 600;
+      border: 1px solid var(--line); color: var(--navy); background: var(--card); transition: .15s;
+    }
+    .btn:hover { border-color: var(--navy-2); transform: translateY(-1px); }
+    .btn.primary { background: var(--navy); color: #fff; border-color: var(--navy); }
+    footer { color: var(--muted); font-size: 13px; text-align: center; padding: 34px 20px 56px; border-top: 1px solid var(--line); margin-top: 30px; }
+    footer a { color: var(--navy-2); }
+  </style>
+</head>
+<body>
+  <div class="tricolore"></div>
+  <header>
+    <img src="/icon-192.png" alt="Logo France Data MCP" />
+    <h1>France Data MCP</h1>
+    <p class="lede">Serveur <strong>MCP</strong> qui croise et réconcilie 10 référentiels publics français — santé, démographie, entreprises, géo et immobilier — pour Claude, Cursor &amp; toute app TypeScript.</p>
+    <div class="endpoint">
+      <code class="url">https://france-data-mcp.vercel.app/mcp</code>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="stats">
+      <div class="stat"><b>10</b><span>sources officielles</span></div>
+      <div class="stat"><b>36</b><span>outils MCP</span></div>
+      <div class="stat"><b>v0.26.1</b><span>fraîcheur exposée</span></div>
+    </section>
+
+    <h2>Sources croisées</h2>
+    <div class="sources">
+      <span class="chip">INSEE SIRENE</span>
+      <span class="chip">INSEE IRIS</span>
+      <span class="chip">FINESS (DREES)</span>
+      <span class="chip">RPPS / Annuaire Santé (ANS)</span>
+      <span class="chip">Annuaire Santé Ameli</span>
+      <span class="chip">Centres de Santé (CNAM)</span>
+      <span class="chip">DGFiP DVF</span>
+      <span class="chip">SDES Sit@del</span>
+      <span class="chip">IGN</span>
+      <span class="chip">DINUM</span>
+    </div>
+
+    <h2>Liens</h2>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/cturkieh/france-data-mcp">GitHub</a>
+      <a class="btn" href="https://www.npmjs.com/package/france-data-mcp">npm</a>
+      <a class="btn" href="https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp">MCP Registry</a>
+      <a class="btn" href="https://smithery.ai/servers/cturkieh/france-data">Smithery</a>
+      <a class="btn" href="/healthz">/healthz</a>
+    </div>
+  </main>
+
+  <footer>
+    Licence MIT · données publiques officielles (sources citées par chaque outil) ·
+    <a href="https://github.com/cturkieh/france-data-mcp">cturkieh/france-data-mcp</a>
+  </footer>
+</body>
+</html>
