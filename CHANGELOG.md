@@ -4,6 +4,37 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — feat/immobilier-potentiel (composite `dynamique_immobiliere`)
+
+### Added
+
+- **Composite `dynamique_immobiliere`** (`src/immobilier/dynamique-immobiliere.ts`) — orchestre
+  3 briques leaf (Sit@del permis · Apicarto PLU · DVF foncier) en parallèle et retourne un
+  résultat à **2 registres distincts** : `note` (volume → scoring LLM) + `info` (quartiers AU,
+  prix → contexte). Doctrine de dégradation `runSection` : échec d'une section →
+  `couverture.<section>` = `"indisponible:<raison>"`, composite ne throw pas. Géocodage inverse
+  = ancrage obligatoire (throw si `codeCommune` absent). Signal heuristic : `"fort"` /
+  `"modéré"` / `"faible"` sur logements autorisés + zones AU ouvertes (AUC).
+
+- **Extension `getZonesAU` avec `radiusKm`** (`src/immobilier/apicarto-plu.ts`) — nouvel
+  `opts.radiusKm` : construit un bbox Polygon (offsets degrés via `bboxPolygon`) au lieu d'un
+  Point, pour récupérer toutes les zones AU intersectant le rayon. Backward-compatible (sans
+  `radiusKm` → comportement Point inchangé). `ZonesAUResult.zones_au` enrichi de `typezone`
+  (requis par le composite pour compter les zones AUC sans ré-accéder au geojson).
+
+- **32 tests verts** (4 fichiers) : `dvf.test.ts` (16), `apicarto-plu.test.ts` (7 dont test
+  Polygon bbox), `sitadel.test.ts` (6), `dynamique-immobiliere.test.ts` (3 : all-ok / PLU-fail
+  / centroïde-fail-partiel). tsc strict + Biome clean.
+
+### Quality (post-review)
+
+- `couverture` fields typés `SectionStatus` (pas `string`) · `bboxPolygon` return type précis ·
+  `n_terrains` issu de `aggregatePrix` (supprime le re-filter redondant) · index drift
+  `zones_au/features` éliminé (dérivé de `topZones` seul) · log `console.warn` ajouté sur
+  `reverseGeocode → null` (hors couverture IGN).
+
+---
+
 ## [0.25.1] — 2026-06-06 (Code NAF invalide → `-32602` propre au lieu d'un 400 Sentry)
 
 ### Fixed
