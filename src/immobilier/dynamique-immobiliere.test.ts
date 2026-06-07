@@ -26,6 +26,9 @@ vi.mock("./dvf.js", () => ({
 
 vi.mock("../territoire/geocode.js", () => ({
   reverseGeocode: vi.fn(),
+}));
+
+vi.mock("../territoire/communes.js", () => ({
   communeContainingPoint: vi.fn(),
 }));
 
@@ -33,6 +36,7 @@ vi.mock("../territoire/geocode.js", () => ({
 // Imports (après mocks)
 // ---------------------------------------------------------------------------
 
+import * as communesModule from "../territoire/communes.js";
 import * as geocodeModule from "../territoire/geocode.js";
 import type { GeocodeResult } from "../territoire/geocode.js";
 import * as pluModule from "./apicarto-plu.js";
@@ -298,7 +302,7 @@ describe("dynamiqueImmobiliere", () => {
     // Anchor ET centroïdes AU hors couverture IGN → tous null ; frontières aussi
     // vides (point réellement en mer) → permis dégradé.
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(null);
-    vi.mocked(geocodeModule.communeContainingPoint).mockResolvedValue(null);
+    vi.mocked(communesModule.communeContainingPoint).mockResolvedValue(null);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
     vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
     vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
@@ -328,7 +332,7 @@ describe("dynamiqueImmobiliere", () => {
     const revGeoNoCcommune: GeocodeResult = { ...REV_GEO_OK, codeCommune: undefined };
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(revGeoNoCcommune);
     // Frontières aussi sans commune → la dégradation `permis` est conservée.
-    vi.mocked(geocodeModule.communeContainingPoint).mockResolvedValue(null);
+    vi.mocked(communesModule.communeContainingPoint).mockResolvedValue(null);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
     vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
     vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
@@ -353,7 +357,7 @@ describe("dynamiqueImmobiliere", () => {
 
   it("(b5) reverse null mais frontières résolvent la commune → permis SERVIS via fallback", async () => {
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(null);
-    vi.mocked(geocodeModule.communeContainingPoint).mockResolvedValue({
+    vi.mocked(communesModule.communeContainingPoint).mockResolvedValue({
       codeCommune: "50041",
       commune: "La Hague",
     });
@@ -365,7 +369,7 @@ describe("dynamiqueImmobiliere", () => {
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
     // Fallback frontières interrogé avec le point d'ancrage, puis Sit@del sur l'INSEE résolu
-    expect(geocodeModule.communeContainingPoint).toHaveBeenCalledWith({
+    expect(communesModule.communeContainingPoint).toHaveBeenCalledWith({
       lat: BASE_INPUT.lat,
       lon: BASE_INPUT.lon,
     });

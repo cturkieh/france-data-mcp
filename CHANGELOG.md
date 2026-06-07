@@ -4,23 +4,34 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [0.26.2] — 2026-06-07 — Immobilier : permis récupérés sur site isolé via fallback frontières
+## [0.26.2] — 2026-06-07 — Commune résolue par frontières sur site isolé (immobilier + couverture santé)
 
-Patch de robustesse sur le domaine Immobilier. Surface inchangée (10 référentiels / 36 tools).
+Patch de robustesse partagé. Surface inchangée (10 référentiels / 36 tools).
+
+### Added
+
+- **`communeContainingPoint(lat,lon)`** (`src/territoire/communes.ts`) : résout la commune **contenant**
+  un point par point-dans-polygone sur les frontières communales officielles (API Découpage administratif
+  `geo.api.gouv.fr/communes?lat&lon`, frontières IGN AdminExpress). FALLBACK de `reverseGeocode`
+  (territoire/geocode) qui, lui, cherche l'**adresse** la plus proche et renvoie `null` sur un point sans
+  adresse à proximité (site industriel isolé / littoral). Les frontières pavent 100 % du territoire
+  terrestre sans trou → seul un point réellement en mer / hors France renvoie `null`. Fail-safe par
+  contrat (`null` + warn, jamais de throw). Type de retour `CommuneResolution` (contrat plus fort que
+  `GeocodeResult` : champs requis non vides).
 
 ### Fixed
 
-- **`dynamique_immobiliere` récupère les permis Sit@del sur un point sans adresse proche** (site
-  industriel isolé / littoral — ex. Orano/La Hague). Avant (0.26.1) : le reverse-geocode d'**adresse**
-  (IGN) renvoyant `null` sur ces points, la commune restait introuvable → `permis` dégradé en
-  `indisponible:commune_introuvable` (logements autorisés perdus) ALORS que la commune existe.
-  Après : **fallback par frontières communales** — `communeContainingPoint` (`src/territoire/geocode.ts`)
-  interroge l'API Découpage administratif (`geo.api.gouv.fr/communes?lat&lon`, point-dans-polygone,
-  frontières IGN AdminExpress) quand le reverse d'adresse échoue. Les frontières pavent 100 % du
-  territoire terrestre sans trou → un point sur terre est toujours rattaché à sa commune et garde ses
-  permis ; seul un point réellement en mer / hors France reste dégradé (filet conservé). Prouvé prod :
+- **`dynamique_immobiliere` récupère les permis Sit@del sur un point sans adresse proche** (ex.
+  Orano/La Hague). Avant (0.26.1) : commune introuvable par adresse → `permis` dégradé en
+  `indisponible:commune_introuvable` (logements autorisés perdus) ALORS que la commune existe. Après :
+  fallback `communeContainingPoint` quand le reverse d'adresse échoue → permis servis. Prouvé prod :
   La Hague (49.6546,−1.8214) → reverse adresse `[]` mais frontières → `50041` (861 lignes Sit@del).
   `src/immobilier/dynamique-immobiliere.ts`.
+- **`finess_sirene_coverage_in_radius` ne plante plus sur un point isolé** (même angle mort, corrigé par
+  le même helper). Avant : reverse d'adresse `null` → `deptFromCodeInsee("")` → `RangeError` (appel mort
+  en standalone, ET dégradation de toute la section « référentiels » dans `panorama_implantation`). Après :
+  fallback frontières → département dérivé. Le filet `RangeError` est conservé pour le vrai point en mer
+  (reverse ET frontières vides). `src/sante/coverage.ts`.
 
 ### Notes
 
@@ -29,8 +40,8 @@ Patch de robustesse sur le domaine Immobilier. Surface inchangée (10 référent
   throw. Le throw de `reverseGeocode` (panne IGN réelle) continue de remonter (garde-fou test b4).
 - **Garde-fou faux positif** : sur coordonnées hors-bornes, l'API ignore silencieusement le filtre géo
   et renvoie TOUTE la liste des communes — on n'exploite donc QUE `length === 1` (un point ∈ 1 commune),
-  jamais `data[0]` (sinon "01001" Ain). Tests : `geocode.test.ts` (4 cas) + `dynamique-immobiliere.test.ts`
-  (b5 nominal fallback, b2 point en mer = reverse+frontières null).
+  jamais `data[0]` (sinon "01001" Ain). Tests : `communes.test.ts` (5 cas) + `dynamique-immobiliere.test.ts`
+  (b5 fallback nominal, b2 point en mer) + `coverage.test.ts` (fallback dept + filet RangeError).
 
 ## [0.26.1] — 2026-06-06 — Immobilier : dégradation gracieuse point côtier + robustesse boundary
 

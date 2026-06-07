@@ -26,6 +26,7 @@
  * 5. Construction du résultat avec samples (top 10 par catégorie) + methodology + caveats
  */
 
+import { communeContainingPoint } from "../territoire/communes.js";
 import { deptFromCodeInsee } from "../territoire/dept-codes.js";
 import { reverseGeocode } from "../territoire/geocode.js";
 import {
@@ -278,10 +279,21 @@ export async function getCoverageFinessVsSireneInRadius(
     );
   }
 
-  const dept = deptFromCodeInsee(reverse?.codeCommune ?? "");
+  // Même angle mort que `dynamique_immobiliere` : un point sans adresse proche
+  // (site industriel isolé / littoral — ex. Orano La Hague) → reverseGeocode
+  // d'ADRESSE sans codeCommune, alors que le point appartient à une commune.
+  // Fallback frontières (point-dans-polygone) pour retrouver la commune → dept.
+  // Seul un point réellement en mer / hors France reste sans commune (→ RangeError).
+  let codeCommune = reverse?.codeCommune ?? "";
+  if (!codeCommune) {
+    const byBoundary = await communeContainingPoint(center);
+    if (byBoundary) codeCommune = byBoundary.codeCommune;
+  }
+
+  const dept = deptFromCodeInsee(codeCommune);
   if (!dept) {
     throw new RangeError(
-      `finess_sirene_coverage_in_radius: impossible de déduire le département du point lon=${center.lon} lat=${center.lat} via reverseGeocode (codeCommune="${reverse?.codeCommune ?? "absent"}"). Fournir les coordonnées dans une zone administrative française valide.`,
+      `finess_sirene_coverage_in_radius: impossible de déduire le département du point lon=${center.lon} lat=${center.lat} (ni par reverseGeocode adresse, ni par frontières communales — codeCommune="${codeCommune || "absent"}", point en mer / hors France ?). Fournir les coordonnées dans une zone administrative française valide.`,
     );
   }
 

@@ -19,14 +19,6 @@ import type { Coordinates } from "../core/types.js";
 
 const BASE_URL = "https://data.geopf.fr/geocodage";
 
-/**
- * API Découpage administratif (Etalab / DINUM) — frontières communales issues
- * d'IGN AdminExpress. Sert de FALLBACK à `reverseGeocode` pour rattacher un
- * point à sa commune par point-dans-polygone (cf. `communeContainingPoint`).
- * Public, sans clé API.
- */
-const DECOUPAGE_BASE_URL = "https://geo.api.gouv.fr";
-
 export type GeocodeResult = {
   /** Coordonnées GPS (WGS84) */
   point: Coordinates;
@@ -242,56 +234,6 @@ export async function reverseGeocode(
   // (coords absentes) ne doit pas masquer un candidat valide en position 2+.
   const results = usableGeocodeResults(data.features, `reverse ${point.lon},${point.lat}`);
   return results[0] ?? null;
-}
-
-/**
- * Résout la commune CONTENANT un point (point-dans-polygone sur les frontières
- * communales officielles, API Découpage administratif). FALLBACK de
- * `reverseGeocode` : ce dernier cherche l'ADRESSE la plus proche et renvoie
- * `null` sur un point sans adresse à proximité (site industriel isolé, littoral
- * — ex. Orano/La Hague) ALORS que le point appartient bel et bien à une commune.
- * Les frontières, elles, pavent 100 % du territoire terrestre sans trou : seul
- * un point réellement en mer / hors France renvoie `null`.
- *
- * FAIL-SAFE par contrat (≠ `reverseGeocode` qui throw sur panne IGN) : on n'est
- * appelé que sur un chemin DÉJÀ dégradé (commune introuvable par adresse) ; une
- * panne de ce service de secours ne doit pas aggraver la situation → toute
- * erreur réseau/HTTP/payload est avalée en `null` + warn, le caller conserve sa
- * dégradation existante. Jamais de throw.
- */
-export async function communeContainingPoint(
-  point: Coordinates,
-  signal?: AbortSignal,
-): Promise<{ codeCommune: string; commune: string } | null> {
-  const params = new URLSearchParams({
-    lat: String(point.lat),
-    lon: String(point.lon),
-    fields: "code,nom",
-  });
-  const url = `${DECOUPAGE_BASE_URL}/communes?${params.toString()}`;
-  try {
-    const data = await fetchJson<Array<{ code?: unknown; nom?: unknown }>>(url, { signal });
-    // Une requête POINT (lat/lon) renvoie EXACTEMENT 1 commune (un point
-    // appartient à une seule commune), ou `[]` en mer / hors France. Garde-fou
-    // prouvé en live : sur des coordonnées hors-bornes, l'API ignore
-    // SILENCIEUSEMENT le filtre géo et renvoie TOUTE la liste alphabétique des
-    // communes — `data[0]` serait alors "01001" (Ain), faux positif pire qu'une
-    // dégradation. On n'exploite donc QUE le cas `length === 1` ; tout autre
-    // cardinal (0 = pas de commune, >1 = filtre ignoré) → null.
-    const first = Array.isArray(data) && data.length === 1 ? data[0] : undefined;
-    const code = typeof first?.code === "string" ? first.code : "";
-    const nom = typeof first?.nom === "string" ? first.nom : "";
-    if (code && nom) return { codeCommune: code, commune: nom };
-    console.warn(
-      `[france-data-mcp] communeContainingPoint(${point.lon},${point.lat}): aucune commune aux frontières (point en mer / hors France). Retour null.`,
-    );
-    return null;
-  } catch (err) {
-    console.warn(
-      `[france-data-mcp] communeContainingPoint(${point.lon},${point.lat}): service frontières indisponible (${(err as Error).message}). Retour null.`,
-    );
-    return null;
-  }
 }
 
 /**

@@ -16,6 +16,7 @@ vi.mock("../storage/supabase.js", () => ({
 }));
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as communesMod from "../territoire/communes.js";
 import * as geocodeMod from "../territoire/geocode.js";
 import { getCoverageFinessVsSireneInRadius } from "./coverage.js";
 import * as dinumMod from "./dinum.js";
@@ -768,5 +769,59 @@ describe("getCoverageFinessVsSireneInRadius — V0.13.2 familles incohérentes (
       result.familles_excluees_naf === undefined || result.familles_excluees_naf.length === 0,
       `familles_excluees_naf doit être vide/absent en cas d'auto-derive sans input. Reçu: ${JSON.stringify(result.familles_excluees_naf)}`,
     ).toBe(true);
+  });
+});
+
+// ── Fallback frontières : point isolé sans adresse (ex. Orano La Hague) ────────
+//   reverseGeocode d'adresse → null, mais le point appartient à une commune →
+//   `communeContainingPoint` la retrouve → département dérivé, PAS de RangeError.
+//   (Même angle mort que dynamique_immobiliere, corrigé par le même helper.)
+// ──────────────────────────────────────────────────────────────────────────────
+
+describe("getCoverageFinessVsSireneInRadius — fallback frontières (point isolé)", () => {
+  it("reverseGeocode sans commune → département résolu via communeContainingPoint (pas de RangeError)", async () => {
+    // Reverse d'adresse vide (site isolé / littoral)…
+    vi.spyOn(geocodeMod, "reverseGeocode").mockResolvedValue(null);
+    // …mais les frontières retrouvent la commune → dept 08.
+    const boundarySpy = vi
+      .spyOn(communesMod, "communeContainingPoint")
+      .mockResolvedValue({ codeCommune: "08105", commune: "Charleville-Mézières" });
+
+    vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+    const searchSpy = vi
+      .spyOn(dinumMod, "searchEntreprises")
+      .mockResolvedValue(makeSearchResult("000000000", "AUCUNE"));
+    vi.spyOn(dinumMod, "getEntrepriseBySiren").mockResolvedValue(
+      makeEntrepriseLookup("000000000", "AUCUNE", []),
+    );
+
+    const result = await getCoverageFinessVsSireneInRadius({
+      center: CENTER,
+      radiusKm: RADIUS_KM,
+      naf: NAF,
+    });
+
+    // Fallback interrogé avec le centre + département dérivé transmis à DINUM.
+    expect(boundarySpy).toHaveBeenCalledWith(CENTER);
+    expect(searchSpy).toHaveBeenCalledWith(expect.objectContaining({ departement: "08" }));
+    expect(result.finess_sites).toBe(0);
+  });
+
+  it("reverse null ET frontières null (point en mer) → RangeError (filet conservé)", async () => {
+    vi.spyOn(geocodeMod, "reverseGeocode").mockResolvedValue(null);
+    vi.spyOn(communesMod, "communeContainingPoint").mockResolvedValue(null);
+    vi.spyOn(finessDbMod, "getFinessInRadius").mockResolvedValue({
+      count: 0,
+      truncated: false,
+      results: [],
+    });
+
+    await expect(
+      getCoverageFinessVsSireneInRadius({ center: CENTER, radiusKm: RADIUS_KM, naf: NAF }),
+    ).rejects.toThrow(RangeError);
   });
 });

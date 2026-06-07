@@ -27,7 +27,8 @@ import {
   type SectionStatus,
   runSection,
 } from "../sante/panorama-implantation.js";
-import { communeContainingPoint, reverseGeocode } from "../territoire/geocode.js";
+import { communeContainingPoint } from "../territoire/communes.js";
+import { reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
 import { aggregatePrix, dvfInRadius } from "./dvf.js";
 import { type PermitsResult, permitsForCommune } from "./sitadel.js";
