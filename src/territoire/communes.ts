@@ -174,6 +174,72 @@ export async function fetchAllCommunes(signal?: AbortSignal): Promise<Commune[]>
   return data.map(toCommune);
 }
 
+/**
+ * Commune résolue par frontières. Contrat PLUS FORT que `GeocodeResult` : les
+ * mêmes noms de champs (`codeCommune`/`commune`) mais **requis ET non vides**
+ * (vs optionnels dans `GeocodeResult`) — ce qui permet un remplacement
+ * field-by-field côté callers (`reverseGeocode` → fallback) sans re-tester `|| null`.
+ */
+export type CommuneResolution = { codeCommune: string; commune: string };
+
+/**
+ * Résout la commune CONTENANT un point (point-dans-polygone sur les frontières
+ * communales officielles, `geo.api.gouv.fr/communes?lat&lon`). FALLBACK de
+ * `reverseGeocode` (territoire/geocode) : ce dernier cherche l'ADRESSE la plus
+ * proche et renvoie `null` sur un point sans adresse à proximité (site
+ * industriel isolé, littoral — ex. Orano/La Hague) ALORS que le point appartient
+ * bien à une commune. Les frontières pavent 100 % du territoire terrestre sans
+ * trou : seul un point réellement en mer / hors France renvoie `null`.
+ *
+ * FAIL-SAFE par contrat (≠ `searchCommunes` qui throw) : on n'est appelé que sur
+ * un chemin DÉJÀ dégradé (commune introuvable par adresse) ; une panne de ce
+ * service de secours ne doit pas aggraver la situation → toute erreur
+ * réseau/HTTP/payload est avalée en `null` + warn, jamais de throw. Voir
+ * `CommuneResolution` pour la relation au contrat `GeocodeResult`.
+ */
+export async function communeContainingPoint(
+  point: Coordinates,
+  signal?: AbortSignal,
+): Promise<CommuneResolution | null> {
+  const params = new URLSearchParams({
+    lat: String(point.lat),
+    lon: String(point.lon),
+    fields: "code,nom",
+  });
+  const url = `${BASE_URL}/communes?${params.toString()}`;
+  try {
+    // Parsing volontairement plus défensif que `ApiCommune`/`toCommune` (qui font
+    // confiance au payload) : ce chemin dégradé ne peut PAS faire confiance — cf.
+    // le cas « poison 01001 » ci-dessous + champs validés non vides avant retour.
+    const data = await fetchJson<Array<{ code?: unknown; nom?: unknown }>>(url, { signal });
+    // Une requête POINT renvoie EXACTEMENT 1 commune (un point ∈ 1 commune), ou
+    // `[]` en mer / hors France. Garde-fou prouvé en live : sur coords hors-bornes
+    // l'API ignore SILENCIEUSEMENT le filtre géo et renvoie TOUTE la liste
+    // alphabétique — `data[0]` serait "01001" (Ain), faux positif pire qu'une
+    // dégradation. On n'exploite donc QUE `length === 1` (0 = pas de commune,
+    // >1 = filtre ignoré → null).
+    const first = Array.isArray(data) && data.length === 1 ? data[0] : undefined;
+    if (
+      typeof first?.code === "string" &&
+      first.code &&
+      typeof first.nom === "string" &&
+      first.nom
+    ) {
+      return { codeCommune: first.code, commune: first.nom };
+    }
+    console.warn(
+      `[france-data-mcp] communeContainingPoint(${point.lon},${point.lat}): aucune commune unique aux frontières (point en mer / hors France, ou filtre ignoré). Retour null.`,
+    );
+    return null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[france-data-mcp] communeContainingPoint(${point.lon},${point.lat}): service frontières indisponible (${msg}). Retour null.`,
+    );
+    return null;
+  }
+}
+
 function toCommune(api: ApiCommune): Commune {
   const centre = api.centre?.coordinates
     ? { lon: api.centre.coordinates[0], lat: api.centre.coordinates[1] }

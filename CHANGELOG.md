@@ -4,6 +4,55 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.26.2] — 2026-06-07 — Commune résolue par frontières sur site isolé (immobilier + couverture santé)
+
+Patch de robustesse partagé. Surface inchangée (10 référentiels / 36 tools).
+
+### Added
+
+- **`communeContainingPoint(lat,lon)`** (`src/territoire/communes.ts`) : résout la commune **contenant**
+  un point par point-dans-polygone sur les frontières communales officielles (API Découpage administratif
+  `geo.api.gouv.fr/communes?lat&lon`, frontières IGN AdminExpress). FALLBACK de `reverseGeocode`
+  (territoire/geocode) qui, lui, cherche l'**adresse** la plus proche et renvoie `null` sur un point sans
+  adresse à proximité (site industriel isolé / littoral). Les frontières pavent 100 % du territoire
+  terrestre sans trou → seul un point réellement en mer / hors France renvoie `null`. Fail-safe par
+  contrat (`null` + warn, jamais de throw). Type de retour `CommuneResolution` (contrat plus fort que
+  `GeocodeResult` : champs requis non vides).
+
+### Fixed
+
+- **`dynamique_immobiliere` récupère les permis Sit@del sur un point sans adresse proche** (ex.
+  Orano/La Hague). Avant (0.26.1) : commune introuvable par adresse → `permis` dégradé en
+  `indisponible:commune_introuvable` (logements autorisés perdus) ALORS que la commune existe. Après :
+  fallback `communeContainingPoint` quand le reverse d'adresse échoue → permis servis. Prouvé prod :
+  La Hague (49.6546,−1.8214) → reverse adresse `[]` mais frontières → `50041` (861 lignes Sit@del).
+  `src/immobilier/dynamique-immobiliere.ts`.
+- **`finess_sirene_coverage_in_radius` ne plante plus sur un point isolé** (même angle mort, corrigé par
+  le même helper). Avant : reverse d'adresse `null` → `deptFromCodeInsee("")` → `RangeError` (appel mort
+  en standalone, ET dégradation de toute la section « référentiels » dans `panorama_implantation`). Après :
+  fallback frontières → département dérivé. Le filet `RangeError` est conservé pour le vrai point en mer
+  (reverse ET frontières vides). `src/sante/coverage.ts`.
+
+### Notes
+
+- **Fail-safe par contrat** : `communeContainingPoint` n'est appelé que sur un chemin déjà dégradé ;
+  toute erreur réseau/HTTP/payload → `null` + `console.warn` (Sentry centralisé au handler), jamais de
+  throw. Le throw de `reverseGeocode` (panne IGN réelle) continue de remonter (garde-fou test b4).
+- **Garde-fou faux positif** : sur coordonnées hors-bornes, l'API ignore silencieusement le filtre géo
+  et renvoie TOUTE la liste des communes — on n'exploite donc QUE `length === 1` (un point ∈ 1 commune),
+  jamais `data[0]` (sinon "01001" Ain). Tests : `communes.test.ts` (5 cas) + `dynamique-immobiliere.test.ts`
+  (b5 fallback nominal, b2 point en mer) + `coverage.test.ts` (fallback dept + filet RangeError).
+
+### Tooling
+
+- **`scripts/smoke-deploy.mjs`** : smoke post-deploy HTTP (node pur, exit 1 si gate rouge). Vérifie
+  `/healthz` version, les permis La Hague (`couverture.permis === "ok"` + commune `50041` résolue par
+  frontières), la couverture santé La Hague (200 sans `-32602`), et le garde-fou anti-régression « point
+  en mer » (immo dégrade, santé `-32602`). **Gate sur `permis === "ok"`, JAMAIS sur `logements > 0`**
+  (le compte peut valoir 0 légitimement — prouvé : Fleury-devant-Douaumont a `permis="ok"` + 0 logement —
+  donc le compte voyage en INFO non gaté). Params santé `{lat, lon, radius_km, naf}` (signature boundary
+  MCP), jamais `{center, radiusKm}` (signature lib interne → `-32602`). Usage : `node scripts/smoke-deploy.mjs`.
+
 ## [0.26.1] — 2026-06-06 — Immobilier : dégradation gracieuse point côtier + robustesse boundary
 
 Patch de robustesse sur le domaine Immobilier. Surface inchangée (10 référentiels / 36 tools).

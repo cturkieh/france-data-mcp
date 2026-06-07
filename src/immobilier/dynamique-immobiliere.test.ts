@@ -28,10 +28,15 @@ vi.mock("../territoire/geocode.js", () => ({
   reverseGeocode: vi.fn(),
 }));
 
+vi.mock("../territoire/communes.js", () => ({
+  communeContainingPoint: vi.fn(),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports (après mocks)
 // ---------------------------------------------------------------------------
 
+import * as communesModule from "../territoire/communes.js";
 import * as geocodeModule from "../territoire/geocode.js";
 import type { GeocodeResult } from "../territoire/geocode.js";
 import * as pluModule from "./apicarto-plu.js";
@@ -284,16 +289,20 @@ describe("dynamiqueImmobiliere", () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b2)(b3) Ancrage sans commune (point côtier/isolé) → dégradation gracieuse
-  //   La commune ne sert QU'AUX permis Sit@del ; zones AU + terrains sont par
-  //   rayon → l'outil NE doit PAS throw (fix régression géo : -32602 sur tout
-  //   l'appel à un point en mer). couverture.permis='indisponible:commune_introuvable',
-  //   permitsForCommune jamais appelé, zones_au + terrains servis.
+  // (b2)(b3) Aucune commune NI par adresse NI par frontières (point réellement
+  //   en mer / hors France) → dégradation gracieuse. La commune ne sert QU'AUX
+  //   permis Sit@del ; zones AU + terrains sont par rayon → l'outil NE doit PAS
+  //   throw (fix régression géo : -32602 sur tout l'appel à un point en mer).
+  //   couverture.permis='indisponible:commune_introuvable', permitsForCommune
+  //   jamais appelé, zones_au + terrains servis. Le fallback frontières est
+  //   sollicité (mock null) — c'est ce qui qualifie le "vrai point en mer".
   // -------------------------------------------------------------------------
 
-  it("(b2) reverseGeocode null (point en mer) → permis indisponible, zones+terrains servis, PAS de throw", async () => {
-    // Anchor ET centroïdes AU hors couverture IGN → tous null
+  it("(b2) reverse null ET frontières null (point en mer) → permis indisponible, zones+terrains servis, PAS de throw", async () => {
+    // Anchor ET centroïdes AU hors couverture IGN → tous null ; frontières aussi
+    // vides (point réellement en mer) → permis dégradé.
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(null);
+    vi.mocked(communesModule.communeContainingPoint).mockResolvedValue(null);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
     vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
     vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
@@ -322,6 +331,8 @@ describe("dynamiqueImmobiliere", () => {
   it("(b3) reverseGeocode OK mais codeCommune absent → permis indisponible, nom commune conservé, zones+terrains servis", async () => {
     const revGeoNoCcommune: GeocodeResult = { ...REV_GEO_OK, codeCommune: undefined };
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(revGeoNoCcommune);
+    // Frontières aussi sans commune → la dégradation `permis` est conservée.
+    vi.mocked(communesModule.communeContainingPoint).mockResolvedValue(null);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
     vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
     vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
@@ -335,6 +346,39 @@ describe("dynamiqueImmobiliere", () => {
     expect(result.meta.commune).toBe("Paris");
     expect(result.couverture.zones_au).toBe("ok");
     expect(result.couverture.terrains).toBe("ok");
+  });
+
+  // -------------------------------------------------------------------------
+  // (b5) FALLBACK frontières : reverse d'ADRESSE sans résultat (site isolé /
+  //   littoral, ex. Orano/La Hague) MAIS le point tombe dans une frontière
+  //   communale → `communeContainingPoint` résout la commune → permis SERVIS.
+  //   C'est l'inverse de (b2) : ici les frontières trouvent (point sur terre).
+  // -------------------------------------------------------------------------
+
+  it("(b5) reverse null mais frontières résolvent la commune → permis SERVIS via fallback", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(null);
+    vi.mocked(communesModule.communeContainingPoint).mockResolvedValue({
+      codeCommune: "50041",
+      commune: "La Hague",
+    });
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    // Fallback frontières interrogé avec le point d'ancrage, puis Sit@del sur l'INSEE résolu
+    expect(communesModule.communeContainingPoint).toHaveBeenCalledWith({
+      lat: BASE_INPUT.lat,
+      lon: BASE_INPUT.lon,
+    });
+    expect(sitadelModule.permitsForCommune).toHaveBeenCalledWith("50041");
+    // Permis SERVIS (≠ dégradation) + commune/code remontés dans meta
+    expect(result.couverture.permis).toBe("ok");
+    expect(result.meta.code_commune).toBe("50041");
+    expect(result.meta.commune).toBe("La Hague");
+    expect(result.note.logements_autorises_recent).toBe(120);
   });
 
   // -------------------------------------------------------------------------

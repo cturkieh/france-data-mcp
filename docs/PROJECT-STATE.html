@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>france-data-mcp — État du projet</title>
+<style>
+  :root{
+    --marine:#0b2e4f; --marine2:#14385f; --bleu:#1d6fd6; --bleu-pale:#e8f1fc;
+    --bg:#eef2f6; --card:#ffffff; --ink:#1a2a3a; --muted:#5b6b7d;
+    --rouge:#c0271a; --vert:#16794c; --vert-pale:#e6f4ec;
+    --ambre:#b06f00; --ambre-pale:#fdf3e0; --bord:#dce4ec;
+    --violet:#6b3fa0; --violet-pale:#f0e9f9;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.55;font-size:15px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px;}
+  header{background:linear-gradient(135deg,var(--marine),var(--marine2));color:#fff;padding:44px 24px 36px;margin-bottom:32px;}
+  .header-inner{max-width:1080px;margin:0 auto;padding:0 24px;}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8fb9e6;font-weight:700;margin-bottom:10px;}
+  h1{font-size:30px;line-height:1.2;font-weight:800;margin-bottom:14px;max-width:820px;}
+  .meta{display:flex;flex-wrap:wrap;gap:9px;margin-top:12px;}
+  .chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:600;color:#dce9f7;}
+  .chip.go{background:var(--vert);border-color:var(--vert);color:#fff;}
+  .tldr{margin-top:16px;font-size:15.5px;line-height:1.55;color:#cfdaea;max-width:840px;}
+  .tldr strong{color:#fff;}
+  h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--bleu);font-weight:800;margin:30px 0 14px;}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr 1fr;}
+  @media(max-width:760px){.grid{grid-template-columns:1fr;}}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;padding:20px 22px;box-shadow:0 1px 3px rgba(11,46,79,.05);max-height:297mm;overflow:hidden;}
+  .card.full{grid-column:1 / -1;}
+  .card h3{font-size:17px;font-weight:800;color:var(--marine);margin-bottom:4px;display:flex;align-items:center;gap:9px;}
+  .tag{font-size:11px;font-weight:700;padding:2px 9px;border-radius:6px;letter-spacing:.02em;}
+  .tag.sante{background:var(--vert-pale);color:var(--vert);}
+  .tag.entr{background:var(--bleu-pale);color:var(--bleu);}
+  .tag.demo{background:var(--violet-pale);color:var(--violet);}
+  .tag.geo{background:var(--ambre-pale);color:var(--ambre);}
+  .tag.immo{background:#fbe9e7;color:var(--rouge);}
+  .tag.patch{background:var(--marine);color:#fff;}
+  .zone{margin-top:11px;}
+  .zlabel{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:700;margin-bottom:3px;}
+  .zone p{font-size:14px;color:var(--ink);}
+  .zone.simple p{color:var(--marine);font-weight:500;}
+  code{background:#f1f5f9;border:1px solid var(--bord);border-radius:5px;padding:1px 5px;font-size:12.5px;font-family:"SF Mono",Menlo,Consolas,monospace;color:var(--marine);}
+  .diag{margin-top:9px;background:#f7fafd;border:1px dashed var(--bord);border-radius:8px;padding:9px 11px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:11.5px;color:var(--muted);white-space:pre;overflow-x:auto;line-height:1.4;}
+  footer{margin-top:36px;padding-top:18px;border-top:1px solid var(--bord);font-size:12.5px;color:var(--muted);}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="kicker">Project State · source de vérité visuelle</div>
+    <h1>france-data-mcp — état du projet</h1>
+    <div class="meta">
+      <span class="chip go">✅ V0.26.2 en production</span>
+      <span class="chip">10 référentiels publics</span>
+      <span class="chip">36 outils MCP</span>
+      <span class="chip">Vercel · Supabase PostGIS</span>
+      <span class="chip">MàJ 2026-06-07</span>
+    </div>
+    <p class="tldr"><strong>En une phrase :</strong> un serveur MCP qui croise les données publiques françaises (santé, démographie, entreprises, géo, immobilier) pour l'analyse territoriale — chaque chiffre tracé à sa source officielle, dégradation gracieuse jamais silencieuse.</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2>Domaines livrés</h2>
+  <div class="grid">
+
+    <div class="card">
+      <h3>Santé <span class="tag sante">FINESS · RPPS · Ameli</span></h3>
+      <div class="zone simple"><div class="zlabel">En simple</div><p>« Où sont les labos, pharmacies, médecins autour d'un point ? Le territoire est-il bien couvert ? »</p></div>
+      <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p>Établissements & professionnels par rayon/commune/département, densité, plateaux techniques hébergés, couverture FINESS↔SIRENE, vérification site actif (succession M&A).</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>FINESS DREES (~95 K), RPPS ANS (~2,23 M), Ameli (~485 K) ingérés par cron, géocodés BAN, requêtés en PostGIS (KNN GiST).</p></div>
+    </div>
+
+    <div class="card">
+      <h3>Entreprises <span class="tag entr">SIRENE · DINUM</span></h3>
+      <div class="zone simple"><div class="zlabel">En simple</div><p>« Quelle société est à cette adresse ? Est-elle active ? Quel est son vrai SIRET ? »</p></div>
+      <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p>Entreprise par SIREN/SIRET, établissements par rayon, enrichissement concurrents, réconciliation FINESS↔SIRENE avec arbitrage « actif co-localisé prime ».</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>API DINUM Recherche Entreprises + SIRENE INSEE V3 (fallback), resolver SIRET par co-localisation haversine (100 m), jamais le score d'adresse seul.</p></div>
+    </div>
+
+    <div class="card">
+      <h3>Démographie & territoire <span class="tag demo">INSEE · IRIS</span></h3>
+      <div class="zone simple"><div class="zlabel">En simple</div><p>« Combien d'habitants ici, et qui sont-ils, à la maille du quartier ? »</p></div>
+      <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p>Population commune, profil IRIS infracommunal (démographie, revenus), résolution communes/départements, autocomplétion.</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>INSEE (population, IRIS) + géométries polygones IRIS en PostGIS ; coercition systématique des NUMERIC sérialisés en string par PostgREST.</p></div>
+    </div>
+
+    <div class="card">
+      <h3>Géocodage <span class="tag geo">IGN · BAN · DINUM</span></h3>
+      <div class="zone simple"><div class="zlabel">En simple</div><p>« Transformer une adresse en coordonnées, et un point en commune. »</p></div>
+      <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p>Géocodage adresse, géocodage inverse (adresse la plus proche), résolution commune par frontières (point-dans-polygone), autocomplétion commune.</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>BAN/IGN pour les adresses, <code>geo.api.gouv.fr</code> (frontières AdminExpress) pour le point-dans-polygone — fail-safe par contrat sur les chemins dégradés.</p></div>
+    </div>
+
+    <div class="card">
+      <h3>Immobilier <span class="tag immo">DVF · Sit@del · PLU</span></h3>
+      <div class="zone simple"><div class="zlabel">En simple</div><p>« Ce secteur se construit-il ? À quel prix le foncier s'y vend-il ? »</p></div>
+      <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p><code>dynamique_immobiliere</code> (permis Sit@del + zones AU du PLU + terrains DVF en 1 appel) et <code>cout_foncier</code> (€/m² médian DVF).</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>DVF DGFiP (cache paresseux RLS anon-lit/service-écrit), Sit@del SDES (API DiDo, live), zones AU apicarto IGN (live).</p></div>
+    </div>
+
+    <div class="card">
+      <h3>Observabilité & garde-fous <span class="tag patch">transverse</span></h3>
+      <div class="zone simple"><div class="zlabel">En simple</div><p>« Quand une source manque, on le dit — jamais un faux zéro silencieux. »</p></div>
+      <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p>Dégradation par section (<code>couverture.&lt;x&gt;=indisponible:&lt;raison&gt;</code>), distinction « pas trouvé » vs « erreur API », Sentry + logs JSON, rate limit 60/min/IP, audit ingestion.</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>Lib OSS pure (<code>console.warn</code> préfixés) ; endpoint Vercel avec Sentry fingerprinté ; smoke post-deploy gaté (<code>scripts/smoke-deploy.mjs</code>).</p></div>
+    </div>
+
+  </div>
+
+  <h2>Dernier patch — V0.26.2 (2026-06-07)</h2>
+  <div class="grid">
+    <div class="card full">
+      <h3>Commune résolue par frontières sur site isolé <span class="tag patch">robustesse · immo + santé</span></h3>
+      <div class="zone simple"><div class="zlabel">En simple</div><p>Un site industriel isolé ou en bord de mer (ex. l'usine Orano de La Hague) n'a aucune adresse à proximité. Avant, l'outil ne « voyait » donc aucune commune et renvoyait une erreur ou perdait les permis de construire. Maintenant il demande « dans quelle commune tombe ce point ? » via ses frontières — La Hague répond, les permis et la couverture santé reviennent.</p></div>
+      <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p>Helper partagé <code>communeContainingPoint(lat,lon)</code> en fallback de <code>reverseGeocode</code> sur deux outils : <code>dynamique_immobiliere</code> (permis Sit@del de nouveau servis) et <code>finess_sirene_coverage_in_radius</code> (ne plante plus en <code>RangeError</code>). Un point réellement en mer continue de dégrader proprement.</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait (+ garde-fou prouvé prod)</div>
+        <div class="diag">point (lat,lon)
+  └─ reverseGeocode (adresse la + proche) ──► trouvée ─► commune ✅
+            │ null (site isolé/littoral)
+            ▼
+     communeContainingPoint (frontières, point-dans-polygone)
+       geo.api.gouv.fr/communes?lat&lon
+         length === 1 ─► commune ✅   (La Hague 50041)
+         length 0     ─► null (en mer) ─► dégradation propre
+         length > 1   ─► null  ◄── coords hors-bornes : l'API
+                                   renvoie TOUTE la liste (01001 Ain) → piège neutralisé</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Source de vérité visuelle (vue par domaine, ultra-synthétique). Détail granulaire commit par commit :
+    <code>CHANGELOG.md</code>. Conventions & workflow : <code>CLAUDE.md</code>. Guide pédagogique des 36 outils :
+    <code>docs/guide-outils.html</code>.
+  </footer>
+
+</div>
+</body>
+</html>

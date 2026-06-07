@@ -82,7 +82,9 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.26.1 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+✅ **v0.26.2 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+
+> Latest patch (v0.26.2): a point with no nearby address (isolated industrial / coastal site, e.g. Orano La Hague) is now matched to its municipality via **boundaries** (point-in-polygon), restoring Sit@del building permits (`dynamique_immobiliere`) and FINESS↔SIRENE coverage (`finess_sirene_coverage_in_radius`) on such sites. Surface unchanged (10 reference datasets / 36 tools).
 
 ### Roadmap
 
