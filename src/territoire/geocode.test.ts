@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { geocode, geocodeMany, reverseGeocode } from "./geocode.js";
+import { communeContainingPoint, geocode, geocodeMany, reverseGeocode } from "./geocode.js";
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -104,6 +104,69 @@ describe("reverseGeocode", () => {
     const result = await reverseGeocode({ lon: -74.006, lat: 40.7128 });
     expect(result).toBeNull();
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("hors couverture"));
+    warnSpy.mockRestore();
+  });
+});
+
+describe("communeContainingPoint (fallback frontières)", () => {
+  function communesResponse(rows: Array<Record<string, unknown>>): Response {
+    return new Response(JSON.stringify(rows), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  it("résout la commune contenant le point (point-dans-polygone)", async () => {
+    fetchMock.mockResolvedValue(communesResponse([{ code: "50041", nom: "La Hague" }]));
+    const result = await communeContainingPoint({ lat: 49.6546, lon: -1.8214 });
+    expect(result).toEqual({ codeCommune: "50041", commune: "La Hague" });
+    // appel sur l'API Découpage admin avec lat/lon
+    const calledUrl = String(fetchMock.mock.calls[0]?.[0]);
+    expect(calledUrl).toContain("geo.api.gouv.fr/communes");
+    expect(calledUrl).toContain("lat=49.6546");
+    expect(calledUrl).toContain("lon=-1.8214");
+  });
+
+  it("aucune commune aux frontières (point en mer) → null + warn", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValue(communesResponse([]));
+    const result = await communeContainingPoint({ lat: 49.9, lon: -2.2 });
+    expect(result).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("aucune commune"));
+    warnSpy.mockRestore();
+  });
+
+  it("FAIL-SAFE : erreur HTTP du service frontières → null (jamais de throw)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // 404 = throw immédiat de fetchJson (4xx ≠ 429, pas de retry) → catch → null.
+    fetchMock.mockResolvedValue(new Response("not found", { status: 404 }));
+    const result = await communeContainingPoint({ lat: 49.6546, lon: -1.8214 });
+    expect(result).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("indisponible"));
+    warnSpy.mockRestore();
+  });
+
+  it("coords hors-bornes → API ignore le filtre et renvoie TOUTE la liste → null (anti faux positif)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Comportement réel prouvé en live : lat invalide → 200 + liste complète
+    // (alphabétique, débute "01001"). length > 1 ⇒ on refuse (jamais data[0]).
+    fetchMock.mockResolvedValue(
+      communesResponse([
+        { code: "01001", nom: "L'Abergement-Clémenciat" },
+        { code: "01002", nom: "L'Abergement-de-Varey" },
+        { code: "01004", nom: "Ambérieu-en-Bugey" },
+      ]),
+    );
+    const result = await communeContainingPoint({ lat: 200, lon: -2.2 });
+    expect(result).toBeNull();
+    warnSpy.mockRestore();
+  });
+
+  it("payload partiel (code sans nom) → null (pas de commune à moitié résolue)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchMock.mockResolvedValue(communesResponse([{ code: "50041" }]));
+    const result = await communeContainingPoint({ lat: 49.6546, lon: -1.8214 });
+    expect(result).toBeNull();
     warnSpy.mockRestore();
   });
 });

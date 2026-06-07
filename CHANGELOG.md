@@ -4,6 +4,34 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [0.26.2] — 2026-06-07 — Immobilier : permis récupérés sur site isolé via fallback frontières
+
+Patch de robustesse sur le domaine Immobilier. Surface inchangée (10 référentiels / 36 tools).
+
+### Fixed
+
+- **`dynamique_immobiliere` récupère les permis Sit@del sur un point sans adresse proche** (site
+  industriel isolé / littoral — ex. Orano/La Hague). Avant (0.26.1) : le reverse-geocode d'**adresse**
+  (IGN) renvoyant `null` sur ces points, la commune restait introuvable → `permis` dégradé en
+  `indisponible:commune_introuvable` (logements autorisés perdus) ALORS que la commune existe.
+  Après : **fallback par frontières communales** — `communeContainingPoint` (`src/territoire/geocode.ts`)
+  interroge l'API Découpage administratif (`geo.api.gouv.fr/communes?lat&lon`, point-dans-polygone,
+  frontières IGN AdminExpress) quand le reverse d'adresse échoue. Les frontières pavent 100 % du
+  territoire terrestre sans trou → un point sur terre est toujours rattaché à sa commune et garde ses
+  permis ; seul un point réellement en mer / hors France reste dégradé (filet conservé). Prouvé prod :
+  La Hague (49.6546,−1.8214) → reverse adresse `[]` mais frontières → `50041` (861 lignes Sit@del).
+  `src/immobilier/dynamique-immobiliere.ts`.
+
+### Notes
+
+- **Fail-safe par contrat** : `communeContainingPoint` n'est appelé que sur un chemin déjà dégradé ;
+  toute erreur réseau/HTTP/payload → `null` + `console.warn` (Sentry centralisé au handler), jamais de
+  throw. Le throw de `reverseGeocode` (panne IGN réelle) continue de remonter (garde-fou test b4).
+- **Garde-fou faux positif** : sur coordonnées hors-bornes, l'API ignore silencieusement le filtre géo
+  et renvoie TOUTE la liste des communes — on n'exploite donc QUE `length === 1` (un point ∈ 1 commune),
+  jamais `data[0]` (sinon "01001" Ain). Tests : `geocode.test.ts` (4 cas) + `dynamique-immobiliere.test.ts`
+  (b5 nominal fallback, b2 point en mer = reverse+frontières null).
+
 ## [0.26.1] — 2026-06-06 — Immobilier : dégradation gracieuse point côtier + robustesse boundary
 
 Patch de robustesse sur le domaine Immobilier. Surface inchangée (10 référentiels / 36 tools).

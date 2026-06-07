@@ -8,13 +8,16 @@
  *   - `info`  = contexte / localisation (quartiers AU, prix) → n'alimente PAS le score
  *
  * Doctrine de dégradation (identique à panorama_implantation) :
- *   - Échec géocodage inverse → SEULE la section `permis` est dégradée
- *     (`indisponible:commune_introuvable`). La commune ne sert QU'AUX permis
- *     Sit@del (maille commune) ; les zones AU (apicarto) et les terrains (DVF)
- *     sont calculés PAR RAYON (lat/lon) → ils restent servis. Un point côtier /
- *     isolé (ex. site industriel en bord de mer) n'a pas de commune au géocodage
- *     inverse mais a des zones AU / ventes dans son rayon → l'outil NE doit pas
- *     échouer en entier (régression prouvée : -32602 sur tout l'appel).
+ *   - Résolution commune en 2 temps : reverse-geocode d'ADRESSE (IGN), puis en
+ *     FALLBACK les frontières communales (`communeContainingPoint`, point-dans-
+ *     polygone). Un site isolé / littoral (ex. Orano/La Hague) sans adresse proche
+ *     est ainsi rattaché à SA commune → ses permis Sit@del restent servis. Si les
+ *     DEUX échouent (point réellement en mer / hors France) → SEULE la section
+ *     `permis` est dégradée (`indisponible:commune_introuvable`). La commune ne
+ *     sert QU'AUX permis Sit@del (maille commune) ; les zones AU (apicarto) et les
+ *     terrains (DVF) sont calculés PAR RAYON (lat/lon) → ils restent servis dans
+ *     tous les cas. L'outil NE doit JAMAIS échouer en entier (régression prouvée :
+ *     -32602 sur tout l'appel pour un point côtier).
  *   - Échec d'une section → `couverture.<section>` = "indisponible:<raison>",
  *     le reste du résultat est préservé.
  */
@@ -24,7 +27,7 @@ import {
   type SectionStatus,
   runSection,
 } from "../sante/panorama-implantation.js";
-import { reverseGeocode } from "../territoire/geocode.js";
+import { communeContainingPoint, reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
 import { aggregatePrix, dvfInRadius } from "./dvf.js";
 import { type PermitsResult, permitsForCommune } from "./sitadel.js";
@@ -178,14 +181,33 @@ export async function dynamiqueImmobiliere(
   // prouvée : un point côtier rendait l'appel entier en -32602, card + carte vides).
   const revGeo = await reverseGeocode({ lat, lon });
   // `|| null` (pas `??`) : un codeCommune "" est aussi inexploitable que absent.
-  const code_commune = revGeo?.codeCommune || null;
-  const commune = communeLabel(revGeo);
+  let code_commune = revGeo?.codeCommune || null;
+  let commune = communeLabel(revGeo);
+
+  // FALLBACK frontières : le reverse d'ADRESSE échoue sur un point sans adresse
+  // proche (site industriel isolé, littoral — ex. Orano/La Hague) ALORS que le
+  // point appartient bien à une commune. On la résout par point-dans-polygone
+  // (`communeContainingPoint`) → les permis Sit@del redeviennent disponibles.
+  // Best-effort fail-safe (null si service down OU point réellement en mer) → la
+  // dégradation `permis` ci-dessous reste le filet. N'allonge le chemin (1 appel
+  // réseau de plus) QUE sur l'échec d'ancrage adresse (rare).
+  if (!code_commune) {
+    const byBoundary = await communeContainingPoint({ lat, lon });
+    if (byBoundary) {
+      code_commune = byBoundary.codeCommune;
+      commune = byBoundary.commune;
+      console.warn(
+        `${LOG_TAG}: commune résolue par frontières (${byBoundary.commune} ${byBoundary.codeCommune}) après reverse-geocode adresse sans résultat (${lat},${lon}) — permis servis.`,
+      );
+    }
+  }
+
   if (!code_commune) {
     const detail = revGeo
       ? `géocodage inverse OK mais codeCommune absent (label="${revGeo.label}")`
       : "géocodage inverse sans résultat";
     console.warn(
-      `${LOG_TAG}: ${detail} (${lat},${lon}) — section 'permis' indisponible:commune_introuvable, zones_au + terrains servis par rayon`,
+      `${LOG_TAG}: ${detail} (${lat},${lon}) — frontières aussi sans commune (point en mer / hors France) ; section 'permis' indisponible:commune_introuvable, zones_au + terrains servis par rayon`,
     );
   }
 
