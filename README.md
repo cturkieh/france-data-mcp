@@ -131,7 +131,9 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.26.1 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.26.2 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+
+> Dernier patch (V0.26.2) : un point sans adresse proche (site industriel isolé / littoral, ex. Orano La Hague) est désormais rattaché à sa commune par ses **frontières** (point-dans-polygone), ce qui restaure les permis Sit@del (`dynamique_immobiliere`) et la couverture FINESS↔SIRENE (`finess_sirene_coverage_in_radius`) sur ces sites. Surface inchangée (10 référentiels / 36 outils).
 
 ### Roadmap
 

@@ -43,6 +43,16 @@ Patch de robustesse partagé. Surface inchangée (10 référentiels / 36 tools).
   jamais `data[0]` (sinon "01001" Ain). Tests : `communes.test.ts` (5 cas) + `dynamique-immobiliere.test.ts`
   (b5 fallback nominal, b2 point en mer) + `coverage.test.ts` (fallback dept + filet RangeError).
 
+### Tooling
+
+- **`scripts/smoke-deploy.mjs`** : smoke post-deploy HTTP (node pur, exit 1 si gate rouge). Vérifie
+  `/healthz` version, les permis La Hague (`couverture.permis === "ok"` + commune `50041` résolue par
+  frontières), la couverture santé La Hague (200 sans `-32602`), et le garde-fou anti-régression « point
+  en mer » (immo dégrade, santé `-32602`). **Gate sur `permis === "ok"`, JAMAIS sur `logements > 0`**
+  (le compte peut valoir 0 légitimement — prouvé : Fleury-devant-Douaumont a `permis="ok"` + 0 logement —
+  donc le compte voyage en INFO non gaté). Params santé `{lat, lon, radius_km, naf}` (signature boundary
+  MCP), jamais `{center, radiusKm}` (signature lib interne → `-32602`). Usage : `node scripts/smoke-deploy.mjs`.
+
 ## [0.26.1] — 2026-06-06 — Immobilier : dégradation gracieuse point côtier + robustesse boundary
 
 Patch de robustesse sur le domaine Immobilier. Surface inchangée (10 référentiels / 36 tools).
