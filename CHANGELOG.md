@@ -4,6 +4,32 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — Refonte landing page (site statique Vercel)
+
+Changement cosmétique du site statique (`public/`, servi tel quel par Vercel) — **aucun
+impact sur la lib npm ni le serveur MCP** : `api/`, `src/`, tools et `vercel.json` inchangés,
+pas de bump de version. Livrable Claude Design appliqué en drop-in.
+
+### Changed
+
+- **Refonte de la page d'accueil** `public/index.html` : nouveau logo « Hexagone réseau »
+  tricolore en SVG inline, polices 100 % système (zéro dépendance externe / CDN), JS vanilla
+  (ombre de barre au scroll + bouton « Copier » l'URL MCP), responsive 720 px.
+- **`site.webmanifest`** : `theme_color` `#142844` → `#13294b` (alignement marque).
+
+### Removed
+
+- **`branding/icons/`** (6 anciennes explorations de logo : drapeau+caducée, hexagone+croix,
+  lettermark « FD ») — non référencées dans le code, seule la mention historique de ce
+  CHANGELOG est conservée.
+
+### Notes
+
+- **Nouveau jeu d'icônes tricolore** écrasé dans `public/` (mêmes noms → aucun lien à mettre
+  à jour) : `favicon.ico`/`-16`/`-32`, `apple-touch-icon` (180²), `icon-192`/`-512` (PWA),
+  `og-image` (1200×630). Le favicon en onglet ne change visuellement qu'après déploiement
+  Vercel (+ purge éventuelle du cache navigateur, très tenace sur les favicons).
+
 ## [0.26.2] — 2026-06-07 — Commune résolue par frontières sur site isolé (immobilier + couverture santé)
 
 Patch de robustesse partagé. Surface inchangée (10 référentiels / 36 tools).
