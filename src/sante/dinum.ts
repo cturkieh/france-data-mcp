@@ -16,7 +16,7 @@
  */
 
 import { parseCoordinates } from "../core/coords.js";
-import { fetchJson } from "../core/http.js";
+import { HttpError, fetchJson } from "../core/http.js";
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
@@ -326,7 +326,34 @@ export async function searchEntreprises(
   params.set("per_page", String(clamp(perPage, 1, 25)));
 
   const url = `${endpoint}?${params.toString()}`;
-  const data = await fetchJson<ApiResponse>(url, { signal });
+  // Un NAF BIEN FORMÉ mais INEXISTANT (ex. `71.12Z` — 7112 est éclaté en
+  // 71.12A/71.12B, pas de `…Z`) passe `normalizeNafCode` puis est rejeté par DINUM
+  // en HTTP 400 (« activite_principale non valide » — seule la nomenclature sait
+  // qu'un code n'existe pas). Faute d'INPUT caller, pas une panne : on la convertit
+  // en RangeError (→ JSON-RPC -32602) au lieu de la laisser remonter en HttpError
+  // capturée Sentry `error`. Discrimination ÉTROITE (400 + `naf` fourni + body
+  // `activite_principale`) ; tout autre 400 et les 5xx transitoires restent des
+  // HttpError. Repro FRANCE-DATA-MCP-G (jumeau « existence-invalide » de
+  // FRANCE-DATA-MCP-A « format-invalide », lui rejeté pré-réseau par normalizeNafCode).
+  let data: ApiResponse;
+  try {
+    data = await fetchJson<ApiResponse>(url, { signal });
+  } catch (err) {
+    if (
+      naf && // truthy : aligné sur le `if (naf)` qui POSE `activite_principale` (l.315/319)
+      err instanceof HttpError &&
+      err.status === 400 &&
+      /activite_principale/i.test(err.body ?? "")
+    ) {
+      console.warn(
+        `[france-data-mcp] searchEntreprises: NAF \`${naf}\` rejeté par DINUM (HTTP 400 activite_principale) → RangeError -32602 (input caller invalide, pas une panne amont)`,
+      );
+      throw new RangeError(
+        `searchEntreprises: code NAF \`${naf}\` rejeté par l'API DINUM — bien formé mais hors nomenclature NAF rév.2 (ex. 7112 n'a pas de \`…Z\` : c'est \`71.12A\`/\`71.12B\`). Utiliser une sous-classe RÉELLE à 5 caractères (ex. \`71.12B\` ingénierie, \`86.90B\` labos).`,
+      );
+    }
+    throw err;
+  }
 
   return {
     total: data.total_results,

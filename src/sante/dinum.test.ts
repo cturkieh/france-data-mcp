@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpError } from "../core/http.js";
 import type { LookupResult } from "../core/lookup-result.js";
 import { getEntrepriseBySiren, searchEntreprises } from "./dinum.js";
 
@@ -49,6 +50,14 @@ function apiResponse(
   };
   return new Response(JSON.stringify(body), {
     status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** Forge une `Response` d'erreur HTTP (body JSON) — jumeau d'`apiResponse` pour tester la discrimination des 4xx. */
+function apiError(status: number, body: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
     headers: { "content-type": "application/json" },
   });
 }
@@ -250,6 +259,45 @@ describe("searchEntreprises", () => {
       /code NAF invalide/,
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("convertit le 400 DINUM d'un NAF bien formé mais INEXISTANT (`71.12Z`) en RangeError (FRANCE-DATA-MCP-G)", async () => {
+    // Reproduction Sentry FRANCE-DATA-MCP-G : `71.12Z` est bien formé (sous-classe
+    // 5 car. `XX.XXY`) donc passe `normalizeNafCode` — MAIS 7112 est éclaté en
+    // 71.12A/71.12B : `71.12Z` n'EXISTE PAS. Seule l'API le sait, elle renvoie 400
+    // « activite_principale non valide ». On convertit ce 400 (faute d'INPUT caller)
+    // en RangeError → JSON-RPC -32602, au lieu de le laisser remonter en HttpError
+    // capturée Sentry `error` (bruit de panne serveur pour un code client invalide).
+    fetchMock.mockResolvedValue(
+      apiError(400, {
+        erreur:
+          "Au moins un paramètre `activite_principale` est non valide. Les valeurs valides : ['01.11Z', '01.12Z']",
+      }),
+    );
+    await expect(
+      searchEntreprises({ naf: "71.12Z", departement: "44", onlyActive: true }),
+    ).rejects.toThrow(RangeError);
+    // L'appel réseau a bien eu lieu (≠ rejet de format pré-réseau) puis été converti.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ne masque PAS un 400 non lié au NAF — reste HttpError capturée", async () => {
+    // Garde-fou anti-sur-élargissement : un 400 dont le body ne parle pas
+    // d'`activite_principale` (et sans `naf` fourni) reste une HttpError (panne /
+    // faute amont légitime) — la conversion en RangeError est étroite et ciblée.
+    fetchMock.mockResolvedValue(apiError(400, { erreur: "Paramètre `departement` invalide" }));
+    await expect(searchEntreprises({ departement: "999" })).rejects.toThrow(HttpError);
+  });
+
+  it("ne convertit PAS un 4xx non-400 même avec `activite_principale` dans le body (gate status === 400)", async () => {
+    // Épingle la spécificité du gate `status === 400` (avec `naf` fourni ET body
+    // mentionnant activite_principale) : un futur relâchement (ex. `status >= 400`)
+    // ferait basculer ce 403 en RangeError — ce test l'attraperait. 403 ≠ 429/5xx
+    // donc pas de retry : HttpError jetée immédiatement (test rapide).
+    fetchMock.mockResolvedValue(apiError(403, { erreur: "activite_principale refusée : quota" }));
+    await expect(searchEntreprises({ naf: "71.12B", departement: "44" })).rejects.toThrow(
+      HttpError,
+    );
   });
 
   it("accepte la sous-classe complète `62.01Z` (1 appel /near_point)", async () => {

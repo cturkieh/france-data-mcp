@@ -4,14 +4,26 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Refonte landing + recompte des sources (10 → 13)
+## [Unreleased]
 
-Refonte cosmétique du site statique (`public/`) **et** recompte du nombre de sources publiques
-(10 → 13) propagé sur la doc/les métadonnées. **Aucun impact sur le comportement du serveur
-MCP** : `api/`, `src/`, les 36 tools et `vercel.json` inchangés, pas de bump de version (seules
-des descriptions/docs changent). Livrable landing = Claude Design appliqué en drop-in.
+### Fixed
+
+- **`searchEntreprises` — code NAF bien formé mais INEXISTANT → `-32602` propre au lieu d'une
+  erreur Sentry** (`src/sante/dinum.ts`, Sentry FRANCE-DATA-MCP-G). Un NAF bien formé mais hors
+  nomenclature (ex. `71.12Z` : la division 7112 est éclatée en `71.12A`/`71.12B`, il n'y a pas de
+  `…Z`) passait `normalizeNafCode` puis était rejeté par l'API DINUM en HTTP 400
+  (« activite_principale non valide ») et remontait en `HttpError` capturée Sentry `error` — alors
+  que c'est une faute d'**input caller**, pas une panne amont. Le chokepoint `searchEntreprises`
+  (couvre `/search` ET `/near_point`) convertit désormais ce 400 ciblé (status 400 + `naf` truthy
+  + body `activite_principale`) en `RangeError` → JSON-RPC `-32602` (que le LLM caller sait
+  corriger) + `console.warn` grep-able. Discrimination ÉTROITE : tout autre 400 et les 5xx
+  transitoires restent des `HttpError` capturées. Jumeau « existence-invalide » de
+  FRANCE-DATA-MCP-A (« format-invalide », déjà rejeté pré-réseau par `normalizeNafCode`).
 
 ### Changed
+
+> Bloc landing + recompte ci-dessous : cosmétique (`public/`) + métadonnées, **aucun impact sur le
+> comportement du serveur MCP** (`api/` logique, `src/`, 36 tools, `vercel.json` inchangés).
 
 - **Refonte de la page d'accueil** `public/index.html` : nouveau logo « Hexagone réseau »
   tricolore en SVG inline, polices 100 % système (zéro dépendance externe / CDN), JS vanilla
