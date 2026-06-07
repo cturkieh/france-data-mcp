@@ -1,6 +1,6 @@
 # france-data-mcp
 
-> A TypeScript MCP server that **cross-references and reconciles** 10 French public registries (INSEE SIRENE & IRIS, FINESS DREES, RPPS / ANS Health Directory, Ameli Health Directory, CNAM Health Centers, DGFiP DVF, SDES Sit@del, IGN, DINUM). Detects closed SIRETs not yet propagated by DREES, distinguishes site vs group, cross-references care supply with neighbourhood demographics, **scores a site's real-estate potential** (DVF €/m², building permits, PLU urbanization zones), exposes data freshness per source.
+> A TypeScript MCP server that **cross-references and reconciles** 13 French public registries (INSEE SIRENE, IRIS & Melodi, FINESS DREES, RPPS / ANS Health Directory, Ameli Health Directory, CNAM Health Centers, DVF / DGFiP, Sit@del / SDES, PLU via apicarto, IGN Géoplateforme, geo.api.gouv.fr & DINUM Recherche Entreprises). Detects closed SIRETs not yet propagated by DREES, distinguishes site vs group, cross-references care supply with neighbourhood demographics, **scores a site's real-estate potential** (DVF €/m², building permits, PLU urbanization zones), exposes data freshness per source.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
@@ -84,7 +84,7 @@ Brings together the most useful French government data sources under a uniform t
 
 ✅ **v0.26.2 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
-> Latest patch (v0.26.2): a point with no nearby address (isolated industrial / coastal site, e.g. Orano La Hague) is now matched to its municipality via **boundaries** (point-in-polygon), restoring Sit@del building permits (`dynamique_immobiliere`) and FINESS↔SIRENE coverage (`finess_sirene_coverage_in_radius`) on such sites. Surface unchanged (10 reference datasets / 36 tools).
+> Latest patch (v0.26.2): a point with no nearby address (isolated industrial / coastal site, e.g. Orano La Hague) is now matched to its municipality via **boundaries** (point-in-polygon), restoring Sit@del building permits (`dynamique_immobiliere`) and FINESS↔SIRENE coverage (`finess_sirene_coverage_in_radius`) on such sites. Surface unchanged (13 reference datasets / 36 tools).
 
 ### Roadmap
 

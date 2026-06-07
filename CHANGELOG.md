@@ -4,11 +4,12 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Refonte landing page (site statique Vercel)
+## [Unreleased] — Refonte landing + recompte des sources (10 → 13)
 
-Changement cosmétique du site statique (`public/`, servi tel quel par Vercel) — **aucun
-impact sur la lib npm ni le serveur MCP** : `api/`, `src/`, tools et `vercel.json` inchangés,
-pas de bump de version. Livrable Claude Design appliqué en drop-in.
+Refonte cosmétique du site statique (`public/`) **et** recompte du nombre de sources publiques
+(10 → 13) propagé sur la doc/les métadonnées. **Aucun impact sur le comportement du serveur
+MCP** : `api/`, `src/`, les 36 tools et `vercel.json` inchangés, pas de bump de version (seules
+des descriptions/docs changent). Livrable landing = Claude Design appliqué en drop-in.
 
 ### Changed
 
@@ -16,6 +17,13 @@ pas de bump de version. Livrable Claude Design appliqué en drop-in.
   tricolore en SVG inline, polices 100 % système (zéro dépendance externe / CDN), JS vanilla
   (ombre de barre au scroll + bouton « Copier » l'URL MCP), responsive 720 px.
 - **`site.webmanifest`** : `theme_color` `#142844` → `#13294b` (alignement marque).
+- **Décompte des sources : 10 → 13.** Le « 10 » comptait les *organismes* (geo.api.gouv.fr
+  regroupé sous DINUM, Melodi sous INSEE, apicarto/PLU sous IGN). Recompté au niveau des
+  **jeux de données / API distincts réellement croisés** = 13 (INSEE SIRENE + IRIS + Melodi,
+  geo.api.gouv.fr + Recherche Entreprises DINUM, IGN Géoplateforme + apicarto/GPU, FINESS,
+  Ameli, RPPS/ANS, CNAM, DVF, Sit@del). Propagé : README FR/EN, `public/index.html`,
+  `package.json`, `docs/PROJECT-STATE.html`, description GitHub. Surface fonctionnelle
+  inchangée (36 tools) ; les entrées de version antérieures gardent leur décompte historique.
 
 ### Removed
 
