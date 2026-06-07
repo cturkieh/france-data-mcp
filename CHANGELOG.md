@@ -4,6 +4,40 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — Refonte landing + recompte des sources (10 → 13)
+
+Refonte cosmétique du site statique (`public/`) **et** recompte du nombre de sources publiques
+(10 → 13) propagé sur la doc/les métadonnées. **Aucun impact sur le comportement du serveur
+MCP** : `api/`, `src/`, les 36 tools et `vercel.json` inchangés, pas de bump de version (seules
+des descriptions/docs changent). Livrable landing = Claude Design appliqué en drop-in.
+
+### Changed
+
+- **Refonte de la page d'accueil** `public/index.html` : nouveau logo « Hexagone réseau »
+  tricolore en SVG inline, polices 100 % système (zéro dépendance externe / CDN), JS vanilla
+  (ombre de barre au scroll + bouton « Copier » l'URL MCP), responsive 720 px.
+- **`site.webmanifest`** : `theme_color` `#142844` → `#13294b` (alignement marque).
+- **Décompte des sources : 10 → 13.** Le « 10 » comptait les *organismes* (geo.api.gouv.fr
+  regroupé sous DINUM, Melodi sous INSEE, apicarto/PLU sous IGN). Recompté au niveau des
+  **jeux de données / API distincts réellement croisés** = 13 (INSEE SIRENE + IRIS + Melodi,
+  geo.api.gouv.fr + Recherche Entreprises DINUM, IGN Géoplateforme + apicarto/GPU, FINESS,
+  Ameli, RPPS/ANS, CNAM, DVF, Sit@del). Propagé : README FR/EN, `public/index.html`,
+  `package.json`, `docs/PROJECT-STATE.html`, description GitHub. Surface fonctionnelle
+  inchangée (36 tools) ; les entrées de version antérieures gardent leur décompte historique.
+
+### Removed
+
+- **`branding/icons/`** (6 anciennes explorations de logo : drapeau+caducée, hexagone+croix,
+  lettermark « FD ») — non référencées dans le code, seule la mention historique de ce
+  CHANGELOG est conservée.
+
+### Notes
+
+- **Nouveau jeu d'icônes tricolore** écrasé dans `public/` (mêmes noms → aucun lien à mettre
+  à jour) : `favicon.ico`/`-16`/`-32`, `apple-touch-icon` (180²), `icon-192`/`-512` (PWA),
+  `og-image` (1200×630). Le favicon en onglet ne change visuellement qu'après déploiement
+  Vercel (+ purge éventuelle du cache navigateur, très tenace sur les favicons).
+
 ## [0.26.2] — 2026-06-07 — Commune résolue par frontières sur site isolé (immobilier + couverture santé)
 
 Patch de robustesse partagé. Surface inchangée (10 référentiels / 36 tools).

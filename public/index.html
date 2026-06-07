@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>France Data MCP — données publiques françaises pour agents IA</title>
-  <meta name="description" content="Serveur MCP TypeScript qui croise et réconcilie 10 référentiels publics français (INSEE, FINESS, RPPS, Ameli, DVF, IGN, DINUM…) : santé, démographie, entreprises, géo et immobilier." />
+  <meta name="description" content="Serveur MCP TypeScript qui croise et réconcilie 13 référentiels publics français (INSEE, FINESS, RPPS, Ameli, DVF, IGN, DINUM…) : santé, démographie, entreprises, géo et immobilier." />
   <link rel="canonical" href="https://france-data-mcp.vercel.app/" />
 
   <!-- Favicons -->
@@ -13,108 +13,395 @@
   <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
   <link rel="manifest" href="/site.webmanifest" />
-  <meta name="theme-color" content="#142844" />
+  <meta name="theme-color" content="#13294b" />
 
   <!-- Open Graph / partage -->
   <meta property="og:type" content="website" />
   <meta property="og:title" content="France Data MCP" />
-  <meta property="og:description" content="10 référentiels publics français croisés et réconciliés, exposés en MCP : santé, démographie, entreprises, géo, immobilier." />
+  <meta property="og:description" content="13 référentiels publics français croisés et réconciliés, exposés en MCP : santé, démographie, entreprises, géo, immobilier." />
   <meta property="og:url" content="https://france-data-mcp.vercel.app/" />
   <meta property="og:image" content="https://france-data-mcp.vercel.app/og-image.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="France Data MCP" />
-  <meta name="twitter:description" content="10 référentiels publics français croisés et réconciliés, exposés en MCP." />
+  <meta name="twitter:description" content="13 référentiels publics français croisés et réconciliés, exposés en MCP." />
   <meta name="twitter:image" content="https://france-data-mcp.vercel.app/og-image.png" />
 
+  
+  
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
   <style>
-    :root {
-      --navy: #142844; --navy-2: #1f3a5f; --ink: #1a2230; --muted: #5b6b80;
-      --bg: #f6f8fb; --card: #ffffff; --line: #e3e9f1;
-      --bleu: #0055a4; --rouge: #ef4135;
+    :root{
+      --navy:#13294b; --navy-2:#0f2038; --ink:#16202e; --muted:#64748b; --muted-2:#94a3b8;
+      --bg:#f5f7fb; --card:#ffffff; --line:#e6ebf3; --line-2:#eef2f8;
+      --bleu:#0b5cab; --rouge:#e23b3b;
+      --shadow-sm:0 1px 2px rgba(16,32,56,.05);
+      --shadow:0 1px 2px rgba(16,32,56,.05), 0 18px 40px -24px rgba(16,32,56,.32);
+      --radius:16px;
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; background: var(--bg); color: var(--ink);
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      line-height: 1.55; -webkit-font-smoothing: antialiased;
+    *{box-sizing:border-box;}
+    html{scroll-behavior:smooth;}
+    body{
+      margin:0; background:var(--bg); color:var(--ink);
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+      line-height:1.6; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+      -webkit-text-size-adjust:100%; text-size-adjust:100%;
     }
-    .tricolore { height: 4px; background: linear-gradient(90deg, var(--bleu) 0 33.3%, #fff 33.3% 66.6%, var(--rouge) 66.6% 100%); }
-    .wrap { max-width: 860px; margin: 0 auto; padding: 0 20px; }
-    header { text-align: center; padding: 56px 20px 32px; }
-    header img { width: 84px; height: 84px; border-radius: 18px; box-shadow: 0 8px 28px rgba(20,40,68,.18); }
-    h1 { font-size: clamp(26px, 5vw, 38px); margin: 18px 0 6px; color: var(--navy); letter-spacing: -.5px; }
-    .lede { color: var(--muted); font-size: 17px; max-width: 620px; margin: 0 auto; }
-    .endpoint {
-      display: flex; align-items: center; gap: 10px; justify-content: center;
-      margin: 26px auto 0; flex-wrap: wrap;
+    .mono{font-family:ui-monospace,"SF Mono","Segoe UI Mono","Roboto Mono",Menlo,Consolas,monospace;}
+    a{color:inherit;}
+    .wrap{max-width:1000px; margin:0 auto; padding:0 24px;}
+
+    /* ---- top bar ---- */
+    .topbar{position:sticky; top:0; z-index:30;
+      background:var(--bg); border-bottom:1px solid transparent; transition:border-color .2s, box-shadow .2s;}
+    .topbar.scrolled{border-color:var(--line); box-shadow:0 6px 22px -18px rgba(16,32,56,.55);}
+    .topbar .row{display:flex; align-items:center; gap:14px; height:62px;}
+    .brand{display:flex; align-items:center; gap:10px; text-decoration:none;}
+    .brand .bm{width:30px; height:30px; flex:none;}
+    .brand .bt{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; font-weight:700; font-size:16px; letter-spacing:-.02em; color:var(--navy); white-space:nowrap;}
+    .nav{margin-left:auto; display:flex; align-items:center; gap:4px;}
+    .nav a{font-size:14px; font-weight:500; color:var(--muted); text-decoration:none; padding:8px 12px; border-radius:9px; transition:.15s;}
+    .nav a:hover{color:var(--navy); background:rgba(19,41,75,.05);}
+    .nav .ghub{display:inline-flex; align-items:center; gap:7px; color:var(--navy); border:1px solid var(--line); background:var(--card);}
+    .nav .ghub:hover{border-color:var(--navy-2); background:var(--card);}
+
+    /* ---- hero ---- */
+    .hero{position:relative; text-align:center; padding:74px 24px 30px; overflow:hidden;}
+    .hero::before{content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+      background:
+        radial-gradient(620px 280px at 50% -40px, rgba(11,92,171,.10), transparent 70%),
+        radial-gradient(circle at 1px 1px, rgba(19,41,75,.05) 1px, transparent 0);
+      background-size:auto, 22px 22px;
+      -webkit-mask-image:radial-gradient(560px 320px at 50% 30%, #000 55%, transparent 100%);
+      mask-image:radial-gradient(560px 320px at 50% 30%, #000 55%, transparent 100%);}
+    .hero > *{position:relative; z-index:1;}
+    .pill{display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:500;
+      color:var(--navy); background:var(--card); border:1px solid var(--line);
+      padding:6px 13px 6px 8px; border-radius:999px; box-shadow:var(--shadow-sm); margin-bottom:26px;}
+    .pill .dot{width:7px; height:7px; border-radius:50%; background:#1aa260; box-shadow:0 0 0 3px rgba(26,162,96,.16);}
+    .pill b{font-weight:600;}
+    .hero .logo-xl{width:78px; height:78px; margin:0 auto 22px; display:block; filter:drop-shadow(0 14px 26px rgba(19,41,75,.22));}
+    h1{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; font-weight:700; letter-spacing:-.03em;
+      font-size:clamp(38px,6.2vw,60px); line-height:1.02; margin:0 0 18px; color:var(--navy);}
+    h1 .grad{color:var(--bleu);}
+    .lede{color:var(--muted); font-size:clamp(16px,2vw,19px); max-width:620px; margin:0 auto; text-wrap:pretty;}
+    .lede strong{color:var(--ink); font-weight:600;}
+
+    /* endpoint */
+    .endpoint{display:inline-flex; align-items:stretch; margin:32px auto 0; background:var(--navy);
+      border-radius:13px; box-shadow:0 14px 34px -16px rgba(19,41,75,.6); overflow:hidden; max-width:100%;}
+    .endpoint .lab{display:flex; align-items:center; color:#8aa3c4; font-size:13px; padding:0 4px 0 16px; user-select:none;}
+    .endpoint .lab::after{content:""; width:1px; align-self:stretch; margin:11px 14px 11px 14px; background:rgba(255,255,255,.12);}
+    .endpoint code{color:#eaf1fb; font-size:14px; padding:14px 6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .endpoint button{appearance:none; border:0; cursor:pointer; background:transparent; color:#8aa3c4;
+      padding:0 16px; display:flex; align-items:center; gap:6px; font:inherit; font-size:12.5px; transition:.15s;}
+    .endpoint button:hover{color:#fff;}
+    .endpoint button svg{width:15px; height:15px;}
+    .endpoint button.ok{color:#5fd29a;}
+
+    .heronote{margin:16px 0 0; font-size:13px; color:var(--muted-2);}
+
+    /* ---- value strip ---- */
+    .valstrip{display:flex; flex-wrap:wrap; justify-content:center; gap:8px 10px; margin:34px auto 0; max-width:760px;}
+    .valstrip .v{display:inline-flex; align-items:center; gap:8px; font-size:13.5px; color:var(--ink);
+      background:var(--card); border:1px solid var(--line); border-radius:999px; padding:7px 14px;}
+    .valstrip .v svg{width:15px; height:15px; color:var(--bleu);}
+
+    /* ---- stats ---- */
+    .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:1px; margin:64px 0 0;
+      background:var(--line); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden;}
+    .stat{background:var(--card); padding:26px 22px; text-align:center;}
+    .stat b{display:block; font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; font-weight:700; font-size:34px; color:var(--navy); letter-spacing:-.02em; line-height:1;}
+    .stat .mono b{font-size:30px;}
+    .stat span{display:block; color:var(--muted); font-size:13px; margin-top:9px;}
+
+    /* ---- section heads ---- */
+    section.block{padding:60px 0 0;}
+    .eyebrow{display:flex; align-items:center; gap:12px; margin:0 0 26px;}
+    .eyebrow h2{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; font-weight:600; font-size:14px;
+      text-transform:uppercase; letter-spacing:.12em; color:var(--navy); margin:0;}
+    .eyebrow .line{flex:1; height:1px; background:var(--line);}
+    .eyebrow .count{font-size:12px; color:var(--muted-2);}
+
+    /* ---- sources grouped ---- */
+    .domain{display:grid; grid-template-columns:200px 1fr; gap:18px; padding:18px 0; border-top:1px solid var(--line-2);}
+    .domain:first-child{border-top:0;}
+    .domain .dh{display:flex; align-items:center; gap:11px;}
+    .domain .ic{width:34px; height:34px; flex:none; border-radius:9px; display:flex; align-items:center; justify-content:center;
+      background:rgba(11,92,171,.08); color:var(--bleu);}
+    .domain .ic svg{width:18px; height:18px;}
+    .domain .dn{font-weight:600; font-size:15px; color:var(--ink);}
+    .domain .dd{font-size:12.5px; color:var(--muted-2); margin-top:1px;}
+    .chips{display:flex; flex-wrap:wrap; gap:8px; align-content:flex-start; padding-top:3px;}
+    .chip{font-size:13px; color:var(--ink); background:var(--card); border:1px solid var(--line);
+      border-radius:8px; padding:6px 12px; transition:.15s; cursor:default; white-space:nowrap;}
+    .chip:hover{border-color:var(--bleu); color:var(--bleu); transform:translateY(-1px);}
+
+    /* ---- install ---- */
+    .install{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+    .icard{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:24px; box-shadow:var(--shadow-sm);}
+    .icard h3{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; font-size:16px; margin:0 0 4px; color:var(--navy);}
+    .icard p{font-size:13.5px; color:var(--muted); margin:0 0 16px;}
+    .icard .hint{font-size:12px; color:var(--muted-2); margin:14px 0 0; line-height:1.6;}
+    .icard .hint .hk{color:var(--bleu);}
+    .code{background:#0f2038; border-radius:11px; padding:16px 18px; overflow-x:auto; font-size:13px; line-height:1.7; color:#d7e2f2;}
+    .code .k{color:#7fb2ee;} .code .s{color:#9bd6a8;} .code .c{color:#6d7f99;}
+
+    /* ---- links / footer ---- */
+    .links{display:flex; flex-wrap:wrap; gap:10px;}
+    .btn{display:inline-flex; align-items:center; gap:8px; text-decoration:none; padding:11px 16px;
+      border-radius:11px; font-size:14px; font-weight:600; border:1px solid var(--line);
+      color:var(--navy); background:var(--card); transition:.15s; box-shadow:var(--shadow-sm);}
+    .btn:hover{border-color:var(--navy-2); transform:translateY(-1px); box-shadow:var(--shadow);}
+    .btn svg{width:16px; height:16px;}
+    .btn.primary{background:var(--navy); color:#fff; border-color:var(--navy);}
+    .btn.primary:hover{background:var(--navy-2);}
+
+    footer{margin-top:72px; border-top:1px solid var(--line); padding:34px 0 60px;}
+    footer .row{display:flex; flex-wrap:wrap; align-items:center; gap:14px; color:var(--muted); font-size:13px;}
+    footer .brand-sm{display:flex; align-items:center; gap:9px;}
+    footer .brand-sm svg{width:24px; height:24px;}
+    footer .brand-sm b{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif; color:var(--navy); font-size:14px;}
+    footer .right{margin-left:auto; display:flex; gap:18px;}
+    footer a{color:var(--muted); text-decoration:none;}
+    footer a:hover{color:var(--navy);}
+    .tricolore-dot{display:inline-flex; gap:3px; align-items:center;}
+    .tricolore-dot i{width:6px; height:6px; border-radius:50%; display:block;}
+
+    @media (max-width:720px){
+      .stats{grid-template-columns:1fr; }
+      .domain{grid-template-columns:1fr; gap:12px;}
+      .install{grid-template-columns:1fr;}
+      .nav a.hide-sm{display:none;}
+      .hero{padding-top:52px;}
+      .endpoint{max-width:100%;}
+      .endpoint .lab{display:none;}
+      .endpoint code{font-size:12.5px; padding-left:15px;}
+      .endpoint button{padding:0 13px;}
+      .endpoint button span{display:none;}
+      footer .right{margin-left:0; flex-basis:100%;}
     }
-    code.url {
-      background: var(--navy); color: #eaf1fb; padding: 10px 14px; border-radius: 10px;
-      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 14px;
-    }
-    .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 8px 0 34px; }
-    .stat { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px; text-align: center; }
-    .stat b { display: block; font-size: 26px; color: var(--navy); }
-    .stat span { color: var(--muted); font-size: 13px; }
-    h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 28px 0 12px; }
-    .sources { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
-    .chip { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 6px 13px; font-size: 13px; color: var(--ink); }
-    .cta { display: flex; flex-wrap: wrap; gap: 10px; margin: 26px 0 10px; }
-    .btn {
-      text-decoration: none; padding: 11px 16px; border-radius: 10px; font-size: 14px; font-weight: 600;
-      border: 1px solid var(--line); color: var(--navy); background: var(--card); transition: .15s;
-    }
-    .btn:hover { border-color: var(--navy-2); transform: translateY(-1px); }
-    .btn.primary { background: var(--navy); color: #fff; border-color: var(--navy); }
-    footer { color: var(--muted); font-size: 13px; text-align: center; padding: 34px 20px 56px; border-top: 1px solid var(--line); margin-top: 30px; }
-    footer a { color: var(--navy-2); }
   </style>
 </head>
 <body>
-  <div class="tricolore"></div>
-  <header>
-    <img src="/icon-192.png" alt="Logo France Data MCP" />
-    <h1>France Data MCP</h1>
-    <p class="lede">Serveur <strong>MCP</strong> qui croise et réconcilie 10 référentiels publics français — santé, démographie, entreprises, géo et immobilier — pour Claude, Cursor &amp; toute app TypeScript.</p>
+
+  <!-- reusable logo symbol -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="fdmark" viewBox="0 0 84 84">
+        <rect x="2" y="2" width="80" height="80" rx="20" fill="#13294b"/>
+        <path d="M42 16 L65 29 L65 55 L42 68 L19 55 L19 29 Z" fill="none" stroke="#e9eef6" stroke-width="2.2" stroke-linejoin="round" opacity=".3"/>
+        <g stroke="#eaf1fb" stroke-width="2.6" stroke-linecap="round">
+          <line x1="42" y1="31" x2="31.6" y2="49"/>
+          <line x1="31.6" y1="49" x2="52.4" y2="49"/>
+          <line x1="52.4" y1="49" x2="42" y2="31"/>
+        </g>
+        <circle cx="42" cy="31" r="5.2" fill="#2f7fd6" stroke="#13294b" stroke-width="1.6"/>
+        <circle cx="31.6" cy="49" r="5.2" fill="#ffffff" stroke="#13294b" stroke-width="1.6"/>
+        <circle cx="52.4" cy="49" r="5.2" fill="#e8484a" stroke="#13294b" stroke-width="1.6"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <!-- TOP BAR -->
+  <div class="topbar" id="topbar">
+    <div class="wrap row">
+      <a class="brand" href="#top">
+        <svg class="bm" aria-hidden="true"><use href="#fdmark"/></svg>
+        <span class="bt">France Data MCP</span>
+      </a>
+      <nav class="nav">
+        <a class="hide-sm" href="#sources">Sources</a>
+        <a class="hide-sm" href="#install">Installation</a>
+        <a class="hide-sm" href="https://github.com/cturkieh/france-data-mcp#outils-mcp-36-tools">Outils</a>
+        <a class="ghub" href="https://github.com/cturkieh/france-data-mcp">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </nav>
+    </div>
+  </div>
+
+  <!-- HERO -->
+  <header class="hero" id="top">
+    <span class="pill"><span class="dot"></span><b>v0.26.2</b> · en production · MCP Registry officiel</span>
+    <svg class="logo-xl" aria-label="France Data MCP"><use href="#fdmark"/></svg>
+    <h1>Les données publiques<br>françaises, <span class="grad">réconciliées</span></h1>
+    <p class="lede">Serveur <strong>MCP</strong> TypeScript qui croise <strong>13&nbsp;référentiels publics</strong> — santé, démographie, entreprises, géo &amp; immobilier — pour Claude, Cursor et toute app. Une seule URL, 36&nbsp;outils.</p>
+
     <div class="endpoint">
-      <code class="url">https://france-data-mcp.vercel.app/mcp</code>
+      <span class="lab mono">URL MCP</span>
+      <code class="mono" id="ep">https://france-data-mcp.vercel.app/mcp</code>
+      <button id="copybtn" aria-label="Copier l'URL">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <span id="copytxt">Copier</span>
+      </button>
+    </div>
+    <p class="heronote">Ajoute-la dans Claude → Connectors, ou <code class="mono">npx france-data-mcp</code> en local.</p>
+
+    <div class="valstrip">
+      <span class="v"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Croise &amp; réconcilie les sources</span>
+      <span class="v"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Détecte les SIRET fermés</span>
+      <span class="v"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Fraîcheur exposée par source</span>
     </div>
   </header>
 
   <main class="wrap">
+
+    <!-- STATS -->
     <section class="stats">
-      <div class="stat"><b>10</b><span>sources officielles</span></div>
-      <div class="stat"><b>36</b><span>outils MCP</span></div>
-      <div class="stat"><b>v0.26.1</b><span>fraîcheur exposée</span></div>
+      <div class="stat"><b>13</b><span>sources officielles croisées</span></div>
+      <div class="stat"><b>36</b><span>outils MCP exposés</span></div>
+      <div class="stat"><span class="mono"><b>v0.26.2</b></span><span>en production · MIT</span></div>
     </section>
 
-    <h2>Sources croisées</h2>
-    <div class="sources">
-      <span class="chip">INSEE SIRENE</span>
-      <span class="chip">INSEE IRIS</span>
-      <span class="chip">FINESS (DREES)</span>
-      <span class="chip">RPPS / Annuaire Santé (ANS)</span>
-      <span class="chip">Annuaire Santé Ameli</span>
-      <span class="chip">Centres de Santé (CNAM)</span>
-      <span class="chip">DGFiP DVF</span>
-      <span class="chip">SDES Sit@del</span>
-      <span class="chip">IGN</span>
-      <span class="chip">DINUM</span>
-    </div>
+    <!-- SOURCES -->
+    <section class="block" id="sources">
+      <div class="eyebrow">
+        <h2>Sources croisées</h2>
+        <span class="line"></span>
+        <span class="count">13 référentiels · 5 domaines</span>
+      </div>
 
-    <h2>Liens</h2>
-    <div class="cta">
-      <a class="btn primary" href="https://github.com/cturkieh/france-data-mcp">GitHub</a>
-      <a class="btn" href="https://www.npmjs.com/package/france-data-mcp">npm</a>
-      <a class="btn" href="https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp">MCP Registry</a>
-      <a class="btn" href="https://smithery.ai/servers/cturkieh/france-data">Smithery</a>
-      <a class="btn" href="/healthz">/healthz</a>
-    </div>
+      <div class="domain">
+        <div class="dh">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-5.5-7-11a7 7 0 0 1 14 0c0 5.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg></span>
+          <div><div class="dn">Territoire</div><div class="dd">communes &amp; géocodage</div></div>
+        </div>
+        <div class="chips">
+          <span class="chip">DINUM · geo.api.gouv.fr</span>
+          <span class="chip">IGN Géoplateforme</span>
+        </div>
+      </div>
+
+      <div class="domain">
+        <div class="dh">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span>
+          <div><div class="dn">Santé</div><div class="dd">établissements &amp; professionnels</div></div>
+        </div>
+        <div class="chips">
+          <span class="chip">FINESS (DREES)</span>
+          <span class="chip">RPPS / Annuaire Santé (ANS)</span>
+          <span class="chip">Annuaire Santé Ameli</span>
+          <span class="chip">Centres de Santé (CNAM)</span>
+        </div>
+      </div>
+
+      <div class="domain">
+        <div class="dh">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l3-4 3 2 4-6"/></svg></span>
+          <div><div class="dn">Démographie</div><div class="dd">maille IRIS, infracommunal</div></div>
+        </div>
+        <div class="chips">
+          <span class="chip">INSEE IRIS</span>
+          <span class="chip">INSEE Melodi</span>
+        </div>
+      </div>
+
+      <div class="domain">
+        <div class="dh">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M9 8h2M9 12h2M13 8h2M13 12h2M10 21v-4h4v4"/></svg></span>
+          <div><div class="dn">Entreprises</div><div class="dd">SIREN / SIRET, réconciliation</div></div>
+        </div>
+        <div class="chips">
+          <span class="chip">INSEE SIRENE</span>
+          <span class="chip">Recherche Entreprises (DINUM)</span>
+        </div>
+      </div>
+
+      <div class="domain">
+        <div class="dh">
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg></span>
+          <div><div class="dn">Immobilier</div><div class="dd">potentiel d'un site</div></div>
+        </div>
+        <div class="chips">
+          <span class="chip">DGFiP DVF</span>
+          <span class="chip">SDES Sit@del</span>
+          <span class="chip">PLU · apicarto / IGN</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- INSTALL -->
+    <section class="block" id="install">
+      <div class="eyebrow">
+        <h2>Installation</h2>
+        <span class="line"></span>
+        <span class="count">2 manières</span>
+      </div>
+      <div class="install">
+        <div class="icard">
+          <h3>URL distante</h3>
+          <p>claude.ai, Claude Code, Cursor — rien à installer.</p>
+          <pre class="code mono"><span class="c"># Claude → Settings → Connectors</span>
+<span class="k">url</span> <span class="s">"https://france-data-mcp.vercel.app/mcp"</span></pre>
+          <p class="hint mono">Aucune DB locale à provisionner · override <span class="hk">FRANCE_DATA_MCP_URL</span></p>
+        </div>
+        <div class="icard">
+          <h3>Wrapper npm (stdio)</h3>
+          <p>Claude Desktop natif &amp; autres clients.</p>
+          <pre class="code mono">{
+  <span class="k">"mcpServers"</span>: {
+    <span class="k">"france-data"</span>: {
+      <span class="k">"command"</span>: <span class="s">"npx"</span>,
+      <span class="k">"args"</span>: [<span class="s">"-y"</span>, <span class="s">"france-data-mcp"</span>]
+    }
+  }
+}</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- LINKS -->
+    <section class="block" id="liens">
+      <div class="eyebrow">
+        <h2>Liens</h2>
+        <span class="line"></span>
+      </div>
+      <div class="links">
+        <a class="btn primary" href="https://github.com/cturkieh/france-data-mcp">
+          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+        <a class="btn" href="https://www.npmjs.com/package/france-data-mcp">npm</a>
+        <a class="btn" href="https://registry.modelcontextprotocol.io/v0/servers?search=france-data-mcp">MCP Registry</a>
+        <a class="btn" href="https://smithery.ai/servers/cturkieh/france-data">Smithery</a>
+        <a class="btn" href="/healthz">/healthz</a>
+      </div>
+    </section>
   </main>
 
   <footer>
-    Licence MIT · données publiques officielles (sources citées par chaque outil) ·
-    <a href="https://github.com/cturkieh/france-data-mcp">cturkieh/france-data-mcp</a>
+    <div class="wrap row">
+      <div class="brand-sm">
+        <svg aria-hidden="true"><use href="#fdmark"/></svg>
+        <b>France Data MCP</b>
+      </div>
+      <span class="tricolore-dot" aria-hidden="true"><i style="background:#0b5cab"></i><i style="background:#cbd5e1"></i><i style="background:#e23b3b"></i></span>
+      <span>Licence MIT · données publiques officielles, sources citées par chaque outil.</span>
+      <div class="right">
+        <a href="https://github.com/cturkieh/france-data-mcp">cturkieh/france-data-mcp</a>
+        <a href="/healthz">État du service</a>
+      </div>
+    </div>
   </footer>
+
+  <script>
+    // top bar shadow on scroll
+    var tb = document.getElementById('topbar');
+    var onScroll = function(){ tb.classList.toggle('scrolled', window.scrollY > 8); };
+    onScroll(); window.addEventListener('scroll', onScroll, {passive:true});
+
+    // copy endpoint
+    var btn = document.getElementById('copybtn');
+    var txt = document.getElementById('copytxt');
+    btn.addEventListener('click', function(){
+      var url = document.getElementById('ep').textContent.trim();
+      navigator.clipboard.writeText(url).then(function(){
+        btn.classList.add('ok'); txt.textContent = 'Copié';
+        setTimeout(function(){ btn.classList.remove('ok'); txt.textContent = 'Copier'; }, 1600);
+      });
+    });
+  </script>
 </body>
 </html>

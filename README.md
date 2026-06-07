@@ -1,6 +1,6 @@
 # france-data-mcp
 
-> MCP TypeScript qui **croise et réconcilie** 10 référentiels publics français (INSEE SIRENE & IRIS, FINESS DREES, RPPS / Annuaire Santé ANS, Annuaire Santé Ameli, Centres de Santé CNAM, DGFiP DVF, SDES Sit@del, IGN, DINUM). Détecte les SIRET fermés invisibles côté DREES, distingue site vs groupe, croise l'offre de soins avec la démographie au quartier, **évalue le potentiel immobilier d'un site** (prix DVF €/m², permis de construire, zones AU du PLU), expose la fraîcheur de chaque source.
+> MCP TypeScript qui **croise et réconcilie** 13 référentiels publics français (INSEE SIRENE, IRIS & Melodi, FINESS DREES, RPPS / Annuaire Santé ANS, Annuaire Santé Ameli, Centres de Santé CNAM, DVF / DGFiP, Sit@del / SDES, PLU via apicarto, IGN Géoplateforme, geo.api.gouv.fr & Recherche Entreprises DINUM). Détecte les SIRET fermés invisibles côté DREES, distingue site vs groupe, croise l'offre de soins avec la démographie au quartier, **évalue le potentiel immobilier d'un site** (prix DVF €/m², permis de construire, zones AU du PLU), expose la fraîcheur de chaque source.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
@@ -51,14 +51,14 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, Centres de 
 
 ---
 
-## Périmètre — 10 sources publiques croisées
+## Périmètre — 13 sources publiques croisées
 
-- 🗺️ **Territoire** : geo.api.gouv.fr (DINUM, communes), IGN Géoplateforme (géocodage)
-- 🏥 **Santé** : FINESS / DREES (~95 K établissements), Annuaire Santé Ameli (~462 K libéraux), RPPS / ANS (~2,2 M PS actifs)
-- 🩺 **Centres de Santé** : Annuaire santé CNAM (~3 K structures L.6323-1 CSP, sync hebdomadaire)
-- 📊 **Démographie infracommunale** : INSEE IRIS (~48,6 K quartiers — RP 2022, FILOSOFI 2021 revenu, contours IGN) + INSEE Melodi (population de référence)
-- 🏢 **Entreprises** : DINUM Recherche Entreprises + INSEE SIRENE V3.11
-- 🏗️ **Immobilier** : ventes foncières DVF / DGFiP (€/m², cache paresseux PostGIS), permis de construire Sit@del via API DiDo / SDES (live), zones AU du PLU via apicarto / IGN (live)
+- 🗺️ **Territoire** (2) : geo.api.gouv.fr (DINUM, communes), IGN Géoplateforme (géocodage)
+- 🏥 **Santé** (3) : FINESS / DREES (~95 K établissements), Annuaire Santé Ameli (~462 K libéraux), RPPS / ANS (~2,2 M PS actifs)
+- 🩺 **Centres de Santé** (1) : Annuaire santé CNAM (~3 K structures L.6323-1 CSP, sync hebdomadaire)
+- 📊 **Démographie infracommunale** (2) : INSEE IRIS (~48,6 K quartiers — RP 2022, FILOSOFI 2021 revenu, contours IGN) + INSEE Melodi (population de référence)
+- 🏢 **Entreprises** (2) : DINUM Recherche Entreprises + INSEE SIRENE V3.11
+- 🏗️ **Immobilier** (3) : ventes foncières DVF / DGFiP (€/m², cache paresseux PostGIS), permis de construire Sit@del via API DiDo / SDES (live), zones AU du PLU via apicarto / IGN (live)
 
 **Cross-source** : réconciliation FINESS ↔ RPPS ↔ SIRENE pour détecter SIRET fermés, rebrandings, raisons sociales périmées.
 
@@ -133,7 +133,7 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ✅ **V0.26.2 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
-> Dernier patch (V0.26.2) : un point sans adresse proche (site industriel isolé / littoral, ex. Orano La Hague) est désormais rattaché à sa commune par ses **frontières** (point-dans-polygone), ce qui restaure les permis Sit@del (`dynamique_immobiliere`) et la couverture FINESS↔SIRENE (`finess_sirene_coverage_in_radius`) sur ces sites. Surface inchangée (10 référentiels / 36 outils).
+> Dernier patch (V0.26.2) : un point sans adresse proche (site industriel isolé / littoral, ex. Orano La Hague) est désormais rattaché à sa commune par ses **frontières** (point-dans-polygone), ce qui restaure les permis Sit@del (`dynamique_immobiliere`) et la couverture FINESS↔SIRENE (`finess_sirene_coverage_in_radius`) sur ces sites. Surface inchangée (13 référentiels / 36 outils).
 
 ### Roadmap
 
