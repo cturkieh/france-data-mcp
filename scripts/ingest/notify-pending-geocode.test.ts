@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { decidePendingNotification, parseSourceArg } from "./notify-pending-geocode.js";
 
@@ -110,5 +113,34 @@ describe("parseSourceArg", () => {
   it("rejette une source inconnue ou absente", () => {
     expect(() => parseSourceArg(["node", "script", "finess"])).toThrow(/usage/);
     expect(() => parseSourceArg(["node", "script"])).toThrow(/usage/);
+  });
+});
+
+describe("wording de l'alerte (reframe : drain BAN automatisé)", () => {
+  // Garde-fou de CONTENU sur le texte rendu (l'action composite n'est pas
+  // unit-testable autrement). Depuis l'auto-trigger `workflow_run` (PR #53/#54),
+  // le re-géocodage tourne tout seul : l'alerte ne doit PLUS réclamer une action
+  // manuelle — ce serait une consigne fausse. Re-introduire ce wording rallume
+  // le bruit trompeur fermé ici (cf. issue #52).
+  const actionYml = readFileSync(
+    resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../.github/actions/notify-pending-geocode/action.yml",
+    ),
+    "utf8",
+  );
+
+  it("n'instruit PLUS de lancer le backfill à la main", () => {
+    expect(actionYml).not.toContain("lancer manuellement");
+    expect(actionYml).not.toContain("node scripts/ban-backfill.mjs");
+    expect(actionYml).not.toContain("En attendant l'automatisation");
+    expect(actionYml).not.toContain("backlog P1");
+    expect(actionYml).not.toContain("à géocoder manuellement");
+  });
+
+  it("cadre le résidu normal comme géocodé automatiquement (drain workflow_run)", () => {
+    expect(actionYml.toLowerCase()).toContain("automatiquement");
+    expect(actionYml).toContain("workflow_run");
+    expect(actionYml).toContain("Aucune action");
   });
 });

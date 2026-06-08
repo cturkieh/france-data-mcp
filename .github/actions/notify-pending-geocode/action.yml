@@ -1,9 +1,11 @@
 # Composite action — alerte ops "adresses restant à géocoder (BAN)".
 #
 # Factorise les 3 steps (check → email → issue) partagés par les crons RPPS et
-# Ameli (seuls à poser des adresses BAN). En attendant l'automatisation du
-# re-géocodage récurrent (backlog P1, `docs/plans/ban-join.md`), prévient qu'il
-# faut lancer `node scripts/ban-backfill.mjs` à la main.
+# Ameli (seuls à poser des adresses BAN). Le re-géocodage est désormais AUTOMATISÉ
+# (drain BAN déclenché en `workflow_run` après chaque cron réussi — cf.
+# `ban-backfill-{rpps,ameli}.yml`) : l'alerte « résidu normal » est INFORMATIVE
+# (géocodé tout seul, aucune action requise) ; seule la mesure indisponible reste
+# une vraie anomalie actionnable.
 #
 # Best-effort de bout en bout : tourne APRÈS une ingestion déjà réussie (swap
 # fait), donc ne doit JAMAIS re-marquer le cron en échec. Le check ne throw pas
@@ -79,10 +81,10 @@ runs:
         # message DÉGRADÉ — surtout pas "0 adresses" (trompeur).
         if [ "$MEASUREMENT_UNAVAILABLE" = "true" ]; then
           subject="[france-data-mcp] $SOURCE_LABEL : ⚠️ mesure des adresses à géocoder indisponible"
-          text="Le cron $SOURCE_LABEL a RÉUSSI mais la mesure du nombre d'adresses à géocoder (BAN) a échoué (RPC de mesure). Comptage INCONNU — vérifier le cron / la RPC ; un re-géocodage (node scripts/ban-backfill.mjs) reste peut-être nécessaire. Run : $RUN_URL"
+          text="Le cron $SOURCE_LABEL a RÉUSSI mais la mesure du nombre d'adresses à géocoder (BAN) a échoué (RPC de mesure). Comptage INCONNU — vérifier la RPC de mesure et que le drain BAN auto a bien tourné. Run : $RUN_URL"
         else
-          subject="[france-data-mcp] $SOURCE_LABEL : $PENDING adresses à géocoder"
-          text="Le cron $SOURCE_LABEL a ingéré de nouvelles données. $PENDING adresses distinctes restent à géocoder (BAN). En attendant l'automatisation, lancer manuellement : node scripts/ban-backfill.mjs — Run : $RUN_URL"
+          subject="[france-data-mcp] $SOURCE_LABEL : $PENDING adresses en attente de géocodage auto"
+          text="Le cron $SOURCE_LABEL a ingéré de nouvelles données. $PENDING adresses distinctes seront géocodées AUTOMATIQUEMENT au prochain drain BAN (déclenché tout seul après ce cron). Aucune action requise. Si ce compte ne baisse pas sur plusieurs cycles, le drain auto est peut-être cassé : vérifier les workflows « Backfill BAN ». Run : $RUN_URL"
         fi
         payload=$(jq -n \
           --arg from "$NOTIFY_EMAIL_FROM" \
@@ -115,24 +117,23 @@ runs:
           const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
           // Message DÉGRADÉ quand la mesure amont a échoué : surtout pas
           // "0 adresses à géocoder" (trompeur) — on signale une anomalie.
+          // Cas normal : INFORMATIF (le drain BAN auto géocode le résidu),
+          // jamais un appel à une action manuelle (qui n'existe plus).
           const comment = degraded
             ? `⚠️ Run #${context.runId} : mesure des adresses ${label} à géocoder INDISPONIBLE (RPC de mesure échouée) — comptage inconnu, vérifier le cron.\n\nRun : ${runUrl}`
-            : `🔄 Mise à jour : **${pending}** adresses ${label} à géocoder après le run #${context.runId}.\n\nRun : ${runUrl}`;
+            : `🔄 Mise à jour : **${pending}** adresses ${label} en attente de géocodage automatique après le run #${context.runId} (drain BAN auto à suivre).\n\nRun : ${runUrl}`;
           const newTitle = degraded
             ? `[pending-geocode] ${label} : ⚠️ mesure des adresses à géocoder indisponible`
-            : `[pending-geocode] ${label} : adresses à géocoder manuellement`;
+            : `[pending-geocode] ${label} : adresses en attente de géocodage automatique`;
           const newBody = degraded
-            ? `Le cron ${label} a RÉUSSI mais la **mesure** du nombre d'adresses à géocoder (BAN) a échoué (RPC de mesure). Comptage INCONNU — vérifier le cron / la RPC.\n\n` +
-              `Un re-géocodage (\`node scripts/ban-backfill.mjs\`) reste peut-être nécessaire.\n\nRun : ${runUrl}`
-            : `Le cron ${label} a ingéré de nouvelles données. **${pending}** adresses distinctes restent à géocoder (BAN).\n\n` +
-              `En attendant l'automatisation du re-géocodage récurrent (backlog P1), lancer manuellement :\n\n` +
-              '```bash\nnode scripts/ban-backfill.mjs\n```\n\n' +
-              `Run : ${runUrl}\n\n` +
-              `_Fermer cette issue une fois le backfill lancé — le prochain cron la rouvrira si besoin._`;
+            ? `Le cron ${label} a RÉUSSI mais la **mesure** du nombre d'adresses à géocoder (BAN) a échoué (RPC de mesure). Comptage INCONNU — vérifier la RPC de mesure et que le drain BAN auto a bien tourné.\n\nRun : ${runUrl}`
+            : `Le cron ${label} a ingéré de nouvelles données. **${pending}** adresses distinctes seront géocodées **automatiquement** au prochain drain BAN (déclenché en \`workflow_run\` après ce cron — cf. \`ban-backfill-${source}.yml\`).\n\n` +
+              `✅ Aucune action manuelle requise.\n\n` +
+              `Cette issue est une **trace de surveillance** : si le compte ne baisse pas sur plusieurs cycles, le drain auto est peut-être cassé — vérifier les workflows « Backfill BAN ».\n\nRun : ${runUrl}`;
           try {
             // Idempotence : réutiliser une issue ouverte (AND sur les labels)
-            // pour ne pas en empiler une à chaque cron tant que le backfill
-            // n'a pas été lancé.
+            // pour ne pas en empiler une à chaque cron — le résidu BAN est
+            // récurrent, une seule issue de surveillance suffit.
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,

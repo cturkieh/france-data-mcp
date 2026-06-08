@@ -36,6 +36,16 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   index BAN (la PK est toujours présente). Prouvé prod : plan `Index Scan annuaire_ameli_pkey`,
   énumération 32 pages sans timeout, garde-fous `22023` sur whitelist + `p_limit`. Cadrage durable
   `docs/plans/automatisation-backfill-ban.{md,html}` (étapes 1 ET 2 livrées : bouton + pilote automatique).
+- **Alerte `notify-pending-geocode` REFRAMÉE — informative, plus d'appel à une action manuelle**
+  (`.github/actions/notify-pending-geocode/action.yml`). Le drain BAN étant désormais automatique
+  (workflow_run), l'alerte « X adresses à géocoder » ne réclame plus `node scripts/ban-backfill.mjs`
+  (consigne devenue FAUSSE) : email + issue cadrent le résidu comme « géocodé automatiquement au
+  prochain drain BAN, aucune action requise », et invitent à vérifier les workflows « Backfill BAN »
+  seulement si le compte ne baisse pas sur plusieurs cycles (signe d'un drain auto cassé). Le cas
+  DÉGRADÉ (mesure RPC indisponible) reste une vraie anomalie actionnable. Commentaires périmés
+  (« en attendant l'automatisation / backlog P1 ») nettoyés dans l'action ET `notify-pending-geocode.ts`.
+  Garde-fou de contenu `notify-pending-geocode.test.ts` (le wording manuel ne peut pas réapparaître).
+  Clôt l'issue récurrente #52.
 
 ## [0.26.3] — 2026-06-07 — NAF inexistant → -32602 propre + refonte landing + recompte sources (13)
 
