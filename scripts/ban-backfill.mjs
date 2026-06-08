@@ -134,39 +134,57 @@ export const SOURCES = {
   },
   ameli: {
     table: "annuaire_ameli",
-    // Énumération KEYSET SUR la clé d'adresse — exige l'index BAN sur la table LIVE
-    // (posé hors cron, cf. runbook ameli). Curseur = `address_key`. Migration vers
-    // id-keyset = follow-up (hors scope du bouton RPPS).
-    enumRpc: "ameli_distinct_eligible_keys",
-    cursorParam: "p_after",
-    cursorField: "address_key",
-    cursorInit: null,
+    // Énumération KEYSET SUR `id` (PK) — jumeau RPPS, ROBUSTE sans index BAN sur la
+    // table LIVE. Remplace le keyset sur la clé d'adresse (`ameli_distinct_eligible_
+    // keys`), qui exigeait l'index `ameli_staging_ban_eligible_normkey*` sur
+    // `annuaire_ameli` — ORPHÉLINÉ à chaque swap du cron hebdo (recréation manuelle
+    // avant chaque drain). La PK suffit → plus AUCUN index à entretenir. Curseur =
+    // `id`. Cf. ameli_eligible_rows_after_id (migration keyset) + docs/plans/
+    // automatisation-backfill-ban.md.
+    enumRpc: "ameli_eligible_rows_after_id",
+    cursorParam: "p_after_id",
+    cursorField: "id",
+    cursorInit: 0,
     countRpc: "ameli_count_ban_eligible_rows",
   },
 };
 
-// Garde-fou STRUCTUREL fail-loud (au chargement du module) : un descripteur de
-// source mal formé (champ oublié pour une future source, cursorInit incohérent)
-// provoquerait une MIS-PAGINATION SILENCIEUSE (`after = undefined` → 1ʳᵉ page en
-// boucle, ou clés ratées). On exige les 6 champs + un cursorInit cohérent avec le
-// type du curseur AVANT tout run. Doctrine : une config cassée doit être BRUYANTE
-// au démarrage, jamais un drain partiel sous le radar. cursorInit DOIT être une
-// sentinelle strictement < toute valeur réelle : 0 (curseur numérique id) ou null
-// (curseur texte clé).
-for (const [name, cfg] of Object.entries(SOURCES)) {
-  for (const k of ["table", "enumRpc", "cursorParam", "cursorField", "cursorInit", "countRpc"]) {
-    if (!(k in cfg)) {
+/**
+ * Garde-fou STRUCTUREL fail-loud du descripteur `SOURCES` : un descripteur de
+ * source mal formé (champ oublié pour une future source, cursorInit incohérent)
+ * provoquerait une MIS-PAGINATION SILENCIEUSE (`after = undefined` → 1ʳᵉ page en
+ * boucle, ou clés ratées). On exige les 6 champs + un cursorInit COHÉRENT avec le
+ * type du curseur. Doctrine : une config cassée doit être BRUYANTE au démarrage,
+ * jamais un drain partiel sous le radar. Exporté pour être testé directement
+ * (`ban-backfill.test.ts`) sans dépendre d'un re-chargement de module.
+ *
+ * @param {Record<string, Record<string, unknown>>} sources
+ */
+export function assertSourcesValid(sources) {
+  for (const [name, cfg] of Object.entries(sources)) {
+    for (const k of ["table", "enumRpc", "cursorParam", "cursorField", "cursorInit", "countRpc"]) {
+      if (!(k in cfg)) {
+        throw new Error(
+          `[ban-backfill] SOURCES.${name} : champ "${k}" manquant (mis-pagination silencieuse)`,
+        );
+      }
+    }
+    // Couple cursorField ↔ cursorInit (PAS cursorInit en isolation) : la sentinelle
+    // DOIT être strictement < toute valeur réelle du TYPE du curseur — 0 pour un
+    // curseur numérique sur la PK `id`, null pour un curseur texte (clé). Un
+    // découplage (`cursorField:"id"` + `cursorInit:null`) passerait un garde isolé
+    // mais enverrait `p_after_id: null` en 1ʳᵉ page → 1ʳᵉ page fausse = panne S-1.
+    const expectedInit = cfg.cursorField === "id" ? 0 : null;
+    if (cfg.cursorInit !== expectedInit) {
       throw new Error(
-        `[ban-backfill] SOURCES.${name} : champ "${k}" manquant (mis-pagination silencieuse)`,
+        `[ban-backfill] SOURCES.${name} : cursorField=${JSON.stringify(cfg.cursorField)} exige cursorInit=${JSON.stringify(expectedInit)} (sentinelle < toute valeur réelle du type du curseur), reçu ${JSON.stringify(cfg.cursorInit)}`,
       );
     }
   }
-  if (cfg.cursorInit !== 0 && cfg.cursorInit !== null) {
-    throw new Error(
-      `[ban-backfill] SOURCES.${name}.cursorInit doit être 0 (curseur id) ou null (curseur clé), reçu ${JSON.stringify(cfg.cursorInit)}`,
-    );
-  }
 }
+
+// Exécution fail-loud immédiate au chargement du module (avant tout run).
+assertSourcesValid(SOURCES);
 
 /**
  * Backfill cache-only, idempotent.
@@ -234,9 +252,12 @@ export async function runBanBackfill(supabase, opts = {}) {
   // lecture est BORNÉE par `withTimeout` (fail-loud : un dépassement throw,
   // PAS un statut "partial").
   const distinctKeyInputs = new Map();
-  // Curseur keyset GÉNÉRIQUE : `id` (PK) pour rpps, `address_key` pour ameli — cf.
-  // `srcCfg.cursorParam`/`cursorField`/`cursorInit`. Le client déduplique TOUJOURS
-  // par `address_key` (les 2 RPC le renvoient) ; le curseur ne sert qu'à paginer.
+  // Curseur keyset GÉNÉRIQUE : les 2 sources énumèrent désormais par `id` (PK ;
+  // `cursorInit: 0`). Le mécanisme reste PARAMÉTRÉ (`srcCfg.cursorParam`/
+  // `cursorField`/`cursorInit`) et supporterait une future source à curseur-clé
+  // (le garde-fou de chargement valide `cursorInit ∈ {0, null}`). Le client
+  // déduplique TOUJOURS par `address_key` (les 2 RPC le renvoient) ; le curseur ne
+  // sert qu'à paginer.
   let after = srcCfg.cursorInit;
   let pageCount = 0;
   // F-1 (silent-failure review) : compte les lignes éligibles à clé vide/nulle,
@@ -321,8 +342,8 @@ export async function runBanBackfill(supabase, opts = {}) {
       `[ban-backfill] ${emptyKeyRows} ligne(s) éligible(s) à address_key vide/nulle — non géocodables (adresse source manquante), SKIPPÉES`,
     );
   }
-  // Pas de `.sort()` ici : l'ORDRE d'énumération dépend du curseur (id pour rpps,
-  // clé pour ameli) et n'est PAS load-bearing — l'ordre de SERVICE déterministe est
+  // Pas de `.sort()` ici : l'ORDRE d'énumération suit le curseur (`id` pour les 2
+  // sources) et n'est PAS load-bearing — l'ordre de SERVICE déterministe est
   // posé par le tri attempt-first plus bas (`keysToSubmit.sort`, tie-break
   // `address_key` total + stable), INDÉPENDANT de l'ordre d'arrivée. Un re-run
   // partiel (--max) reste déterministe : les clés cachées au run précédent sont

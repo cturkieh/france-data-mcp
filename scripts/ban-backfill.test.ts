@@ -29,7 +29,7 @@ vi.mock("../src/core/index.js", async (importOriginal) => {
   };
 });
 
-const { runBanBackfill, SOURCES } = await import("./ban-backfill.mjs");
+const { runBanBackfill, SOURCES, assertSourcesValid } = await import("./ban-backfill.mjs");
 
 function banOutcome(
   results: Array<
@@ -52,7 +52,7 @@ function banOutcome(
 
 // Fixtures adresses RPPS RÉELLES (style ANS). On NE passe plus par
 // `.range()` : on alimente directement le dataset de l'énumération keyset
-// (rpps → `rpps_eligible_rows_after_id` / ameli → `ameli_distinct_eligible_keys`,
+// (rpps → `rpps_eligible_rows_after_id` / ameli → `ameli_eligible_rows_after_id`,
 // cf. `SRC` par source). Les helpers `realKey` fabriquent une clé
 // byte-exacte avec le jumeau JS (parité octet-à-octet garantie par le HARD
 // GATE Task 1) pour des assertions réalistes côté tests.
@@ -161,9 +161,10 @@ function makeStub(opts: {
     ameli: ["annuaire_ameli", "annuaire_ameli_staging"],
   };
   const SRC = { ...SOURCES[sourceKey], forbid: FORBID[sourceKey] };
-  // Curseur keyset GÉNÉRIQUE : id (numérique) pour rpps, address_key (string) pour
-  // ameli. On assigne un id stable (ordre fourni) puis on trie par le champ curseur
-  // de la source — le mock pagine `> cursor` EXACTEMENT comme la RPC réelle.
+  // Curseur keyset GÉNÉRIQUE : les 2 sources énumèrent par `id` (numérique). Le mock
+  // reste générique (number OU string) pour couvrir une future source à curseur-clé :
+  // on assigne un id stable (ordre fourni) puis on trie par le champ curseur de la
+  // source — le mock pagine `> cursor` EXACTEMENT comme la RPC réelle.
   const withIds = opts.distinctRows.map((r, i) => ({ ...r, id: i + 1 }));
   const cursorVal = (r: (typeof withIds)[number]): number | string | null => r[SRC.cursorField];
   const sorted = [...withIds].sort((a, b) => {
@@ -749,7 +750,7 @@ describe("runBanBackfill", () => {
     errSpy.mockRestore();
   });
 
-  it("source=ameli : énumère via les RPC AMELI (ameli_distinct_eligible_keys + ameli_count_ban_eligible_rows), géocode, et n'écrit QUE le cache (jamais annuaire_ameli)", async () => {
+  it("source=ameli : énumère via les RPC AMELI (ameli_eligible_rows_after_id + ameli_count_ban_eligible_rows), géocode, et n'écrit QUE le cache (jamais annuaire_ameli)", async () => {
     const keyA = normalizeAddressKey(ROW_A.adresse, ROW_A.code_postal, ROW_A.code_insee);
     const keyB = normalizeAddressKey(ROW_B.adresse, ROW_B.code_postal, ROW_B.code_insee);
     geocodeAddressesBatchMock.mockResolvedValue(
@@ -788,7 +789,7 @@ describe("runBanBackfill", () => {
         (c) => c[0] as string,
       ),
     );
-    expect(calledRpcs.has("ameli_distinct_eligible_keys")).toBe(true);
+    expect(calledRpcs.has("ameli_eligible_rows_after_id")).toBe(true);
     expect(calledRpcs.has("ameli_count_ban_eligible_rows")).toBe(true);
     expect(calledRpcs.has("rpps_eligible_rows_after_id")).toBe(false);
     // La lecture cache reste l'RPC PARTAGÉE (cache commun aux 2 sources).
@@ -806,5 +807,53 @@ describe("runBanBackfill", () => {
       // @ts-expect-error — source hors union : on prouve le garde runtime.
       runBanBackfill(stub.client, { source: "finess" }),
     ).rejects.toThrow(/unknown source "finess"/);
+  });
+});
+
+describe("assertSourcesValid : garde structurel SOURCES (anti mis-pagination S-1)", () => {
+  const base = {
+    table: "t",
+    enumRpc: "e",
+    cursorParam: "p_after_id",
+    cursorField: "id",
+    cursorInit: 0,
+    countRpc: "c",
+  };
+
+  it("le descripteur RÉEL SOURCES est valide (rpps + ameli)", () => {
+    expect(() => assertSourcesValid(SOURCES)).not.toThrow();
+  });
+
+  it("champ manquant → throw fail-loud", () => {
+    const incomplete = {
+      table: "t",
+      enumRpc: "e",
+      cursorParam: "p_after_id",
+      cursorField: "id",
+      cursorInit: 0,
+    };
+    expect(() => assertSourcesValid({ x: incomplete })).toThrow(/champ "countRpc" manquant/);
+  });
+
+  it("DÉCOUPLAGE cursorField:'id' + cursorInit:null → throw (1ʳᵉ page p_after_id:null = S-1)", () => {
+    expect(() =>
+      assertSourcesValid({ x: { ...base, cursorField: "id", cursorInit: null } }),
+    ).toThrow(/cursorField="id" exige cursorInit=0/);
+  });
+
+  it("DÉCOUPLAGE curseur clé + cursorInit:0 → throw (sentinelle incohérente)", () => {
+    expect(() =>
+      assertSourcesValid({
+        x: { ...base, cursorParam: "p_after", cursorField: "address_key", cursorInit: 0 },
+      }),
+    ).toThrow(/cursorField="address_key" exige cursorInit=null/);
+  });
+
+  it("curseur clé COHÉRENT (cursorField:'address_key' + cursorInit:null) → OK (généralité préservée)", () => {
+    expect(() =>
+      assertSourcesValid({
+        x: { ...base, cursorParam: "p_after", cursorField: "address_key", cursorInit: null },
+      }),
+    ).not.toThrow();
   });
 });
