@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Automatisation backfill BAN (RPPS + Ameli) — cadrage</title>
+<style>
+  :root{
+    --marine:#0b2e4f; --marine2:#14385f; --bleu:#1d6fd6; --bleu-pale:#e8f1fc;
+    --bg:#eef2f6; --card:#ffffff; --ink:#1a2a3a; --muted:#5b6b7d;
+    --rouge:#c0271a; --rouge-pale:#fbe9e7; --vert:#16794c; --vert-pale:#e6f4ec;
+    --ambre:#b06f00; --ambre-pale:#fdf3e0; --bord:#dce4ec;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px;}
+  header{background:linear-gradient(135deg,var(--marine),var(--marine2));color:#fff;padding:48px 24px 40px;margin-bottom:36px;}
+  .header-inner{max-width:1080px;margin:0 auto;padding:0 24px;}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8fb9e6;font-weight:700;margin-bottom:10px;}
+  h1{font-size:32px;line-height:1.2;font-weight:800;margin-bottom:18px;max-width:860px;}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;}
+  .chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:600;color:#dce9f7;}
+  .chip.go{background:var(--vert);border-color:var(--vert);color:#fff;}
+  .chip.wait{background:var(--ambre);border-color:var(--ambre);color:#fff;}
+  .tldr{margin-top:18px;font-size:16px;line-height:1.55;color:#cfdaea;max-width:820px;}
+  .tldr strong{color:#fff;}
+  section{margin-bottom:34px;}
+  h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--bleu);font-weight:800;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  h2 .num{background:var(--bleu);color:#fff;width:24px;height:24px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;letter-spacing:0;flex-shrink:0;}
+  h3{font-size:16px;font-weight:700;margin:18px 0 8px;color:var(--marine);}
+  p{margin-bottom:10px;}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;padding:22px 24px;box-shadow:0 1px 3px rgba(11,46,79,.05);}
+  .card + .card{margin-top:14px;}
+  .grid{display:grid;gap:14px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  @media(max-width:720px){.g2{grid-template-columns:1fr;}}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0;}
+  th{background:var(--bleu-pale);color:var(--marine);text-align:left;padding:9px 12px;font-weight:700;font-size:12.5px;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid #cfe0f3;}
+  td{padding:9px 12px;border-bottom:1px solid var(--bord);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  code{background:#eef2f6;border:1px solid var(--bord);border-radius:4px;padding:1px 5px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;color:var(--marine);}
+  .badge{display:inline-block;padding:2px 9px;border-radius:5px;font-size:12px;font-weight:700;white-space:nowrap;}
+  .b-ok{background:var(--vert-pale);color:var(--vert);}
+  .b-no{background:var(--rouge-pale);color:var(--rouge);}
+  .b-mid{background:var(--ambre-pale);color:var(--ambre);}
+  .b-info{background:var(--bleu-pale);color:var(--bleu);}
+  .callout{border-left:4px solid var(--bleu);background:var(--bleu-pale);padding:16px 20px;border-radius:0 10px 10px 0;}
+  .callout.warn{border-color:var(--ambre);background:var(--ambre-pale);}
+  .callout.danger{border-color:var(--rouge);background:var(--rouge-pale);}
+  .callout.good{border-color:var(--vert);background:var(--vert-pale);}
+  .callout .lbl{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.07em;display:block;margin-bottom:5px;color:var(--bleu);}
+  .callout.warn .lbl{color:var(--ambre);}
+  .callout.danger .lbl{color:var(--rouge);}
+  .callout.good .lbl{color:var(--vert);}
+  .diagram{background:#0e2138;color:#cfe0f3;border-radius:10px;padding:18px 20px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;overflow-x:auto;white-space:pre;}
+  .diagram .h{color:#ffd07a;font-weight:700;} .diagram .o{color:#9fffb8;} .diagram .n{color:#ff9a8c;} .diagram .a{color:#7ab7ff;}
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0;}
+  .stat{flex:1;min-width:150px;background:var(--card);border:1px solid var(--bord);border-radius:10px;padding:14px 16px;}
+  .stat .v{font-size:24px;font-weight:800;color:var(--marine);}
+  .stat .l{font-size:12px;color:var(--muted);margin-top:2px;}
+  ul{margin:6px 0 10px 20px;} li{margin-bottom:5px;}
+  .step{display:flex;gap:12px;align-items:flex-start;margin-bottom:10px;}
+  .step .n{background:var(--bleu);color:#fff;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;}
+  .muted{color:var(--muted);}
+</style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="kicker">Cadrage technique · à valider avant code</div>
+    <h1>Automatiser le backfill BAN — supprimer la corvée hebdo, puis le pilote automatique</h1>
+    <div class="tldr">
+      <strong>En une phrase :</strong> on donne à Ameli le même « bouton » qu'RPPS (en réglant d'abord la cause-racine
+      qui m'oblige à intervenir à la main chaque semaine), puis plus tard on supprime le bouton des deux pour que tout
+      parte tout seul après chaque mise à jour des données.
+    </div>
+    <div class="meta">
+      <span class="chip">france-data-mcp</span>
+      <span class="chip">Données santé · validation Cyril requise</span>
+      <span class="chip go">Étape 1 : prête</span>
+      <span class="chip wait">Étape 2 : plus tard</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- 1 -->
+  <section>
+    <h2><span class="num">1</span> Le problème, en simple</h2>
+    <div class="card">
+      <p>Chaque semaine, un nouveau fichier Ameli arrive « nu » (adresses écrites, pas de coordonnées GPS).
+      À l'arrivée, les adresses déjà connues récupèrent automatiquement leur position exacte depuis notre
+      <strong>carnet d'adresses permanent</strong> (le cache). Les nouvelles, elles, restent au centre du village
+      en attendant qu'on aille leur chercher des coordonnées : c'est le <strong>backfill</strong>.</p>
+      <p>Aujourd'hui, ce backfill est <span class="badge b-no">100 % manuel pour Ameli</span> : tu reçois un mail,
+      tu me le transmets, et je dois faire une petite « réparation technique » à la main <em>avant même</em> de pouvoir
+      lancer le géocodage. C'est cette réparation hebdomadaire qu'on veut supprimer.</p>
+      <div class="callout warn">
+        <span class="lbl">La cause-racine</span>
+        Pour trouver vite les adresses à géocoder, Ameli s'appuie sur un « marque-page » (un index). Or, quand le
+        nouveau fichier remplace l'ancien, le marque-page reste collé sur l'ancien fichier parti à la corbeille.
+        Sans lui, le script relit les 485 000 lignes une par une → il plante au bout de 50 secondes. Je dois donc
+        recréer le marque-page à la main à chaque fois.
+      </div>
+    </div>
+  </section>
+
+  <!-- 2 -->
+  <section>
+    <h2><span class="num">2</span> Pourquoi RPPS a déjà un bouton, et pas Ameli</h2>
+    <div class="card">
+      <p>On a déjà rencontré et résolu exactement ce problème pour le RPPS. La différence tient à
+      <strong>la façon de retrouver la liste des adresses à géocoder</strong> :</p>
+      <table>
+        <tr><th>Source</th><th>Comment elle trouve les adresses</th><th>Marque-page ?</th><th>État</th></tr>
+        <tr>
+          <td><strong>RPPS</strong> (mensuel)</td>
+          <td>Par <strong>numéro de ligne</strong> (un compteur interne toujours présent)</td>
+          <td><span class="badge b-ok">Pas nécessaire</span></td>
+          <td><span class="badge b-info">🟡 bouton GitHub</span></td>
+        </tr>
+        <tr>
+          <td><strong>Ameli</strong> (hebdo)</td>
+          <td>Par <strong>l'adresse elle-même</strong> → exige le marque-page fragile</td>
+          <td><span class="badge b-no">Détruit à chaque fichier</span></td>
+          <td><span class="badge b-no">🔴 100 % manuel</span></td>
+        </tr>
+      </table>
+      <p class="muted">Le « numéro de ligne » est toujours indexé d'office (c'est la clé primaire de la table).
+      En s'appuyant dessus, RPPS n'a aucun marque-page à entretenir. <strong>Il suffit de faire pareil pour Ameli.</strong></p>
+    </div>
+
+    <div class="card">
+      <h3>Avant / après — ce que change l'étape 1</h3>
+      <div class="diagram"><span class="c">// AUJOURD'HUI (Ameli)</span>
+mail reçu → <span class="n">je recrée le marque-page À LA MAIN</span> → je lance le script → cache rempli
+            <span class="n">▲ étape fragile, chaque semaine, nécessite Claude</span>
+
+<span class="c">// APRÈS L'ÉTAPE 1 (Ameli, comme RPPS)</span>
+mail reçu → <span class="a">tu cliques sur le bouton GitHub</span> → <span class="o">cache rempli</span>
+            <span class="o">▲ plus aucun marque-page, plus aucune réparation</span></div>
+    </div>
+  </section>
+
+  <!-- 3 -->
+  <section>
+    <h2><span class="num">3</span> Étape 1 — le bouton Ameli <span class="badge b-info" style="margin-left:8px;">à faire maintenant</span></h2>
+    <div class="card">
+      <p>On réplique le mécanisme RPPS, déjà prouvé en production. Quatre petits chantiers :</p>
+      <div class="step"><span class="n">1</span><div><strong>Apprendre à Ameli à lister par numéro de ligne</strong> — une fonction base de données jumelle de celle d'RPPS (le « moteur de recherche » des adresses à géocoder, version sans marque-page).</div></div>
+      <div class="step"><span class="n">2</span><div><strong>Brancher le script dessus</strong> — 4 lignes à changer dans le script de backfill pour qu'il utilise ce nouveau moteur.</div></div>
+      <div class="step"><span class="n">3</span><div><strong>Créer le bouton GitHub Ameli</strong> — copie conforme du bouton RPPS, en version « Ameli ».</div></div>
+      <div class="step"><span class="n">4</span><div><strong>Filets de sécurité</strong> — un test automatique qui garantit que le moteur Ameli vise exactement les bonnes adresses (anti-régression silencieuse).</div></div>
+      <div class="callout good">
+        <span class="lbl">Le critère de réussite</span>
+        Lancer le bouton Ameli <strong>sans avoir recréé aucun marque-page au préalable</strong>, et que ça draine sans
+        planter. Si ce test passe, la corvée hebdomadaire est éliminée pour de bon.
+      </div>
+      <p class="muted">Effet concret pour toi : à la place du mail « lancer manuellement node… », tu auras juste un bouton
+      à cliquer dans l'onglet Actions de GitHub. Exactement comme le RPPS aujourd'hui.</p>
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section>
+    <h2><span class="num">4</span> Étape 2 — le zéro-clic <span class="badge b-mid" style="margin-left:8px;">plus tard</span></h2>
+    <div class="card">
+      <p>Une fois les deux sources au niveau « bouton », l'étape suivante supprime le bouton lui-même : le drain se
+      déclenche <strong>tout seul juste après chaque mise à jour des données</strong> (RPPS et Ameli). Plus de mail,
+      plus de clic.</p>
+      <div class="diagram"><span class="c">// ÉTAPE 2 — bout en bout, sans intervention</span>
+nouveau fichier ingéré ✓ → <span class="o">le drain part automatiquement</span> → cache rempli → posé au fichier suivant</div>
+      <p>Techniquement : on relie le drain à la fin réussie de l'ingestion (mécanisme natif GitHub « un workflow en
+      déclenche un autre »). On garde l'ingestion (sensible) et le géocodage (best-effort) <strong>découplés</strong> :
+      si le géocodage rate, l'ingestion santé reste verte.</p>
+      <div class="callout">
+        <span class="lbl">Rappel — ce que le zéro-clic ne change pas</span>
+        Il supprime le <strong>clic</strong>, pas le <strong>décalage d'une passe</strong> : les nouvelles coordonnées
+        sont toujours posées au fichier suivant (semaine pour Ameli, mois pour RPPS). Réduire ce décalage à zéro est un
+        sujet séparé, qu'on n'ouvre pas ici.
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 -->
+  <section>
+    <h2><span class="num">5</span> Effort, risque & ce que je te demande</h2>
+    <div class="grid g2">
+      <div class="card">
+        <h3>Effort estimé</h3>
+        <div class="stat-row">
+          <div class="stat"><div class="v">~½–1 j</div><div class="l">Étape 1 (bouton Ameli)</div></div>
+          <div class="stat"><div class="v">~½ j</div><div class="l">Étape 2 (zéro-clic, plus tard)</div></div>
+        </div>
+        <p class="muted">Étape 1 = réplique d'un pattern déjà prouvé en prod (RPPS). Faible incertitude.</p>
+      </div>
+      <div class="card">
+        <h3>Risque & maîtrise</h3>
+        <ul>
+          <li>Zone sensible (pipeline santé) → <strong>PR validée par toi, jamais de merge auto</strong>.</li>
+          <li>Filets anti-régression : tests de parité (le moteur vise exactement les bonnes adresses).</li>
+          <li>Drain jamais lancé pendant une ingestion (sérialisation automatique).</li>
+        </ul>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Décision demandée</h3>
+      <p>Je <strong>ne code rien tant que tu n'as pas validé ce cadrage</strong>. Deux questions :</p>
+      <ul>
+        <li><strong>On lance l'étape 1 maintenant ?</strong> (le bouton Ameli — supprime la corvée hebdo)</li>
+        <li><strong>L'étape 2 (zéro-clic) :</strong> on l'enchaîne dans la foulée, ou on la garde pour un second temps une
+        fois l'étape 1 éprouvée sur un cycle réel ?</li>
+      </ul>
+      <p class="muted">Détail technique complet (code SQL/script/workflow, tasks pas-à-pas) :
+      <code>docs/plans/automatisation-backfill-ban.md</code>.</p>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

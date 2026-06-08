@@ -1,0 +1,85 @@
+# Bouton MANUEL « drain BAN Ameli » — géocode le résidu d'adresses éligibles non
+# encore en cache (geocoded_addresses) et REMPLIT le cache. Les coords sont
+# POSÉES dans annuaire_ameli au prochain cron Ameli via ban_join.
+#
+# Déclenché À LA MAIN (Actions → Run workflow). Reste « manuel » par design tant
+# que le re-géocodage récurrent n'est pas intégré au cron (étape 2 du cadrage —
+# docs/plans/automatisation-backfill-ban.md) — la seule différence vs le terminal
+# = secrets gérés par la CI, pas de clé en local.
+#
+# Énumération ROBUSTE : keyset SUR `id` (PK) via `ameli_eligible_rows_after_id` —
+# AUCUN index BAN à construire ni à recréer (jumeau du bouton RPPS ; résout la
+# corvée d'index orphéliné au swap, cf. docs/plans/automatisation-backfill-ban.md).
+name: Backfill BAN Ameli (manuel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Nb max de NOUVELLES adresses géocodées ce run (canari, ex. 1000). Vide = drainage complet."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# JAMAIS concurrent du cron Ameli : son swap atomique renommerait `annuaire_ameli`
+# en pleine énumération keyset (la RPC résout `FROM annuaire_ameli` PAR NOM à
+# chaque page → pages incohérentes inter-tables). Même groupe que ingest-ameli.yml
+# → ils se sérialisent.
+concurrency:
+  group: ingest-ameli
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # Énumération keyset (pages bornées) + géocodage BAN du résidu (~quelques
+    # milliers d'adresses, chunké). 30 min = large marge (jours BAN lents).
+    timeout-minutes: 30
+    steps:
+      # Preflight secrets AVANT checkout/install (convention nouveaux workflows
+      # Supabase) : échec EXPLICITE et immédiat si un secret manque, plutôt qu'une
+      # panne opaque au 1er appel RPC.
+      - name: Validate required secrets present
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          missing=()
+          [ -z "$SUPABASE_URL" ] && missing+=("SUPABASE_URL")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Secrets manquants: ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Drain BAN Ameli (géocode le résidu → remplit le cache)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Input passé via env (jamais interpolé dans le shell = anti-injection).
+          MAX: ${{ inputs.max }}
+        run: |
+          if [ -n "$MAX" ]; then
+            echo "Canari : $MAX adresses max"
+            pnpm exec tsx scripts/ban-backfill.mjs --source ameli --max "$MAX"
+          else
+            echo "Drainage complet"
+            pnpm exec tsx scripts/ban-backfill.mjs --source ameli
+          fi

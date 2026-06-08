@@ -4,6 +4,31 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — Bouton drain BAN Ameli (énumération keyset id) — supprime la corvée d'index manuel
+
+### Added
+
+- **Bouton GitHub « Backfill BAN Ameli (manuel) »** (`.github/workflows/ban-backfill-ameli.yml`) —
+  jumeau du bouton RPPS. Draine le résidu d'adresses Ameli au centroïde commune vers le cache
+  partagé `geocoded_addresses` (appliqué au prochain cron Ameli via `ban_join`). `workflow_dispatch`
+  + input `max` (canari) ; `concurrency.group: ingest-ameli` (jamais concurrent du swap atomique).
+- **RPC `ameli_eligible_rows_after_id`** (migration `20260608T120000`) — énumération KEYSET SUR
+  `id` (PK) des lignes éligibles BAN Ameli, jumelle de `rpps_eligible_rows_after_id`. Prédicat
+  Ameli (`geom_source='commune_centroid' AND adresse IS NOT NULL`, **sans** la branche RPPS
+  `geom IS NULL`). `STABLE` + `SECURITY DEFINER` + `statement_timeout='55s'` + whitelist
+  `annuaire_ameli | annuaire_ameli_staging`. Garde-fou `scripts/ingest/ameli-eligible-rows-after-id.test.ts`.
+
+### Changed
+
+- **Le backfill Ameli énumère désormais par `id` (PK), plus par la clé d'adresse**
+  (`scripts/ban-backfill.mjs` `SOURCES.ameli`). **Élimine la cause-racine** de la corvée manuelle
+  hebdomadaire : l'énumération par clé (`ameli_distinct_eligible_keys`) exigeait l'index BAN
+  `ameli_staging_ban_eligible_normkey*` sur la table live, ORPHÉLINÉ à chaque swap du cron Ameli
+  (DROP des orphelins + recréation manuelle avant chaque drain). Le keyset `id` n'a besoin d'aucun
+  index BAN (la PK est toujours présente). Prouvé prod : plan `Index Scan annuaire_ameli_pkey`,
+  énumération 32 pages sans timeout, garde-fous `22023` sur whitelist + `p_limit`. Cadrage durable
+  `docs/plans/automatisation-backfill-ban.{md,html}` (étape 1 livrée ; étape 2 « zéro-clic » = suite).
+
 ## [0.26.3] — 2026-06-07 — NAF inexistant → -32602 propre + refonte landing + recompte sources (13)
 
 ### Fixed
