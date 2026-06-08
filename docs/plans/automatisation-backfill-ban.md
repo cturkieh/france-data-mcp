@@ -289,7 +289,7 @@ jobs:
 
 ---
 
-## ÉTAPE 2 — Zéro-clic (déclenchement automatique) — *design, à détailler le moment venu*
+## ÉTAPE 2 — Zéro-clic (déclenchement automatique) — ✅ LIVRÉE
 
 **Objectif :** plus de bouton à presser ; le drain part tout seul après chaque ingestion (RPPS **et** Ameli).
 

@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Bouton drain BAN Ameli (énumération keyset id) — supprime la corvée d'index manuel
+## [Unreleased] — Automatisation backfill BAN (RPPS + Ameli) — bouton Ameli (keyset id) + drain auto post-ingestion
 
 ### Added
 
@@ -17,6 +17,14 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   Ameli (`geom_source='commune_centroid' AND adresse IS NOT NULL`, **sans** la branche RPPS
   `geom IS NULL`). `STABLE` + `SECURITY DEFINER` + `statement_timeout='55s'` + whitelist
   `annuaire_ameli | annuaire_ameli_staging`. Garde-fou `scripts/ingest/ameli-eligible-rows-after-id.test.ts`.
+- **Drain BAN automatique post-ingestion (zéro-clic, RPPS + Ameli)** — les 2 workflows de backfill
+  se déclenchent désormais AUSSI via `on: workflow_run` à la complétion RÉUSSIE du cron d'ingestion
+  correspondant (`Ingest RPPS Annuaire Sante ANS` / `Ingest Annuaire Sante Ameli`), gardés au niveau
+  job par `if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'`.
+  `workflow_dispatch` conservé en bouton de secours + canari. Plus aucune intervention manuelle :
+  chaque ingestion enchaîne le drain du résidu (idempotent — « nothing to do » si rien de neuf).
+  `concurrency.group` partagé cron↔backfill préservé (jamais concurrent du swap). S'active au 1ᵉʳ
+  cron post-merge (contrainte `workflow_run` = version du workflow sur la branche par défaut).
 
 ### Changed
 
@@ -27,7 +35,7 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   (DROP des orphelins + recréation manuelle avant chaque drain). Le keyset `id` n'a besoin d'aucun
   index BAN (la PK est toujours présente). Prouvé prod : plan `Index Scan annuaire_ameli_pkey`,
   énumération 32 pages sans timeout, garde-fous `22023` sur whitelist + `p_limit`. Cadrage durable
-  `docs/plans/automatisation-backfill-ban.{md,html}` (étape 1 livrée ; étape 2 « zéro-clic » = suite).
+  `docs/plans/automatisation-backfill-ban.{md,html}` (étapes 1 ET 2 livrées : bouton + pilote automatique).
 
 ## [0.26.3] — 2026-06-07 — NAF inexistant → -32602 propre + refonte landing + recompte sources (13)
 

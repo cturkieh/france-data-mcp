@@ -1,16 +1,18 @@
-# Bouton MANUEL « drain BAN Ameli » — géocode le résidu d'adresses éligibles non
-# encore en cache (geocoded_addresses) et REMPLIT le cache. Les coords sont
-# POSÉES dans annuaire_ameli au prochain cron Ameli via ban_join.
+# Drain BAN Ameli — géocode le résidu d'adresses éligibles non encore en cache
+# (geocoded_addresses) et REMPLIT le cache. Les coords sont POSÉES dans
+# annuaire_ameli au prochain cron Ameli via ban_join (décalage d'UNE passe, par design).
 #
-# Déclenché À LA MAIN (Actions → Run workflow). Reste « manuel » par design tant
-# que le re-géocodage récurrent n'est pas intégré au cron (étape 2 du cadrage —
-# docs/plans/automatisation-backfill-ban.md) — la seule différence vs le terminal
-# = secrets gérés par la CI, pas de clé en local.
+# DEUX déclencheurs (étape 2 du cadrage docs/plans/automatisation-backfill-ban.md) :
+#  - AUTO : à la complétion RÉUSSIE du cron « Ingest Annuaire Sante Ameli »
+#    (`workflow_run`) → zéro-clic, le résidu hebdo est drainé sans intervention ;
+#  - MANUEL : `workflow_dispatch` (bouton de secours + canari via input `max`).
+# Idempotent : si le cron a short-circuité (checksum identique), le drain dit
+# « nothing to do » (coût négligeable).
 #
 # Énumération ROBUSTE : keyset SUR `id` (PK) via `ameli_eligible_rows_after_id` —
 # AUCUN index BAN à construire ni à recréer (jumeau du bouton RPPS ; résout la
 # corvée d'index orphéliné au swap, cf. docs/plans/automatisation-backfill-ban.md).
-name: Backfill BAN Ameli (manuel)
+name: Backfill BAN Ameli (auto + manuel)
 
 on:
   workflow_dispatch:
@@ -20,6 +22,12 @@ on:
         type: string
         required: false
         default: ""
+  # AUTO post-ingestion : déclenché à la complétion du cron Ameli. La garde
+  # `conclusion == 'success'` (niveau job) évite de drainer après une ingestion
+  # ÉCHOUÉE (données non fiables). Sur cet événement, `inputs.max` est vide → drain complet.
+  workflow_run:
+    workflows: ["Ingest Annuaire Sante Ameli"]
+    types: [completed]
 
 permissions:
   contents: read
@@ -34,6 +42,11 @@ concurrency:
 
 jobs:
   backfill:
+    # MANUEL → toujours ; AUTO (workflow_run) → seulement si l'ingestion a RÉUSSI
+    # (une ingestion échouée n'a pas produit de nouvelles données fiables à géocoder).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     # Énumération keyset (pages bornées) + géocodage BAN du résidu (~quelques
     # milliers d'adresses, chunké). 30 min = large marge (jours BAN lents).
