@@ -3,9 +3,12 @@ import { appendFileSync } from "node:fs";
 import { getUntypedServiceClient, runIfMain } from "./shared.js";
 
 /**
- * Alerte ops : prévient quand un cron d'ingestion (RPPS / Ameli) vient de poser
- * de nouvelles adresses qui restent à géocoder (BAN), en attendant que le
- * re-géocodage récurrent soit automatisé (backlog P1, `docs/plans/ban-join.md`).
+ * Alerte ops : signale quand un cron d'ingestion (RPPS / Ameli) vient de poser
+ * de nouvelles adresses restant à géocoder (BAN). Le re-géocodage est désormais
+ * AUTOMATISÉ (drain BAN en `workflow_run` post-cron, cf.
+ * `ban-backfill-{rpps,ameli}.yml`) : l'alerte normale est INFORMATIVE (résidu
+ * auto-géocodé, aucune action requise) ; seule la mesure indisponible reste une
+ * vraie anomalie actionnable.
  *
  * Lit la dernière ligne `ingest_log` de la source (le cron vient de l'écrire),
  * décide s'il faut alerter, et expose la décision via `$GITHUB_OUTPUT` — les
@@ -112,7 +115,7 @@ export function decidePendingNotification(row: IngestLogTail | null): NotifyDeci
   return {
     shouldNotify: true,
     pending,
-    reason: `${pending} adresses à géocoder après une vraie ingestion`,
+    reason: `${pending} adresses en attente de géocodage automatique (drain BAN à suivre) après une vraie ingestion`,
   };
 }
 
