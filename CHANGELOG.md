@@ -36,15 +36,25 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   faussant tout agrégat `duration_ms` Axiom (avg/percentiles). Un `requestStart`
   capturé en tête de handler est désormais passé à ces 2 `emit`. Garde-fou
   `api/mcp-handler-meta-duration.test.ts` (durée réaliste, jamais un timestamp).
+- **Échec de deploy Vercel résolu — `.vercelignore` exclut les `*.test.ts` du
+  build** (cause-racine PROUVÉE : `exceeded_serverless_functions_per_deployment`).
+  Vercel transforme **chaque `api/*.ts` en fonction serverless**, fichiers de test
+  compris ; le plan Hobby plafonne à **12**. `main` était à 11 fichiers `api/*.ts`
+  (pile sous la limite) → ajouter ≥ 2 fichiers de test dans `api/` faisait passer à
+  13 → deploy en échec à l'étape `patchBuild` (le 1ᵉʳ commit, +1 fichier = 12,
+  passait ; les suivants, 13, échouaient — d'où l'« intermittence » trompeuse).
+  `.vercelignore` (`**/*.test.ts` + le helper `test-helpers.ts`) retire les tests du
+  build (ils ne sont importés par aucune fonction) → 3 fichiers `api/`, bien sous la
+  limite. Désamorce la bombe pour tout futur test.
 - **Les `*.test.ts` sont désormais typecheck par la CI + 83 erreurs de type
-  latentes corrigées** (`tsconfig.api.json` + 17 fichiers de test). **Cause-racine
-  d'un build Vercel intermittent** : les tests n'étaient typecheck par AUCUN
+  latentes corrigées** (`tsconfig.api.json` + 17 fichiers de test). Trou de
+  couverture indépendant (PAS la cause de l'échec deploy ci-dessus, contrairement à
+  ce qu'une première analyse supposait) : les tests n'étaient typecheck par AUCUN
   tsconfig (la racine couvre `src/`, `tsconfig.api.json` excluait `**/*.test.ts`)
-  → 83 erreurs de type latentes invisibles en CI locale/GitHub mais que
-  `@vercel/node` voyait au build (échec aléatoire à « Deploying outputs »). Fix :
-  retrait de l'exclusion `**/*.test.ts` de `tsconfig.api.json` (la CI les attrape
-  désormais AVANT Vercel) + 83 corrections **type-only** (casts `as`, retypes à la
-  source — zéro `!`/`@ts-ignore`, comportement runtime inchangé, 1720 tests verts).
+  → 83 erreurs de type latentes invisibles en CI locale/GitHub. Fix : retrait de
+  l'exclusion `**/*.test.ts` de `tsconfig.api.json` (la CI les attrape désormais) +
+  83 corrections **type-only** (casts `as`, retypes à la source — zéro `!`/
+  `@ts-ignore`, comportement runtime inchangé, 1720 tests verts).
 
 ## [Unreleased] — Automatisation backfill BAN (RPPS + Ameli) — bouton Ameli (keyset id) + drain auto post-ingestion
 

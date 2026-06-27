@@ -35,8 +35,8 @@ const MAX_PLAUSIBLE_MS = 60_000;
 
 function durationFor(method: string): number | undefined {
   const event = mocks.logMcpEvent.mock.calls
-    .map((c) => c[0] as { method?: string; durationMs?: number })
-    .find((e) => e.method === method);
+    .map((c: unknown[]) => c[0] as { method?: string; durationMs?: number })
+    .find((e: { method?: string; durationMs?: number }) => e.method === method);
   return event?.durationMs;
 }
 

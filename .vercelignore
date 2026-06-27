@@ -1,0 +1,12 @@
+# Fichiers de test : EXCLUS du déploiement Vercel.
+#
+# Vercel transforme chaque `api/*.ts` en fonction serverless. Sans cette
+# exclusion, les `api/*.test.ts` comptent dans la limite du plan (12 fonctions
+# sur Hobby) et le deploy échoue avec `exceeded_serverless_functions_per_deployment`
+# dès qu'on ajoute un fichier de test (main était à 11, pile sous la limite —
+# bombe à retardement). Les tests n'ont de toute façon rien à faire dans un
+# build de production : ils ne sont importés par aucune fonction.
+**/*.test.ts
+
+# Helpers de test (importés uniquement par des *.test.ts, désormais exclus).
+api/_lib/test-helpers.ts
