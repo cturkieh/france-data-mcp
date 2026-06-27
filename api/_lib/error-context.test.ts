@@ -36,7 +36,7 @@ describe("attachErrorContext / extractErrorContext", () => {
   it("context is not enumerable — JSON.stringify(err) does not leak it", () => {
     const err = new Error("boom");
     attachErrorContext(err, { departement: "75", secret: "should_not_leak" });
-    const serialized = JSON.stringify({ message: err.message, ...err });
+    const serialized = JSON.stringify({ ...err, message: err.message });
     expect(serialized).not.toContain("departement");
     expect(serialized).not.toContain("should_not_leak");
   });

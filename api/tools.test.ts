@@ -348,7 +348,7 @@ describe("documentation tools Ameli — type_ps codes", () => {
   it("la description type_ps_codes est cohérente avec la nomenclature live (1, 2, 5)", () => {
     const tool = findTool("professionnels_in_radius");
     const arr = (tool?.inputSchema.properties as Record<string, { description: string }>)
-      .type_ps_codes;
+      .type_ps_codes as { description: string };
     expect(arr.description).toContain("'1'");
     expect(arr.description).toContain("'2'");
     expect(arr.description).toContain("'5'");
@@ -1308,7 +1308,7 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
       num_finess: "590048997",
       candidates: [],
       skipped: [],
-    });
+    } as unknown as Awaited<ReturnType<typeof crossSource.reconcilierFinessSirene>>);
     const tool = findTool("reconcilier_finess_sirene");
     await tool?.handler({ num_finess: "590048997" });
     expect(spy).toHaveBeenCalledWith("590048997");
@@ -1859,7 +1859,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
   });
 
   it("densite_sante (etablissements) expose perimetre + préserve le payload", async () => {
-    const mocked = { zone: { densite: 12.3 } } as Awaited<
+    const mocked = { zone: { densite: 12.3 } } as unknown as Awaited<
       ReturnType<typeof densite.densiteEtablissementsSante>
     >;
     vi.spyOn(densite, "densiteEtablissementsSante").mockResolvedValueOnce(mocked);
@@ -1884,7 +1884,7 @@ describe("perimetre wiring FINESS / densité / panorama / coverage", () => {
   });
 
   it("densite_sante (professionnels) expose perimetre + préserve le payload", async () => {
-    const mocked = { zone: { densite: 45.6 } } as Awaited<
+    const mocked = { zone: { densite: 45.6 } } as unknown as Awaited<
       ReturnType<typeof densite.densiteProfessionnelsSante>
     >;
     vi.spyOn(densite, "densiteProfessionnelsSante").mockResolvedValueOnce(mocked);

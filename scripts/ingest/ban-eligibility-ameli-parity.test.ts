@@ -165,7 +165,7 @@ function ameliEligibilityViolations(rawSql: string): string[] {
     const keyExpr = (stmt.match(/\bon\s+annuaire_ameli_staging\s*\(((?:[^()]|\([^()]*\))*)\)/) ?? [
       "",
       "",
-    ])[1];
+    ])[1] as string;
     if (!keyExpr.includes(WRAPPER)) {
       violations.push(`index ${name} : keyexpr n'utilise PAS ${WRAPPER}`);
     }
@@ -178,7 +178,7 @@ function ameliEligibilityViolations(rawSql: string): string[] {
   if (composite) {
     const keyExpr = (composite.match(
       /\bon\s+annuaire_ameli_staging\s*\(((?:[^()]|\([^()]*\))*)\)/,
-    ) ?? ["", ""])[1];
+    ) ?? ["", ""])[1] as string;
     if (!/,\s*id\s*$/.test(keyExpr.trim())) {
       violations.push(
         `index composite ameli_staging_ban_eligible_normkey_id_idx ne se termine PAS par , id — vu: ${keyExpr}`,

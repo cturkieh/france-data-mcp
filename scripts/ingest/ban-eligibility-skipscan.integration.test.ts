@@ -183,9 +183,11 @@ function totalActualScanRows(root: PlanNode): number {
  */
 function rpcCost(pAfter: string | null, pLimit: number): { ms: number; blocks: number } {
   const afterSql = pAfter === null ? "NULL" : lit(pAfter);
-  const plan = explainJson(
-    `SELECT * FROM rpps_distinct_eligible_keys('rpps_staging', ${afterSql}, ${pLimit})`,
-  )[0].Plan;
+  const plan = (
+    explainJson(
+      `SELECT * FROM rpps_distinct_eligible_keys('rpps_staging', ${afterSql}, ${pLimit})`,
+    )[0] as { Plan: PlanNode }
+  ).Plan;
   return {
     ms: Number(plan["Actual Total Time"] ?? 0),
     blocks: Number(plan["Shared Hit Blocks"] ?? 0),
@@ -208,9 +210,9 @@ function enumerateRows(pageLimit: number): Array<{ key: string; adresse: string 
     const lines = raw.split("\n");
     for (const ln of lines) {
       const [key, adresse] = ln.split("\t");
-      out.push({ key, adresse: adresse ?? "" });
+      out.push({ key: key as string, adresse: adresse ?? "" });
     }
-    after = out[out.length - 1].key;
+    after = (out[out.length - 1] as { key: string }).key;
   }
   return out;
 }
@@ -349,7 +351,7 @@ describe.skipIf(!canRun)(
             "ROLLBACK;",
           ].join("\n"),
         );
-        const plan = (JSON.parse(raw) as Array<{ Plan: PlanNode }>)[0].Plan;
+        const plan = ((JSON.parse(raw) as Array<{ Plan: PlanNode }>)[0] as { Plan: PlanNode }).Plan;
         return {
           scanned: totalActualScanRows(plan),
           hasSort: flattenPlan(plan).some((n) => /sort/i.test(String(n["Node Type"]))),

@@ -31,7 +31,7 @@ function matviewSelectCore(sql: string, name: string): string {
     "i",
   );
   const m = sql.match(re);
-  return m ? m[1].replace(/\s+/g, " ").trim() : "";
+  return m ? (m[1] as string).replace(/\s+/g, " ").trim() : "";
 }
 
 describe("fix matview/swap finess_hosted_activities : reconstruction post-swap (pas REFRESH-only)", () => {

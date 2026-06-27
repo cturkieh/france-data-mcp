@@ -56,7 +56,7 @@ function matviewSelectCore(sql: string, name: string): string {
     "i",
   );
   const m = sql.match(re);
-  return m ? m[1].replace(/\s+/g, " ").trim() : "";
+  return m ? (m[1] as string).replace(/\s+/g, " ").trim() : "";
 }
 
 const RPPS_MATVIEWS = ["rpps_savoir_faire_stats", "rpps_count_stats", "rpps_commune_centroids"];

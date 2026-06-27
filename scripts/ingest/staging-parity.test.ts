@@ -69,7 +69,7 @@ function indexColumnLists(sql: string, table: string): Set<string> {
     "g",
   );
   const out = new Set<string>();
-  for (const m of sql.matchAll(re)) out.add(m[1].replace(/\s+/g, " ").trim());
+  for (const m of sql.matchAll(re)) out.add((m[1] as string).replace(/\s+/g, " ").trim());
   return out;
 }
 
@@ -163,7 +163,7 @@ describe("staging-create est un superset des index prod (annuaire_ameli)", () =>
       "annuaire_ameli_geog_precise_gist", // Chantier C — prédicat ban_address (garde-fou dédié ci-dessous)
     ]);
     const unknownRich = [...sql.matchAll(richIndexRe)]
-      .map((m) => m[1])
+      .map((m) => m[1] as string)
       .filter((name) => !KNOWN_RICH_AMELI_INDEXES.has(name));
     expect(
       unknownRich,
@@ -212,8 +212,8 @@ describe("staging-create est un superset des index prod (annuaire_ameli)", () =>
       "ingest_create_annuaire_ameli_staging ne crée PAS l'index `annuaire_ameli_staging_geog_precise_gist` → la branche precise des tools radius perdra son index au prochain swap.",
     ).toBe(1);
     expect(
-      partialPredicate.test(precise[0][2]),
-      `annuaire_ameli_staging_geog_precise_gist SANS le prédicat partiel \`WHERE geom_source = 'ban_address'\` → swap le transforme en GiST global → la branche precise ramène le cluster commune_centroid → 57014 zone dense. Trouvé : ${precise[0][0].replace(/\s+/g, " ").trim()}`,
+      partialPredicate.test((precise[0] as RegExpExecArray)[2] as string),
+      `annuaire_ameli_staging_geog_precise_gist SANS le prédicat partiel \`WHERE geom_source = 'ban_address'\` → swap le transforme en GiST global → la branche precise ramène le cluster commune_centroid → 57014 zone dense. Trouvé : ${(precise[0] as RegExpExecArray)[0].replace(/\s+/g, " ").trim()}`,
     ).toBe(true);
 
     // Parité consommateur croisée : la migration prod (20260521T100000) et la
@@ -232,7 +232,7 @@ describe("staging-create est un superset des index prod (annuaire_ameli)", () =>
     expect(
       normalize(prodMatch?.[1] ?? ""),
       "Prédicat de `annuaire_ameli_geog_precise_gist` divergent entre prod et staging-create → swap perdra le prédicat → re-régression 57014.",
-    ).toBe(normalize(precise[0][2]));
+    ).toBe(normalize((precise[0] as RegExpExecArray)[2] as string));
   });
 });
 
@@ -329,7 +329,7 @@ describe("staging-create est un superset des index prod (rpps)", () => {
 
     for (const m of geogGists) {
       expect(
-        partialPredicate.test(m[1]),
+        partialPredicate.test(m[1] as string),
         `Un GiST sur rpps_staging(geog) SANS le prédicat partiel \`WHERE geom_source IN ('finess_join','ban_address')\` → au swap il devient un GiST GLOBAL \`rpps_geog_gist\` → re-régression 57014 de rpps_in_radius en commune dense (cluster co-localisé non élagué) : ${m[0].replace(/\s+/g, " ").trim()}`,
       ).toBe(true);
     }
@@ -417,7 +417,7 @@ describe("matviews refresh par les scripts d'ingest sont whitelistées", () => {
     const m = body.match(/not\s+in\s*\(([^)]*)\)/);
     expect(m, "tuple `not in (...)` introuvable dans ingest_refresh_matview").not.toBeNull();
     const whitelist = new Set(
-      (m as RegExpMatchArray)[1].split(",").map((s) => s.replace(/['"\s]/g, "")),
+      ((m as RegExpMatchArray)[1] as string).split(",").map((s) => s.replace(/['"\s]/g, "")),
     );
 
     const referenced = new Set<string>();
@@ -430,7 +430,7 @@ describe("matviews refresh par les scripts d'ingest sont whitelistées", () => {
       // rpps_commune_centroids). Élargir ce groupe à chaque nouvelle famille
       // de matview refresh par un ingest, sinon faux négatif silencieux.
       for (const mm of src.matchAll(/["'`]([a-z_]+_(?:stats|centroids))["'`]/g))
-        referenced.add(mm[1]);
+        referenced.add(mm[1] as string);
     }
 
     // PLUS AUCUNE ancre refresh-only : les 2 dettes « bombe OID » sont closes.

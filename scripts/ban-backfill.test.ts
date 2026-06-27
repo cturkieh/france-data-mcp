@@ -29,6 +29,7 @@ vi.mock("../src/core/index.js", async (importOriginal) => {
   };
 });
 
+// @ts-expect-error import .mjs sans déclaration de types
 const { runBanBackfill, SOURCES, assertSourcesValid } = await import("./ban-backfill.mjs");
 
 function banOutcome(
@@ -166,7 +167,8 @@ function makeStub(opts: {
   // on assigne un id stable (ordre fourni) puis on trie par le champ curseur de la
   // source — le mock pagine `> cursor` EXACTEMENT comme la RPC réelle.
   const withIds = opts.distinctRows.map((r, i) => ({ ...r, id: i + 1 }));
-  const cursorVal = (r: (typeof withIds)[number]): number | string | null => r[SRC.cursorField];
+  const cursorVal = (r: (typeof withIds)[number]): number | string | null =>
+    r[SRC.cursorField as keyof typeof r];
   const sorted = [...withIds].sort((a, b) => {
     const av = cursorVal(a);
     const bv = cursorVal(b);
@@ -503,8 +505,8 @@ describe("runBanBackfill", () => {
     vi.useFakeTimers();
     try {
       const rows: DistinctRow[] = [distinctKeyRow(ROW_A), distinctKeyRow(ROW_B)];
-      const keyA = rows[0].address_key;
-      const keyB = rows[1].address_key;
+      const keyA = (rows[0] as DistinctRow).address_key;
+      const keyB = (rows[1] as DistinctRow).address_key;
       geocodeAddressesBatchMock.mockResolvedValue(
         banOutcome(
           [
@@ -535,8 +537,8 @@ describe("runBanBackfill", () => {
     vi.useFakeTimers();
     try {
       const rows: DistinctRow[] = [distinctKeyRow(ROW_A), distinctKeyRow(ROW_B)];
-      const keyA = rows[0].address_key;
-      const keyB = rows[1].address_key;
+      const keyA = (rows[0] as DistinctRow).address_key;
+      const keyB = (rows[1] as DistinctRow).address_key;
       geocodeAddressesBatchMock.mockResolvedValue(
         banOutcome(
           [
@@ -584,7 +586,7 @@ describe("runBanBackfill", () => {
     vi.useFakeTimers();
     try {
       const rows: DistinctRow[] = [distinctKeyRow(ROW_A)];
-      const keyA = rows[0].address_key;
+      const keyA = (rows[0] as DistinctRow).address_key;
       geocodeAddressesBatchMock.mockResolvedValue(
         banOutcome(
           [
@@ -785,7 +787,7 @@ describe("runBanBackfill", () => {
 
     // Preuve EXPLICITE : les noms de RPC appelés sont bien les jumelles Ameli.
     const calledRpcs = new Set(
-      (stub.client.rpc as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(
+      (stub.client as unknown as { rpc: { mock: { calls: unknown[][] } } }).rpc.mock.calls.map(
         (c) => c[0] as string,
       ),
     );
@@ -803,10 +805,9 @@ describe("runBanBackfill", () => {
 
   it("source inconnue → throw fail-loud (jamais un drainage silencieux mal ciblé)", async () => {
     const stub = makeStub({ distinctRows: [distinctKeyRow(ROW_A)] });
-    await expect(
-      // @ts-expect-error — source hors union : on prouve le garde runtime.
-      runBanBackfill(stub.client, { source: "finess" }),
-    ).rejects.toThrow(/unknown source "finess"/);
+    await expect(runBanBackfill(stub.client, { source: "finess" })).rejects.toThrow(
+      /unknown source "finess"/,
+    );
   });
 });
 

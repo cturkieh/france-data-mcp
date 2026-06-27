@@ -36,6 +36,15 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   faussant tout agrégat `duration_ms` Axiom (avg/percentiles). Un `requestStart`
   capturé en tête de handler est désormais passé à ces 2 `emit`. Garde-fou
   `api/mcp-handler-meta-duration.test.ts` (durée réaliste, jamais un timestamp).
+- **Les `*.test.ts` sont désormais typecheck par la CI + 83 erreurs de type
+  latentes corrigées** (`tsconfig.api.json` + 17 fichiers de test). **Cause-racine
+  d'un build Vercel intermittent** : les tests n'étaient typecheck par AUCUN
+  tsconfig (la racine couvre `src/`, `tsconfig.api.json` excluait `**/*.test.ts`)
+  → 83 erreurs de type latentes invisibles en CI locale/GitHub mais que
+  `@vercel/node` voyait au build (échec aléatoire à « Deploying outputs »). Fix :
+  retrait de l'exclusion `**/*.test.ts` de `tsconfig.api.json` (la CI les attrape
+  désormais AVANT Vercel) + 83 corrections **type-only** (casts `as`, retypes à la
+  source — zéro `!`/`@ts-ignore`, comportement runtime inchangé, 1720 tests verts).
 
 ## [Unreleased] — Automatisation backfill BAN (RPPS + Ameli) — bouton Ameli (keyset id) + drain auto post-ingestion
 

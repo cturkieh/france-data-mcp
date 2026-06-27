@@ -378,9 +378,9 @@ describe("writeIngestLog — retry défensif PGRST204 (review P1 silent-failure-
     await writeIngestLog(baseEntry({ forced: true }), client);
     expect(insert).toHaveBeenCalledTimes(2);
     // 1er appel : payload avec forced=true (échoue)
-    expect(insert.mock.calls[0]?.[0]).toMatchObject({ forced: true });
+    expect((insert.mock.calls[0] as unknown[])?.[0]).toMatchObject({ forced: true });
     // 2e appel (retry) : payload SANS forced
-    expect(insert.mock.calls[1]?.[0]).not.toHaveProperty("forced");
+    expect((insert.mock.calls[1] as unknown[])?.[0]).not.toHaveProperty("forced");
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]?.[0]).toContain("PGRST204");
     expect(errSpy).not.toHaveBeenCalled();
@@ -446,8 +446,8 @@ describe("writeIngestLog — retry défensif PGRST204 (review P1 silent-failure-
     ]);
     await writeIngestLog(baseEntry({ ban_eligible_distinct: 42 }), client);
     expect(insert).toHaveBeenCalledTimes(2);
-    expect(insert.mock.calls[0]?.[0]).toMatchObject({ ban_eligible_distinct: 42 });
-    expect(insert.mock.calls[1]?.[0]).not.toHaveProperty("ban_eligible_distinct");
+    expect((insert.mock.calls[0] as unknown[])?.[0]).toMatchObject({ ban_eligible_distinct: 42 });
+    expect((insert.mock.calls[1] as unknown[])?.[0]).not.toHaveProperty("ban_eligible_distinct");
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]?.[0]).toContain("ban_eligible_distinct");
     expect(errSpy).not.toHaveBeenCalled();
@@ -463,7 +463,7 @@ describe("writeIngestLog — retry défensif PGRST204 (review P1 silent-failure-
       client,
     );
     expect(insert).toHaveBeenCalledTimes(2);
-    const retryPayload = insert.mock.calls[1]?.[0] as Record<string, unknown>;
+    const retryPayload = (insert.mock.calls[1] as unknown[])?.[0] as Record<string, unknown>;
     expect(retryPayload).not.toHaveProperty("forced");
     expect(retryPayload).not.toHaveProperty("ban_eligible_distinct");
     expect(retryPayload).not.toHaveProperty("ban_to_geocode_distinct");

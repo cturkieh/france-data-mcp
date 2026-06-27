@@ -193,7 +193,7 @@ describe("V0.20 — densite_sante + niveau commune", () => {
       activite: "biologie_medicale",
       count: 13,
       zone: { codeInsee: "59350" },
-    } as Awaited<ReturnType<typeof hostedActivities.getHostedActivitiesInZone>>);
+    } as unknown as Awaited<ReturnType<typeof hostedActivities.getHostedActivitiesInZone>>);
     const tool = findTool("densite_sante");
     await tool?.handler({ cible: "etablissements", nom_commune: "Lille", famille: "labo" });
     expect(hostedSpy).toHaveBeenCalled();
@@ -243,7 +243,7 @@ describe("V0.20 — densite_sante + niveau commune", () => {
       },
       parametres: { famille: "labo", methodologie: "test" },
       source: { etablissements: "FINESS DREES", population: "INSEE Melodi" },
-    } as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>);
+    } as unknown as Awaited<ReturnType<typeof densiteMod.densiteEtablissementsSante>>);
     const tool = findTool("densite_sante");
     const result = (await tool?.handler({
       cible: "etablissements",

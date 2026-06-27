@@ -144,7 +144,7 @@ async function enumerateKeys(
     const page = (data ?? []) as Array<{ address_key: string }>;
     if (page.length === 0) break; // terminaison cap-agnostique sur page VIDE
     for (const r of page) keys.push(r.address_key);
-    after = page[page.length - 1].address_key;
+    after = (page[page.length - 1] as { address_key: string }).address_key;
   }
   return keys;
 }

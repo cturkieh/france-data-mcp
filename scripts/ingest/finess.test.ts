@@ -399,7 +399,10 @@ describe("runCanaryCheck (V0.4.4 — non-blocking canary)", () => {
         error: null,
       }),
     };
-    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    const missing = await runCanaryCheck(
+      fakeSupabase as unknown as Parameters<typeof runCanaryCheck>[0],
+      "finess",
+    );
     expect(missing).toEqual(["080010085", "080010093"]);
   });
 
@@ -410,7 +413,10 @@ describe("runCanaryCheck (V0.4.4 — non-blocking canary)", () => {
         error: null,
       }),
     };
-    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    const missing = await runCanaryCheck(
+      fakeSupabase as unknown as Parameters<typeof runCanaryCheck>[0],
+      "finess",
+    );
     expect(missing).toEqual([]);
   });
 
@@ -424,7 +430,10 @@ describe("runCanaryCheck (V0.4.4 — non-blocking canary)", () => {
     // Le canary est non-bloquant by contract : la swap est déjà committée,
     // on alerte sans rollback. process.exit(1) ne doit JAMAIS être appelé
     // depuis cet helper — on vérifie juste qu'il retourne le sentinelle.
-    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    const missing = await runCanaryCheck(
+      fakeSupabase as unknown as Parameters<typeof runCanaryCheck>[0],
+      "finess",
+    );
     expect(missing).toEqual(["__rpc_error__"]);
   });
 
@@ -435,7 +444,10 @@ describe("runCanaryCheck (V0.4.4 — non-blocking canary)", () => {
         error: null,
       }),
     };
-    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    const missing = await runCanaryCheck(
+      fakeSupabase as unknown as Parameters<typeof runCanaryCheck>[0],
+      "finess",
+    );
     expect(missing).toEqual([]);
   });
 
@@ -448,7 +460,10 @@ describe("runCanaryCheck (V0.4.4 — non-blocking canary)", () => {
         error: null,
       }),
     };
-    const missing = await runCanaryCheck(fakeSupabase, "finess");
+    const missing = await runCanaryCheck(
+      fakeSupabase as unknown as Parameters<typeof runCanaryCheck>[0],
+      "finess",
+    );
     expect(missing).toEqual(["080010085", "080010093"]);
   });
 
@@ -460,7 +475,10 @@ describe("runCanaryCheck (V0.4.4 — non-blocking canary)", () => {
         return { data: [], error: null };
       },
     };
-    await runCanaryCheck(fakeSupabase, "ameli_ps");
+    await runCanaryCheck(
+      fakeSupabase as unknown as Parameters<typeof runCanaryCheck>[0],
+      "ameli_ps",
+    );
     expect(captured).toEqual({ fn: "check_ingest_canary", args: { p_source: "ameli_ps" } });
   });
 });
