@@ -72,6 +72,12 @@ type JsonRpcError = {
 type RequestContext = McpRequestContext;
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  // Horodatage d'entrée du handler — sert de `start` aux chemins meta
+  // early-return (405 non-POST, 400 POST vide) qui n'ont pas de `start`
+  // par-sous-requête. SANS lui, `emit(ctx, 0, …)` loggait `Date.now() - 0`
+  // = l'epoch entier (~1.7e12) au lieu d'une durée ~0 ms, polluant tout
+  // agrégat `duration_ms` côté Axiom (avg/percentiles faussés).
+  const requestStart = Date.now();
   try {
     if (req.method === "OPTIONS") {
       res.status(204).end();
@@ -99,7 +105,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     };
 
     if (req.method !== "POST") {
-      emit(ctx, 0, `http_${req.method ?? "unknown"}`, {
+      emit(ctx, requestStart, `http_${req.method ?? "unknown"}`, {
         status: 405,
         outcome: "bad_request",
         level: "warn",
@@ -110,7 +116,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const body = req.body as JsonRpcRequest | JsonRpcRequest[] | undefined;
     if (!body) {
-      emit(ctx, 0, "http_post_empty", {
+      emit(ctx, requestStart, "http_post_empty", {
         status: 400,
         outcome: "bad_request",
         level: "warn",

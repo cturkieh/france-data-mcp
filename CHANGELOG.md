@@ -30,6 +30,12 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   prouvé par un puits qui ne résout jamais, fail-soft one-shot prod, silence dev).
   `@vercel/functions` ajouté en `dependencies` (import de valeur runtime). Mock
   `VercelResponse` factorisé dans `api/_lib/test-helpers.ts` (était triplicaté).
+- **`duration_ms` des chemins meta (405 non-POST / 400 POST vide) corrigé**
+  (`api/mcp.ts`). Ces early-returns passaient `start=0` à `emit` → la durée
+  loggée valait `Date.now() - 0` = l'**epoch entier** (~1,7e12) au lieu de ~0 ms,
+  faussant tout agrégat `duration_ms` Axiom (avg/percentiles). Un `requestStart`
+  capturé en tête de handler est désormais passé à ces 2 `emit`. Garde-fou
+  `api/mcp-handler-meta-duration.test.ts` (durée réaliste, jamais un timestamp).
 
 ## [Unreleased] — Automatisation backfill BAN (RPPS + Ameli) — bouton Ameli (keyset id) + drain auto post-ingestion
 
