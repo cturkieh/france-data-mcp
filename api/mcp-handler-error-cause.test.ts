@@ -13,6 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeMockVercelRes } from "./_lib/test-helpers.js";
 
 const mocks = vi.hoisted(() => ({
   captureMcpError: vi.fn(),
@@ -33,28 +34,6 @@ vi.mock("./_lib/observability.js", async (importOriginal) => {
 });
 
 import handler from "./mcp.js";
-
-function makeMockRes() {
-  const captured: { status?: number; json?: unknown; ended: boolean } = { ended: false };
-  const res = {
-    status(code: number) {
-      captured.status = code;
-      return res;
-    },
-    json(payload: unknown) {
-      captured.json = payload;
-      return res;
-    },
-    end() {
-      captured.ended = true;
-      return res;
-    },
-    setHeader() {
-      return res;
-    },
-  };
-  return { res, captured };
-}
 
 describe("api/mcp.ts — propagation RangeError.cause → JSON-RPC error.data", () => {
   beforeEach(() => mocks.captureMcpError.mockClear());
@@ -78,10 +57,10 @@ describe("api/mcp.ts — propagation RangeError.cause → JSON-RPC error.data", 
         },
       },
     };
-    const { res, captured } = makeMockRes();
+    const { res, captured } = makeMockVercelRes();
 
     // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat Vercel
-    await handler(req as any, res as any);
+    await handler(req as any, res);
 
     // JSON-RPC encapsule les erreurs dans le payload (HTTP 200 toujours, sauf parse error 400).
     // L'erreur est portée par error.code = -32602, pas le HTTP status.
@@ -123,10 +102,10 @@ describe("api/mcp.ts — propagation RangeError.cause → JSON-RPC error.data", 
         },
       },
     };
-    const { res, captured } = makeMockRes();
+    const { res, captured } = makeMockVercelRes();
 
     // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat Vercel
-    await handler(req as any, res as any);
+    await handler(req as any, res);
 
     // JSON-RPC encapsule les erreurs dans le payload (HTTP 200, sauf parse error).
     expect(captured.status).toBe(200);

@@ -4,6 +4,33 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`)
+
+### Fixed
+
+- **Le flush d'observabilité (Sentry + Axiom) ne bloque plus la réponse client et
+  ne perd plus d'events au timeout** (`api/_lib/observability.ts`, `api/mcp.ts`).
+  Le `finally` du handler faisait `await Promise.allSettled([flushSentry(),
+  flushMcpEventsToAxiom()])` : sur `@vercel/node` la réponse n'est libérée qu'à la
+  résolution du handler, donc cet `await` **bloquait** la réponse jusqu'au timeout
+  Axiom. Et le POST cross-Atlantique (Vercel EU → `api.axiom.co` US) dépassait
+  régulièrement le timeout serré de **1,5 s** → l'event était **jeté sans retry**
+  (`Axiom ingest error: timeout` ~1×/requête, prouvé prod) → metrics Axiom
+  tronquées (un comptage d'utilisateurs réels sous-estimé). Nouveau point d'entrée
+  unique `scheduleObservabilityFlush()` qui **déporte le flush en arrière-plan via
+  `waitUntil` de `@vercel/functions`** : la réponse HTTP part AVANT le flush
+  (**latence client ZÉRO**), la lambda reste vivante jusqu'à résolution (borné par
+  `maxDuration`=60 s). Timeout Axiom relevé **1,5 s → 5 s** (devenu un plafond
+  *background* indolore). Fail-soft total : `scheduleObservabilityFlush` ne throw
+  JAMAIS (appelée dans un `finally`) ; si `waitUntil` est indisponible (hors
+  runtime Vercel, ou régression) → fire-and-forget + alerte one-shot
+  `console.error` + Sentry `observability_flush_degraded`, **gatée prod/preview**
+  (silencieuse en dev/test où le throw est attendu). Garde-fous
+  `api/mcp-handler-flush-background.test.ts` (déport via `waitUntil`, non-blocage
+  prouvé par un puits qui ne résout jamais, fail-soft one-shot prod, silence dev).
+  `@vercel/functions` ajouté en `dependencies` (import de valeur runtime). Mock
+  `VercelResponse` factorisé dans `api/_lib/test-helpers.ts` (était triplicaté).
+
 ## [Unreleased] — Automatisation backfill BAN (RPPS + Ameli) — bouton Ameli (keyset id) + drain auto post-ingestion
 
 ### Added

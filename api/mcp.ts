@@ -28,11 +28,11 @@ import {
   type McpOutcome,
   type McpRequestContext,
   extractUserAgent,
-  flushMcpEventsToAxiom,
   logMcpEvent,
+  scheduleObservabilityFlush,
 } from "./_lib/observability.js";
 import { checkRateLimit, extractIp, hashIp } from "./_lib/rate-limit.js";
-import { captureMcpError, flushSentry } from "./_lib/sentry.js";
+import { captureMcpError } from "./_lib/sentry.js";
 import { TOOLS, findTool } from "./tools.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -186,14 +186,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     });
     throw err;
   } finally {
-    // Flush en parallèle pour borner la latence ajoutée au pire à
-    // `max(flushSentry, flushAxiom)` plutôt que leur somme. Sur `@vercel/node`,
-    // la réponse HTTP n'est libérée qu'à la résolution du handler async, donc
-    // ces awaits bloquent bien la réponse client (acceptable pour un endpoint
-    // MCP non-temps-réel — pire cas ~1.5s si Axiom timeout). Le `finally` garantit
-    // que tout chemin de retour (early returns OPTIONS/GET/405/400, re-throw du
-    // catch root) flush les events en attente.
-    await Promise.allSettled([flushSentry(), flushMcpEventsToAxiom()]);
+    // Flush observabilité DÉPORTÉ en arrière-plan (latence client ZÉRO) — toute
+    // la mécanique (puits Sentry+Axiom, `waitUntil`, fail-soft) est encapsulée
+    // dans `scheduleObservabilityFlush`. Le `finally` garantit que tout chemin
+    // de retour (early returns OPTIONS/GET/405/400, re-throw du catch root)
+    // programme le flush en attente.
+    scheduleObservabilityFlush();
   }
 }
 
