@@ -88,7 +88,15 @@ describe("api/healthz", () => {
     expect(typeof body.version).toBe("string");
     expect(typeof body.timestamp).toBe("string");
 
-    const config = body.config as Record<string, { configured: boolean }>;
+    const config = body.config as {
+      axiom: { configured: boolean };
+      ip_salt: { configured: boolean };
+      sentry: { configured: boolean };
+      supabase: { configured: boolean };
+      insee_sirene: { configured: boolean };
+      ans_fhir: { configured: boolean };
+      upstash: { configured: boolean };
+    };
     expect(config.axiom.configured).toBe(false);
     expect(config.ip_salt.configured).toBe(false);
     expect(config.sentry.configured).toBe(false);
@@ -145,7 +153,15 @@ describe("api/healthz", () => {
 
     expect(res.statusCode).toBe(200);
     const body = res.body as Record<string, unknown>;
-    const config = body.config as Record<string, { configured: boolean }>;
+    const config = body.config as {
+      axiom: { configured: boolean };
+      ip_salt: { configured: boolean };
+      sentry: { configured: boolean };
+      supabase: { configured: boolean };
+      insee_sirene: { configured: boolean };
+      ans_fhir: { configured: boolean };
+      upstash: { configured: boolean };
+    };
     expect(config.axiom.configured).toBe(true);
     expect(config.ip_salt.configured).toBe(true);
     expect(config.sentry.configured).toBe(true);
@@ -186,7 +202,10 @@ describe("api/healthz", () => {
     const res = makeRes();
     await handler(makeReq("GET"), res);
     const body = res.body as Record<string, unknown>;
-    const config = body.config as Record<string, { configured: boolean }>;
+    const config = body.config as {
+      sentry: { configured: boolean };
+      ip_salt: { configured: boolean };
+    };
     expect(config.sentry.configured).toBe(false);
     expect(config.ip_salt.configured).toBe(false);
   });

@@ -195,7 +195,7 @@ describe("V0.19.0 — panorama_sante_territoire + nom_commune", () => {
       activite: "biologie_medicale",
       count: 13,
       zone: { codeInsee: "59350" },
-    } as Awaited<ReturnType<typeof hostedActivities.getHostedActivitiesInZone>>);
+    } as unknown as Awaited<ReturnType<typeof hostedActivities.getHostedActivitiesInZone>>);
     const tool = findTool("panorama_sante_territoire");
     await tool?.handler({ nom_commune: "Lille", finess_familles: ["labo"] });
     expect(hostedSpy).toHaveBeenCalled();

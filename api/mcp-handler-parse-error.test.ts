@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { makeMockVercelRes } from "./_lib/test-helpers.js";
 
 // vi.hoisted() : les factories de vi.mock sont hoistées au top du fichier,
 // donc elles ne peuvent pas référencer des variables `const` du module-level
@@ -28,34 +29,6 @@ vi.mock("./_lib/observability.js", async (importOriginal) => {
 
 import handler from "./mcp.js";
 
-/**
- * Mock minimal d'un VercelResponse qui capture status() + json() + end()
- * pour assertions. Renvoie `this` pour permettre `res.status(x).json(y)`.
- */
-function makeMockRes() {
-  const captured: { status?: number; json?: unknown; ended: boolean } = {
-    ended: false,
-  };
-  const res = {
-    status(code: number) {
-      captured.status = code;
-      return res;
-    },
-    json(payload: unknown) {
-      captured.json = payload;
-      return res;
-    },
-    end() {
-      captured.ended = true;
-      return res;
-    },
-    setHeader() {
-      return res;
-    },
-  };
-  return { res, captured };
-}
-
 describe("handler — JSON parse error (P2 backlog cleanup)", () => {
   beforeEach(() => {
     mocks.captureMcpError.mockClear();
@@ -77,10 +50,10 @@ describe("handler — JSON parse error (P2 backlog cleanup)", () => {
         throw new SyntaxError("Unexpected token i in JSON at position 0");
       },
     };
-    const { res, captured } = makeMockRes();
+    const { res, captured } = makeMockVercelRes();
 
     // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat Vercel
-    await handler(req as any, res as any);
+    await handler(req as any, res);
 
     expect(captured.status).toBe(400);
     expect(captured.json).toMatchObject({
@@ -107,11 +80,11 @@ describe("handler — JSON parse error (P2 backlog cleanup)", () => {
         throw new TypeError("genuine server bug: undefined.foo");
       },
     };
-    const { res } = makeMockRes();
+    const { res } = makeMockVercelRes();
 
     await expect(
       // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat Vercel
-      handler(req as any, res as any),
+      handler(req as any, res),
     ).rejects.toThrow(/genuine server bug/);
     expect(mocks.captureMcpError).toHaveBeenCalledTimes(1);
   });

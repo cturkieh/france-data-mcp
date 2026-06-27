@@ -98,7 +98,7 @@ function indexExprDriftViolations(rawSql: string): string[] {
       continue;
     }
     const keyMatch = stmt.match(new RegExp(`\\bon\\s+${table}\\s*\\(((?:[^()]|\\([^()]*\\))*)\\)`));
-    const keyExpr = keyMatch ? keyMatch[1] : "";
+    const keyExpr = keyMatch ? (keyMatch[1] as string) : "";
     if (!keyExpr.includes(WRAPPER)) {
       violations.push(`index ${name} : keyexpr n'utilise PAS ${WRAPPER}`);
     }
@@ -245,7 +245,7 @@ describe("rpps_ban_eligible : parité expression STEP build-index ↔ RPC skip-s
     const keyExpr = (stmt.match(/\bon\s+rpps_staging\s*\(((?:[^()]|\([^()]*\))*)\)/) ?? [
       "",
       "",
-    ])[1];
+    ])[1] as string;
     expect(keyExpr.includes(WRAPPER), `index keyexpr DOIT utiliser ${WRAPPER} — ${FAIL_WHY}`).toBe(
       true,
     );
@@ -264,7 +264,7 @@ describe("rpps_ban_eligible : parité expression STEP build-index ↔ RPC skip-s
     const keyExpr = (stmt.match(/\bon\s+rpps_staging\s*\(((?:[^()]|\([^()]*\))*)\)/) ?? [
       "",
       "",
-    ])[1];
+    ])[1] as string;
     expect(
       keyExpr.includes(WRAPPER),
       `index composite keyexpr DOIT utiliser ${WRAPPER} — ${FAIL_WHY}`,

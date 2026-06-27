@@ -28,11 +28,11 @@ import {
   type McpOutcome,
   type McpRequestContext,
   extractUserAgent,
-  flushMcpEventsToAxiom,
   logMcpEvent,
+  scheduleObservabilityFlush,
 } from "./_lib/observability.js";
 import { checkRateLimit, extractIp, hashIp } from "./_lib/rate-limit.js";
-import { captureMcpError, flushSentry } from "./_lib/sentry.js";
+import { captureMcpError } from "./_lib/sentry.js";
 import { TOOLS, findTool } from "./tools.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -72,6 +72,12 @@ type JsonRpcError = {
 type RequestContext = McpRequestContext;
 
 export default async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
+  // Horodatage d'entrée du handler — sert de `start` aux chemins meta
+  // early-return (405 non-POST, 400 POST vide) qui n'ont pas de `start`
+  // par-sous-requête. SANS lui, `emit(ctx, 0, …)` loggait `Date.now() - 0`
+  // = l'epoch entier (~1.7e12) au lieu d'une durée ~0 ms, polluant tout
+  // agrégat `duration_ms` côté Axiom (avg/percentiles faussés).
+  const requestStart = Date.now();
   try {
     if (req.method === "OPTIONS") {
       res.status(204).end();
@@ -99,7 +105,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     };
 
     if (req.method !== "POST") {
-      emit(ctx, 0, `http_${req.method ?? "unknown"}`, {
+      emit(ctx, requestStart, `http_${req.method ?? "unknown"}`, {
         status: 405,
         outcome: "bad_request",
         level: "warn",
@@ -110,7 +116,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     const body = req.body as JsonRpcRequest | JsonRpcRequest[] | undefined;
     if (!body) {
-      emit(ctx, 0, "http_post_empty", {
+      emit(ctx, requestStart, "http_post_empty", {
         status: 400,
         outcome: "bad_request",
         level: "warn",
@@ -186,14 +192,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     });
     throw err;
   } finally {
-    // Flush en parallèle pour borner la latence ajoutée au pire à
-    // `max(flushSentry, flushAxiom)` plutôt que leur somme. Sur `@vercel/node`,
-    // la réponse HTTP n'est libérée qu'à la résolution du handler async, donc
-    // ces awaits bloquent bien la réponse client (acceptable pour un endpoint
-    // MCP non-temps-réel — pire cas ~1.5s si Axiom timeout). Le `finally` garantit
-    // que tout chemin de retour (early returns OPTIONS/GET/405/400, re-throw du
-    // catch root) flush les events en attente.
-    await Promise.allSettled([flushSentry(), flushMcpEventsToAxiom()]);
+    // Flush observabilité DÉPORTÉ en arrière-plan (latence client ZÉRO) — toute
+    // la mécanique (puits Sentry+Axiom, `waitUntil`, fail-soft) est encapsulée
+    // dans `scheduleObservabilityFlush`. Le `finally` garantit que tout chemin
+    // de retour (early returns OPTIONS/GET/405/400, re-throw du catch root)
+    // programme le flush en attente.
+    scheduleObservabilityFlush();
   }
 }
 

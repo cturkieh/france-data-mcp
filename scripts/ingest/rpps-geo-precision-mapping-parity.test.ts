@@ -132,8 +132,8 @@ describe("RPPS geo_precision mapping parity (V0.12.0)", () => {
       .map((fn) => compactBody(latestFunctionBody(sql, fn, { stripComments: true })))
       .join("\n");
 
-    const allowedSources = new Set(MAPPING_CANONICAL.map((m) => m.source));
-    const allowedValues = new Set(MAPPING_CANONICAL.map((m) => m.precision));
+    const allowedSources = new Set<string>(MAPPING_CANONICAL.map((m) => m.source));
+    const allowedValues = new Set<string>(MAPPING_CANONICAL.map((m) => m.precision));
     const pairRe = /when\s+'([^']+)'\s+then\s+'([^']+)'/g;
     const violations: string[] = [];
     for (const m of allBodies.matchAll(pairRe)) {
