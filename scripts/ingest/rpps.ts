@@ -494,6 +494,35 @@ async function main(): Promise<void> {
       console.log("[rpps] ban_join: 0 eligible rows, skipped");
     }
 
+    // 5d. RE-ANALYZE post-ban_join — stats fraîches pour la MESURE 6d.
+    // L'enrichment (5b) + ban_join (5c) ont UPDATE ~1,6 M lignes depuis
+    // l'ANALYZE 5a : la distribution `geom_source` des stats est périmée
+    // (~1,3 M `commune_centroid` avant pose → ~135 K après). Les stats
+    // suivent la table au RENAME du swap (même OID) : sans ce refresh, la
+    // mesure post-swap `rpps_measure_ban_to_geocode` planifie sur ces stats
+    // périmées → >55 s → 57014 « mesure indisponible » sur un run SAIN
+    // (prouvé prod run #28733339515 du 2026-07-05 ; la même RPC répond <1 s
+    // une fois l'autoanalyze passé). BEST-EFFORT (≠ 5a fail-loud) : ne
+    // protège que la jauge 6d, elle-même best-effort — un échec ici ne doit
+    // pas tuer un run dont les données sont bonnes (warn LOUD, run continue).
+    try {
+      await callRpcFailLoud(
+        supabase,
+        "ingest_analyze_rpps_staging",
+        RPC_ANALYZE_TIMEOUT_MS,
+        "Failed to re-ANALYZE rpps_staging after ban_join",
+      );
+    } catch (err) {
+      // Warn console (grep ops) + trace audit DB `ingest_log` (doctrine
+      // observabilité background) — la mesure 6d restera probablement NULL,
+      // l'audit explique POURQUOI sans rejouer les logs GitHub Actions.
+      const reAnalyzeMsg = `post-ban_join re-ANALYZE skipped (best-effort, la mesure 6d risque un 57014): ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      console.warn(`[rpps] ${reAnalyzeMsg}`);
+      appendLogMessage(log, reAnalyzeMsg);
+    }
+
     // 6. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "rpps" });
 
