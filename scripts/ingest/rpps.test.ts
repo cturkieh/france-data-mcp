@@ -377,8 +377,8 @@ describe("rebuildRppsMatviews", () => {
 // et verrouille l'ORDRE TEXTUEL des sites d'appel (même discipline que les
 // guards de parité migrations : textuel mais load-bearing, ancré sur de
 // vrais sites d'appel, jamais un `.includes()` flou).
-describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→6 (séquence load-bearing)", () => {
-  it("les sites d'appel apparaissent dans l'ordre 5a ANALYZE → 5b FINESS → 5c count → 5c ban_join apply → 6 swap", async () => {
+describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→5d re-ANALYZE→6→6d mesure (séquence load-bearing)", () => {
+  it("les sites d'appel apparaissent dans l'ordre 5a ANALYZE → 5b FINESS → 5c count → 5c ban_join apply → 5d re-ANALYZE → 6 swap → 6d mesure", async () => {
     const fs = await import("node:fs");
     const url = await import("node:url");
     const rppsSrc = fs.readFileSync(
@@ -394,23 +394,33 @@ describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→6 (séquence l
     expect(afterMain, "fin de main() (streamCsvToStaging) introuvable").toBeGreaterThan(mainStart);
     const body = rppsSrc.slice(mainStart, afterMain);
 
-    // Ancres = vrais sites d'appel (pas de la prose). 5a passe par
-    // callRpcFailLoud → ancre sur son libellé d'erreur UNIQUE. 5c ban_join =
-    // count (rpps_count_ban_eligible_rows) PUIS apply via runKeysetRpc
-    // ("ingest_apply_rpps_ban_join_batch"). Plus de 5c build-index / 5d
-    // re-ANALYZE / 5e runBanGeocodeStep (supprimés par la refonte).
+    // Ancres = vrais sites d'appel (pas de la prose). 5a et 5d passent par
+    // callRpcFailLoud → ancre sur leur libellé d'erreur UNIQUE respectif.
+    // 5c ban_join = count (rpps_count_ban_eligible_rows) PUIS apply via
+    // runKeysetRpc ("ingest_apply_rpps_ban_join_batch"). Plus de 5c
+    // build-index / 5e runBanGeocodeStep (supprimés par la refonte). Le 5d
+    // re-ANALYZE (RÉINTRODUIT 2026-07, autre finalité que l'ex-5d) fiabilise
+    // la mesure 6d : stats fraîches post-UPDATE massifs, qui VOYAGENT avec la
+    // table au RENAME du swap — sans lui, 57014 « mesure indisponible » sur
+    // run sain (prouvé prod run #28733339515). La mesure 6d doit rester
+    // POST-swap sur `rpps` (résidu ~135 K ; pré-ban_join sur staging = ~1,29 M
+    // → 57014 systématique, prouvé prod run #27003446829).
     const i5aAnalyze = body.indexOf('"Failed to ANALYZE rpps_staging before enrichment"');
     const i5bEnrich = body.indexOf('"ingest_apply_rpps_finess_enrichment_batch"');
     const i5cCount = body.indexOf('supabase.rpc("rpps_count_ban_eligible_rows"');
     const i5cBanJoin = body.indexOf('"ingest_apply_rpps_ban_join_batch"');
+    const i5dReAnalyze = body.indexOf('"Failed to re-ANALYZE rpps_staging after ban_join"');
     const i6Swap = body.indexOf('atomicSwapTables({ prodTable: "rpps" })');
+    const i6dMeasure = body.indexOf('supabase.rpc("rpps_measure_ban_to_geocode"');
 
     for (const [label, idx] of [
       ["5a ANALYZE post-COPY", i5aAnalyze],
       ["5b enrichment FINESS", i5bEnrich],
       ["5c ban_join count", i5cCount],
       ["5c ban_join apply (ingest_apply_rpps_ban_join_batch)", i5cBanJoin],
+      ["5d re-ANALYZE post-ban_join (jauge 6d)", i5dReAnalyze],
       ["6 atomicSwapTables", i6Swap],
+      ["6d mesure rpps_measure_ban_to_geocode", i6dMeasure],
     ] as const) {
       expect(idx, `site d'appel ${label} introuvable dans main()`).toBeGreaterThanOrEqual(0);
     }
@@ -425,11 +435,16 @@ describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→6 (séquence l
       "runBanGeocodeStep supprimé — ne doit plus être appelé dans main()",
     ).toBe(-1);
 
-    // 5a < 5b < 5c count < 5c ban_join apply < 6 — chaîne strictement croissante.
+    // 5a < 5b < 5c count < 5c ban_join apply < 5d < 6 < 6d — chaîne
+    // strictement croissante. 5d APRÈS le ban_join (sinon stats re-périmées
+    // par la pose) et AVANT le swap (la RPC cible `rpps_staging` par nom) ;
+    // 6d APRÈS le swap (mesure du résidu réel servi en prod).
     expect(i5aAnalyze).toBeLessThan(i5bEnrich);
     expect(i5bEnrich).toBeLessThan(i5cCount);
     expect(i5cCount).toBeLessThan(i5cBanJoin);
-    expect(i5cBanJoin).toBeLessThan(i6Swap);
+    expect(i5cBanJoin).toBeLessThan(i5dReAnalyze);
+    expect(i5dReAnalyze).toBeLessThan(i6Swap);
+    expect(i6Swap).toBeLessThan(i6dMeasure);
   });
 });
 
@@ -496,7 +511,10 @@ describe("rpps.ts wiring mesure BAN delta : post-swap, sur rpps", () => {
 
   it("appelée APRÈS atomicSwapTables (pré-swap = re-régression 57014)", () => {
     const swapIdx = RPPS_SRC.indexOf('atomicSwapTables({ prodTable: "rpps" })');
-    const measureIdx = RPPS_SRC.indexOf("rpps_measure_ban_to_geocode");
+    // Ancre sur le LITTÉRAL du site d'appel (`supabase.rpc("<rpc>"`), pas le
+    // nom nu — une mention en prose/backticks AVANT le swap (ex. commentaire
+    // 5d) faussait l'index et faisait échouer le test à tort.
+    const measureIdx = RPPS_SRC.indexOf('supabase.rpc("rpps_measure_ban_to_geocode"');
     expect(swapIdx, "atomicSwapTables({ prodTable: 'rpps' }) introuvable").toBeGreaterThan(0);
     expect(measureIdx, "appel rpps_measure_ban_to_geocode introuvable").toBeGreaterThan(0);
     expect(

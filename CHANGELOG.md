@@ -4,10 +4,27 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`)
+## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée
 
 ### Fixed
 
+- **La jauge « adresses à géocoder » du cron RPPS ne timeout plus post-swap —
+  re-ANALYZE 5d avant le swap** (`scripts/ingest/rpps.ts`). Au run prod
+  #28733339515 (2026-07-05, 1er cron mensuel post-V0.25), la mesure
+  `rpps_measure_ban_to_geocode` (6d, post-swap) a pris un 57014 à 55 s →
+  email « mesure indisponible » sur un run pourtant SAIN (ban_join : 1 167 021
+  posées). Cause : l'enrichment FINESS (5b) + le ban_join (5c) UPDATE ~1,6 M
+  lignes APRÈS l'ANALYZE 5a → stats planner périmées (distribution
+  `geom_source` : ~1,3 M `commune_centroid` avant pose → ~135 K après), et ces
+  stats VOYAGENT avec la table au RENAME du swap (même OID) → la mesure
+  planifie à l'aveugle (la même RPC répond <1 s une fois l'autoanalyze passé,
+  prouvé prod). Fix : ré-appel de la RPC existante `ingest_analyze_rpps_staging`
+  en étape 5d (post-ban_join, pré-swap) — zéro migration, zéro nouvelle
+  surface SQL. BEST-EFFORT (≠ 5a fail-loud) : ne protège que la jauge 6d,
+  elle-même best-effort — échec → `console.warn` + trace `ingest_log`
+  (`appendLogMessage`), le run continue. Ameli n'est PAS exposé (sa mesure 5c
+  tourne juste après son ANALYZE 5b, stats fraîches). Garde-fou : test de
+  séquence `rpps.test.ts` étendu (5a→5b→5c→**5d**→6→**6d**, chaîne stricte).
 - **Le flush d'observabilité (Sentry + Axiom) ne bloque plus la réponse client et
   ne perd plus d'events au timeout** (`api/_lib/observability.ts`, `api/mcp.ts`).
   Le `finally` du handler faisait `await Promise.allSettled([flushSentry(),
