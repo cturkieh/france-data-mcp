@@ -4,10 +4,32 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée
+## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700`
 
 ### Fixed
 
+- **Un POST au body JSON malformé rend enfin un JSON-RPC `-32700 Parse error`
+  et ne pollue plus Sentry** (`api/mcp.ts`, issue `FRANCE-DATA-MCP-1`, 7 events
+  depuis le 2026-05-12). La discrimination V0.12.2 `err instanceof SyntaxError`
+  dans le catch root ne matchait **jamais** en prod : le runtime Vercel
+  (`/opt/rust/nodejs.js`) throw un `Error` **NU** de message `"Invalid JSON"`
+  depuis le getter lazy `IncomingMessage.get [as body]`, pas un `SyntaxError`
+  (inférence de l'époque, jamais vérifiée contre le runtime). Conséquences :
+  (1) chaque payload malformé partait en `captureMcpError` avec
+  `outcome=internal_error` — une faute caller comptée comme bug serveur, qui
+  diluait l'invariant « 100 % des 500 capturés » ; (2) le re-throw laissait le
+  runtime convertir sa propre erreur en **400 à corps VIDE**, donc le client MCP
+  n'obtenait aucun objet `error` exploitable. Fix : la classification passe de
+  la CLASSE de l'exception à son SITE — l'accès `req.body` (seul point de parse,
+  lazy) est enveloppé dans un `try/catch` dédié → `console.warn` +
+  `emit(outcome=bad_request)` + `400 {-32700}`. Le catch root ne discrimine plus
+  rien : un `instanceof SyntaxError` à ce niveau masquerait au contraire un VRAI
+  bug `JSON.parse` serveur. Reproduction prod (déterministe) :
+  `curl -X POST …/mcp -H 'Content-Type: application/json' -d 'pas-du-json'`.
+  Garde-fous `api/mcp-handler-parse-error.test.ts` : 3 cas dont la **forme
+  réelle prod** (`Error` nu) et « exception hors accès body → Sentry préservé »
+  (véhicule déplacé du getter `body` vers `headers`, sinon le test asserte
+  l'inverse de la règle).
 - **La jauge « adresses à géocoder » du cron RPPS ne timeout plus post-swap —
   re-ANALYZE 5d avant le swap** (`scripts/ingest/rpps.ts`). Au run prod
   #28733339515 (2026-07-05, 1er cron mensuel post-V0.25), la mesure

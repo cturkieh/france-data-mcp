@@ -114,7 +114,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       return;
     }
 
-    const body = req.body as JsonRpcRequest | JsonRpcRequest[] | undefined;
+    // Le getter `body` de @vercel/node parse le payload À LA VOLÉE (lazy) :
+    // toute exception levée ICI est un échec de parse CALLER-side, jamais un
+    // bug serveur. On classe donc par SITE (cet accès précis), PAS par classe
+    // d'exception — le runtime Vercel `/opt/rust/nodejs.js` throw un `Error`
+    // NU de message "Invalid JSON", pas un `SyntaxError` (prouvé prod,
+    // FRANCE-DATA-MCP-1 : la discrimination `instanceof SyntaxError` du catch
+    // root ne matchait jamais → bruit Sentry `internal_error` + 400 à corps
+    // vide côté caller). Le catch root reste le filet des VRAIS bugs serveur.
+    let rawBody: JsonRpcRequest | JsonRpcRequest[] | undefined;
+    try {
+      rawBody = req.body as JsonRpcRequest | JsonRpcRequest[] | undefined;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[france-data-mcp] handler root: invalid JSON (${message})`);
+      emit(ctx, requestStart, "http_post_parse_error", {
+        status: 400,
+        outcome: "bad_request",
+        level: "warn",
+        extra: { error: message },
+      });
+      // Réutilise le helper `error()` — source unique de la shape JsonRpcError.
+      res.status(400).json(error(null, -32700, `Parse error: ${message}`));
+      return;
+    }
+    // Re-liaison en `const` load-bearing pour le TYPAGE : le narrowing par
+    // alias (`isBatch = Array.isArray(body)` plus bas) n'opère que sur une
+    // variable non réassignable — sur le `let` ci-dessus, `body` resterait
+    // `JsonRpcRequest | JsonRpcRequest[]` dans les deux branches (TS2322).
+    const body = rawBody;
+
     if (!body) {
       emit(ctx, requestStart, "http_post_empty", {
         status: 400,
@@ -167,21 +196,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     res.status(200).json(isBatch ? responses : responses[0]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // SyntaxError = JSON malformé caller-side (`req.body` getter @vercel/node
-    // throw quand Content-Type=application/json + payload non parseable) →
-    // -32700 Parse error (spec JSON-RPC 2.0 §5.1), status 400, SANS Sentry
-    // (faute caller, pas serveur — complète `beforeSendEvent` bot-noise drop
-    // en évitant l'appel). PAS de re-throw : Vercel renvoie la 400 propre.
-    if (err instanceof SyntaxError) {
-      console.warn(`[france-data-mcp] handler root: invalid JSON (${message})`);
-      // Réutilise le helper `error()` (ligne 501) — source unique de la shape
-      // JsonRpcError, évite la divergence si on ajoute des champs spec.
-      res.status(400).json(error(null, -32700, `Parse error: ${message}`));
-      return;
-    }
-    // Filet root pour les autres exceptions HORS boucle batch (ex: extractIp/
-    // hashIp/extractUserAgent en cold start exotique). Sans ce filet,
-    // l'invariant "100% des 500 sont capturés par Sentry" serait cassé.
+    // Filet root des exceptions HORS boucle batch (ex: extractIp/hashIp en
+    // cold start exotique) — invariant "100% des 500 capturés par Sentry".
+    // Le JSON malformé caller (-32700) est classé EN AMONT, au SITE de l'accès
+    // `req.body` : AUCUNE discrimination par classe d'exception ici (un
+    // `instanceof SyntaxError` ratait la forme prod ET masquerait un vrai bug).
     console.error(`[france-data-mcp] handler root error: ${message}`);
     captureMcpError(err, {
       method: "handler_root",
