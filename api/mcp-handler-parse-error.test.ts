@@ -69,16 +69,53 @@ describe("handler — JSON parse error (P2 backlog cleanup)", () => {
     expect(mocks.captureMcpError).not.toHaveBeenCalled();
   });
 
-  it("POST avec exception non-SyntaxError dans le catch root → captureMcpError appelé (path Sentry préservé)", async () => {
-    // Garde-fou anti-régression : un genuine bug serveur (ex: extractIp throw)
-    // doit toujours être capturé Sentry. La détection SyntaxError ne doit pas
-    // élargir le silence.
+  it("POST avec body access throwing Error nu « Invalid JSON » (FORME RÉELLE PROD) → 400 -32700, SANS captureMcpError", async () => {
+    // Régression FRANCE-DATA-MCP-1, prouvée prod (7 events, reproduction
+    // déterministe 2026-07-25) : le runtime Vercel `/opt/rust/nodejs.js` NE
+    // throw PAS un `SyntaxError` mais un `Error` NU de message "Invalid JSON"
+    // depuis `IncomingMessage.get [as body]`. La discrimination historique
+    // `err instanceof SyntaxError` ne matchait donc JAMAIS en prod → chaque
+    // POST malformé partait en `captureMcpError` (bruit Sentry, outcome
+    // `internal_error` = faute caller comptée comme bug serveur) et le caller
+    // recevait un 400 à CORPS VIDE au lieu d'un JSON-RPC -32700.
+    //
+    // La classification ne doit donc PAS dépendre de la CLASSE de l'exception
+    // (couplage au runtime, non testable localement) mais de son SITE : toute
+    // exception levée par l'accès à `req.body` est un échec de parse caller.
     const req = {
       method: "POST",
       headers: { "content-type": "application/json" },
-      get body() {
+      get body(): unknown {
+        throw new Error("Invalid JSON");
+      },
+    };
+    const { res, captured } = makeMockVercelRes();
+
+    // biome-ignore lint/suspicious/noExplicitAny: mock minimal du contrat Vercel
+    await handler(req as any, res);
+
+    expect(captured.status).toBe(400);
+    expect(captured.json).toMatchObject({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700 },
+    });
+    expect(mocks.captureMcpError).not.toHaveBeenCalled();
+  });
+
+  it("POST avec exception HORS accès body (headers throw) → captureMcpError appelé (path Sentry préservé)", async () => {
+    // Garde-fou anti-régression : un genuine bug serveur doit toujours être
+    // capturé Sentry. Le véhicule est `req.headers` (lu par `extractIp` /
+    // `extractUserAgent`, AVANT l'accès body) et non plus le getter `body` —
+    // depuis le fix FRANCE-DATA-MCP-1, TOUTE exception au site `req.body` est
+    // classée faute caller ; utiliser ce getter comme véhicule testerait
+    // l'inverse de la règle.
+    const req = {
+      method: "POST",
+      get headers(): unknown {
         throw new TypeError("genuine server bug: undefined.foo");
       },
+      body: { jsonrpc: "2.0", method: "ping", id: 1 },
     };
     const { res } = makeMockVercelRes();
 
