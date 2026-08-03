@@ -4,9 +4,21 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700`
+## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700` + timeout `count_rpps_by_commune` aligné 15 s
 
 ### Fixed
+
+- **`count_rpps_by_commune` rejoint le tier 15 s de statement_timeout**
+  (migration `20260804T090000`, issue `FRANCE-DATA-MCP-M`, 2 events
+  2026-07-30 — burst d'un même `panorama_sante_territoire` : 2 des 3 counts
+  parallèles en 57014 sur cold-start). C'était la dernière RPC lookup restée
+  au tuning serré 5 s de la décision 20260528, dont la prémisse « le
+  keep-warm la protège » est réfutée prod : cadence réelle du keep-warm
+  1-2 h (throttling GitHub des schedules, l'event tombe dans le trou
+  15:04→16:43) et son ping ne chauffe que la commune 59009. Bilan 19 jours :
+  8 RPC à 15 s = 0 event, la seule à 5 s = 3 events. `ALTER FUNCTION … SET`
+  config-only (aucun corps touché) ; ⚠️ tout futur `CREATE OR REPLACE` de la
+  fonction doit porter `15s` inline (la def V0.9 dit encore `5s`).
 
 - **Un POST au body JSON malformé rend enfin un JSON-RPC `-32700 Parse error`
   et ne pollue plus Sentry** (`api/mcp.ts`, issue `FRANCE-DATA-MCP-1`, 7 events
