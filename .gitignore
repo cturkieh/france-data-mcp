@@ -26,6 +26,8 @@ docs/guide-outils.md
 # scheduled_tasks.lock, cache/, transcripts/…) ne sera plus committé par
 # étourderie. NE JAMAIS retirer ce pattern sans audit du contenu généré.
 .claude/*
+# Skills projet partagés (règles de tête dans CLAUDE.md, détail ici) — versionnés.
+!.claude/skills/
 # Pas d'exception aujourd'hui — si tu veux partager un hook avec l'équipe,
 # ajouter le PARENT puis le fichier : `!.claude/hooks/` ET `!.claude/hooks/foo.sh`
 # (git ne re-scanne pas les enfants d'un répertoire exclu). Vérifier avec
