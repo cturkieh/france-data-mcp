@@ -4,6 +4,152 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+### Changed
+
+- **FINESS : migration de la source DREES (CSV, flux arrêté le 20 juillet 2026)
+  vers le flux ANS « nouvelle génération » (JSON.gz quotidien, dataset data.gouv
+  `finess-structures-1`)** — `scripts/ingest/finess.ts` réécrit ; mapping pur
+  `finess-ans-parse.ts` testé sur 6 EGE réels ; nomenclature TRE_R397 figée
+  (`finess-categories-labels.json`, 428 libellés, `refresh-finess-categories.mjs`).
+  Post-mortem : dernier millésime DREES au 04/05/2026, sept runs `same_checksum`
+  en `success` de juin à septembre — données figées quatre mois sans aucun signal.
+  Inventaire et décisions : `docs/plans/finess-migration-ans.md`.
+  - Périmètre = EGE en service (`etatObjet = "A"`, sans `dateFermeture`) :
+    104 734 le 2026-09-05 contre 93 403. **DOM enfin couverts** (+2 814 : Réunion,
+    Guadeloupe, Martinique, Guyane, Mayotte…) — le parseur CSV les skippait
+    (`dom_unsupported`) alors que le schéma les accepte depuis V0.3.
+  - Pièges du flux, mesurés et testés : adresse géographique = `usageAdresse "03"`
+    (jamais `adresse[0]`, 2 294 EGE ont l'accueil devant) ; **deux paires de
+    coordonnées dont le système WGS84 / Lambert 93 s'inverse d'un enregistrement
+    à l'autre** (57 930 / 20 499) → `resolveCoordinates` détecte par plage de
+    valeurs ; parsing en flux obligatoire (715 Mo décompressés > limite de chaîne V8).
+  - Géolocalisation en cascade : coordonnées ANS (74,9 %) → repli `previous_ingest`
+    (RPC `ingest_apply_finess_geom_previous` : point de la prod par `num_finess`,
+    provenance tracée `raw.geom_source`) → NULL. Pas de centroïde commune : le
+    cron RPPS recopierait `finess.geom` en `finess_join` (tier précis).
+    `MIN_GEOM_COVERAGE` relevé de 0,8 à 0,95.
+  - Nouveaux garde-fous : signature gzip en pré-validation ; **diff staging ↔ prod
+    avant swap** (`ingest_finess_staging_diff`, bloque si > 10 % des établissements
+    prod disparaissent) ; débordements de colonne mis à `null` et comptés, jamais
+    tronqués (un téléphone à deux numéros, 21 caractères, a fait échouer le premier
+    dry-run en 22001) ; `FINESS_DRY_RUN=1` (pipeline complet, arrêt avant swap).
+  - Nouveaux champs dans `raw` (matière phase 2) : `siret`, `cle_ban`, `score_ban`,
+    `geom_source` (`ans` | `previous_ingest` — la disposition des paires
+    WGS84/Lambert n'est qu'un compteur de diagnostic, pas une provenance).
+    Dépendance dev `stream-json` (non publiée : `scripts/` hors `dist`).
+  - Revue `/simplify` (4 angles) : `preValidateFile` de `shared.ts` généralisé —
+    en-tête CSV **ou** signature binaire (`magicBytes`, `GZIP_MAGIC`), un seul
+    point de vérité pour la phase et le message ; étape de reprojection Lambert
+    retirée (morte par construction : le parseur ne renseigne le Lambert que
+    quand le WGS84 existe) ; `parser.asStream({ streamValues: false })` (le
+    parser émettait 4 tokens par scalaire dont 3 jetés) + tampons 1 Mo ;
+    `BATCH_SIZE` 500 → 1 000 (aligné RPPS) ; contraintes de colonnes en un
+    seul prédicat par champ (`COLUMN_RULES`) **gardées par un test de parité
+    DDL ↔ règles** (`finess-column-rules-parity.test.ts`, même famille que
+    `staging-parity`) ; validateurs partagés au lieu de copies locales
+    (`isValidCodeInsee` — plus strict que la regex inline, rejette `99xxx` —,
+    `deptFromCodeInsee`, `parseRpcCount`) ; `num_finess` validé (`CHAR(9)`,
+    Corse `2A`/`2B`) ; caractères de contrôle `\x00-\x1f` retirés comme côté
+    CSV (`getNonEmpty`) ; `countStagingWithGeom` supprimé (la diff porte déjà
+    la couverture). Dry-run forcé après revue : staging strictement identique
+    à la prod (`added/removed/lost/moved = 0`), **52 s au lieu de 91,8 s**.
+- **Politique de validation extraite en fonctions pures testées**
+  (`scripts/ingest/finess-validate.ts`, revue angle altitude) : les huit
+  décisions qui autorisent ou refusent le swap (volume, anomalies structurelles,
+  coordonnées inexploitables, débordements, nomenclature, couverture géo,
+  disparitions, `lost_geom`) vivaient en ligne droite dans `main()` sans aucun
+  test — alors que le parseur avait été extrait pour être prouvable. Tests
+  (`finess-validate.test.ts`) sur les chiffres réellement mesurés : le run réel
+  passe, chaque garde se déclenche sur une dérive plausible, une base vide ne
+  bloque pas. `main()` ne fait plus que l'orchestration. Bornes de détection
+  WGS84 élargies au domaine complet (le Pacifique — Wallis -176°, Polynésie
+  -150°, Nouvelle-Calédonie 166° — était exclu par une emprise « France » qui
+  n'apportait rien à la détection ; seul (0, 0) reste rejeté).
+- **Deux angles morts fermés par la revue (silent-failure-hunter)** : (1) une
+  `categorie_code` nulle n'était comptée nulle part — 32 lignes en prod ce soir
+  sans signal, et une encapsulation du code par l'ANS (tableau, comme
+  `typeBudget`) aurait mis 100 % des tools par famille à 0 en `success` →
+  compteurs de contenu (`nullCategorieCode`, `emptyRaisonSociale`) seuillés à
+  1 % ; (2) **`lost_geom = 0` était une tautologie** (le repli `previous_ingest`
+  remplit exactement l'ensemble compté, juste avant la diff) et `moved_gt_500m`
+  était calculé sans jamais être évalué — depuis le domaine WGS84 complet, une
+  inversion lat/lon upstream aurait passé avec couverture 100 % → garde
+  `MOVED_MAX_RATE` 20 % sur les établissements communs (6,2 % le jour de
+  migration, 0 ensuite), `lost_geom` requalifié en garde du repli. Types :
+  `ParsedEge` discriminé par `kind`, `FinessRawExtras` + `GEOM_SOURCES`
+  (source unique de `raw.geom_source`, parité SQL testée), `ResolvedCoordinates`
+  en union (`point` ⟺ `layout`), `magicBytes` tuple non vide.
+- **Suite de la passe 1 (code-reviewer, silent-failure-hunter, types)** :
+  **un échec de canary marque désormais le run `partial`** dans
+  `runAndRecordCanary` (toutes sources) — preuve prod : `130786049` en échec à
+  chaque run du 15 mai au 1ᵉʳ septembre en `status: success`, le workflow
+  n'alertant que sur `failure()` ; `present` (signal de dérive des coordonnées)
+  jugé sur les chaînes brutes, pas les valeurs parsées (un passage à la virgule
+  décimale serait « absent » au lieu d'« inexploitable ») ; `staleness_days`
+  aligné sur `data_age_days` (`partial` = donnée servie, sinon les deux âges
+  s'inversent) ; nomenclature : fatal si > 1 % de lignes sans libellé ou > 50 %
+  en famille « autre », et `refresh-finess-categories.mjs` refuse d'écraser le
+  fichier sous 95 % du compte courant (SMT partiel) ; erreur gunzip/JSON
+  classée `copy` (plus « programming bug » en `validate`), `pmej[null]` rejeté
+  explicitement ; `FINESS_DRY_RUN=1` refusé sous `GITHUB_ACTIONS` (run vert
+  sans trace) et force le pipeline complet (jamais de ligne `ingest_log`) ;
+  un checksum identique sur ce flux **quotidien** est logué comme publication
+  ANS gelée, pas comme « rien de neuf ».
+- **Centroïdes commune BAN refusés dans `finess.geom`** (revue, code-reviewer,
+  prouvé prod : 186 lignes) : l'ANS livre des points dont la clé
+  d'interopérabilité BAN est un code INSEE nu (`01053`, résultat
+  `municipality`) avec un `score_ban` ≈ 0,94 — un gate par score ne les
+  verrait pas (doctrine `ban-acceptance-precision-tier`) — et le cron RPPS
+  recopie `finess.geom` en `finess_join`, tier précis. Clé sans `_` → point
+  refusé (repli `previous_ingest` pour les établissements connus), compté et
+  logué. Aussi : périmètre (fermé/inactif) contrôlé AVANT l'identité (les
+  archivés sans identifiant ne pèsent plus sur un taux calculé sur les actifs),
+  libellé de catégorie dérivé de la valeur retenue, `staging_rows ≠ inserted`
+  fatal (staging polluée), breakdown `staging_geom_source` fail-loud, flux gelé
+  tracé dans `ingest_log` (`appendLogMessage`) en plus du log Actions.
+- **Contrat `data_freshness` porté jusqu'au boundary** (revue, angle altitude) :
+  `DATA_FRESHNESS_OUTPUT_SCHEMA` expose `last_data_change_at` / `data_age_days`
+  et **`expected_max_age_days`** — `INGEST_CADENCE` devient une donnée
+  (`{ hint, maxAgeDays }`) au lieu d'une prose, la règle d'alerte est une
+  comparaison (`data_age_days > expected_max_age_days`) exposée dans chaque
+  ligne plutôt qu'une consigne recopiée dans la description du tool. Cette
+  description disait encore « FINESS DREES (bimestriel) » et instruisait
+  d'alerter sur `staleness_days > 90` — le champ que le post-mortem venait de
+  prouver trompeur. `panorama_implantation_complet` affiche « maj
+  `last_data_change_at` ».
+  - **Preuve (2026-09-05, trois dry-runs puis run réel en 91,8 s, swap + canary
+    5/5 + rebuild `finess_hosted_activities` 19,9 s)** : 104 734 établissements
+    (+17 450 nouveaux, −6 119 retirés — échantillon de 400 : **tous fermés dans le
+    flux ANS, 387 avant mai 2026**, le CSV DREES servait des établissements fermés
+    depuis 2010), **99 463 géolocalisés contre 93 401 (+6 062)**, **`lost_geom = 0`**
+    (aucun établissement existant ne perd son point ; les 5 271 sans point sont
+    tous nouveaux — 3 797 métropole, 1 474 DOM — à géocoder en phase 2), 2 816 DOM,
+    5 395 points déplacés de > 500 m (médiane 1,3 km, max 98 km, aucun aberrant).
+    `MIN_GEOM_COVERAGE` fixé à 0,93 sur la baseline mesurée 94,97 % ; la
+    non-régression est gardée par `MOVED_MAX_RATE` (cf. plus bas — `lost_geom`
+    s'est révélé tautologique). **Run réel n°2 avec le code final après revue :
+    `success` en 69 s**, 186 centroïdes commune refusés et repris par le repli,
+    canary 5/5. Détail : `docs/plans/finess-migration-ans.md` § 6.
+- **Fraîcheur honnête (`data_freshness`, `src/storage/ingest-log.ts`)** :
+  `last_data_change_at` / `data_age_days` = dernier run ayant réellement changé la
+  donnée (`success`/`partial` sans `skip_reason`). `staleness_days` annonçait
+  4 jours pour une donnée FINESS de 113 jours ; il reste exposé (il répond à une
+  autre question). Test rejouant la séquence réelle d'`ingest_log`.
+
+### Fixed
+
+- **`FORCE_REINGEST` inopérant sur FINESS** : le script ne transmettait pas `force`
+  à `shortCircuitIfSameChecksum` (Ameli, RPPS et IRIS le font) et le workflow
+  n'avait ni input `force` ni env `FORCE_REINGEST` — un forçage ops y était
+  ignoré en silence. Câblé sur le modèle d'`ingest-rpps.yml` (`inputs.force`,
+  jamais `github.event.inputs.force`). Découvert en relançant un dry-run après
+  le run réel : même checksum, court-circuit… malgré le flag.
+- Canary FINESS `130786049` (« Timone ») n'a jamais existé dans FINESS — en échec
+  logué à chaque run depuis le 2026-05-15 ; remplacé par `130783293` (APHM Hôpital
+  la Timone). Description de `750100166` corrigée (site Cochin, pas Pitié).
+
 ## [0.27.0] — 2026-09-05 — Ingestion plus robuste : géocodage BAN sur deux hôtes avec repli, 9 305 rejets périmés récupérés, positions RPPS affinées (repli FINESS), cron RPPS fiabilisé, observabilité non-bloquante
 
 > Regroupe tout le travail depuis la 0.26.3 (juin → septembre 2026). Surface MCP inchangée : 13 référentiels / 36 outils.

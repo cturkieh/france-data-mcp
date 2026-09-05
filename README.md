@@ -54,7 +54,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, Centres de 
 ## Périmètre — 13 sources publiques croisées
 
 - 🗺️ **Territoire** (2) : geo.api.gouv.fr (DINUM, communes), IGN Géoplateforme (géocodage)
-- 🏥 **Santé** (3) : FINESS / DREES (~95 K établissements), Annuaire Santé Ameli (~462 K libéraux), RPPS / ANS (~2,2 M PS actifs)
+- 🏥 **Santé** (3) : FINESS / ANS (~105 K établissements en service, DOM inclus — flux JSON quotidien qui remplace le CSV DREES arrêté en juillet 2026), Annuaire Santé Ameli (~466 K libéraux), RPPS / ANS (~2,28 M PS actifs)
 - 🩺 **Centres de Santé** (1) : Annuaire santé CNAM (~3 K structures L.6323-1 CSP, sync hebdomadaire)
 - 📊 **Démographie infracommunale** (2) : INSEE IRIS (~48,6 K quartiers — RP 2022, FILOSOFI 2021 revenu, contours IGN) + INSEE Melodi (population de référence)
 - 🏢 **Entreprises** (2) : DINUM Recherche Entreprises + INSEE SIRENE V3.11
@@ -75,7 +75,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, Centres de 
 ### 🏥 Établissements santé FINESS (3)
 `etablissements_finess_in_radius` · `etablissements_finess_by_categorie` · `etablissement_by_finess`
 
-> 24 familles couvrant ~92 % du volume. Source DREES rafraîchie bimestriellement.
+> 24 familles couvrant ~92 % du volume. Source ANS publiée quotidiennement, ingérée le 1ᵉʳ et le 15 du mois.
 
 ### 👨‍⚕️ Professionnels libéraux Ameli (2)
 `professionnels_in_radius` · `professionnels_par_specialite_dept`

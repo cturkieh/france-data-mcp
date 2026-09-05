@@ -98,5 +98,5 @@ export const INCLUDE_FRESHNESS_SCHEMA = {
   type: "boolean",
   default: false,
   description:
-    "Si true, ajoute un champ `data_freshness` au payload (dans `query_metadata` si présent, sinon à la racine) listant la dernière ingestion réussie par source (FINESS, Ameli, RPPS, CDS) avec `staleness_days`. Opt-in pour ne pas alourdir les payloads par défaut. Cache 5min côté serveur — coût négligeable.",
+    "Si true, ajoute un champ `data_freshness` au payload (dans `query_metadata` si présent, sinon à la racine) listant, par source (FINESS, Ameli, RPPS, CDS, IRIS), la dernière ingestion réussie (`last_success_at`, `staleness_days`) ET la dernière fois que la donnée a réellement changé (`last_data_change_at`, `data_age_days` — un run court-circuité « fichier amont identique » compte comme succès mais ne rajeunit pas la donnée ; c'est `data_age_days` qui dit l'âge réel de ce qui est servi). Opt-in pour ne pas alourdir les payloads par défaut. Cache 5min côté serveur — coût négligeable.",
 } as const;

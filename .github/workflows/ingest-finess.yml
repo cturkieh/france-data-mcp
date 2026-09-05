@@ -3,9 +3,16 @@ name: Ingest FINESS
 
 on:
   schedule:
-    # 1st and 15th of each month at 04:00 UTC (FINESS publishes bimonthly)
+    # 1st and 15th of each month at 04:00 UTC. Since 2026-09-05 the source is
+    # the ANS daily JSON feed (the DREES CSV stopped on 2026-07-20) — the
+    # bimonthly cadence is ours, not the publisher's (~105 K rows, ~90 s).
     - cron: "0 4 1,15 * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Forcer la ré-ingestion même si le fichier ANS est identique au dernier run (bypass court-circuit SHA256). Run complet ~2 min + swap atomique."
+        type: boolean
+        default: false
 
 # Never run on pull_request — secrets are not available there, by design.
 
@@ -48,6 +55,13 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Input booléen typé du workflow_dispatch → "1" si coché, sinon "0".
+          # Cron planifié = inputs absent → falsy → "0".
+          # ⚠️ NE JAMAIS remplacer `inputs.force` par `github.event.inputs.force` :
+          # ce dernier STRINGIFIE le booléen → la string "false" est TRUTHY en
+          # expression Actions → force à CHAQUE cron. Le contexte `inputs`
+          # PRÉSERVE le booléen — load-bearing, même règle que ingest-rpps.yml.
+          FORCE_REINGEST: ${{ inputs.force && '1' || '0' }}
         run: pnpm ingest:finess
 
       # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.

@@ -1139,7 +1139,11 @@ describe("data_freshness (MCP tool — V0.6.1)", () => {
         last_attempt_at: "2026-04-30T00:00:00Z",
         last_attempt_status: "success",
         staleness_days: 11,
-        cadence_hint: "bimestrielle (~tous les 2 mois côté DREES)",
+        last_data_change_at: "2026-04-30T00:00:00Z",
+        data_age_days: 11,
+        expected_max_age_days: 30,
+        cadence_hint:
+          "quotidienne côté ANS (flux JSON nouvelle génération) ; cron le 1er et le 15 du mois",
       },
       {
         source: "ameli_ps",
@@ -1148,6 +1152,9 @@ describe("data_freshness (MCP tool — V0.6.1)", () => {
         last_attempt_at: "2026-05-10T00:00:00Z",
         last_attempt_status: "success",
         staleness_days: 1,
+        last_data_change_at: "2026-05-10T00:00:00Z",
+        data_age_days: 1,
+        expected_max_age_days: 14,
         cadence_hint: "hebdomadaire (côté Annuaire Santé Ameli)",
       },
       {
@@ -1157,6 +1164,9 @@ describe("data_freshness (MCP tool — V0.6.1)", () => {
         last_attempt_at: null,
         last_attempt_status: null,
         staleness_days: null,
+        last_data_change_at: null,
+        data_age_days: null,
+        expected_max_age_days: 45,
         cadence_hint: "mensuelle (côté Annuaire Santé ANS)",
       },
     ]);

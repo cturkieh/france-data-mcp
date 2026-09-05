@@ -1,18 +1,32 @@
 import "./load-env.js";
 import * as fs from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { createGunzip } from "node:zlib";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { parse } from "csv-parse";
+import { parser } from "stream-json";
+import { pick } from "stream-json/filters/pick.js";
+import { streamArray } from "stream-json/streamers/stream-array.js";
+import { parseRpcCount } from "../../src/core/parse-rpc-count.js";
 import { finessFamille } from "../../src/sante/finess-categories.js";
-import { isValidDept } from "../../src/territoire/dept-codes.js";
+import { type AnsPmej, type FinessStagingRow, mapEgeToRow } from "./finess-ans-parse.js";
 import {
+  type Assessment,
+  type IngestStreamStats,
+  type StagingDiff,
+  assessParsedRows,
+  assessStagingDiff,
+} from "./finess-validate.js";
+import {
+  GZIP_MAGIC,
   IngestError,
   type IngestLogEntry,
+  appendLogMessage,
   atomicSwapTables,
   downloadCsv,
   getLastSuccessChecksum,
-  getNonEmpty,
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
+  isForceReingestEnv,
   preValidateFile,
   rebuildHostedActivities,
   runAndRecordCanary,
@@ -22,18 +36,34 @@ import {
   writeIngestLogSuccessSafe,
 } from "./shared.js";
 
-// Canonical FINESS extract on data.gouv (geocoded version). Verify the resource
-// id is current at https://www.data.gouv.fr/fr/datasets/finess-extraction-du-fichier-des-etablissements/
-// before each release — the data.gouv dataset slug is stable, but the underlying
-// resource id can rotate. Override at runtime via FINESS_CSV_URL env var.
-const FINESS_CSV_URL =
-  process.env.FINESS_CSV_URL ??
-  "https://www.data.gouv.fr/fr/datasets/r/3dc9b1d5-0157-440d-a7b5-c894fcfdfd45";
+/**
+ * Ingestion FINESS depuis le flux « nouvelle génération » de l'ANS
+ * (dataset data.gouv `finess-structures-1`, JSON.gz quotidien).
+ *
+ * Pourquoi plus le CSV DREES : la DREES a arrêté la génération des flux le
+ * 20 juillet 2026 (dernier millésime 04/05/2026). Le cron court-circuitait en
+ * `same_checksum` depuis juin, statut `success`, sans qu'aucun signal ne
+ * distingue « rien de neuf en amont » de « source morte ». Post-mortem et
+ * inventaire du flux ANS : `docs/plans/finess-migration-ans.md`.
+ *
+ * Ressource journalière : l'id `cd493959-…` est STABLE (créé le 2026-05-06,
+ * modifié chaque jour) — l'URL data.gouv redirige vers le fichier du jour.
+ * Le contenu changeant quotidiennement (`generatedAt`), le court-circuit par
+ * checksum ne s'applique qu'à un re-jeu le même jour (~105 K lignes, ~50 s
+ * par run). Conservé pour la symétrie avec les autres crons.
+ *
+ * Mapping du flux : `finess-ans-parse.ts` (pur, testé sur fixtures réelles).
+ * Politique de validation (seuils qui décident du swap) : `finess-validate.ts`
+ * (pur, testé sur les chiffres mesurés). Ici : l'orchestration seulement.
+ */
+const FINESS_ANS_URL =
+  process.env.FINESS_ANS_URL ??
+  "https://www.data.gouv.fr/fr/datasets/r/cd493959-fb03-41e5-9347-0edd14dfbc22";
 
-const MIN_SIZE_BYTES = 30_000_000; // FINESS extract is ~35 MB; 30 MB threshold catches truncations.
-const MIN_ROWS = 50_000;
-const MAX_ROWS = 200_000;
-const BATCH_SIZE = 500;
+/** Le .gz pèse ~50 Mo (715 Mo décompressés) ; 30 Mo attrape une troncature. */
+const MIN_GZ_SIZE_BYTES = 30_000_000;
+/** Aligné sur RPPS (`rpps.ts`) : ~105 lots au lieu de 210, payload ≈ 600 Ko, sous les limites PostgREST. */
+const BATCH_SIZE = 1_000;
 
 /**
  * How long to wait after `NOTIFY pgrst, 'reload schema'` before issuing the
@@ -44,57 +74,14 @@ const BATCH_SIZE = 500;
  */
 const PGRST_RELOAD_WAIT_MS = 2000;
 
-/** Rows per batched call to `ingest_apply_finess_geom_batch` (PostgREST 60s proxy timeout safe). */
-const GEOM_BATCH_SIZE = 10_000;
-
-/** Hard floor on geocoded-rows ratio. Below this, we suspect a CSV format change. */
-const MIN_GEOM_COVERAGE = 0.8;
-
 /**
- * Aborts the run when structural anomalies (missing nofinesset, missing
- * commune, ligneacheminement format change) cross 1% — those grow rapidly
- * past 1% on real upstream regressions.
+ * `FINESS_DRY_RUN=1` : tout le pipeline jusqu'à la validation (staging
+ * peuplée, repli geom appliqué, diff staging↔prod loguée), puis ARRÊT avant
+ * le swap. La staging est conservée pour inspection SQL. Aucune ligne
+ * `ingest_log` n'est écrite. Sert à prouver une migration de format avant
+ * de basculer la prod.
  */
-const STRUCTURAL_FAIL_THRESHOLD = 0.01;
-
-/**
- * Aborts the run when `bad_dept` skips cross 5%. Steady state is ~2.5%
- * (csv-parse `relax_quotes` cannot recover all un-quoted commas in `rs` /
- * `voie`); a real DREES layout change pushes far past 5%.
- */
-const BAD_DEPT_NOISE_THRESHOLD = 0.05;
-
-/**
- * Expected envelope for the "autre" famille. Catalogue covers ~92% of
- * FINESS volume by design; above 15%, DREES likely introduced a new code
- * at scale and FINESS_CATEGORIES needs extending. Warning, not blocker.
- */
-const AUTRE_FAMILY_DRIFT_THRESHOLD = 0.15;
-
-interface FinessStagingRow {
-  num_finess: string;
-  raison_sociale: string;
-  categorie_code: string | null;
-  categorie_libelle: string | null;
-  num_voie: string | null;
-  type_voie: string | null;
-  voie: string | null;
-  code_postal: string | null;
-  code_departement: string;
-  code_insee: string;
-  ville: string | null;
-  telephone: string | null;
-  email: string | null;
-  date_ouverture: string | null;
-  date_maj: string | null;
-  /** EWKT string — PostGIS auto-casts to `geometry(Point, 4326)` on insert. */
-  geom: string | null;
-  /** Lambert 93 X coordinate (EPSG:2154), parsed from CSV. NULL if missing/invalid. */
-  coordx_lambert93: number | null;
-  /** Lambert 93 Y coordinate (EPSG:2154), parsed from CSV. NULL if missing/invalid. */
-  coordy_lambert93: number | null;
-  raw: Record<string, string>;
-}
+const DRY_RUN = process.env.FINESS_DRY_RUN === "1";
 
 async function main(): Promise<void> {
   const startedAt = new Date().toISOString();
@@ -102,212 +89,130 @@ async function main(): Promise<void> {
     source: "finess",
     started_at: startedAt,
     status: "failed",
-    csv_url: FINESS_CSV_URL,
+    csv_url: FINESS_ANS_URL,
     github_run_url: process.env.GITHUB_RUN_URL,
   };
 
   try {
-    // 1. DOWNLOAD + lookup last success checksum en parallèle. Le checksum
-    // précédent ne dépend pas du download courant — Promise.all économise un
-    // RTT Supabase sur le chemin nominal. DREES regenerates le FINESS extract
-    // hebdomadaire mais le contenu peut être byte-identique entre 2 runs ; on
-    // skip COPY/VALIDATE/SWAP dans ce cas (économise plusieurs min Postgres).
+    // Un dry-run dans le cron produirait un run VERT sans swap ni ligne
+    // ingest_log — exactement la classe d'échec silencieux que ce script
+    // corrige. Refusé sous GitHub Actions (variable oubliée dans un env).
+    if (DRY_RUN && process.env.GITHUB_ACTIONS === "true") {
+      throw new IngestError(
+        "validate",
+        "FINESS_DRY_RUN=1 refusé sous GITHUB_ACTIONS — un dry-run en cron serait un run vert sans trace",
+      );
+    }
+
+    // 1. DOWNLOAD + lookup last success checksum en parallèle.
     const [downloaded, lastSha] = await Promise.all([
-      downloadCsv(FINESS_CSV_URL, "finess.csv"),
+      downloadCsv(FINESS_ANS_URL, "finess-structures.json.gz"),
       getLastSuccessChecksum("finess"),
     ]);
     log.csv_size_bytes = downloaded.sizeBytes;
     log.csv_sha256 = downloaded.sha256;
 
-    if (await shortCircuitIfSameChecksum(log, lastSha, downloaded.sha256, "finess")) return;
+    // `FORCE_REINGEST=1` (workflow_dispatch ops, ou re-jeu local) : le
+    // chokepoint marque `ingest_log.forced = true`. L'ancien script FINESS ne
+    // transmettait pas ce flag — un forçage y était silencieusement ignoré.
+    // Un dry-run force aussi : il doit exercer TOUT le pipeline, et le
+    // court-circuit écrirait une ligne `ingest_log` (contrat du dry-run :
+    // aucune).
+    const force = isForceReingestEnv(process.env.FORCE_REINGEST) || DRY_RUN;
+    if (!force && lastSha === downloaded.sha256) {
+      // Flux QUOTIDIEN : deux crons à quinze jours d'écart avec le même SHA
+      // ne signifient pas « rien de neuf » mais « publication ANS gelée » —
+      // le symptôme exact de la panne DREES de 2026. Loud, puis court-circuit
+      // (la donnée servie reste juste ; `data_age_days` le dit au caller).
+      const frozen = `fichier ANS identique au dernier run (${downloaded.sha256.slice(0, 8)}…) alors que le flux est quotidien — publication gelée côté ANS ?`;
+      console.warn(`[finess] ⚠️ ${frozen}`);
+      // Aussi dans `ingest_log` : le log Actions expire à 90 jours, la
+      // table est interrogeable en SQL.
+      appendLogMessage(log, frozen);
+    }
+    if (await shortCircuitIfSameChecksum(log, lastSha, downloaded.sha256, "finess", force)) {
+      return;
+    }
 
-    // 2. PRE-VALIDATE
+    // 2. PRE-VALIDATE — taille + signature gzip (page HTML de maintenance
+    // servie en 200 = ni la taille ni les deux octets magiques).
     await preValidateFile(downloaded.filePath, {
-      minSizeBytes: MIN_SIZE_BYTES,
-      expectedHeaderColumns: ["nofinesset", "rs", "categetab", "departement"],
-      // The data.gouv geocoded FINESS CSV is comma-delimited (NOT ";", which
-      // would be the convention for raw ANS extracts). Verified from a real
-      // run on 2026-05-08 — first line started with "," (empty first column).
-      delimiter: ",",
+      minSizeBytes: MIN_GZ_SIZE_BYTES,
+      magicBytes: GZIP_MAGIC,
     });
 
-    // 3. COPY → STAGING
+    // 3. STREAM → STAGING
     const supabase = getUntypedServiceClient("finess");
     const { error: stagingErr } = await supabase.rpc("ingest_create_finess_staging");
     if (stagingErr) {
       throw new IngestError("copy", `Failed to create finess_staging table: ${stagingErr.message}`);
     }
-    // The RPC emits NOTIFY pgrst,'reload schema' but PostgREST polls on a
-    // small interval — wait so the next insert finds the table in the schema
-    // cache instead of "Could not find the table 'public.finess_staging'".
     await new Promise((resolve) => setTimeout(resolve, PGRST_RELOAD_WAIT_MS));
 
-    const stats = await streamCsvToStaging(downloaded.filePath, supabase);
+    const stats = await streamAnsToStaging(downloaded.filePath, supabase);
     log.row_count = stats.inserted;
+    const skippedTotal = Object.values(stats.skipped).reduce((a, b) => a + b, 0);
+    const skippedDetail = Object.entries(stats.skipped)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(", ");
+    console.log(
+      `[finess] ${stats.pmej} PMEJ, ${stats.inserted + skippedTotal} EGE lus → ${stats.inserted} en service insérés ; écartés : ${skippedDetail}`,
+    );
 
-    // 4. VALIDATE COHERENCE
-    if (stats.inserted < MIN_ROWS) {
+    // 4a. VALIDATION DU PARSING — volume, anomalies structurelles,
+    // coordonnées inexploitables, nomenclature, débordements de colonne.
+    // Avant toute RPC : inutile de travailler une staging déjà invalide.
+    applyAssessment(assessParsedRows(stats));
+
+    // 4b. REPLI `previous_ingest` — reprend le point de la prod actuelle pour
+    // les num_finess déjà connus sans coordonnées ANS (migration
+    // 20260905T210000 ; pourquoi PAS de centroïde commune : elle le documente).
+    // Un seul UPDATE PK↔PK (~21 K lignes touchées sur 105 K, sub-seconde sous
+    // les 55 s de la fonction) ; un 57014 tomberait ICI, avant le swap, prod
+    // intacte — le keyset de `runKeysetRpc` répond à un problème (1,3 M lignes,
+    // sentinelle quadratique) que FINESS n'a pas.
+    const { data: previousApplied, error: prevErr } = await supabase.rpc(
+      "ingest_apply_finess_geom_previous",
+    );
+    if (prevErr) {
       throw new IngestError(
         "validate",
-        `Row count ${stats.inserted} below minimum ${MIN_ROWS} — suspected partial parse`,
+        `ingest_apply_finess_geom_previous failed: ${prevErr.message}`,
       );
     }
-    if (stats.inserted > MAX_ROWS) {
-      throw new IngestError(
-        "validate",
-        `Row count ${stats.inserted} above maximum ${MAX_ROWS} — suspected format change`,
-      );
-    }
+    const previousCount = parseRpcCount(previousApplied, "ingest_apply_finess_geom_previous");
+    console.log(`[finess] repli previous_ingest : ${previousCount} points repris de la prod`);
 
-    // 4b. APPLY GEOM (Lambert 93 → WGS84 transform server-side, batched)
-    // The CSV uses coordxet/coordyet (EPSG:2154) which were stored in `raw`.
-    // We batch the UPDATE to stay under PostgREST's 60s proxy timeout — each
-    // call updates up to GEOM_BATCH_SIZE rows that don't yet have a geom,
-    // and we loop until the RPC returns fewer rows than requested.
-    // Bounded safety net: 95K rows / 10K batch = 10 iterations max under
-    // healthy operation. We add a generous margin so a slow tail (last batch
-    // tiny) doesn't trip the cap, but a runaway loop (RPC contract regression)
-    // will surface as a clear error instead of hanging the workflow.
-    const maxGeomIterations = Math.ceil(stats.inserted / GEOM_BATCH_SIZE) + 5;
-    let updated = 0;
-    let iter = 0;
-    while (true) {
-      if (++iter > maxGeomIterations) {
-        throw new IngestError(
-          "validate",
-          `Geom transform did not converge after ${maxGeomIterations} batches — likely RPC contract regression (rows updated but geom still NULL)`,
-        );
-      }
-      const { data: batchUpdated, error: geomErr } = await supabase.rpc(
-        "ingest_apply_finess_geom_batch",
-        { p_limit: GEOM_BATCH_SIZE },
-      );
-      if (geomErr) {
-        throw new IngestError("validate", `Failed to apply geom transform: ${geomErr.message}`);
-      }
-      // Strict type check: the RPC must return a number. A null/string/object
-      // is a PostgREST or Supabase serialization regression that we want to
-      // fail loud, not coerce to 0 (which would silently exit the loop early).
-      if (typeof batchUpdated !== "number") {
-        throw new IngestError(
-          "validate",
-          `ingest_apply_finess_geom_batch returned ${typeof batchUpdated} instead of number — RPC contract regression`,
-        );
-      }
-      updated += batchUpdated;
-      // Exit ONLY on 0 — that's the canonical "no more rows to process"
-      // signal. A short-but-non-zero batch (lock contention, planner choosing
-      // parallel scan that returns slightly fewer than asked) does NOT mean
-      // we're done.
-      if (batchUpdated === 0) break;
-    }
-    console.log(`[finess] geom transform: ${updated}/${stats.inserted} rows geocoded`);
-    if (updated < stats.inserted * MIN_GEOM_COVERAGE) {
-      const pct = (MIN_GEOM_COVERAGE * 100).toFixed(0);
-      throw new IngestError(
-        "validate",
-        `Only ${updated}/${stats.inserted} rows have a valid geom (< ${pct}% threshold) — coordxet/coordyet likely missing or malformed`,
-      );
-    }
+    // 4c. DIFF STAGING ↔ PROD — une seule RPC porte la couverture géo, les
+    // disparitions et la non-régression ; loguée systématiquement.
+    // `moved_gt_500m` est informatif (recalage BAN côté ANS).
+    const diff = await fetchStagingDiff(supabase);
+    console.log(`[finess] diff staging↔prod : ${JSON.stringify(diff)}`);
 
-    // Two anomaly families with distinct semantics — see threshold consts.
-    //   - structural (STRUCTURAL_FAIL_THRESHOLD) : DREES schema change.
-    //   - bad_dept (BAD_DEPT_NOISE_THRESHOLD)    : csv-parse baseline noise.
-    //   - DOM rows are a documented architectural limit, log-only.
-    const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
-    const rateOf = (failures: number) =>
-      stats.inserted > 0 ? failures / (stats.inserted + failures) : 0;
-    const blockingFailures = stats.skippedNoFinessId + stats.skippedNoCommune;
-    const skipRate = rateOf(blockingFailures + stats.parsedNoLigneAch);
-    const badDeptRate = rateOf(stats.skippedBadDept);
-    if (stats.skippedDom > 0) {
-      console.log(
-        `[finess] skipped ${stats.skippedDom} DOM rows (architectural limit — V0.3 widens code_insee to support DOM)`,
-      );
-    }
-    if (stats.skippedBadDept > 0) {
-      console.log(
-        `[finess] skipped ${stats.skippedBadDept} bad-dept rows (${fmt(badDeptRate)} — csv-parse column shifts on unquoted commas, baseline noise)`,
-      );
-      if (badDeptRate > BAD_DEPT_NOISE_THRESHOLD) {
-        throw new IngestError(
-          "validate",
-          `Bad-dept rate ${fmt(badDeptRate)} above ${fmt(BAD_DEPT_NOISE_THRESHOLD)} — beyond the steady-state CSV noise floor, likely a real DREES layout change`,
-        );
-      }
-    }
-    if (blockingFailures > 0 || stats.parsedNoLigneAch > 0) {
-      console.warn(
-        `[finess] structural parsing anomalies (${fmt(skipRate)} of inserted): ${stats.skippedNoFinessId} missing nofinesset, ${stats.skippedNoCommune} missing commune, ${stats.parsedNoLigneAch} ligneacheminement non-match (DREES format change suspect)`,
-      );
-      if (skipRate > STRUCTURAL_FAIL_THRESHOLD) {
-        throw new IngestError(
-          "validate",
-          `Structural parsing anomaly rate ${fmt(skipRate)} above ${fmt(STRUCTURAL_FAIL_THRESHOLD)} — likely upstream regression (required column rename/removed or ligneacheminement format change)`,
-        );
-      }
-    }
-    // V0.4.3 — coord rejection ladder. Soft warn à >2% (drift léger), hard
-    // throw à >5%. MIN_GEOM_COVERAGE 0.8 côté swap atomic ne catch QUE après
-    // reprojection server-side : un drift 5-15% au parse rejette les rows
-    // upstream (`coordx_lambert93 = null` à l'insert), géom NULL, et
-    // ST_DWithin les ignore — ingestion silencieusement partielle. On bloque
-    // explicitement avant le swap.
-    const coordRejectRate = rateOf(stats.parsedCoordRejected);
-    if (stats.parsedCoordRejected > 0 && coordRejectRate > 0.02) {
-      console.warn(
-        `[finess] coords Lambert93 rejected by strict regex : ${stats.parsedCoordRejected} rows (${fmt(coordRejectRate)} of inserted). Expected baseline < 2% — investigate column shift or DREES coord format change.`,
-      );
-      if (coordRejectRate > 0.05) {
-        throw new IngestError(
-          "validate",
-          `Lambert93 coord rejection rate ${fmt(coordRejectRate)} above 5% — likely upstream regression (CSV column shift on coordxet/coordyet, or DREES format change). Refusing to swap a partially geocoded ingestion.`,
-        );
-      }
-    }
+    // 4d. VALIDATION DE LA DIFF — couverture géo, établissements disparus,
+    // non-régression de la géolocalisation.
+    applyAssessment(assessStagingDiff(stats, diff));
 
-    // 4d. NOMENCLATURE DRIFT — surface DREES codes that fell into "autre".
-    // Catalogue covers ~92% of FINESS volume by design. If `autre` overshoots
-    // its expected envelope, DREES probably introduced a new code at scale
-    // (new structure type 2026, etc.). Logged as warning, not blocker.
-    if (stats.unknownCategorieCounts.size > 0) {
-      const totalAutre = [...stats.unknownCategorieCounts.values()].reduce((a, b) => a + b, 0);
-      const autreRate = stats.inserted > 0 ? totalAutre / stats.inserted : 0;
-      const top = [...stats.unknownCategorieCounts.entries()]
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 5)
-        .map(([code, count]) => `${code}=${count}`)
-        .join(", ");
+    if (DRY_RUN) {
       console.log(
-        `[finess] ${stats.unknownCategorieCounts.size} codes catégorie en famille "autre" (${fmt(autreRate)} du volume). Top: ${top}`,
+        "[finess] DRY RUN — validation passée, swap NON exécuté. finess_staging conservée pour inspection ; aucune ligne ingest_log écrite.",
       );
-      if (autreRate > AUTRE_FAMILY_DRIFT_THRESHOLD) {
-        console.warn(
-          `[finess] ⚠️ "autre" rate ${fmt(autreRate)} above ${fmt(AUTRE_FAMILY_DRIFT_THRESHOLD)} expected envelope — DREES nomenclature drift suspect, consider extending FINESS_CATEGORIES`,
-        );
-      }
+      return;
     }
 
     // 5. ATOMIC SWAP
     await atomicSwapTables({ prodTable: "finess" });
 
-    // 5b. CANARY POST-SWAP — non-bloquant. Vérifie que les num_finess
-    // hardcodés dans `ingest_canary_targets` sont bien présents en prod après
-    // le swap. Si l'un disparaît, on logue dans `canary_failures` sans rollback.
+    // 5b. CANARY POST-SWAP — non-bloquant.
     await runAndRecordCanary(supabase, "finess", log, "finess");
 
-    // 5c. REBUILD `finess_hosted_activities` post-swap (Phase 2 — chantier
-    // « Complétude territoriale & lentilles »). La matview JOIN `finess` ET
-    // `rpps` → suit l'OID de la table swappée → DOIT être rebuilt (jamais
-    // REFRESH). Hook symétrique côté RPPS dans `scripts/ingest/rpps.ts`.
-    // Politique d'erreur (partial sans throw, couche secondaire) dans
-    // `rebuildHostedActivities` (`./shared.js`).
+    // 5c. REBUILD `finess_hosted_activities` post-swap — la matview JOIN
+    // `finess` ET `rpps` → suit l'OID de la table swappée → DOIT être
+    // rebuilt (jamais REFRESH). Politique d'erreur dans `rebuildHostedActivities`.
     await rebuildHostedActivities(supabase, log, "finess");
 
-    // SUCCESS — IMPORTANT : préserver un éventuel `status: "partial"` posé
-    // par `rebuildHostedActivities` (échec de la couche secondaire = dégradation
-    // bénigne ; le cron FINESS principal a réussi). NE PAS écraser
-    // silencieusement avec "success" — même pattern défensif que rpps.ts.
+    // SUCCESS — préserver un éventuel `status: "partial"` posé par
+    // `rebuildHostedActivities` (couche secondaire), ne JAMAIS l'écraser.
     if (log.status !== "partial") {
       log.status = "success";
     }
@@ -317,9 +222,7 @@ async function main(): Promise<void> {
     console.log(`[finess] success: ${stats.inserted} rows ingested in ${elapsedSec}s`);
   } catch (err) {
     console.error("[finess] ingestion failed:", err);
-    // Wrap non-IngestError as `validate` (programming bug catch-all) — using
-    // "download" by default mis-attributes a TypeError thrown during swap
-    // as "CSV download failure". Same pattern as Ameli (V0.4).
+    // Wrap non-IngestError as `validate` (programming bug catch-all).
     const ingestErr =
       err instanceof IngestError
         ? err
@@ -338,59 +241,110 @@ async function main(): Promise<void> {
   }
 }
 
-interface IngestStreamStats {
-  inserted: number;
-  skippedNoFinessId: number;
-  skippedNoCommune: number;
-  skippedBadDept: number;
-  skippedDom: number;
-  parsedNoLigneAch: number;
-  /**
-   * Lignes où `coordxet` ou `coordyet` étaient présents dans le CSV mais ont
-   * été rejetés par `parseLambert93Coord` (regex stricte). Symétrique à
-   * `parsedNoLigneAch` : surface un drift 5-15% que `MIN_GEOM_COVERAGE=0.8`
-   * ne catche pas, signalant un column shift ou un format upstream modifié
-   * par DREES.
-   */
-  parsedCoordRejected: number;
-  /**
-   * Codes catégorie that finessFamille() classified as "autre" together with
-   * the count of rows. Surfaces a DREES nomenclature drift early — if a new
-   * code lands at high volume, the operator can decide to add it to
-   * FINESS_CATEGORIES + a family in one PR.
-   */
-  unknownCategorieCounts: Map<string, number>;
+/** Logue info + warnings, puis refuse le swap si au moins un fatal. */
+function applyAssessment(a: Assessment): void {
+  for (const line of a.info) console.log(line);
+  for (const line of a.warnings) console.warn(line);
+  if (a.fatal.length > 0) throw new IngestError("validate", a.fatal.join(" | "));
 }
 
-async function streamCsvToStaging(
+/** `ingest_finess_staging_diff()` → jsonb, validé champ par champ (fail-loud). */
+async function fetchStagingDiff(supabase: SupabaseClient): Promise<StagingDiff> {
+  const { data, error } = await supabase.rpc("ingest_finess_staging_diff");
+  if (error) {
+    throw new IngestError("validate", `ingest_finess_staging_diff failed: ${error.message}`);
+  }
+  if (typeof data !== "object" || data === null) {
+    throw new IngestError("validate", "ingest_finess_staging_diff returned a non-object");
+  }
+  const d = data as Record<string, unknown>;
+  // `parseRpcCount` = garde unique des compteurs RPC du repo (accepte aussi la
+  // string décimale que PostgREST renvoie sur un BIGINT).
+  const num = (k: keyof StagingDiff): number =>
+    parseRpcCount(d[k], `ingest_finess_staging_diff.${k}`);
+  const sources: Record<string, number> = {};
+  const rawSources = d.staging_geom_source;
+  if (typeof rawSources === "object" && rawSources !== null) {
+    // Une valeur non numérique = régression de la RPC : fail-loud plutôt
+    // qu'un breakdown amputé qui se lirait comme un breakdown complet.
+    for (const [k, v] of Object.entries(rawSources)) {
+      sources[k] = parseRpcCount(v, `ingest_finess_staging_diff.staging_geom_source.${k}`);
+    }
+  }
+  return {
+    staging_rows: num("staging_rows"),
+    prod_rows: num("prod_rows"),
+    prod_with_geom: num("prod_with_geom"),
+    added: num("added"),
+    removed: num("removed"),
+    lost_geom: num("lost_geom"),
+    moved_gt_500m: num("moved_gt_500m"),
+    staging_geom_null: num("staging_geom_null"),
+    staging_geom_source: sources,
+  };
+}
+
+/**
+ * Décompresse et parse le JSON EN FLUX : 715 Mo décompressés dépassent la
+ * taille maximale d'une chaîne V8 (~512 Mo), `JSON.parse` est impossible.
+ * `pick({filter: "pmej"})` isole le tableau des personnes morales,
+ * `streamArray` émet une PMEJ à la fois (avec ses EGE), la mémoire reste
+ * bornée. `stream.pipeline` propage toute erreur gunzip/parse jusqu'ici
+ * — un `.pipe()` nu laisserait le for-await pendre en silence.
+ */
+async function streamAnsToStaging(
   filePath: string,
   supabase: SupabaseClient,
 ): Promise<IngestStreamStats> {
-  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
+  const out = streamArray.asStream();
+  // Une erreur amont (gunzip, JSON) détruit `out` : le for-await ci-dessous
+  // throw et remonte au catch de main(). On la logue AUSSI ici — c'est la
+  // trace la plus proche de la cause (offset gzip, token JSON) — et on la
+  // mémorise pour fail-loud si, par régression de la lib, le for-await se
+  // terminait proprement malgré un pipeline en erreur.
+  let pipelineError: unknown = null;
+  const done = pipeline(
+    // 1 Mo par lecture/décompression : 715 Mo décompressés en ~700 chunks au
+    // lieu de ~44 000 aux tailles par défaut (64 Ko / 16 Ko).
+    fs.createReadStream(filePath, { highWaterMark: 1 << 20 }),
+    createGunzip({ chunkSize: 1 << 20 }),
+    // `streamValues: false` : sinon le parser émet 4 tokens par scalaire
+    // (start/chunk/end + valeur empaquetée) dont `pick` et `streamArray`
+    // n'exploitent que le dernier — ~75 % des tokens alloués pour rien.
+    parser.asStream({ streamValues: false }),
+    pick.asStream({ filter: "pmej" }),
+    out,
+  ).catch((err: unknown) => {
+    pipelineError = err;
+    console.error(
+      `[finess] stream pipeline (gunzip → stream-json) failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
 
-  const parser = stream.pipe(
-    parse({
-      // Match the pre-validate delimiter — see header-validation block above.
-      delimiter: ",",
-      columns: true,
-      skip_empty_lines: true,
-      relax_quotes: true,
-      trim: true,
-      bom: true,
-    }),
-  );
+  const stats: IngestStreamStats = {
+    inserted: 0,
+    pmej: 0,
+    skipped: {
+      no_finess_id: 0,
+      bad_finess_id: 0,
+      ferme: 0,
+      inactif: 0,
+      no_adresse_geographique: 0,
+      no_commune: 0,
+      bad_commune: 0,
+    },
+    geomByLayout: { wgs84_first: 0, lambert_first: 0 },
+    coordsUnusable: 0,
+    nullCategorieCode: 0,
+    emptyRaisonSociale: 0,
+    municipalityRejected: 0,
+    unknownCategorieCounts: new Map(),
+    missingLabelCounts: new Map(),
+    overflowCounts: new Map(),
+  };
 
   let batch: FinessStagingRow[] = [];
-  let inserted = 0;
-  let skippedNoFinessId = 0;
-  let skippedNoCommune = 0;
-  let skippedBadDept = 0;
-  let skippedDom = 0;
-  let parsedNoLigneAch = 0;
-  let parsedCoordRejected = 0;
-  const unknownCategorieCounts = new Map<string, number>();
   let firstBatch = true;
-
   const flush = async (): Promise<void> => {
     if (batch.length === 0) return;
     await insertStagingBatchWithRetry(supabase, "finess_staging", batch, {
@@ -398,229 +352,98 @@ async function streamCsvToStaging(
       isFirstBatch: firstBatch,
     });
     firstBatch = false;
-    inserted += batch.length;
+    stats.inserted += batch.length;
     batch = [];
   };
 
-  for await (const record of parser as AsyncIterable<Record<string, string>>) {
-    const parsed = parseFinessRecord(record);
-    if (parsed.row) {
-      batch.push(parsed.row);
-      // Track ligneacheminement parse failures — silent null CP/ville was the
-      // v0.2.0 bug, so a re-emergence (DREES layout change) must be loud.
-      if (parsed.ligneAchPresentButUnparsed) {
-        parsedNoLigneAch++;
-      }
-      // V0.4.3 — track Lambert93 coords rejected by the strict regex. Same
-      // motivation as parsedNoLigneAch : surfaces a column shift / format
-      // drift that MIN_GEOM_COVERAGE=0.8 alone wouldn't catch at 5-15% rates.
-      if (parsed.coordPresentButUnparsed) {
-        parsedCoordRejected++;
-      }
-      // Track DREES codes that fall into "autre" — surfaces a nomenclature
-      // drift (new code at high volume) so it can be added to a family in one PR.
-      const code = parsed.row.categorie_code;
-      if (code && finessFamille(code) === "autre") {
-        unknownCategorieCounts.set(code, (unknownCategorieCounts.get(code) ?? 0) + 1);
-      }
-    } else {
-      // Exhaustive switch: a new SkipReason without a counter triggers a TS
-      // compile error via the `never` check, preventing silent drops. We
-      // assign the discriminant to a local variable so TypeScript narrows
-      // `reason` to `never` in the default branch — narrowing through a
-      // property access expression (`parsed.skipReason`) doesn't work here.
-      const reason = parsed.skipReason;
-      switch (reason) {
-        case "no_finess_id":
-          skippedNoFinessId++;
-          break;
-        case "no_commune":
-          skippedNoCommune++;
-          break;
-        case "bad_dept":
-          skippedBadDept++;
-          break;
-        case "dom_unsupported":
-          skippedDom++;
-          break;
-        default: {
-          const _exhaustive: never = reason;
-          throw new Error(`unreachable skipReason: ${String(_exhaustive)}`);
+  try {
+    for await (const item of out as AsyncIterable<unknown>) {
+      const value = readStreamItem(item);
+      stats.pmej++;
+      const eges = Array.isArray(value.ege) ? value.ege : [];
+      for (const ege of eges) {
+        const parsed = mapEgeToRow(ege);
+        if (parsed.kind === "skip") {
+          stats.skipped[parsed.skipReason]++;
+          continue;
         }
+        batch.push(parsed.row);
+        if (parsed.coordLayout !== null) stats.geomByLayout[parsed.coordLayout]++;
+        if (parsed.municipalityCentroidRejected) stats.municipalityRejected++;
+        if (parsed.coordsPresentButUnusable) stats.coordsUnusable++;
+        for (const field of parsed.overflows) {
+          stats.overflowCounts.set(field, (stats.overflowCounts.get(field) ?? 0) + 1);
+        }
+        const code = parsed.row.categorie_code;
+        if (code === null) {
+          stats.nullCategorieCode++;
+        } else {
+          if (finessFamille(code) === "autre") {
+            stats.unknownCategorieCounts.set(
+              code,
+              (stats.unknownCategorieCounts.get(code) ?? 0) + 1,
+            );
+          }
+          if (parsed.row.categorie_libelle === null) {
+            stats.missingLabelCounts.set(code, (stats.missingLabelCounts.get(code) ?? 0) + 1);
+          }
+        }
+        if (parsed.row.raison_sociale === "") stats.emptyRaisonSociale++;
+        if (batch.length >= BATCH_SIZE) await flush();
       }
     }
-    if (batch.length >= BATCH_SIZE) await flush();
+  } catch (err) {
+    // Le for-await rejette AVANT `await done` quand le pipeline se détruit :
+    // sans ceci, un .gz tronqué remonterait en « programming bug », phase
+    // `validate`. Une IngestError aval (insert PostgREST) passe telle quelle.
+    console.error(
+      `[finess] streaming aborted after ${stats.pmej} PMEJ / ${stats.inserted} rows inserted: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    // Sur une erreur AVAL (insert PostgREST), le pipeline gunzip → JSON
+    // continuerait de décompresser 715 Mo dans un consommateur mort jusqu'à
+    // la sortie du process : on le détruit (no-op s'il est déjà en erreur).
+    out.destroy();
+    if (err instanceof IngestError) throw err;
+    const cause = pipelineError ?? err;
+    throw new IngestError(
+      "copy",
+      `stream pipeline (gunzip → stream-json) failed after ${stats.pmej} PMEJ: ${cause instanceof Error ? cause.message : String(cause)}`,
+      cause,
+    );
   }
   await flush();
-  return {
-    inserted,
-    skippedNoFinessId,
-    skippedNoCommune,
-    skippedBadDept,
-    skippedDom,
-    parsedNoLigneAch,
-    parsedCoordRejected,
-    unknownCategorieCounts,
-  };
-}
-
-type SkipReason = "no_finess_id" | "no_commune" | "bad_dept" | "dom_unsupported";
-
-type ParsedFinessRow =
-  | {
-      row: FinessStagingRow;
-      ligneAchPresentButUnparsed: boolean;
-      coordPresentButUnparsed: boolean;
-      skipReason?: never;
-    }
-  | {
-      row?: never;
-      ligneAchPresentButUnparsed?: never;
-      coordPresentButUnparsed?: never;
-      skipReason: SkipReason;
-    };
-
-/**
- * Match `ligneacheminement` of the form `"08000 CHARLEVILLE MEZIERES CEDEX"`.
- * Extracts a leading 5-digit postal code followed by the city name.
- * The trailing "CEDEX"/"CEDEX 02"/etc. suffix is stripped from the city name.
- */
-const LIGNE_ACHEMINEMENT_REGEX = /^(\d{5})\s+(.+?)(?:\s+CEDEX(?:\s+\d+)?)?$/;
-
-// Note: `isValidDept` was moved to `src/territoire/dept-codes.ts` (V0.4
-// consolidation) — single source of truth shared with Ameli, commune-index,
-// and the MCP tools layer. Imported above.
-
-function parseFinessRecord(rec: Record<string, string>): ParsedFinessRow {
-  const numFiness = getNonEmpty(rec, "nofinesset");
-  if (!numFiness) return { skipReason: "no_finess_id" };
-
-  const codeCommuneRaw = getNonEmpty(rec, "commune");
-  const codeDepartementRaw = getNonEmpty(rec, "departement");
-  if (!codeCommuneRaw || !codeDepartementRaw) return { skipReason: "no_commune" };
-
-  const codeDepartement = codeDepartementRaw.trim();
-  if (!isValidDept(codeDepartement)) return { skipReason: "bad_dept" };
-
-  // FINESS stores commune as the 3-char code WITHIN the department.
-  // Reconstruct canonical 5-char INSEE: "08" + "105" = "08105".
-  // Schema is CHAR(5) → DOM (dept 3 chars) is skipped until V0.3 widens it.
-  if (codeDepartement.length === 3) return { skipReason: "dom_unsupported" };
-  const codeInsee = `${codeDepartement}${codeCommuneRaw.trim().padStart(3, "0")}`;
-
-  // `ligneacheminement` is the canonical source for postal code + real city
-  // name (e.g. "08005 CHARLEVILLE MEZIERES CEDEX"). The previous parser used
-  // `libdepartement` ("ARDENNES") as `ville`, which was wrong. CEDEX suffix
-  // is stripped from the city name; the postal code keeps its CEDEX form.
-  // collapseWhitespace : DREES upstream émet parfois des doubles espaces
-  // ("08000  CHARLEVILLE  MEZIERES") qui produisent des doublons logiques
-  // côté equality matching avec/sans normalisation.
-  const ligneAch = getNonEmpty(rec, "ligneacheminement") ?? "";
-  const ligneMatch = ligneAch.match(LIGNE_ACHEMINEMENT_REGEX);
-  const codePostal = ligneMatch?.[1] ?? null;
-  const ville = ligneMatch?.[2] ? collapseWhitespace(ligneMatch[2]) : null;
-  // Surface to the streamer for monitoring (raw is empty post-V0.4.2).
-  const ligneAchPresentButUnparsed = ligneAch !== "" && !ligneMatch;
-
-  // Build full address line: "12 CRS BRIAND" instead of just "BRIAND".
-  // collapseWhitespace après concat : si `numVoie` est null mais typVoie/voie
-  // présents, `filter(Boolean).join(" ")` produit déjà un seul espace entre
-  // les deux mots, mais l'un d'eux peut contenir des doubles-espaces internes
-  // hérités du CSV brut DREES — on normalise ici.
-  const numVoie = getNonEmpty(rec, "numvoie");
-  const typVoie = getNonEmpty(rec, "typvoie");
-  const voieRaw = getNonEmpty(rec, "voie");
-  const voieFullRaw = [numVoie, typVoie, voieRaw].filter(Boolean).join(" ");
-  const voieFull = voieFullRaw === "" ? null : collapseWhitespace(voieFullRaw);
-
-  // geom NULL ici — populé server-side par ingest_apply_finess_geom_batch
-  // qui lit coordx/y_lambert93 et reprojette Lambert 93 → WGS84. SSOT = le RPC.
-  // Postmortem V0.2 : commit 88ebfc0 ; switch typed columns : V0.4.2.
-  const coordxRaw = getNonEmpty(rec, "coordxet");
-  const coordyRaw = getNonEmpty(rec, "coordyet");
-  const coordxParsed = parseLambert93Coord(coordxRaw);
-  const coordyParsed = parseLambert93Coord(coordyRaw);
-  // Drift signal V0.4.3 : présent dans le CSV mais rejeté par la regex stricte.
-  // Catche les column shifts 5-15% que MIN_GEOM_COVERAGE=0.8 laisse passer.
-  const coordPresentButUnparsed =
-    (coordxRaw !== null && coordxParsed === null) || (coordyRaw !== null && coordyParsed === null);
-
-  // DREES émet parfois des doubles espaces dans `rs` ("LBM  BIO ARD'AISNE"),
-  // ce qui crée des doublons logiques côté equality / search_text. getNonEmpty
-  // strippe les control chars mais préserve les espaces internes — on collapse ici.
-  const raisonSocialeRaw = getNonEmpty(rec, "rs") ?? "";
-  const raisonSociale = raisonSocialeRaw === "" ? "" : collapseWhitespace(raisonSocialeRaw);
-
-  return {
-    row: {
-      num_finess: numFiness,
-      raison_sociale: raisonSociale,
-      categorie_code: getNonEmpty(rec, "categetab"),
-      categorie_libelle: getNonEmpty(rec, "libcategetab"),
-      num_voie: numVoie,
-      type_voie: typVoie,
-      voie: voieFull,
-      code_postal: codePostal,
-      code_departement: codeDepartement,
-      code_insee: codeInsee,
-      ville,
-      telephone: getNonEmpty(rec, "telephone"),
-      email: null,
-      date_ouverture: getNonEmpty(rec, "dateouv"),
-      date_maj: getNonEmpty(rec, "datemaj"),
-      geom: null,
-      coordx_lambert93: coordxParsed,
-      coordy_lambert93: coordyParsed,
-      // V0.4.2 — colonnes typées remplacent raw->>'coordxet' ; colonne gardée pour rétro-compat.
-      raw: {},
-    },
-    ligneAchPresentButUnparsed,
-    coordPresentButUnparsed,
-  };
+  await done;
+  if (pipelineError !== null) {
+    throw new IngestError(
+      "copy",
+      `stream pipeline ended in error after ${stats.pmej} PMEJ: ${pipelineError instanceof Error ? pipelineError.message : String(pipelineError)}`,
+      pipelineError,
+    );
+  }
+  return stats;
 }
 
 /**
- * Collapse runs of whitespace (\s+) into a single ASCII space, then trim.
- * Used to normalize DREES upstream artifacts like "LBM  BIO ARD'AISNE".
- *
- * NB. `getNonEmpty` strips control chars (0x00-0x1f) and trims outer
- * whitespace, but preserves internal spaces. `collapseWhitespace` is applied
- * only on fields where double-spaces are unambiguous upstream noise
- * (raison_sociale, ville, voie).
+ * `streamArray` émet `{ key, value }` ; un item sans `value` = régression de la
+ * lib, un `value` nul ou scalaire = donnée amont plausible (`pmej: [null]`) —
+ * dans les deux cas une IngestError `copy` explicite plutôt qu'un TypeError
+ * classé « programming bug ». Le contenu de l'objet n'est pas vérifié ici :
+ * l'appelant tolère déjà un `ege` absent.
  */
-export function collapseWhitespace(raw: string): string {
-  return raw.replace(/\s+/g, " ").trim();
+function readStreamItem(item: unknown): AnsPmej {
+  if (typeof item !== "object" || item === null || !("value" in item)) {
+    throw new IngestError("copy", "stream-json streamArray emitted an item without `value`");
+  }
+  const value = (item as { value: unknown }).value;
+  if (typeof value !== "object" || value === null) {
+    throw new IngestError(
+      "copy",
+      `pmej[] element is ${value === null ? "null" : typeof value}, expected object`,
+    );
+  }
+  return value as AnsPmej;
 }
-
-/**
- * Parses a Lambert 93 coordinate from the CSV. Tolerates French decimal
- * comma ("823923,6") and surrounding whitespace. Returns null when the
- * input is missing, blank, or NOT a clean numeric literal.
- *
- * Strict regex anchor (`^-?\d+(\.\d+)?$`) blocks `Number.parseFloat`'s
- * silent partial-parse: without it, a CSV column shift placing "12 RUE
- * DUMAS" into `coordxet` would yield 12, projecting to an ocean point
- * that silently passes the geom-coverage threshold.
- */
-export function parseLambert93Coord(raw: string | null): number | null {
-  if (raw === null) return null;
-  const cleaned = raw.replace(",", ".").trim();
-  if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return null;
-  const value = Number.parseFloat(cleaned);
-  return Number.isFinite(value) ? value : null;
-}
-
-export const __TESTING__ = {
-  parseFinessRecord,
-  isValidDept,
-  LIGNE_ACHEMINEMENT_REGEX,
-  parseLambert93Coord,
-  collapseWhitespace,
-};
 
 // Only run main() when this file is executed as a script, not when imported
-// by the test suite or another module. Without this guard, vitest pulls in
-// the module to test the pure helpers and immediately tries to connect to
-// Supabase via `main()` — failing with "Missing SUPABASE_URL" before any
-// test runs. See `runIfMain` for the rationale on `fileURLToPath`.
+// by the test suite or another module. See `runIfMain` for the rationale.
 await runIfMain(import.meta.url, main);

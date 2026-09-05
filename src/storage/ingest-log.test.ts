@@ -118,3 +118,91 @@ describe("getDataFreshness", () => {
     expect(mockFrom).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("last_data_change_at / data_age_days — post-mortem FINESS 2026-09-05", () => {
+  const row = (
+    day: string,
+    status: string,
+    skip_reason: string | null,
+    row_count: number | null = null,
+  ) => ({
+    source: "finess",
+    started_at: `${day}T04:00:00Z`,
+    finished_at: `${day}T04:20:00Z`,
+    status,
+    row_count,
+    skip_reason,
+  });
+
+  it("sept court-circuits same_checksum en `success` ne rajeunissent PAS la donnée", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T12:00:00Z"));
+    try {
+      // Séquence RÉELLE d'ingest_log : dernière ingestion effective le 15 mai,
+      // puis sept skips bimensuels jusqu'au 1er septembre, tous `success`.
+      mockQuery([
+        row("2026-09-01", "success", "same_checksum"),
+        row("2026-08-15", "success", "same_checksum"),
+        row("2026-08-01", "success", "same_checksum"),
+        row("2026-07-15", "success", "same_checksum"),
+        row("2026-07-01", "success", "same_checksum"),
+        row("2026-06-15", "success", "same_checksum"),
+        row("2026-06-01", "success", "same_checksum"),
+        row("2026-05-15", "success", null, 93403),
+      ]);
+      const finess = (await getDataFreshness()).find((r) => r.source === "finess");
+      // Ce que l'ancien contrat disait — et dit toujours, il n'est pas faux :
+      expect(finess?.last_success_at).toBe("2026-09-01T04:20:00Z");
+      expect(finess?.staleness_days).toBe(4);
+      // Ce qui manquait — l'âge de la donnée réellement servie :
+      expect(finess?.last_data_change_at).toBe("2026-05-15T04:20:00Z");
+      expect(finess?.data_age_days).toBe(113);
+      expect(finess?.last_success_row_count).toBeNull();
+      // La règle d'alerte est une comparaison exposée, pas une consigne en prose.
+      expect(finess?.expected_max_age_days).toBe(30);
+      expect((finess?.data_age_days ?? 0) > (finess?.expected_max_age_days ?? 0)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("un run `partial` (swap OK, matview KO) compte comme changement de donnée", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-05T12:00:00Z"));
+    try {
+      mockQuery([
+        row("2026-09-03", "success", "same_checksum"),
+        row("2026-09-01", "partial", null, 104734),
+        row("2026-08-15", "success", null, 93403),
+      ]);
+      const finess = (await getDataFreshness()).find((r) => r.source === "finess");
+      expect(finess?.last_data_change_at).toBe("2026-09-01T04:20:00Z");
+      expect(finess?.data_age_days).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rows sans colonne skip_reason (historique pré-V0.12) = ingestion réelle", async () => {
+    mockQuery([
+      {
+        source: "rpps",
+        started_at: "2026-09-01T04:00:00Z",
+        finished_at: "2026-09-01T05:00:00Z",
+        status: "success",
+        row_count: 2282339,
+      },
+    ]);
+    const rpps = (await getDataFreshness()).find((r) => r.source === "rpps");
+    expect(rpps?.last_data_change_at).toBe("2026-09-01T05:00:00Z");
+    expect(rpps?.last_data_change_at).toBe(rpps?.last_success_at);
+  });
+
+  it("aucune ingestion réelle → last_data_change_at et data_age_days null", async () => {
+    mockQuery([row("2026-09-01", "success", "same_checksum")]);
+    const finess = (await getDataFreshness()).find((r) => r.source === "finess");
+    expect(finess?.last_success_at).not.toBeNull();
+    expect(finess?.last_data_change_at).toBeNull();
+    expect(finess?.data_age_days).toBeNull();
+  });
+});

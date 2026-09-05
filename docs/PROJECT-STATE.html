@@ -72,7 +72,7 @@
       <h3>Santé <span class="tag sante">FINESS · RPPS · Ameli</span></h3>
       <div class="zone simple"><div class="zlabel">En simple</div><p>« Où sont les labos, pharmacies, médecins autour d'un point ? Le territoire est-il bien couvert ? »</p></div>
       <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p>Établissements & professionnels par rayon/commune/département, densité, plateaux techniques hébergés, couverture FINESS↔SIRENE, vérification site actif (succession M&A).</p></div>
-      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>FINESS DREES (~95 K), RPPS ANS (~2,23 M), Ameli (~485 K) ingérés par cron, géocodés BAN, requêtés en PostGIS (KNN GiST).</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>FINESS ANS (flux JSON quotidien depuis 2026-09-05, ~105 K établissements en service DOM inclus — le CSV DREES s'est tari en juillet 2026), RPPS ANS (~2,28 M), Ameli (~466 K) ingérés par cron, géocodés BAN, requêtés en PostGIS (KNN GiST). Chaque cron compare staging ↔ prod avant swap ; <code>data_freshness</code> expose l'âge réel de la donnée (<code>data_age_days</code>), pas seulement le dernier run.</p></div>
     </div>
 
     <div class="card">

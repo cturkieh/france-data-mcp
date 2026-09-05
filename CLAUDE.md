@@ -94,7 +94,9 @@ intégration → reste parallèle/rapide. Tout nouveau test d'intégration touch
 
 ## Ingestion (crons GitHub Actions)
 
-3 sources : FINESS (bimestriel, ~95K), Ameli (hebdo, ~485K), RPPS (mensuel, ~2.23M). Pattern : download → SHA256 short-circuit si identique → COPY staging → validate → atomic swap → canary → ingest_log.
+3 sources : FINESS (flux ANS JSON.gz quotidien, cron le 1er et le 15, ~105K), Ameli (hebdo, ~466K), RPPS (mensuel, ~2.28M). Pattern : download → SHA256 short-circuit si identique → COPY staging → validate → atomic swap → canary → ingest_log.
+
+**FINESS vient de l'ANS depuis 2026-09-05, plus du CSV DREES (flux arrêté le 2026-07-20 ; le cron a court-circuité en `same_checksum`/`success` quatre mois sans signal — d'où `last_data_change_at`/`data_age_days` dans `data_freshness`).** Source de vérité : `docs/plans/finess-migration-ans.md`. Les trois pièges qui ont failli passer en silence, tous testés sur fixtures réelles (`finess-ans-parse.test.ts`) : (1) adresse géographique = `usageAdresse "03"`, JAMAIS `adresse[0]` (2 294 EGE ont l'accueil devant) ; (2) deux paires de coordonnées dont le système WGS84/Lambert 93 **s'inverse d'un enregistrement à l'autre** → `resolveCoordinates` détecte par plage de valeurs ; (3) seulement 74,9 % des EGE ont des coordonnées → repli `previous_ingest` (point de la prod par `num_finess`, tracé `raw.geom_source`), JAMAIS de centroïde commune dans `finess.geom` (le RPPS le recopierait en `finess_join` = tier précis). Parsing en flux obligatoire (715 Mo > limite de chaîne V8). Un débordement de colonne = `null` compté, jamais tronqué (un téléphone à deux numéros a fait échouer le premier dry-run ; parité DDL↔`COLUMN_RULES` testée). Les seuils qui décident du swap vivent dans `finess-validate.ts` (pur, testé sur les chiffres mesurés) — ne pas les réinliner dans `main()`. `FINESS_DRY_RUN=1` = pipeline complet sans swap, staging conservée ; `FORCE_REINGEST=1` bypass le checksum.
 
 **Service client typage** : pour toute RPC ajoutée par migration récente, utiliser `getUntypedServiceClient(source)` (sinon `tsc -p tsconfig.api.json` échoue, types Supabase pas regénérés).
 

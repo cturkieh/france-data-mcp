@@ -52,11 +52,26 @@ export class IngestError extends Error {
   }
 }
 
-export interface PreValidateConfig {
-  minSizeBytes: number;
-  expectedHeaderColumns: string[];
-  delimiter: string;
-}
+/** Signature d'un fichier gzip : deux premiers octets (RFC 1952). */
+export const GZIP_MAGIC: MagicBytes = [0x1f, 0x8b];
+
+/**
+ * Tuple NON vide : `[]` rendrait la comparaison `head.subarray(0, 0).equals(Buffer.alloc(0))`
+ * trivialement vraie — une pré-validation muette qui laisserait passer n'importe quoi.
+ */
+export type MagicBytes = readonly [number, ...number[]];
+
+/**
+ * Pré-validation d'un téléchargement : taille minimale, puis SOIT le contrôle
+ * d'en-tête d'un CSV (colonnes attendues + délimiteur), SOIT la signature d'un
+ * fichier binaire (`magicBytes`, ex. `GZIP_MAGIC` pour le flux FINESS ANS).
+ * Une page HTML de maintenance servie en 200 n'a ni les colonnes ni la
+ * signature — elle est rejetée avant de créer la staging.
+ */
+export type PreValidateConfig = { minSizeBytes: number } & (
+  | { expectedHeaderColumns: string[]; delimiter: string; magicBytes?: undefined }
+  | { magicBytes: MagicBytes; expectedHeaderColumns?: undefined; delimiter?: undefined }
+);
 
 export interface DownloadResult {
   filePath: string;
@@ -135,12 +150,24 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
     );
   }
 
-  // Read just the first line (header) without loading the whole file.
+  // Read just the head of the file (header line or binary signature) without
+  // loading the whole file.
   const fd = await fsp.open(filePath, "r");
   try {
     const buf = Buffer.alloc(8192);
     const { bytesRead } = await fd.read(buf, 0, 8192, 0);
-    const firstLine = buf.subarray(0, bytesRead).toString("utf8").split(/\r?\n/)[0] ?? "";
+    const head = buf.subarray(0, bytesRead);
+    if (config.magicBytes !== undefined) {
+      const expected = Buffer.from(config.magicBytes);
+      if (!head.subarray(0, expected.length).equals(expected)) {
+        throw new IngestError(
+          "pre_validate",
+          `File signature ${head.subarray(0, expected.length).toString("hex")} does not match expected ${expected.toString("hex")} — upstream served something else (maintenance page ?)`,
+        );
+      }
+      return;
+    }
+    const firstLine = head.toString("utf8").split(/\r?\n/)[0] ?? "";
     const headers = firstLine.split(config.delimiter).map((h) => h.trim().replace(/^"|"$/g, ""));
     const missing = config.expectedHeaderColumns.filter((c) => !headers.includes(c));
     if (missing.length > 0) {
@@ -500,7 +527,18 @@ export async function runAndRecordCanary(
   const missing = await runCanaryCheck(supabase, source);
   if (missing.length === 0) return;
   log.canary_failures = missing;
-  console.warn(`[${tag}] canary missing: ${missing.join(", ")} — investigate (no rollback)`);
+  // Doctrine `rebuildHostedActivities` : swap réussi + couche secondaire en
+  // échec = `partial`, jamais `success`. Preuve prod (revue 2026-09-05) : le
+  // canary FINESS `130786049` a échoué à chaque run du 2026-05-15 au
+  // 2026-09-01 en `status: success` — invisible quatre mois, le workflow
+  // n'alertant que sur `failure()`. Pas de throw : la swap est committée.
+  // Inconditionnel : à cet instant `log.status` vaut encore l'initial
+  // `"failed"` des scripts (ils ne posent `success` qu'à la fin, en
+  // préservant un `partial`) — une garde `!== "failed"` serait morte.
+  log.status = "partial";
+  console.warn(
+    `[${tag}] canary missing: ${missing.join(", ")} — run marqué partial, investigate (no rollback)`,
+  );
 }
 
 /**

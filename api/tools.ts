@@ -557,7 +557,7 @@ const DATA_FRESHNESS_OUTPUT_SCHEMA: Record<string, unknown> = {
           last_success_at: {
             type: ["string", "null"],
             description:
-              "ISO timestamp dernière ingestion OK. null si aucun succès enregistré (1er déploiement).",
+              "ISO timestamp du dernier run dont le swap a réussi — statut `success` OU `partial` (swap OK, couche secondaire matview/canary en échec : la donnée est servie). null si aucun succès enregistré (1er déploiement).",
           },
           last_success_row_count: { type: ["number", "null"] },
           last_attempt_at: { type: ["string", "null"] },
@@ -565,7 +565,22 @@ const DATA_FRESHNESS_OUTPUT_SCHEMA: Record<string, unknown> = {
           staleness_days: {
             type: ["number", "null"],
             description:
-              "null si la source n'a jamais été synchronisée (signal alarmant à propager au caller).",
+              "Jours depuis le dernier run réussi — y compris un run court-circuité « fichier amont identique ». NE mesure PAS l'âge de la donnée : utiliser data_age_days. null si la source n'a jamais été synchronisée (signal alarmant à propager au caller).",
+          },
+          last_data_change_at: {
+            type: ["string", "null"],
+            description:
+              "ISO timestamp du dernier run ayant RÉELLEMENT changé la donnée servie (success/partial sans court-circuit). null si aucune ingestion réelle n'a jamais abouti.",
+          },
+          data_age_days: {
+            type: ["number", "null"],
+            description:
+              "Âge de la donnée servie, en jours, depuis last_data_change_at. C'est CE champ qui dit si la donnée est périmée (post-mortem FINESS 2026-09 : staleness_days=4 pour une donnée de 113 jours).",
+          },
+          expected_max_age_days: {
+            type: "number",
+            description:
+              "Âge maximal attendu de la donnée pour cette source, en jours. Règle d'alerte : data_age_days > expected_max_age_days.",
           },
           cadence_hint: { type: "string" },
         },
@@ -1274,7 +1289,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "data_freshness",
     description:
-      "Retourne la fraîcheur des dumps de données ingérés côté serveur : FINESS DREES (bimestriel), Annuaire Santé Ameli (hebdomadaire), RPPS / Annuaire Santé ANS (mensuel), Centres de Santé CNAM (hebdomadaire). Pour chaque source : `last_success_at` ISO timestamp, `last_success_row_count`, `last_attempt_at`, `last_attempt_status`, `staleness_days` (jours depuis la dernière ingestion réussie), `cadence_hint` (cadence attendue côté éditeur).\n\nUsage typique : avant un audit territorial ou une analyse temporelle, le caller appelle ce tool pour savoir si les données sont à jour. Une `staleness_days > 90` côté FINESS = alerte (dernier sync DREES manqué), `> 14` côté Ameli = alerte (job hebdo cassé), `> 45` côté RPPS = alerte (job mensuel cassé), `> 14` côté CDS = alerte (job hebdo cassé).\n\nLes sources LIVE (DINUM Recherche Entreprises, INSEE SIRENE V3.11, ANS FHIR live) ne sont PAS listées ici puisqu'elles n'ont pas de cycle d'ingestion — leur fraîcheur est celle des API amont (live, ~secondes).\n\nCache serveur : 5 minutes. Coût : 1 SELECT sur `ingest_log` au pire (sinon hit cache).",
+      "Retourne la fraîcheur des dumps de données ingérés côté serveur : FINESS / ANS (flux quotidien, ingéré le 1er et le 15 du mois), Annuaire Santé Ameli (hebdomadaire), RPPS / Annuaire Santé ANS (mensuel), Centres de Santé CNAM (hebdomadaire), IRIS INSEE (annuel). Pour chaque source : `last_data_change_at` + `data_age_days` (dernier run ayant RÉELLEMENT changé la donnée servie, et son âge en jours — C'EST LE CHAMP À LIRE), `last_success_at` + `staleness_days` (dernier run réussi, y compris un run court-circuité « fichier amont identique » — ne mesure PAS l'âge de la donnée), `last_success_row_count`, `last_attempt_at`, `last_attempt_status`, `cadence_hint` (cadence attendue).\n\nUsage typique : avant un audit territorial ou une analyse temporelle, le caller appelle ce tool pour savoir si les données sont à jour. Juger sur `data_age_days`, JAMAIS sur `staleness_days` seul : en 2026 la source FINESS s'est tarie 4 mois pendant que `staleness_days` restait à quelques jours (runs « fichier identique » comptés comme succès). Règle d'alerte : `data_age_days > expected_max_age_days` (seuil par source, exposé dans chaque ligne — ne pas le recopier) ; `data_age_days: null` = jamais ingéré.\n\nLes sources LIVE (DINUM Recherche Entreprises, INSEE SIRENE V3.11, ANS FHIR live) ne sont PAS listées ici puisqu'elles n'ont pas de cycle d'ingestion — leur fraîcheur est celle des API amont (live, ~secondes).\n\nCache serveur : 5 minutes. Coût : 1 SELECT sur `ingest_log` au pire (sinon hit cache).",
     inputSchema: {
       type: "object",
       properties: {},
