@@ -11,13 +11,15 @@
  */
 
 import { parseCoordinates } from "../core/coords.js";
+import { GEOPF_GEOCODAGE_BASE_URL } from "../core/geopf.js";
 import { fetchJson } from "../core/http.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import { diceCoefficient, normalizeForCompare } from "../core/text-match.js";
 import type { Coordinates } from "../core/types.js";
 
-const BASE_URL = "https://data.geopf.fr/geocodage";
+// Base partagée avec le client bulk via `core/geopf.ts` : un changement de chemin IGN se fait à UN endroit.
+const BASE_URL = GEOPF_GEOCODAGE_BASE_URL;
 
 export type GeocodeResult = {
   /** Coordonnées GPS (WGS84) */

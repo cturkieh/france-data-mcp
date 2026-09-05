@@ -1,11 +1,13 @@
-// Client de géocodage de masse via l'API BAN bulk CSV (api-adresse.data.gouv.fr).
+// Client de géocodage de masse via l'API BAN bulk CSV — deux hôtes servant la MÊME
+// base (Géoplateforme IGN en tête, api-adresse.data.gouv.fr en repli, cf. BAN_BULK_HOSTS).
 // POST multipart/form-data (un CSV en pièce jointe), réponse CSV. Best-effort :
 // un chunk en échec après retries incrémente `apiFailures` sans jamais throw —
 // le caller (pipeline) doit pouvoir observer le taux d'échec même BAN-down total.
 
-import { backoffDelayMs, sleep } from "./backoff.js";
+import { backoffDelayMs, jitter, sleep } from "./backoff.js";
 import { parseCsvLine } from "./csv.js";
-import { isTransientHttpStatus } from "./http.js";
+import { GEOPF_GEOCODAGE_BASE_URL } from "./geopf.js";
+import { isTransientHttpStatus, parseRetryAfterSeconds } from "./http.js";
 
 export type BanGeocodeResult = {
   accepted: boolean;
@@ -22,11 +24,106 @@ export type BanGeocodeBatchOutcome = {
   apiFailures: number;
   /** Total chunks attempted */
   chunksTotal: number;
+  /**
+   * Observabilité multi-hôte (cf. `BAN_BULK_HOSTS`) : chunks RÉUSSIS par nom d'hôte,
+   * bascules d'hôte effectuées, tentatives rejouées sur 429. Un run servi à 100 %
+   * par l'hôte déprécié, ou 4× ralenti par le quota, doit se VOIR dans le résumé.
+   */
+  chunksByHost: Record<string, number>;
+  hostSwitches: number;
+  rateLimitRetries: number;
 };
+type BatchStats = Pick<
+  BanGeocodeBatchOutcome,
+  "chunksByHost" | "hostSwitches" | "rateLimitRetries"
+>;
 
-const BAN_BULK_URL = "https://api-adresse.data.gouv.fr/search/csv/";
+/**
+ * Hôtes du service de géocodage BAN bulk CSV, par ordre de préférence. MÊME base
+ * de données, MÊME format de réponse — parité prouvée prod 2026-09-05 : 1 000
+ * adresses RPPS réelles POSTées sur les deux hôtes → 1 000 résultats identiques
+ * (result_id, coords, score, type), cf. `docs/plans/ban-emprunts-1001-feuilles-mesure.md`.
+ *
+ *  [0] Géoplateforme IGN (`core/geopf.ts`) — successeur OFFICIEL ; api-adresse est
+ *      déclaré déprécié par sa propre doc (« décommissionnée fin Janvier 2026 »).
+ *  [1] api-adresse.data.gouv.fr — hôte historique, encore servi en 2026-09 : repli
+ *      tant qu'il répond (le retirer quand il rendra du DNS/404 durable).
+ *
+ * Politique de repli (UNIQUE énoncé, appliqué par `postChunk`) :
+ *  - 5xx, erreur réseau, timeout → tentative suivante sur l'AUTRE hôte ;
+ *  - 4xx non-retryable (404 chemin changé / 410 décommissionné) ou corps 200
+ *    illisible (page de maintenance derrière la passerelle) = panne d'HÔTE
+ *    possible → l'autre hôte UNE fois ; si les deux échouent, c'est la requête ;
+ *  - 429 → MÊME hôte, attente `retry-after` sinon 2/4/8 s (quota de l'hôte ;
+ *    basculer serait esquiver la limite d'un service public gratuit). Après une
+ *    bascule A→B suivie de 429 sur B, A n'est pas retenté dans ce chunk (borné).
+ *  - « sticky » : l'hôte dont le corps a été LU avec succès devient l'hôte de
+ *    départ des chunks suivants (on ne repaie pas la panne à chaque chunk — panne
+ *    réelle du 26/08/2026 vécue par 1001 feuilles : bloc 37.59.183.x d'api-adresse
+ *    injoignable, data.geopf.fr debout) ; le changement d'hôte préféré est LOGGÉ.
+ * Tuple ≥ 2 par TYPE : la politique « l'autre hôte » n'a de sens qu'à partir de 2.
+ */
+const BAN_BULK_PATH = "/search/csv/";
+export const BAN_BULK_HOSTS = [
+  `${GEOPF_GEOCODAGE_BASE_URL}${BAN_BULK_PATH}`,
+  `https://api-adresse.data.gouv.fr${BAN_BULK_PATH}`,
+] as const satisfies readonly [string, string, ...string[]];
+// Nom d'hôte précalculé une fois pour les logs (jamais re-parsé sur le hot path).
+type BulkHost = { url: string; name: string };
+const toBulkHost = (url: string): BulkHost => ({ url, name: new URL(url).hostname });
+const HOSTS: readonly [BulkHost, BulkHost, ...BulkHost[]] = [
+  toBulkHost(BAN_BULK_HOSTS[0]),
+  toBulkHost(BAN_BULK_HOSTS[1]),
+  ...BAN_BULK_HOSTS.slice(2).map(toBulkHost),
+];
+/** Hôte à l'index `idx` (modulo : `hostAt(i + 1)` = l'autre hôte). */
+function hostAt(idx: number): BulkHost {
+  return HOSTS[idx % HOSTS.length] ?? HOSTS[0];
+}
+// Hôte de départ du prochain chunk = dernier hôte dont le corps a été lu (état
+// module, volontairement partagé par tous les appels d'un même process ; toujours
+// normalisé dans [0, HOSTS.length)).
+let preferredHostIdx = 0;
+/** Test-only : remet l'hôte de départ sur `BAN_BULK_HOSTS[0]`. */
+export function _resetBanBulkHostForTesting(): void {
+  preferredHostIdx = 0;
+}
+
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 500;
+// 429 sans `retry-after` : 2 s, 4 s, 8 s (`backoffDelayMs` base 2 s — barème calibré
+// par 1001 feuilles sur data.geopf.fr, ~7 req/s max ; l'ancien backoff 0,5/1/2 s
+// retapait dans le quota et brûlait les tentatives). Header présent → il PRIME
+// (secondes ou HTTP-date ; plafonné à 60 s par `parseRetryAfterSeconds`, qui WARNE
+// quand il écrête — un chunk n'attend pas 5 min, mais l'ops le voit).
+const RATE_LIMIT_BASE_DELAY_MS = 2_000;
+function rateLimitDelayMs(attempt: number, retryAfterHeader: string | null): number {
+  const fromHeader = parseRetryAfterSeconds(retryAfterHeader);
+  return fromHeader !== null
+    ? fromHeader * 1000 + jitter()
+    : backoffDelayMs(attempt, RATE_LIMIT_BASE_DELAY_MS);
+}
+/**
+ * `sleep` interruptible par le signal caller : un abort pendant une attente 429
+ * (jusqu'à 60 s) doit stopper net, pas au réveil (contrat « pas de retry sur un
+ * abort caller » — le check en tête de boucle fait le reste).
+ */
+function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return sleep(ms);
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done);
+  });
+}
 // F2 — borne par défaut d'une requête chunk. Un socket BAN figé sans cette
 // borne bloquerait indéfiniment un job de 339k rows (la première vraie passe
 // de masse est le backfill). Une valeur généreuse (60 s) : un chunk de 10k
@@ -42,6 +139,38 @@ export const ACCEPTED_PRECISION_TYPES: ReadonlySet<string> = new Set([
   "street",
   "locality",
 ]);
+
+/**
+ * Normalise un `result_type` BAN (trim + lowercase) — forme JUGÉE par le gate ET
+ * forme PERSISTÉE downstream (sinon un `"Housenumber"` accepté ici serait jeté
+ * par un filtre aval en lowercase = panne silencieuse aval). Une seule copie.
+ */
+export function normalizeBanResultType(raw: string | null): string | null {
+  const t = (raw ?? "").trim().toLowerCase();
+  return t === "" ? null : t;
+}
+
+/**
+ * GATE d'acceptation BAN, partie « score + précision » — UNIQUE source de vérité,
+ * consommée par `parseBanCsvResponse` (au géocodage) ET par `isStaleRejection`
+ * (`geocoded-cache-row.ts` : un rejet dont le cache porte encore un résultat que
+ * cette règle accepterait a été rejeté sous une règle plus stricte → à re-soumettre).
+ * Deux exemplaires de cette règle ont déjà divergé une fois (0,7 → 0,5, 9 305 clés
+ * périmées prouvées prod 2026-09-05) : ne pas la recopier. La condition
+ * « coordonnées valides » reste dans `parseBanCsvResponse` (elle n'a pas de sens
+ * sur une ligne de cache dont les coords ont été nullifiées au rejet). Paramètre
+ * OBJET : deux `number` positionnels (score, seuil) s'inverseraient sans erreur TS.
+ */
+export function meetsBanAcceptanceGate(
+  result: { resultScore: number | null; resultType: string | null },
+  scoreThreshold: number,
+): boolean {
+  const { resultScore, resultType } = result;
+  if (resultScore === null || !Number.isFinite(resultScore) || resultScore < scoreThreshold) {
+    return false;
+  }
+  return ACCEPTED_PRECISION_TYPES.has(normalizeBanResultType(resultType) ?? "");
+}
 
 /** Erreur sentinelle interne : la requête a été annulée par le caller. */
 class CallerAbortedError extends Error {
@@ -185,6 +314,7 @@ function buildFormData(chunk: InputRow[]): FormData {
 function parseBanCsvResponse(
   text: string,
   scoreThreshold: number,
+  ctx: { chunkIndex: number; hostName: string },
 ): Map<string, BanGeocodeResult> | null {
   const results = new Map<string, BanGeocodeResult>();
   const lines = text.split(/\r?\n/);
@@ -192,7 +322,7 @@ function parseBanCsvResponse(
   // jamais de chunk vide ⇒ toujours une erreur, jamais un résultat vide légitime.
   if (lines.length < 2) {
     console.warn(
-      "[france-data-mcp] geocodeAddressesBatch: BAN response too short (<2 lines), cannot map response — treating chunk as failed",
+      `[france-data-mcp] geocodeAddressesBatch: chunk ${ctx.chunkIndex} — BAN response from ${ctx.hostName} too short (<2 lines, got ${JSON.stringify(text.slice(0, 120))}), cannot map response — treating attempt as failed`,
     );
     return null;
   }
@@ -211,7 +341,7 @@ function parseBanCsvResponse(
   // an apiFailure rather than a silent empty success.
   if (idxKey === -1 || idxLat === -1 || idxLon === -1 || idxScore === -1 || idxType === -1) {
     console.warn(
-      "[france-data-mcp] geocodeAddressesBatch: unexpected BAN CSV header (missing key or result column), cannot map response",
+      `[france-data-mcp] geocodeAddressesBatch: chunk ${ctx.chunkIndex} — unexpected BAN CSV header from ${ctx.hostName} (missing key or result column; got ${JSON.stringify(headerLine.slice(0, 200))}), cannot map response`,
     );
     return null;
   }
@@ -233,15 +363,11 @@ function parseBanCsvResponse(
     const lon = lonStr !== "" ? Number(lonStr) : null;
     const resultScore = scoreStr !== "" ? Number(scoreStr) : null;
 
-    // Acceptation par PRÉCISION (`result_type`) — cf. `ACCEPTED_PRECISION_TYPES`
-    // + `docs/plans/ban-join.md`. `Number.isFinite` rejette NaN/Infinity ; le
-    // range guard rejette une lat/lon hors plage géographique (cache pollué
-    // sinon — BAN ne devrait jamais sortir hors France, le client n'a pas à
-    // l'accepter). Normalisation casse/espaces sur `resultType` : défense
-    // contre une dérive contractuelle BAN ; la forme normalisée est ALSO
-    // celle persistée downstream (sinon un `"Housenumber"` accepté ici serait
-    // jeté par tout filtre aval sur lowercase = panne silencieuse aval).
-    const normalizedType = resultType.trim().toLowerCase();
+    // Acceptation = gate partagé (score + précision, `meetsBanAcceptanceGate`) ET
+    // coordonnées valides. `Number.isFinite` rejette NaN/Infinity ; le range guard
+    // rejette une lat/lon hors plage géographique (cache pollué sinon — BAN ne
+    // devrait jamais sortir hors France, le client n'a pas à l'accepter).
+    const normalizedType = normalizeBanResultType(resultType);
     const hasCoords =
       Number.isFinite(lat) &&
       Number.isFinite(lon) &&
@@ -249,16 +375,16 @@ function parseBanCsvResponse(
       (lat as number) <= 90 &&
       (lon as number) >= -180 &&
       (lon as number) <= 180;
-    const meetsConfidence = resultScore !== null && resultScore >= scoreThreshold;
-    const isMorePreciseThanCommune = ACCEPTED_PRECISION_TYPES.has(normalizedType);
-    const accepted = hasCoords && meetsConfidence && isMorePreciseThanCommune;
+    const accepted =
+      hasCoords &&
+      meetsBanAcceptanceGate({ resultScore, resultType: normalizedType }, scoreThreshold);
 
     results.set(key, {
       accepted,
       lat: Number.isFinite(lat) ? lat : null,
       lon: Number.isFinite(lon) ? lon : null,
       resultScore: Number.isFinite(resultScore) ? resultScore : null,
-      resultType: normalizedType !== "" ? normalizedType : null,
+      resultType: normalizedType,
     });
   }
 
@@ -267,17 +393,19 @@ function parseBanCsvResponse(
 
 /**
  * POST one chunk to the BAN bulk CSV API with bounded retry on transient errors.
- * Returns null if all retries are exhausted OR the response body is unparsable
+ * Returns null if all retries are exhausted OR no host yields a parsable body
  * (best-effort: the caller counts null as an apiFailure, never a silent empty).
+ * Hôtes et politique de repli : cf. `BAN_BULK_HOSTS`. `stats` est MUTÉ (compteurs
+ * d'observabilité du batch).
  *
  * F2 — chaque tentative est bornée par `requestTimeoutMs` (socket BAN figé ⇒
  * AbortError au lieu d'un hang infini). Un timeout est traité comme une erreur
  * TRANSITOIRE (≈ 5xx) : il est RETRY-é dans la boucle MAX_RETRIES — mais comme
  * CHAQUE tentative est elle-même bornée par `requestTimeoutMs`, le temps total
- * du chunk reste borné par (MAX_RETRIES+1) × requestTimeoutMs + backoffs : il
+ * du chunk reste borné par (MAX_RETRIES+1) × requestTimeoutMs + attentes : il
  * ne peut JAMAIS redevenir non-borné silencieusement. Si le caller fournit un
  * `signal` et qu'il abort, on propage une `CallerAbortedError` pour arrêter
- * net (pas de retry sur un abort caller : l'intention est d'annuler le batch).
+ * net (pas de retry sur un abort caller ; les attentes sont interruptibles).
  */
 async function postChunk(
   chunk: InputRow[],
@@ -285,13 +413,34 @@ async function postChunk(
   scoreThreshold: number,
   requestTimeoutMs: number,
   callerSignal: AbortSignal | undefined,
+  stats: BatchStats,
 ): Promise<Map<string, BanGeocodeResult> | null> {
-  let lastError: string | undefined;
+  let hostIdx = preferredHostIdx;
+  // Dernier échec PAR hôte (jamais écrasé par l'autre hôte) : la ligne d'abandon dit
+  // quels hôtes ont été contactés et pourquoi chacun a échoué — « 4× 429 sur A »
+  // ne se lit pas « les deux hôtes sont morts ».
+  const errByHost = new Map<string, string>();
+  const giveUp = (why: string): null => {
+    const tried = [...errByHost].map(([h, e]) => `${h}: ${e}`).join(" | ");
+    console.error(
+      `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} ${why} — hosts tried: ${tried} — continuing with other chunks`,
+    );
+    return null;
+  };
+  const switchHost = (): BulkHost => {
+    hostIdx++;
+    stats.hostSwitches++;
+    return hostAt(hostIdx);
+  };
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const isFinal = attempt === MAX_RETRIES;
     // Total-attempts framing so "attempt 3/4" isn't misread as the final call.
     const attemptLabel = `attempt ${attempt + 1}/${MAX_RETRIES + 1}`;
+    const host = hostAt(hostIdx);
+    // Un échec « définitif » (4xx non-retryable, corps illisible) ne condamne le chunk
+    // que si l'AUTRE hôte a déjà été essayé dans ce chunk.
+    const otherHostUntried = HOSTS.some((h) => h.name !== host.name && !errByHost.has(h.name));
 
     // Un abort caller survenu entre deux tentatives = stop immédiat.
     if (callerSignal?.aborted) throw new CallerAbortedError();
@@ -312,7 +461,7 @@ async function postChunk(
     if (callerSignal) callerSignal.addEventListener("abort", onCallerAbort);
 
     try {
-      const response = await fetch(BAN_BULK_URL, {
+      const response = await fetch(host.url, {
         method: "POST",
         body: buildFormData(chunk),
         signal: controller.signal,
@@ -320,51 +469,91 @@ async function postChunk(
 
       if (response.ok) {
         const text = await response.text();
-        const parsed = parseBanCsvResponse(text, scoreThreshold);
-        // Unparsable body (missing key/result columns) = chunk failure, not
-        // a silent empty success — parseBanCsvResponse already logged a warn.
-        if (parsed === null) return null;
+        const parsed = parseBanCsvResponse(text, scoreThreshold, {
+          chunkIndex,
+          hostName: host.name,
+        });
+        if (parsed === null) {
+          // Corps 200 illisible (page HTML de maintenance, CSV tronqué, en-tête
+          // renommé) = symptôme d'HÔTE, pas d'adresse → l'autre hôte une fois.
+          errByHost.set(host.name, "unparsable 200 body");
+          if (isFinal || !otherHostUntried) return giveUp("unparsable 200 body");
+          const next = switchHost();
+          console.warn(
+            `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} unparsable 200 body from ${host.name}, ${attemptLabel} — retrying on ${next.name}`,
+          );
+          await abortableSleep(backoffDelayMs(attempt, BASE_DELAY_MS), callerSignal);
+          continue;
+        }
+        // Corps LU : cet hôte devient l'hôte de départ des chunks suivants (loggé).
+        stats.chunksByHost[host.name] = (stats.chunksByHost[host.name] ?? 0) + 1;
+        const normalized = hostIdx % HOSTS.length;
+        if (normalized !== preferredHostIdx) {
+          console.warn(
+            `[france-data-mcp] geocodeAddressesBatch: preferred BAN host ${hostAt(preferredHostIdx).name} → ${host.name} for subsequent chunks`,
+          );
+          preferredHostIdx = normalized;
+        }
         return parsed;
       }
 
-      if (isTransientHttpStatus(response.status)) {
-        lastError = `HTTP ${response.status}`;
-        if (isFinal) break;
+      if (response.status === 429) {
+        errByHost.set(host.name, "HTTP 429");
+        if (isFinal) return giveUp(`rate limited after ${MAX_RETRIES + 1} attempts`);
+        stats.rateLimitRetries++;
+        const header = response.headers.get("retry-after");
+        const delayMs = rateLimitDelayMs(attempt, header);
         console.warn(
-          `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} transient error (${response.status}), ${attemptLabel} — retrying`,
+          `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} rate limited (429) by ${host.name}, ${attemptLabel} — retrying in ${delayMs} ms (${header === null ? "local 2/4/8 s schedule" : "retry-after header"})`,
         );
-        await sleep(backoffDelayMs(attempt, BASE_DELAY_MS));
+        await abortableSleep(delayMs, callerSignal);
         continue;
       }
 
-      // Non-retryable 4xx (except 429 already covered by isTransientHttpStatus)
-      console.error(
-        `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} non-retryable error HTTP ${response.status} — giving up`,
+      if (isTransientHttpStatus(response.status)) {
+        errByHost.set(host.name, `HTTP ${response.status}`);
+        if (isFinal) return giveUp(`failed after ${MAX_RETRIES + 1} attempts`);
+        const next = switchHost();
+        console.warn(
+          `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} transient error (${response.status}) on ${host.name}, ${attemptLabel} — retrying on ${next.name}`,
+        );
+        await abortableSleep(backoffDelayMs(attempt, BASE_DELAY_MS), callerSignal);
+        continue;
+      }
+
+      // 4xx non-retryable : chemin changé (404) ou hôte décommissionné (410) = panne
+      // d'HÔTE possible → l'autre hôte UNE fois ; les deux → la requête est fautive.
+      errByHost.set(host.name, `HTTP ${response.status}`);
+      if (isFinal || !otherHostUntried) return giveUp(`non-retryable HTTP ${response.status}`);
+      const next = switchHost();
+      console.warn(
+        `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} non-retryable HTTP ${response.status} on ${host.name}, ${attemptLabel} — trying ${next.name} once`,
       );
-      return null;
     } catch (err) {
       // F2 — distinguer 3 cas d'abort/erreur :
       //  (1) caller signal aborté → CallerAbortedError : on propage (le batch
       //      veut s'arrêter, pas de retry).
       //  (2) timeout par-tentative (`timedOut`) → AbortError, le caller n'a
-      //      PAS aborté : transitoire, on retry (CHAQUE tentative est elle-
-      //      même bornée → temps total borné par retries × timeout).
-      //  (3) erreur réseau (ENOTFOUND, ECONNRESET…) → transitoire, on retry.
+      //      PAS aborté : transitoire, on retry sur l'AUTRE hôte (CHAQUE
+      //      tentative est elle-même bornée → temps total borné).
+      //  (3) erreur réseau (ENOTFOUND, ECONNREFUSED, ECONNRESET…) → transitoire,
+      //      on retry sur l'AUTRE hôte (c'est LE cas de la panne du 26/08/2026).
       if (callerSignal?.aborted) {
         // Le caller a annulé pendant la requête en vol — stop net.
         throw new CallerAbortedError();
       }
-      const isTimeout = timedOut;
-      lastError = isTimeout
+      const reason = timedOut
         ? `request timed out after ${requestTimeoutMs}ms`
         : (err as Error).message;
-      if (isFinal) break;
+      errByHost.set(host.name, reason);
+      if (isFinal) return giveUp(`failed after ${MAX_RETRIES + 1} attempts`);
+      const next = switchHost();
       console.warn(
-        isTimeout
-          ? `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} request timed out (>${requestTimeoutMs}ms), ${attemptLabel} — retrying`
-          : `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} network error (${lastError}), ${attemptLabel} — retrying`,
+        timedOut
+          ? `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} request timed out (>${requestTimeoutMs}ms) on ${host.name}, ${attemptLabel} — retrying on ${next.name}`
+          : `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} network error (${reason}) on ${host.name}, ${attemptLabel} — retrying on ${next.name}`,
       );
-      await sleep(backoffDelayMs(attempt, BASE_DELAY_MS));
+      await abortableSleep(backoffDelayMs(attempt, BASE_DELAY_MS), callerSignal);
     } finally {
       // Toujours clearer le timer (réponse à temps OU abort) — aucun timer
       // non-unref'd ne fuit dans un job de 339k rows ni dans les tests.
@@ -373,10 +562,8 @@ async function postChunk(
     }
   }
 
-  console.error(
-    `[france-data-mcp] geocodeAddressesBatch: chunk ${chunkIndex} failed after ${MAX_RETRIES + 1} attempts (${lastError ?? "unknown"}) — continuing with other chunks`,
-  );
-  return null;
+  // Inatteignable (chaque branche finale retourne) — garde LOUD si la boucle évolue.
+  return giveUp(`exhausted ${MAX_RETRIES + 1} attempts`);
 }
 
 /**
@@ -403,6 +590,7 @@ export async function geocodeAddressesBatch(
   const { chunkSize, scoreThreshold, signal, requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS } = opts;
   const results = new Map<string, BanGeocodeResult>();
   let apiFailures = 0;
+  const stats: BatchStats = { chunksByHost: {}, hostSwitches: 0, rateLimitRetries: 0 };
 
   // Split into chunks
   const chunks: InputRow[][] = [];
@@ -434,7 +622,7 @@ export async function geocodeAddressesBatch(
 
     let chunkResults: Map<string, BanGeocodeResult> | null;
     try {
-      chunkResults = await postChunk(chunk, i, scoreThreshold, requestTimeoutMs, signal);
+      chunkResults = await postChunk(chunk, i, scoreThreshold, requestTimeoutMs, signal, stats);
     } catch (err) {
       // Seul cas propagé par postChunk : CallerAbortedError (annulation du
       // batch). On bascule en mode arrêt : ce chunk + les suivants comptent
@@ -497,5 +685,5 @@ export async function geocodeAddressesBatch(
     }
   }
 
-  return { results, apiFailures, chunksTotal };
+  return { results, apiFailures, chunksTotal, ...stats };
 }

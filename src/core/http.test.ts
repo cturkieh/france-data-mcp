@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpError, RateLimitExceededError, fetchJson } from "./http.js";
+import { HttpError, RateLimitExceededError, fetchJson, parseRetryAfterSeconds } from "./http.js";
 import { runWithFakeTimers } from "./test-helpers.js";
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -64,7 +64,7 @@ describe("fetchJson", () => {
   });
 
   // Garde-fou : si une API amont renvoie 429 SANS le header `retry-after` (cas
-  // dégradé, observé sur certains proxies), `parseRetryAfter(null)` doit
+  // dégradé, observé sur certains proxies), `parseRetryAfterSeconds(null)` rend `null` et le caller doit
   // retourner un défaut > 0 ET un retry doit être tenté. Sans cet ensemble
   // d'assertions, un changement du défaut vers 0 (qui produirait une hot-loop
   // sur les 429 sans header) passerait silencieusement : un drain de timer
@@ -158,5 +158,39 @@ describe("fetchJson", () => {
     expect(err.status).toBe(500);
     expect(err.url).toContain("example.test");
     expect(err.body).toBe("body");
+  });
+});
+
+describe("parseRetryAfterSeconds", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("entier de secondes → tel quel ; absent / 0 / date passée → null sans warn", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parseRetryAfterSeconds("7")).toBe(7);
+    expect(parseRetryAfterSeconds(null)).toBeNull();
+    expect(parseRetryAfterSeconds("0")).toBeNull();
+    expect(parseRetryAfterSeconds("Wed, 21 Oct 2015 07:28:00 GMT")).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("HTTP-date future → secondes restantes (jamais lue comme « 21 s » par parseInt)", () => {
+    const future = new Date(Date.now() + 30_000).toUTCString();
+    const s = parseRetryAfterSeconds(future);
+    expect(s).not.toBeNull();
+    expect(s as number).toBeGreaterThanOrEqual(29);
+    expect(s as number).toBeLessThanOrEqual(31);
+  });
+
+  it("header présent mais illisible → null + warn (dégradation amont jamais muette)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parseRetryAfterSeconds("banana")).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("retry-after header unreadable"));
+  });
+
+  it("au-delà du plafond → écrêté + warn (retry potentiellement prématuré)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parseRetryAfterSeconds("300")).toBe(60);
+    expect(parseRetryAfterSeconds("300", 120)).toBe(120);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("capped to 60s"));
   });
 });

@@ -1,9 +1,20 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ACCEPTED_PRECISION_TYPES,
+  BAN_BULK_HOSTS,
+  _resetBanBulkHostForTesting,
   geocodeAddressesBatch,
   normalizeAddressForBan,
 } from "./ban-bulk-client.js";
+import { runWithFakeTimers } from "./test-helpers.js";
+
+// En-tête CSV tel que la BAN l'écho (colonnes d'entrée puis result_*) — une seule copie.
+const BAN_CSV_HEADER =
+  "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label";
+
+// L'hôte préféré est un état MODULE (sticky) : chaque test repart de l'hôte [0],
+// sinon une séquence 5xx → 200 d'un test précédent fuit dans le suivant.
+beforeEach(() => _resetBanBulkHostForTesting());
 
 // Retour sous forme d'objet (pas bare Map) : P5 exige que apiFailures soit
 // observable même quand results est vide (ex : BAN-down total). Un bare Map
@@ -13,14 +24,11 @@ describe("geocodeAddressesBatch", () => {
     // BAN bulk CSV response : la BAN préfixe avec les colonnes d'entrée, puis ajoute result_*
     // Ici on passe un passthrough column "key" → la BAN l'écho en première position
     const chunk1Csv = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       "key-good,1 Rue de Rivoli,75001,75101,48.8600,2.3530,0.92,housenumber,1 Rue de Rivoli 75001 Paris",
     ].join("\n");
 
-    const chunk2Csv = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
-      "key-bad,99 Lieu Inexistant,99999,99999,,,-1,,",
-    ].join("\n");
+    const chunk2Csv = [BAN_CSV_HEADER, "key-bad,99 Lieu Inexistant,99999,99999,,,-1,,"].join("\n");
 
     const fetchMock = vi
       .fn()
@@ -101,7 +109,7 @@ describe("geocodeAddressesBatch", () => {
 
   it("score sous le seuil → accepted:false même si housenumber", async () => {
     const csvBody = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       "key-low,5 Rue du Faubourg,75011,75111,48.8540,2.3770,0.35,housenumber,5 Rue du Faubourg 75011 Paris",
     ].join("\n");
 
@@ -133,7 +141,7 @@ describe("geocodeAddressesBatch", () => {
     const lat = opts.lat ?? "48.86";
     const lon = opts.lon ?? "2.35";
     const csvBody = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       `k,X,75001,75101,${lat},${lon},${opts.score},${opts.type},X`,
     ].join("\n");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(csvBody, { status: 200 })));
@@ -306,7 +314,7 @@ describe("geocodeAddressesBatch", () => {
   // donnée, pas échec d'API).
   it("S2 — BAN écho 1 ligne sur 2 → clé absente = entrée unresolved explicite, apiFailures=0", async () => {
     const csvBody = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       "k-echoed,1 Rue A,75001,75101,48.8600,2.3530,0.92,housenumber,1 Rue A 75001 Paris",
     ].join("\n");
 
@@ -349,10 +357,9 @@ describe("geocodeAddressesBatch", () => {
     // à AUCUNE clé envoyée (mis-mapping systémique). parseBanCsvResponse n'est
     // pas null (header OK, ≥2 lignes) → ce n'est PAS S1. Aucune de nos clés
     // n'est mappée ⇒ les 2 deviennent unresolved + 1 warn "0 mapped rows".
-    const csvBody = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
-      "k-not-sent,X,75000,75100,48.8,2.3,0.9,housenumber,X",
-    ].join("\n");
+    const csvBody = [BAN_CSV_HEADER, "k-not-sent,X,75000,75100,48.8,2.3,0.9,housenumber,X"].join(
+      "\n",
+    );
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(csvBody, { status: 200 })));
 
@@ -404,7 +411,7 @@ describe("geocodeAddressesBatch", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const okCsv = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       "k-ok,1 Rue OK,75001,75101,48.8600,2.3530,0.92,housenumber,1 Rue OK 75001 Paris",
     ].join("\n");
 
@@ -514,7 +521,7 @@ describe("geocodeAddressesBatch", () => {
   // restants comptent en apiFailures. Pas de throw, pas de hang.
   it("F2 — caller signal aborté mid-flight → pas de nouveau chunk, restants en apiFailures", async () => {
     const okCsv = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       "k1,1 Rue A,75001,75101,48.8600,2.3530,0.92,housenumber,1 Rue A 75001 Paris",
     ].join("\n");
     const ac = new AbortController();
@@ -560,7 +567,7 @@ describe("geocodeAddressesBatch", () => {
   // UNRESOLVED ou émettait le warn « 0 mapped rows » sur un chunk dédupliqué.
   it("clé dupliquée dans un chunk → 1 entrée réelle (last-write-wins), pas d'UNRESOLVED ni warn 0-mapped", async () => {
     const csvBody = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       "K,1 Rue Alpha,75001,75101,48.8600,2.3530,0.91,housenumber,1 Rue Alpha 75001 Paris",
       "K,9 Rue Omega,75001,75101,48.8700,2.3600,0.95,housenumber,9 Rue Omega 75001 Paris",
     ].join("\n");
@@ -684,7 +691,7 @@ describe("normalizeAddressForBan", () => {
 
   it("buildFormData : envoie l'adresse NORMALISÉE à BAN mais garde la clé de cache INTACTE", async () => {
     const csv = [
-      "key,adresse,code_postal,citycode,latitude,longitude,result_score,result_type,result_label",
+      BAN_CSV_HEADER,
       '"0002 BD MARIN|13008|13055",2 BD MARIN,13008,13055,43.27,5.39,0.74,housenumber,2 Bd Marin 13008 Marseille',
     ].join("\n");
     const fetchMock = vi.fn().mockResolvedValue(new Response(csv, { status: 200 }));
@@ -719,5 +726,219 @@ describe("normalizeAddressForBan", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+// Repli d'hôte (Géoplateforme IGN ↔ api-adresse) + 429 — emprunts 1001 feuilles,
+// mesurés prod 2026-09-05 (docs/plans/ban-emprunts-1001-feuilles-mesure.md) :
+// parité 1 000/1 000 entre les deux hôtes sur des adresses RPPS réelles.
+describe("repli d'hôte BAN bulk + barème 429", () => {
+  const ok = (key: string) =>
+    new Response(
+      [
+        BAN_CSV_HEADER,
+        `${key},1 Rue OK,75001,75101,48.8600,2.3530,0.92,housenumber,1 Rue OK 75001 Paris`,
+      ].join("\n"),
+      { status: 200 },
+    );
+  const row = (key: string) => ({
+    key,
+    adresse: "1 Rue OK",
+    codePostal: "75001",
+    codeInsee: "75101",
+  });
+  const isGeopf = (u: string) => u.includes("data.geopf.fr");
+  /** Stub `fetch` traçant les URL appelées ; `handler(url, n)` reçoit le rang (1-based) de l'appel. */
+  function stubFetch(handler: (url: string, n: number) => Promise<Response>) {
+    const calls: string[] = [];
+    const urlOf = (input: RequestInfo | URL): string =>
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      return handler(url, calls.push(url));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, hosts: () => calls.map((u) => (isGeopf(u) ? "geopf" : "gouv")) };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("BAN_BULK_HOSTS : Géoplateforme IGN en tête (successeur officiel), api-adresse (déprécié) en repli — ordre FIGÉ, même endpoint bulk CSV", () => {
+    expect(BAN_BULK_HOSTS.length).toBe(2);
+    expect(isGeopf(BAN_BULK_HOSTS[0])).toBe(true);
+    expect(BAN_BULK_HOSTS[1].includes("api-adresse.data.gouv.fr")).toBe(true);
+    for (const h of BAN_BULK_HOSTS) expect(h.endsWith("/search/csv/")).toBe(true);
+  });
+
+  it("hôte primaire injoignable (erreur réseau) → tentative suivante sur l'AUTRE hôte, chunk OK, apiFailures=0 ; le chunk suivant part DIRECTEMENT sur l'hôte qui a répondu (sticky)", async () => {
+    // Panne réelle 26/08/2026 : connexion refusée (pas un 5xx) sur un hôte.
+    const { hosts } = stubFetch(async (url, n) => {
+      if (isGeopf(url)) throw new TypeError("fetch failed: ECONNREFUSED");
+      return ok(n === 2 ? "k1" : "k2");
+    });
+
+    const out = await runWithFakeTimers(
+      geocodeAddressesBatch([row("k1"), row("k2")], { chunkSize: 1, scoreThreshold: 0.5 }),
+    );
+
+    // chunk 0 : geopf KO → gouv OK ; chunk 1 : gouv direct (sticky) — 3 appels, pas 4.
+    expect(hosts()).toEqual(["geopf", "gouv", "gouv"]);
+    expect(out.apiFailures).toBe(0);
+    expect(out.results.get("k1")?.accepted).toBe(true);
+    expect(out.results.get("k2")?.accepted).toBe(true);
+    const warns = vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
+    expect(
+      warns.some(
+        (m) => m.includes("data.geopf.fr") && m.includes("retrying on api-adresse.data.gouv.fr"),
+      ),
+    ).toBe(true);
+  });
+
+  it("5xx sur un hôte → bascule sur l'autre (le repli couvre la panne serveur, pas seulement le réseau)", async () => {
+    const { hosts } = stubFetch(async (url) =>
+      isGeopf(url) ? new Response("upstream error", { status: 502 }) : ok("k1"),
+    );
+
+    const out = await runWithFakeTimers(
+      geocodeAddressesBatch([row("k1")], { chunkSize: 1, scoreThreshold: 0.5 }),
+    );
+
+    expect(hosts()).toEqual(["geopf", "gouv"]);
+    expect(out.apiFailures).toBe(0);
+  });
+
+  it("les deux hôtes en panne → alternance sur les 4 tentatives, chunk compté en apiFailure (best-effort inchangé)", async () => {
+    const { hosts } = stubFetch(async () => new Response("down", { status: 503 }));
+
+    const out = await runWithFakeTimers(
+      geocodeAddressesBatch([row("k1")], { chunkSize: 1, scoreThreshold: 0.5 }),
+    );
+
+    expect(hosts()).toEqual(["geopf", "gouv", "geopf", "gouv"]);
+    expect(out.apiFailures).toBe(1);
+    expect(out.results.size).toBe(0);
+  });
+
+  it("404 sur l'hôte primaire (chemin changé / décommission) → l'autre hôte UNE fois, chunk OK ; l'hôte cassé ne devient PAS sticky", async () => {
+    const { hosts } = stubFetch(async (url) =>
+      isGeopf(url) ? new Response("not found", { status: 404 }) : ok("k1"),
+    );
+
+    const out = await runWithFakeTimers(
+      geocodeAddressesBatch([row("k1"), row("k2")], { chunkSize: 1, scoreThreshold: 0.5 }),
+    );
+
+    // chunk 0 : geopf 404 → gouv OK ; chunk 1 : gouv direct (sticky = hôte dont le corps a été LU).
+    expect(hosts()).toEqual(["geopf", "gouv", "gouv"]);
+    expect(out.apiFailures).toBe(0);
+    expect(out.hostSwitches).toBe(1);
+    expect(out.chunksByHost).toEqual({ "api-adresse.data.gouv.fr": 2 });
+  });
+
+  it("corps 200 ILLISIBLE sur l'hôte primaire (page de maintenance) → l'autre hôte, chunk OK ; l'hôte malade n'est pas promu sticky", async () => {
+    const { hosts } = stubFetch(async (url) =>
+      isGeopf(url) ? new Response("<html>maintenance</html>", { status: 200 }) : ok("k1"),
+    );
+
+    const out = await runWithFakeTimers(
+      geocodeAddressesBatch([row("k1"), row("k2")], { chunkSize: 1, scoreThreshold: 0.5 }),
+    );
+
+    expect(hosts()).toEqual(["geopf", "gouv", "gouv"]);
+    expect(out.apiFailures).toBe(0);
+    const warns = vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
+    expect(warns.some((m) => m.includes("chunk 0") && m.includes("data.geopf.fr"))).toBe(true);
+    expect(
+      warns.some((m) => m.includes("preferred BAN host data.geopf.fr → api-adresse.data.gouv.fr")),
+    ).toBe(true);
+  });
+
+  it("404 sur les DEUX hôtes → exactement 2 appels (la requête est fautive, pas l'hôte), apiFailure, ligne d'abandon nommant les deux hôtes", async () => {
+    const { fetchMock } = stubFetch(async () => new Response("not found", { status: 404 }));
+
+    const out = await runWithFakeTimers(
+      geocodeAddressesBatch([row("k1")], { chunkSize: 1, scoreThreshold: 0.5 }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out.apiFailures).toBe(1);
+    const errs = vi.mocked(console.error).mock.calls.map((c) => String(c[0]));
+    expect(
+      errs.some(
+        (m) =>
+          m.includes("data.geopf.fr: HTTP 404") && m.includes("api-adresse.data.gouv.fr: HTTP 404"),
+      ),
+    ).toBe(true);
+  });
+
+  it("abort caller PENDANT l'attente 429 (retry-after 60 s) → arrêt net, pas d'attente jusqu'au réveil", async () => {
+    const controller = new AbortController();
+    const queue = [new Response("rate limited", { status: 429, headers: { "retry-after": "60" } })];
+    const { fetchMock } = stubFetch(async () => queue.shift() ?? ok("k1"));
+
+    const promise = geocodeAddressesBatch([row("k1"), row("k2")], {
+      chunkSize: 1,
+      scoreThreshold: 0.5,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(1_000); // 1er appel fait, attente 60 s en cours
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(10); // bien avant les 60 s
+    const out = await promise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out.apiFailures).toBe(2);
+  });
+
+  it("429 avec `retry-after: 7` → attend 7 s (le header prime) sur le MÊME hôte (pas de bascule sur un quota), puis succès", async () => {
+    const queue = [new Response("rate limited", { status: 429, headers: { "retry-after": "7" } })];
+    const { fetchMock, hosts } = stubFetch(async () => queue.shift() ?? ok("k1"));
+
+    const promise = geocodeAddressesBatch([row("k1")], { chunkSize: 1, scoreThreshold: 0.5 });
+    await vi.advanceTimersByTimeAsync(6_000); // l'ancien backoff 0,5 s aurait déjà re-tapé
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_500); // 7 s + jitter (< 250 ms)
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const out = await promise;
+
+    expect(hosts()).toEqual(["geopf", "geopf"]);
+    expect(out.apiFailures).toBe(0);
+    expect(out.rateLimitRetries).toBe(1);
+    expect(out.hostSwitches).toBe(0);
+    expect(out.results.get("k1")?.accepted).toBe(true);
+  });
+
+  it("429 SANS retry-after → barème 2 s puis 4 s (jamais le backoff 0,5 s), même hôte", async () => {
+    const queue = [
+      new Response("rate limited", { status: 429 }),
+      new Response("rate limited", { status: 429 }),
+    ];
+    const { fetchMock, hosts } = stubFetch(async () => queue.shift() ?? ok("k1"));
+
+    const promise = geocodeAddressesBatch([row("k1")], { chunkSize: 1, scoreThreshold: 0.5 });
+    await vi.advanceTimersByTimeAsync(1_500); // t=1,5 s : 1er 429 attend 2 s
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_000); // t=2,5 s : 2e tentative partie (2 s + jitter)
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(3_000); // t=5,5 s : 2e 429 attend 4 s → pas encore
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1_500); // t=7 s : 3e tentative partie (≥ 6,25 s)
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const out = await promise;
+
+    expect(hosts()).toEqual(["geopf", "geopf", "geopf"]);
+    expect(out.apiFailures).toBe(0);
+    expect(out.rateLimitRetries).toBe(2);
+    expect(out.results.get("k1")?.accepted).toBe(true);
   });
 });

@@ -78,6 +78,13 @@ cible `rpps_staging`) : 66 % d'acceptation prouvée prod sur les rejetées
 centroïde ». Dette : re-géocodage récurrent encore manuel (cron ne géocode
 plus). Cf. mémoire `ban-acceptance-precision-tier`.
 
+**Rejets périmés (2026-09-05)** : le passage 0,7 → 0,5 a laissé **9 305 clés**
+rejetées sous l'ancien gate et figées par le cap `BAN_MAX_ATTEMPTS` (15 903 lignes
+`rpps` au centroïde). `ban-backfill.mjs` re-soumet désormais tout rejet dont le
+cache porte un résultat que la règle courante accepterait (`isStaleRejection`, RPC
+`rpps_geocoded_cache_lookup` étendue). Mesure complète, repli d'hôte Géoplateforme
+et emprunts non retenus : `ban-emprunts-1001-feuilles-mesure.md`.
+
 ## Garde-fous
 
 `ban-eligibility-predicate-parity` (6 sites), `ban-eligibility-index-expr-parity`

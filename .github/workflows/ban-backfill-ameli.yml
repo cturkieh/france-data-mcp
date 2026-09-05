@@ -112,7 +112,7 @@ jobs:
           source-label: Backfill BAN Ameli
           ingest-log-source: "" # pas d'ingest_log côté backfill (cache-only)
           issue-labels: backfill-failure,ameli
-          failure-modes: "API BAN (api-adresse) indisponible ou lente (réessayer plus tard), RPC d'énumération keyset absente (migration T-format non appliquée), secrets Supabase manquants (preflight)."
+          failure-modes: "Géocodage BAN indisponible ou lent sur les DEUX hôtes (data.geopf.fr puis repli api-adresse — réessayer plus tard), RPC d'énumération keyset absente (migration T-format non appliquée), secrets Supabase manquants (preflight)."
           killed-hint: "Le drain BAN remplit le cache geocoded_addresses au fil de l'eau (idempotent) : relancer via workflow_dispatch pour finir le drain ; les coords sont posées dans la table au prochain cron (ban_join)."
           job-status: ${{ job.status }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

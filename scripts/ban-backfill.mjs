@@ -8,7 +8,8 @@
 // interrompu converge quand même run après run via ce même cache.
 //
 // IDEMPOTENT : un re-run saute les clés déjà cachées (accepted=true figées,
-// accepted=false au-delà du cap d'attempts) → un 2e run ne re-géocode ~rien.
+// accepted=false au-delà du cap d'attempts — SAUF rejet PÉRIMÉ d'une règle plus
+// stricte, re-soumis une fois, cf. `isStaleRejection`) → un 2e run ne re-géocode ~rien.
 //
 // Lancement manuel :
 //   tsx scripts/ban-backfill.mjs [--max N]
@@ -23,6 +24,8 @@ import { createClient } from "@supabase/supabase-js";
 import {
   banLastStatus,
   geocodeAddressesBatch,
+  hasGateFields,
+  isStaleRejection,
   parseRpcCount,
   withTimeout,
 } from "../src/core/index.ts";
@@ -67,10 +70,19 @@ const BAN_ACCEPT_SCORE = 0.5;
 // timeout (transitoire) mais CHAQUE tentative est elle-même bornée.
 const BAN_REQUEST_TIMEOUT_MS = 90_000;
 // Cap de tentatives sur une clé `accepted=false` : au-delà, l'adresse est
-// durablement non résolue → on ne la re-soumet plus (identique au cron
-// `BAN_MAX_ATTEMPTS` de `scripts/ingest/rpps.ts`). Les `accepted=true` sont
-// FIGÉES (jamais re-soumises) ; les clés jamais vues toujours soumises.
+// durablement non résolue → on ne la re-soumet plus (le cron ne géocode plus
+// depuis la refonte `ban_join` : ce backfill est le SEUL émetteur BAN ; les RPC de
+// jauge `rpps_measure_ban_to_geocode` / Ameli encodent le même `>= 3`, cf. note
+// de la migration 20260905T180000). Les `accepted=true` sont FIGÉES (jamais
+// re-soumises) ; les clés jamais vues toujours soumises.
 const BAN_MAX_ATTEMPTS = 3;
+// REJET PÉRIMÉ : règle et type de ligne dans `src/core/geocoded-cache-row.ts`
+// (`isStaleRejection`, TYPÉE et testée — ce `.mjs` n'est pas sous `tsc`). Ici
+// seulement les paramètres : seuil courant + plafond de ré-soumission = UNE
+// tentative au-delà du cap (convergence par construction ; prod 2026-09-05 :
+// aucune clé au-delà de 3 tentatives → no-op sur le lot actuel de 9 305).
+const BAN_STALE_RESUBMIT_CAP = BAN_MAX_ATTEMPTS + 1;
+const STALE_OPTS = { scoreThreshold: BAN_ACCEPT_SCORE, resubmitCap: BAN_STALE_RESUBMIT_CAP };
 // Lecture cache par RPC `rpps_geocoded_cache_lookup` (clés en BODY POST, PAS
 // `.in()` en URL GET). Batch large : ~670 requêtes (chunks 500) → ~34
 // (incident GATE G5 — 3 runs prod morts `fetch failed` sur la phase cache,
@@ -209,7 +221,9 @@ assertSourcesValid(SOURCES);
  *     backfill standalone DOIT lire la table LIVE (la staging n'existe que
  *     PENDANT l'ingestion).
  * @returns {Promise<{ totalEligibleDistinct:number, geocoded:number,
- *   skippedCached:number, accepted:number, rejected:number, unresolved:number,
+ *   skippedCached:number, staleResubmitted:number, staleDeferred:number,
+ *   staleDetectionEnabled:boolean, staleRerejected:number, accepted:number, rejected:number, unresolved:number,
+ *   banChunksByHost:Record<string,number>, banHostSwitches:number, banRateLimitRetries:number,
  *   contractBreached:number, apiFailures:number, transientRetries:number,
  *   remaining:number }>}
  */
@@ -411,8 +425,25 @@ export async function runBanBackfill(supabase, opts = {}) {
     for (const c of data ?? []) cached.set(c.address_key, c);
   }
 
+  // Garde de CONTRAT (fenêtre push-code ↔ apply-migration, T-format prod-only) :
+  // sans les 3 champs de gate (`20260905T180000`), la détection des rejets périmés
+  // serait un no-op SILENCIEUX (« 0 stale » indiscernable de « rien de périmé »).
+  let staleDetectionEnabled = true;
+  for (const c of cached.values()) {
+    if (hasGateFields(c)) break;
+    staleDetectionEnabled = false;
+    console.warn(
+      `[ban-backfill] rpps_geocoded_cache_lookup renvoie des lignes SANS champs de gate (ex. ${c.address_key}) — migration 20260905T180000 non appliquée : détection des rejets périmés DÉSACTIVÉE ce run`,
+    );
+    break;
+  }
+
   const keysToSubmit = [];
   let skippedCached = 0;
+  // Rejets périmés (cf. `isStaleRejection`, core) — comptés APRÈS la borne --max sur
+  // la liste réellement soumise (ils sont à attempts=3 donc en QUEUE de tri : un
+  // canari --max les diffère tous, et le dire est la seule chose honnête).
+  const staleKeys = new Set();
   for (const key of distinctKeys) {
     const c = cached.get(key);
     if (c === undefined) {
@@ -425,9 +456,14 @@ export async function runBanBackfill(supabase, opts = {}) {
     }
     if (c.ban_attempt_count < BAN_MAX_ATTEMPTS) {
       keysToSubmit.push(key);
-    } else {
-      skippedCached++;
+      continue;
     }
+    if (staleDetectionEnabled && isStaleRejection(c, STALE_OPTS)) {
+      staleKeys.add(key);
+      keysToSubmit.push(key);
+      continue;
+    }
+    skippedCached++;
   }
 
   // Ordre de service : `(ban_attempt_count ASC, address_key ASC)` — une clé
@@ -454,6 +490,14 @@ export async function runBanBackfill(supabase, opts = {}) {
     remaining = keysToSubmit.length - maxNew;
     keysToSubmit.length = maxNew;
   }
+  let staleResubmitted = 0;
+  for (const key of keysToSubmit) if (staleKeys.has(key)) staleResubmitted++;
+  const staleDeferred = staleKeys.size - staleResubmitted;
+  if (staleDeferred > 0) {
+    console.warn(
+      `[ban-backfill] ${staleDeferred} rejet(s) périmé(s) NON re-soumis ce run (--max ${maxNew} : les clés à attempts=${BAN_MAX_ATTEMPTS} sont en queue de tri) — relancer SANS --max pour les drainer`,
+    );
+  }
 
   if (keysToSubmit.length === 0) {
     console.log(
@@ -463,18 +507,25 @@ export async function runBanBackfill(supabase, opts = {}) {
       totalEligibleDistinct,
       geocoded: 0,
       skippedCached,
+      staleResubmitted,
+      staleDeferred,
+      staleDetectionEnabled,
+      staleRerejected: 0,
       accepted: 0,
       rejected: 0,
       unresolved: 0,
       contractBreached: 0,
       apiFailures: 0,
       transientRetries,
+      banChunksByHost: {},
+      banHostSwitches: 0,
+      banRateLimitRetries: 0,
       remaining,
     };
   }
 
   console.log(
-    `[ban-backfill] ${keysToSubmit.length} addresses to geocode / ${skippedCached} already cached / ${totalEligibleDistinct} distinct eligible${
+    `[ban-backfill] ${keysToSubmit.length} addresses to geocode (${staleResubmitted} stale rejections resubmitted) / ${skippedCached} already cached / ${totalEligibleDistinct} distinct eligible${
       remaining > 0 ? ` / ${remaining} deferred (--max ${maxNew})` : ""
     }`,
   );
@@ -487,6 +538,14 @@ export async function runBanBackfill(supabase, opts = {}) {
   let accepted = 0;
   let rejected = 0;
   let unresolved = 0;
+  // Rejet périmé re-soumis et RE-rejeté : score/type acceptables mais résultat
+  // inexploitable (coords invalides ?) — signal d'une rupture de contrat BAN, isolé
+  // du `rejected` ordinaire (sinon enterré).
+  let staleRerejected = 0;
+  // Observabilité multi-hôte du client BAN (cf. `BanGeocodeBatchOutcome`).
+  const banChunksByHost = {};
+  let banHostSwitches = 0;
+  let banRateLimitRetries = 0;
   // S-3 parité avec `rpps.ts:runBanGeocodeStep` : compteur DÉDIÉ au downgrade
   // défensif d'un `accepted=true` à coords NULL (RUPTURE DE CONTRAT du client
   // BAN). Le noyer dans `rejected` masquerait un signal de bug client sous des
@@ -513,6 +572,11 @@ export async function runBanBackfill(supabase, opts = {}) {
       requestTimeoutMs: BAN_REQUEST_TIMEOUT_MS,
     });
     apiFailures += outcome.apiFailures;
+    banHostSwitches += outcome.hostSwitches;
+    banRateLimitRetries += outcome.rateLimitRetries;
+    for (const [h, n] of Object.entries(outcome.chunksByHost)) {
+      banChunksByHost[h] = (banChunksByHost[h] ?? 0) + n;
+    }
 
     // Upsert TOUS les results — mêmes semantics que `runBanGeocodeStep` :
     // accepté → coords + accepted=true ; non résolu → accepted=false,
@@ -540,6 +604,7 @@ export async function runBanBackfill(supabase, opts = {}) {
       else if (breached) contractBreached++;
       else if (isUnresolved) unresolved++;
       else rejected++;
+      if (!acc && staleKeys.has(key)) staleRerejected++;
       upserts.push({
         address_key: key,
         lat: acc ? lat : null,
@@ -565,14 +630,21 @@ export async function runBanBackfill(supabase, opts = {}) {
       }
     }
 
-    geocoded += sliceKeys.length;
+    // Clés réellement TRAITÉES (une entrée par clé envoyée d'un chunk réussi) — pas
+    // la taille de la tranche, qui compterait les chunks en apiFailure.
+    geocoded += outcome.results.size;
     console.log(
       `[ban-backfill] ${Math.min(i + PROGRESS_EVERY, keysToSubmit.length)}/${keysToSubmit.length} done (${accepted} accepted / ${rejected} rejected_low_score / ${unresolved} unresolved / ${contractBreached} contract_breach_downgrades / ${apiFailures} api_failures so far)`,
     );
   }
 
+  if (staleRerejected > 0) {
+    console.warn(
+      `[ban-backfill] ${staleRerejected} rejet(s) périmé(s) re-soumis et RE-rejeté(s) — score/type acceptables mais résultat inexploitable (coords invalides ?) : vérifier le contrat BAN (plafond BAN_STALE_RESUBMIT_CAP : plus jamais re-soumis)`,
+    );
+  }
   console.log(
-    `[ban-backfill] DONE: ${geocoded} geocoded / ${skippedCached} cached / ${accepted} accepted / ${rejected} rejected_low_score / ${unresolved} unresolved / ${contractBreached} contract_breach_downgrades / ${apiFailures} api_failures / ${transientRetries} transient_retries${
+    `[ban-backfill] DONE: ${geocoded} geocoded / ${staleResubmitted} stale_rejections_resubmitted${staleDeferred > 0 ? ` (${staleDeferred} deferred by --max)` : ""}${staleRerejected > 0 ? ` (${staleRerejected} re-rejected)` : ""} / ${skippedCached} cached / ${accepted} accepted / ${rejected} rejected_low_score / ${unresolved} unresolved / ${contractBreached} contract_breach_downgrades / ${apiFailures} api_failures / ${transientRetries} transient_retries / ban_hosts=${JSON.stringify(banChunksByHost)} host_switches=${banHostSwitches} rate_limit_retries=${banRateLimitRetries}${
       remaining > 0 ? ` / ${remaining} deferred (re-run to continue)` : ""
     }`,
   );
@@ -580,7 +652,14 @@ export async function runBanBackfill(supabase, opts = {}) {
   return {
     totalEligibleDistinct,
     geocoded,
+    staleRerejected,
+    banChunksByHost,
+    banHostSwitches,
+    banRateLimitRetries,
     skippedCached,
+    staleResubmitted,
+    staleDeferred,
+    staleDetectionEnabled,
     accepted,
     rejected,
     unresolved,
