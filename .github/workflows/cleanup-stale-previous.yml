@@ -53,6 +53,13 @@ jobs:
       # standard GitHub Actions (évite toute interpolation imprévue côté shell).
       MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days }}
     steps:
+      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
+      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
+      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
+      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
+      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
+      - uses: actions/checkout@v6
+
       - name: Validate max_age_days bounds
         if: env.MAX_AGE_DAYS != ''
         run: |
@@ -62,7 +69,7 @@ jobs:
           fi
 
       - name: Validate required secrets present
-        # Fail-fast clair AVANT checkout+install (~30-60s) si SUPABASE_URL ou
+        # Fail-fast clair AVANT `pnpm install` (le checkout reste en 1er, cf. ci-dessus) (~30-60s) si SUPABASE_URL ou
         # SUPABASE_SERVICE_ROLE_KEY est absent : sinon le throw du CLI Node
         # « Missing SUPABASE_URL » est moins lisible dans les logs GH que
         # cette `::error::` annotation, et arrive après l'install pnpm.
@@ -77,8 +84,6 @@ jobs:
             echo "::error::Required repository secret(s) missing: ${missing[*]}"
             exit 1
           fi
-
-      - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v6
         with:
@@ -103,19 +108,20 @@ jobs:
             pnpm cleanup:stale-previous
           fi
 
-      - name: Open issue on failure
-        if: failure()
-        uses: actions/github-script@v9
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
         with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `[cleanup-failure] stale-previous cleanup failed (run #${context.runId})`,
-              body: `The weekly stale-previous cleanup failed.\n\n` +
-                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-                    `Cleanup is best-effort and idempotent — re-run via workflow_dispatch once the underlying issue is fixed. ` +
-                    `If the failure is structural (RPC contract drift, schema migration), the failure log will pinpoint the source. ` +
-                    `Per-source failures do NOT cascade — each \`<source>_previous\` is processed independently and the script exits 1 if ANY source failed.`,
-              labels: ['cleanup-failure'],
-            })
+          source-label: Cleanup stale-previous
+          ingest-log-source: "" # le cleanup n'écrit pas ingest_log
+          issue-labels: cleanup-failure
+          failure-modes: "Cleanup best-effort et idempotent — relancer via workflow_dispatch une fois la cause corrigée. Échec structurel (dérive de contrat RPC, migration de schéma) : le log du run nomme la source fautive. Les échecs par source ne cascadent PAS (chaque <source>_previous est traité indépendamment ; exit 1 si UNE source a échoué)."
+          killed-hint: "Le cleanup est idempotent : relancer via workflow_dispatch, aucune donnée servie n'est touchée."
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

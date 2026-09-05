@@ -49,18 +49,19 @@ jobs:
           GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: pnpm ingest:cds
 
-      - name: Open issue on failure
-        if: failure()
-        uses: actions/github-script@v9
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
         with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `[ingestion-failure] CDS run failed (run #${context.runId})`,
-              body: `Le workflow CDS (centres de santé) a échoué.\n\n` +
-                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-                    `Check la table \`ingest_log\` pour la dernière ligne \`failed\` (source = 'cds') — error_phase et error_message. ` +
-                    `Causes typiques : CDS_CSV_URL stale (resource id rotated par CNAM), unmatched_locality > 5% (INSEE drift), CDS count < 2K (troncature CSV), structural skips > 1% (rename colonne CNAM).`,
-              labels: ['ingestion-failure', 'cds'],
-            })
+          source-label: CDS
+          ingest-log-source: cds
+          issue-labels: ingestion-failure,cds
+          failure-modes: "CDS_CSV_URL stale (resource id rotated par CNAM), unmatched_locality > 5% (INSEE drift), CDS count < 2K (troncature CSV), structural skips > 1% (rename colonne CNAM)."
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

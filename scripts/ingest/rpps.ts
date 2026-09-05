@@ -2,8 +2,17 @@ import "./load-env.js";
 import * as fs from "node:fs";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
-import { parseRpcCount, withTimeout } from "../../src/core/index.js";
-import { missingRpcHint } from "../../src/core/retry-transient.js";
+import {
+  PG_TRANSIENT_REBUILD_CODES,
+  isStatementTimeoutError,
+  parseRpcCount,
+  withTimeout,
+} from "../../src/core/index.js";
+import {
+  isTransientSupabaseError,
+  missingRpcHint,
+  retryTransient,
+} from "../../src/core/retry-transient.js";
 import {
   type CommuneIndex,
   type IndexedCommune,
@@ -127,6 +136,47 @@ const FINESS_MATCH_RATIO_MIN_SAMPLE = 1_000;
  * fonction 55 s) sans laisser un hang réel non borné.
  */
 const RPC_READ_TIMEOUT_MS = 60_000;
+
+/**
+ * Jauge 6d (`rpps_measure_ban_to_geocode`) : UNE relance après un délai de
+ * repos (`retryTransient`, `maxRetries: 1`, `baseDelayMs` = cette constante),
+ * sur 57014 (`isStatementTimeoutError` ; `statement_timeout` 55 s côté
+ * fonction) OU un blip transport RÉSOLU (`isTransientSupabaseError` — PostgREST
+ * résout `{ error: "fetch failed" }` sans throw, prouvé prod G5) ; un blip
+ * transport qui THROW est relancé par `retryTransient` lui-même.
+ *
+ * Prouvé prod run #33954453629 (2026-09-05) : la RPC a fait 57014 à 09:08:34
+ * ALORS QUE le re-ANALYZE 5d avait tourné à 09:06:58 (stats fraîches — la
+ * seule hypothèse « stats périmées » du fix 2026-07 est donc INSUFFISANTE) ;
+ * un checkpoint de 612 Mo (write=269 s) venait de se terminer à 09:07:36 et
+ * un second démarrait à 09:08:06, en plein dans la mesure. Relancée à la
+ * main 20 min plus tard, base au repos : réponse < 1 s (42 194 / 7 048).
+ * Cause = contention I/O post-run (35 min d'UPDATE ban_join + swap + rebuild
+ * de 4 matviews sur un compute à ~256 Mo de shared_buffers), pas la requête.
+ * 60 s de repos laissent le checkpoint se terminer avant la 2e tentative.
+ * Coût au PIRE ≈ 175 s (55 s serveur + 60 s repos + jitter + 60 s
+ * `RPC_READ_TIMEOUT_MS` sur la 2e), inséré ENTRE le swap et l'écriture
+ * d'`ingest_log` — sous le budget job de 120 min, mais c'est un argument de
+ * plus pour sortir la jauge du cron (backlog). Jamais relancés : une RPC
+ * absente / permission / contrat (structurel, échec définitif → warn +
+ * `missingRpcHint` + indice « structurel si récurrent ») et un hang client
+ * (`withTimeout` throw `TimeoutError`, exclu par `retryTransient` — contrat
+ * anti-hang).
+ */
+const MEASURE_RETRY_DELAY_MS = 60_000;
+
+/**
+ * Budget du job GitHub Actions — MIROIR de `timeout-minutes` dans
+ * `.github/workflows/ingest-rpps.yml` (parité gardée par
+ * `workflows-alerting.test.ts`). Sert au PRÉAVIS de dérive de durée : la
+ * durée réelle a glissé 54 → 57 → 60 min sur 4 mois (2026-05 → 09) sans AUCUN
+ * signal, jusqu'au mois perdu (run #30981501695 tué à 60 min). Au-delà de
+ * `JOB_DURATION_WARN_RATIO` du budget, warn LOUD + annotation GitHub
+ * (grep `DÉRIVE DE DURÉE`) : regarder quelle phase a grossi AVANT de remonter
+ * le budget. 60 % = ~2 cycles de préavis au rythme observé (+1 min/mois).
+ */
+const RPPS_JOB_BUDGET_MINUTES = 120;
+const JOB_DURATION_WARN_RATIO = 0.6;
 
 // Borne ANTI-HANG par lot de `runKeysetRpc` au step 5c (`ban_join` :
 // pose ensembliste cache→staging via `ingest_apply_rpps_ban_join_batch`).
@@ -552,14 +602,35 @@ async function main(): Promise<void> {
     let eligibleDistinct: number | null = null;
     let toGeocodeDistinct: number | null = null;
     try {
-      const { data: deltaData, error: deltaErr } = await withTimeout(
-        supabase.rpc("rpps_measure_ban_to_geocode", { p_source_table: "rpps" }),
-        RPC_READ_TIMEOUT_MS,
+      // Relance unique sur 57014 (contention I/O post-run, prouvée prod) — cf.
+      // `MEASURE_RETRY_DELAY_MS`. `retryTransient` rend la dernière valeur
+      // telle quelle : le `if (deltaErr)` ci-dessous voit l'échec définitif.
+      const { data: deltaData, error: deltaErr } = await retryTransient(
+        () =>
+          withTimeout(
+            supabase.rpc("rpps_measure_ban_to_geocode", { p_source_table: "rpps" }),
+            RPC_READ_TIMEOUT_MS,
+            "rpps_measure_ban_to_geocode",
+          ),
         "rpps_measure_ban_to_geocode",
+        {
+          maxRetries: 1,
+          baseDelayMs: MEASURE_RETRY_DELAY_MS,
+          isRetryableResult: (r) =>
+            isStatementTimeoutError(r.error) || isTransientSupabaseError(r.error),
+        },
       );
       if (deltaErr) {
+        // Dans CE projet, le 57014 a historiquement été STRUCTUREL (GiST partiel
+        // perdu au swap, matview OID, budget 8 s hérité) — une régression
+        // d'index se présenterait désormais comme « relance puis skip », mois
+        // après mois : on nomme l'hypothèse pour que l'opérateur ne la range
+        // pas en « blip ».
+        const structuralHint = isStatementTimeoutError(deltaErr)
+          ? " — 57014 APRÈS relance : si le symptôme se répète d'un cycle à l'autre, ce n'est PAS de la contention I/O mais du STRUCTUREL (index perdu au swap, plan dégradé) → EXPLAIN ANALYZE la RPC à froid"
+          : "";
         console.warn(
-          `[rpps] BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}`,
+          `[rpps] BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}${structuralHint}`,
         );
       } else {
         const row = (
@@ -612,6 +683,16 @@ async function main(): Promise<void> {
     await writeIngestLogSuccessSafe(log, "rpps");
     const elapsedSec = (new Date(log.finished_at).getTime() - new Date(startedAt).getTime()) / 1000;
     console.log(`[rpps] success: ${stats.inserted} rows ingested in ${elapsedSec}s`);
+    // Préavis de dérive (cf. `RPPS_JOB_BUDGET_MINUTES`) : le run n'a pas été
+    // tué, mais il s'en rapproche. `::warning::` sur stdout = annotation
+    // visible sur la page du run GitHub, pas seulement dans le log.
+    if (elapsedSec > RPPS_JOB_BUDGET_MINUTES * 60 * JOB_DURATION_WARN_RATIO) {
+      const minutes = Math.round(elapsedSec / 60);
+      const pct = JOB_DURATION_WARN_RATIO * 100;
+      const drift = `[rpps] DÉRIVE DE DURÉE : ${minutes} min pour un budget de ${RPPS_JOB_BUDGET_MINUTES} min (> ${pct} %) — regarder quelle phase a grossi (insert / enrichment FINESS / ban_join) AVANT de remonter timeout-minutes.`;
+      console.warn(drift);
+      console.log(`::warning::${drift}`);
+    }
   } catch (err) {
     console.error("[rpps] ingestion failed:", err);
     const ingestErr =
@@ -821,7 +902,8 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
  *
  * Exporté pour testabilité unitaire.
  */
-const TRANSIENT_REBUILD_CODES = new Set(["55P03", "40P01", "57014", "53300"]);
+// Codes transitoires : `PG_TRANSIENT_REBUILD_CODES` (`src/core/pg-errors.ts`,
+// source unique partagée avec `ameli.ts`).
 
 // `appendLogMessage` est désormais exporté depuis `./shared.js` (Phase 2 /
 // Tâche 3) — partagé avec `finess.ts` qui consomme aussi `rebuildHostedActivities`.
@@ -923,7 +1005,7 @@ export async function rebuildRppsMatviews(
     const message = (error as { message?: string }).message ?? String(error);
     const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
 
-    if (code !== undefined && TRANSIENT_REBUILD_CODES.has(code)) {
+    if (code !== undefined && PG_TRANSIENT_REBUILD_CODES.has(code)) {
       // Transitoire : `ingest_rebuild_rpps_matviews` est transactionnelle →
       // rollback intégral → AUCUNE matview détruite, l'ancienne (peuplée,
       // juste périmée) reste en place. Dégradation bénigne, retry au prochain

@@ -2,7 +2,7 @@ import "./load-env.js";
 import * as fs from "node:fs";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
-import { parseRpcCount, withTimeout } from "../../src/core/index.js";
+import { PG_TRANSIENT_REBUILD_CODES, parseRpcCount, withTimeout } from "../../src/core/index.js";
 import { missingRpcHint } from "../../src/core/retry-transient.js";
 import {
   type CommuneIndex,
@@ -115,10 +115,9 @@ const STRUCTURAL_FAIL_THRESHOLD = 0.01;
 
 /**
  * Helper local fail-loud + anti-hang pour les RPC sans payload (ANALYZE).
- * Dupliqué à dessein de `rpps.ts:callRpcFailLoud` — même rationale que
- * `AMELI_TRANSIENT_REBUILD_CODES` (ne PAS modifier rpps.ts code critique
- * stabilisé pour factoriser un helper court ; factorisation = dette mineure
- * si `/simplify` la juge nécessaire). Préfixe log `[ameli]` au lieu de
+ * Dupliqué à dessein de `rpps.ts:callRpcFailLoud` (ne PAS modifier rpps.ts
+ * code critique stabilisé pour factoriser un helper court ; factorisation =
+ * dette mineure si `/simplify` la juge nécessaire). Préfixe log `[ameli]` au lieu de
  * `[rpps]` — sinon byte-identique.
  *
  * Un `supabase.rpc()` brut sur socket figé pendrait jusqu'au kill GitHub
@@ -792,15 +791,9 @@ export function parseAmeliRecord(rec: Record<string, string>, index: CommuneInde
   };
 }
 
-// Codes SQLSTATE transitoires d'un rebuild matview (lock indisponible,
-// deadlock, statement_timeout, out-of-memory) : `ingest_rebuild_ameli_matviews`
-// est transactionnelle → un rollback intégral préserve l'ANCIENNE matview
-// (peuplée, juste périmée) ⇒ dégradation bénigne, retry au prochain cron.
-// Tout autre code = structurel (matview cassée) → fail-loud. Dupliqué de
-// `rpps.ts:TRANSIENT_REBUILD_CODES` à dessein : ne PAS modifier `rpps.ts`
-// (mergé/prouvé-prod, code critique stabilisé) pour factoriser un Set de 4
-// constantes ; factorisation = dette mineure si /simplify la juge nécessaire.
-const AMELI_TRANSIENT_REBUILD_CODES = new Set(["55P03", "40P01", "57014", "53300"]);
+// Codes SQLSTATE transitoires d'un rebuild matview : `PG_TRANSIENT_REBUILD_CODES`
+// (`src/core/pg-errors.ts`, source unique partagée avec `rpps.ts` — jadis 2 Sets
+// jumeaux dupliqués « à dessein », dette close 2026-09).
 
 /**
  * Reconstruction post-swap de la matview `ameli_nomenclature_stats`
@@ -837,7 +830,7 @@ export async function rebuildAmeliMatviews(
   const message = (error as { message?: string }).message ?? String(error);
   const detail = `post-swap matview rebuild failed [code=${code ?? "none"}] after ${elapsedMs}ms: ${message}`;
 
-  if (code !== undefined && AMELI_TRANSIENT_REBUILD_CODES.has(code)) {
+  if (code !== undefined && PG_TRANSIENT_REBUILD_CODES.has(code)) {
     console.error(`[ameli] ${detail} — transitoire, ancienne matview préservée (rollback)`);
     log.status = "partial";
     const previousMsg = log.error_message ? `${log.error_message}; ` : "";

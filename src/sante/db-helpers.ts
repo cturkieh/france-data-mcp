@@ -9,6 +9,10 @@
  *     helpers just throw, callers preserve their domain prefix.
  */
 
+// `PG_STATEMENT_TIMEOUT` vit désormais dans `core/pg-errors.ts` (générique,
+// partagé avec `scripts/ingest/`) — ré-export pour les consommateurs historiques.
+export { PG_STATEMENT_TIMEOUT } from "../core/pg-errors.js";
+
 export const DEFAULT_LIMIT = 100;
 export const MAX_LIMIT = 500;
 /**
@@ -112,13 +116,6 @@ export function validatePreciseOnly(value: unknown, fnName: string): void {
  * `error.code` so the operator can grep PgError tables (PGRST205 / 42703 /
  * etc.) directly in logs.
  */
-/**
- * SQLSTATE Postgres `57014` = `query_canceled` (statement timeout). Surface
- * tel quel par PostgREST dans `error.code`. Constante nommée pour éviter le
- * littéral magique dispersé (boundary lib + tests).
- */
-export const PG_STATEMENT_TIMEOUT = "57014";
-
 export function formatRpcError(
   rpc: string,
   error: { code?: string; message: string; hint?: string; details?: string },
