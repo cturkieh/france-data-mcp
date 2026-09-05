@@ -40,7 +40,7 @@ jobs:
       # Le preflight reste AVANT `pnpm install` (le poste coûteux).
       - uses: actions/checkout@v6
 
-      # Preflight AVANT checkout/install : echoue vite et clairement si un secret
+      # Preflight AVANT `pnpm install` (le checkout reste en 1er, cf. ci-dessus) : echoue vite et clairement si un secret
       # manque (convention pour tout nouveau workflow Supabase) plutot que de
       # crasher opaquement au milieu de l'ingestion.
       - name: Validate required secrets present

@@ -59,7 +59,10 @@ runs:
       env:
         SUPABASE_URL: ${{ inputs.supabase-url }}
         SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase-service-role-key }}
-      run: pnpm notify:pending-geocode ${{ inputs.source }}
+        # Input passé via env (jamais interpolé dans le shell = anti-injection,
+        # convention des workflows du repo).
+        SOURCE: ${{ inputs.source }}
+      run: pnpm notify:pending-geocode "$SOURCE"
 
     - name: Compose email — adresses à géocoder
       id: compose

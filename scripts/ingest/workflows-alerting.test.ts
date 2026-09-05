@@ -99,9 +99,17 @@ function stepIfCondition(src: string, stepName: string): string | null {
   return block === null ? null : (ifConditions(block)[0] ?? null);
 }
 
-/** Première ligne de chaque step d'un workflow (`- name: …` ou `- uses: …`), dans l'ordre. */
+/**
+ * Tête de chaque step d'un workflow (`name: …`, `uses: …`, `run: …`, `id: …`…),
+ * dans l'ordre. Capture TOUTE forme de tête : un `- run:` inséré avant le
+ * checkout doit faire échouer « checkout en 1er », pas être sauté.
+ */
 function stepHeads(src: string): string[] {
-  return [...src.matchAll(/^[ \t]+- (?:name|uses): (.+)$/gm)].map((m) => (m[1] ?? "").trim());
+  // Borné à la section `steps:` du job : les listes AVANT (`- cron:` du
+  // planning, `- name:` d'un input) ne sont pas des steps.
+  const stepsIdx = src.search(/^[ \t]+steps:[ \t]*$/m);
+  const body = stepsIdx < 0 ? src : src.slice(stepsIdx);
+  return [...body.matchAll(/^[ \t]+- (\S.*)$/gm)].map((m) => (m[1] ?? "").trim());
 }
 
 describe("workflows d'alerte + composites — aucun `failure()` sans `cancelled()` (timeout GitHub = cancelled)", () => {
@@ -158,7 +166,7 @@ describe("tout workflow non exempté alerte via notify-ingest-failure", () => {
       expect(
         heads[0],
         `${file} : le 1er step doit être actions/checkout (trouvé « ${heads[0]} ») — sinon un échec avant checkout rend l'alerte locale introuvable`,
-      ).toMatch(/^actions\/checkout@/);
+      ).toMatch(/^uses: actions\/checkout@/);
     });
   }
 
@@ -212,12 +220,13 @@ describe("composites — aucune expression sur un contexte indisponible (job, se
   // suffisait à tuer l'alerte. Même classe pour `secrets` (indisponible aussi).
   for (const [dir, src] of actions) {
     it(`${dir}/action.yml : aucun \$\{\{ job.* \}\} ni \$\{\{ secrets.* \}\}, même en prose`, () => {
-      expect(src, `${dir} : contexte job indisponible dans une composite`).not.toMatch(
-        /\$\{\{\s*job\./,
-      );
-      expect(src, `${dir} : contexte secrets indisponible dans une composite`).not.toMatch(
-        /\$\{\{\s*secrets\./,
-      );
+      // Scan de l'INTÉRIEUR de chaque expression (pas seulement sa tête) :
+      // `${{ inputs.x || job.status }}` casserait le chargement tout pareil.
+      for (const [, expr] of src.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+        expect(expr, `${dir} : contexte job/secrets indisponible dans une composite`).not.toMatch(
+          /\b(?:job|secrets)\./,
+        );
+      }
     });
   }
 });

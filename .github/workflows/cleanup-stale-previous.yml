@@ -69,7 +69,7 @@ jobs:
           fi
 
       - name: Validate required secrets present
-        # Fail-fast clair AVANT checkout+install (~30-60s) si SUPABASE_URL ou
+        # Fail-fast clair AVANT `pnpm install` (le checkout reste en 1er, cf. ci-dessus) (~30-60s) si SUPABASE_URL ou
         # SUPABASE_SERVICE_ROLE_KEY est absent : sinon le throw du CLI Node
         # « Missing SUPABASE_URL » est moins lisible dans les logs GH que
         # cette `::error::` annotation, et arrive après l'install pnpm.
