@@ -1,8 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import {
+  GZIP_MAGIC,
   IngestError,
   type IngestLogEntry,
   type PreValidateConfig,
@@ -70,6 +72,34 @@ describe("preValidateFile", () => {
     await expect(preValidateFile(file, baseConfig)).rejects.toMatchObject({
       phase: "pre_validate",
       message: expect.stringContaining("header"),
+    });
+  });
+
+  // Variante binaire (flux FINESS ANS, JSON.gz) : signature au lieu d'en-tête.
+  const gzConfig: PreValidateConfig = { minSizeBytes: 1, magicBytes: GZIP_MAGIC };
+  const binFile = (content: Buffer): string => {
+    const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "prevalidate-gz-")), "f.json.gz");
+    fs.writeFileSync(p, content);
+    return p;
+  };
+
+  it("magicBytes : accepte un gzip (1f 8b) sans contrôle d'en-tête CSV", async () => {
+    const file = binFile(gzipSync(Buffer.from('{"pmej":[]}')));
+    await expect(preValidateFile(file, gzConfig)).resolves.toBeUndefined();
+  });
+
+  it("magicBytes : la taille minimale s'applique aussi au binaire", async () => {
+    const file = binFile(gzipSync(Buffer.from("{}")));
+    await expect(
+      preValidateFile(file, { minSizeBytes: 10_000, magicBytes: GZIP_MAGIC }),
+    ).rejects.toMatchObject({ phase: "pre_validate", message: expect.stringContaining("size") });
+  });
+
+  it("magicBytes : rejette un contenu non-gzip même gros (page HTML de maintenance en 200)", async () => {
+    const file = binFile(Buffer.from(`<!doctype html>${"x".repeat(5000)}`));
+    await expect(preValidateFile(file, gzConfig)).rejects.toMatchObject({
+      phase: "pre_validate",
+      message: expect.stringContaining("signature"),
     });
   });
 });

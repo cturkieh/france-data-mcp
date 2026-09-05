@@ -1,0 +1,380 @@
+[
+  {
+    "informationsGeneralesEGE": {
+      "egeId": "477",
+      "complementDenominationEg": null,
+      "dateFermeture": null,
+      "dateOuverture": "2001-01-15",
+      "datePremiereAutorisation": "2017-01-03",
+      "nomEgeCourt": "SAVS ASSOCIATION ECLAT",
+      "nomEgeLong": "SAVS ASSOCIATION ECLAT",
+      "numeroEducationNationale": null,
+      "numeroReferenceExterne": null,
+      "numFinessEge": "010008894",
+      "espic": null,
+      "siret": null
+    },
+    "categorieentiteGeographiqueExercice": "446",
+    "modefixationtarifaire": "08",
+    "typeBudget": ["02"],
+    "adresse": [
+      {
+        "usageAdresse": "06",
+        "numeroVoie": "20",
+        "typeVoie": "CHE",
+        "libelleVoie": "DES TATTES DU MOULIN",
+        "complementVoie": null,
+        "complementPointGeographique": "\\ ",
+        "lieuDit": "\\ ",
+        "cogCommune": "01173",
+        "ligneAcheminement": null,
+        "ligneUne": null,
+        "ligneDeux": null,
+        "ligneTrois": null,
+        "ligneQuatre": "20 CHEMIN DES TATTES DU MOULIN",
+        "ligneCinq": null,
+        "ligneSix": null,
+        "codePostal": "01170",
+        "coordonneesGeographique": null
+      },
+      {
+        "usageAdresse": "03",
+        "numeroVoie": "20",
+        "typeVoie": "CHE",
+        "libelleVoie": "DES TATTES DU MOULIN",
+        "complementVoie": null,
+        "complementPointGeographique": null,
+        "lieuDit": null,
+        "cogCommune": "01313",
+        "ligneAcheminement": "PREVESSIN MOENS",
+        "ligneUne": null,
+        "ligneDeux": null,
+        "ligneTrois": null,
+        "ligneQuatre": "20 CHEMIN DES TATTES DU MOULIN",
+        "ligneCinq": null,
+        "ligneSix": null,
+        "codePostal": "01280",
+        "coordonneesGeographique": {
+          "coordonneeX": "6.074912",
+          "coordonneeY": "46.267633",
+          "directionLatitude": "6578805.24",
+          "directionLongitude": "936759.28",
+          "cleInInteropBAN": "01313_0112_00020",
+          "scoreBAN": "0.9528772727272726"
+        }
+      }
+    ],
+    "contact": [
+      {
+        "typeContact": {
+          "roleContact": "01"
+        },
+        "telecom": {
+          "telephone": "0450422805",
+          "telecopie": "0450422905",
+          "courriel": null
+        }
+      }
+    ],
+    "etatObjet": "A",
+    "dateDerniereMaj": "2017-04-21 00:00:00"
+  },
+  {
+    "informationsGeneralesEGE": {
+      "egeId": "833",
+      "complementDenominationEg": null,
+      "dateFermeture": null,
+      "dateOuverture": "1956-11-16",
+      "datePremiereAutorisation": "1956-11-16",
+      "nomEgeCourt": "CLINIQUE CONVERT",
+      "nomEgeLong": "CLINIQUE DOCTEUR CONVERT",
+      "numeroEducationNationale": null,
+      "numeroReferenceExterne": null,
+      "numFinessEge": "010780195",
+      "espic": ["0"],
+      "siret": "77220148900022"
+    },
+    "categorieentiteGeographiqueExercice": "365",
+    "modefixationtarifaire": "07",
+    "typeBudget": ["01"],
+    "adresse": [
+      {
+        "usageAdresse": "03",
+        "numeroVoie": "62",
+        "typeVoie": "AV",
+        "libelleVoie": "DE JASSERON",
+        "complementVoie": null,
+        "complementPointGeographique": null,
+        "lieuDit": "BP 132",
+        "cogCommune": "01053",
+        "ligneAcheminement": "BOURG EN BRESSE",
+        "ligneUne": null,
+        "ligneDeux": null,
+        "ligneTrois": null,
+        "ligneQuatre": "62 AVENUE DE JASSERON",
+        "ligneCinq": null,
+        "ligneSix": null,
+        "codePostal": "01000",
+        "coordonneesGeographique": {
+          "coordonneeX": "5.254203",
+          "coordonneeY": "46.211257",
+          "directionLatitude": "6570414.61",
+          "directionLongitude": "873766.07",
+          "cleInInteropBAN": "01053_1950_00062",
+          "scoreBAN": "0.9723872727272727"
+        }
+      }
+    ],
+    "contact": [
+      {
+        "typeContact": {
+          "roleContact": "01"
+        },
+        "telecom": {
+          "telephone": "0428631234",
+          "telecopie": null,
+          "courriel": null
+        }
+      }
+    ],
+    "etatObjet": "A",
+    "dateDerniereMaj": "2021-10-18 00:00:00"
+  },
+  {
+    "informationsGeneralesEGE": {
+      "egeId": "9024",
+      "complementDenominationEg": null,
+      "dateFermeture": null,
+      "dateOuverture": "2010-12-13",
+      "datePremiereAutorisation": "2016-06-30",
+      "nomEgeCourt": "LBM Bio Ard'Aisne Rethel",
+      "nomEgeLong": "LBM Bio Ard'Aisne Rethel",
+      "numeroEducationNationale": null,
+      "numeroReferenceExterne": null,
+      "numFinessEge": "080010085",
+      "espic": null,
+      "siret": "78712043500070"
+    },
+    "categorieentiteGeographiqueExercice": "611",
+    "modefixationtarifaire": "01",
+    "typeBudget": ["01"],
+    "adresse": [
+      {
+        "usageAdresse": "03",
+        "numeroVoie": null,
+        "typeVoie": "R",
+        "libelleVoie": "ANTOINE SAINT EXUPERY",
+        "complementVoie": null,
+        "complementPointGeographique": null,
+        "lieuDit": null,
+        "cogCommune": "08362",
+        "ligneAcheminement": "RETHEL",
+        "ligneUne": null,
+        "ligneDeux": null,
+        "ligneTrois": null,
+        "ligneQuatre": "RUE ANTOINE SAINT EXUPERY",
+        "ligneCinq": null,
+        "ligneSix": null,
+        "codePostal": "08300",
+        "coordonneesGeographique": null
+      }
+    ],
+    "contact": [
+      {
+        "typeContact": {
+          "roleContact": "01"
+        },
+        "telecom": {
+          "telephone": "0324384964",
+          "telecopie": "0324380955",
+          "courriel": null
+        }
+      }
+    ],
+    "etatObjet": "A",
+    "dateDerniereMaj": "2026-09-04 23:42:46"
+  },
+  {
+    "informationsGeneralesEGE": {
+      "egeId": "9025",
+      "complementDenominationEg": null,
+      "dateFermeture": null,
+      "dateOuverture": "2023-05-02",
+      "datePremiereAutorisation": "2022-08-26",
+      "nomEgeCourt": "LBM BIO ARD'AISNE",
+      "nomEgeLong": "LBM BIO ARD'AISNE",
+      "numeroEducationNationale": null,
+      "numeroReferenceExterne": null,
+      "numFinessEge": "080010093",
+      "espic": null,
+      "siret": "78712043500195"
+    },
+    "categorieentiteGeographiqueExercice": "611",
+    "modefixationtarifaire": "01",
+    "typeBudget": ["01"],
+    "adresse": [
+      {
+        "usageAdresse": "03",
+        "numeroVoie": "17",
+        "typeVoie": null,
+        "libelleVoie": "rue des anciens combattants d'afrique du nord",
+        "complementVoie": null,
+        "complementPointGeographique": null,
+        "lieuDit": null,
+        "cogCommune": "08105",
+        "ligneAcheminement": "Charleville-Mézières",
+        "ligneUne": "LBM BIO ARD'AISNE",
+        "ligneDeux": null,
+        "ligneTrois": null,
+        "ligneQuatre": "17 rue des anciens combattants d'afrique du nord",
+        "ligneCinq": null,
+        "ligneSix": "08000 Charleville-Mézières",
+        "codePostal": "08000",
+        "coordonneesGeographique": {
+          "coordonneeX": "824475.06",
+          "coordonneeY": "6962126.52",
+          "directionLatitude": "49.745866",
+          "directionLongitude": "4.726059",
+          "cleInInteropBAN": "08105_ldddoa_00017",
+          "scoreBAN": "0.964514545454545"
+        }
+      }
+    ],
+    "contact": [
+      {
+        "typeContact": {
+          "roleContact": "01"
+        },
+        "telecom": {
+          "telephone": "0324532060",
+          "telecopie": "0324531722",
+          "courriel": null
+        }
+      }
+    ],
+    "etatObjet": "A",
+    "dateDerniereMaj": "2026-09-04 23:42:45"
+  },
+  {
+    "informationsGeneralesEGE": {
+      "egeId": "17014",
+      "complementDenominationEg": null,
+      "dateFermeture": "2014-03-31",
+      "dateOuverture": "1982-12-01",
+      "datePremiereAutorisation": "1982-12-01",
+      "nomEgeCourt": "CRECHE PARENTALE DE LA TIMONE   ",
+      "nomEgeLong": "CRECHE PARENTALE DE L'INTERNAT DE LA TIMONE                 ",
+      "numeroEducationNationale": null,
+      "numeroReferenceExterne": null,
+      "numFinessEge": "130801541",
+      "espic": null,
+      "siret": "33338375000010"
+    },
+    "categorieentiteGeographiqueExercice": "398",
+    "modefixationtarifaire": "01",
+    "typeBudget": ["01"],
+    "adresse": [
+      {
+        "usageAdresse": "03",
+        "numeroVoie": null,
+        "typeVoie": "BD  ",
+        "libelleVoie": "JEAN MOULIN          ",
+        "complementVoie": null,
+        "complementPointGeographique": "INTERNAT DE LA TIMONE           ",
+        "lieuDit": null,
+        "cogCommune": "13205",
+        "ligneAcheminement": "MARSEILLE",
+        "ligneUne": null,
+        "ligneDeux": null,
+        "ligneTrois": null,
+        "ligneQuatre": "BOULEVARD JEAN MOULIN",
+        "ligneCinq": null,
+        "ligneSix": null,
+        "codePostal": "13005",
+        "coordonneesGeographique": {
+          "coordonneeX": "5.400049",
+          "coordonneeY": "43.289659",
+          "directionLatitude": "6246349.3",
+          "directionLongitude": "894868.32",
+          "cleInInteropBAN": "13205_4778",
+          "scoreBAN": "0.9641645454545453"
+        }
+      }
+    ],
+    "contact": [
+      {
+        "typeContact": {
+          "roleContact": "01"
+        },
+        "telecom": {
+          "telephone": "0491346060",
+          "telecopie": null,
+          "courriel": null
+        }
+      }
+    ],
+    "etatObjet": "I",
+    "dateDerniereMaj": "2014-03-31 00:00:00"
+  },
+  {
+    "informationsGeneralesEGE": {
+      "egeId": "172814",
+      "complementDenominationEg": null,
+      "dateFermeture": null,
+      "dateOuverture": "2000-05-09",
+      "datePremiereAutorisation": "2000-05-09",
+      "nomEgeCourt": "C.A.M.S.P. LES JACARANDAS",
+      "nomEgeLong": "CENTRE D'ACTION MEDICO-SOCIALE PRECOCE LES JACARANDAS",
+      "numeroEducationNationale": null,
+      "numeroReferenceExterne": null,
+      "numFinessEge": "970402988",
+      "espic": null,
+      "siret": "77555989100285"
+    },
+    "categorieentiteGeographiqueExercice": "190",
+    "modefixationtarifaire": "10",
+    "typeBudget": ["02"],
+    "adresse": [
+      {
+        "usageAdresse": "03",
+        "numeroVoie": "9",
+        "typeVoie": "R",
+        "libelleVoie": "JACOB DE CORDEMOY",
+        "complementVoie": null,
+        "complementPointGeographique": null,
+        "lieuDit": null,
+        "cogCommune": "97411",
+        "ligneAcheminement": "ST DENIS",
+        "ligneUne": null,
+        "ligneDeux": null,
+        "ligneTrois": null,
+        "ligneQuatre": "9 RUE JACOB DE CORDEMOY",
+        "ligneCinq": null,
+        "ligneSix": null,
+        "codePostal": "97490",
+        "coordonneesGeographique": {
+          "coordonneeX": "55.489104",
+          "coordonneeY": "-20.894784",
+          "directionLatitude": "7688757.72",
+          "directionLongitude": "342850.92",
+          "cleInInteropBAN": "97411_0611_00009",
+          "scoreBAN": "0.9678918181818181"
+        }
+      }
+    ],
+    "contact": [
+      {
+        "typeContact": {
+          "roleContact": "01"
+        },
+        "telecom": {
+          "telephone": "0262213574",
+          "telecopie": null,
+          "courriel": null
+        }
+      }
+    ],
+    "etatObjet": "A",
+    "dateDerniereMaj": "2024-02-15 00:00:00"
+  }
+]

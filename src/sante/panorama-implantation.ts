@@ -476,8 +476,12 @@ export async function panoramaImplantationComplet(
   };
 
   // Labels de sources tracées (freshness best-effort — jamais bloquant).
+  // `last_data_change_at` = dernière ingestion qui a réellement changé la
+  // donnée ; `last_success_at` compte aussi les court-circuits « fichier
+  // identique » (FINESS 2026-09 : « maj 2026-09-01 » pour une donnée de mai).
   const sources = (freshness.data ?? []).map(
-    (row) => `${row.source} (maj ${row.last_success_at ?? "?"}, ${row.cadence_hint})`,
+    (row) =>
+      `${row.source} (maj ${row.last_data_change_at ?? row.last_success_at ?? "?"}, ${row.cadence_hint})`,
   );
   sources.push("IGN Géoplateforme (géocodage)");
 
