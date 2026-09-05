@@ -4,9 +4,78 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700` + timeout `count_rpps_by_commune` aligné 15 s + cron RPPS : budget 120 min, alerte sur run tué, relance de la jauge
+## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700` + timeout `count_rpps_by_commune` aligné 15 s + cron RPPS : budget 120 min, alerte sur run tué, relance de la jauge + BAN bulk : repli d'hôte Géoplateforme ↔ api-adresse, `Retry-After` 2/4/8 s, rejets périmés re-soumis
+
+### Added
+
+- **Client BAN bulk : deux hôtes avec repli (`BAN_BULK_HOSTS`,
+  `src/core/ban-bulk-client.ts`)** — emprunt à 1001 feuilles, mesuré prod
+  2026-09-05 (`docs/plans/ban-emprunts-1001-feuilles-mesure.md`). Le client de
+  masse n'avait QU'UN hôte, `api-adresse.data.gouv.fr`, que la doc officielle
+  déclare déprécié (« décommissionnée fin Janvier 2026 », encore servi). Désormais
+  **Géoplateforme IGN en tête** (`data.geopf.fr/geocodage/search/csv/`, successeur
+  officiel, même hôte que `geocode_adresse`) et api-adresse en repli : 5xx / erreur
+  réseau / timeout → tentative suivante sur l'autre hôte, l'hôte qui répond devient
+  l'hôte de départ des chunks suivants (sticky, promu seulement quand son corps a
+  été LU ; changement loggé). Un 4xx non-retryable (404 chemin changé, 410
+  décommissionné) ou un corps 200 illisible (page de maintenance) = panne d'hôte
+  possible → l'autre hôte une fois (revue : sans ça, l'hôte décommissionné restait
+  sticky et le run échouait à 100 % avec un hôte sain inutilisé). **Parité
+  prouvée** : 1 000 adresses RPPS réelles → 1 000 résultats identiques
+  (`result_id`, coords, score, type) sur les deux endpoints. Un 429 ne bascule pas
+  (quota de l'hôte). `BanGeocodeBatchOutcome` expose `chunksByHost` /
+  `hostSwitches` / `rateLimitRetries`, repris dans la ligne `DONE:` du backfill (un
+  run servi par l'hôte déprécié ou ralenti par le quota se voit). Attente 429
+  interruptible par le signal caller. `GEOPF_GEOCODAGE_BASE_URL` (`core/geopf.ts`)
+  partagé avec `geocode_adresse`. Tests : 10 cas (ordre figé, réseau KO, 5xx, 404,
+  corps illisible, double panne, double 404, 429 avec/sans header, abort pendant
+  l'attente).
+- **429 : `Retry-After` respecté, barème 2 s / 4 s / 8 s sans header** (avant :
+  backoff 0,5/1/2 s qui ignorait le header et retapait dans le quota).
+  `parseRetryAfterSeconds` exporté de `core/http.ts` (source unique, `fetchJson`
+  inchangé : défaut 5 s) ; header présent mais illisible ou écrêté (> 60 s) →
+  `console.warn` ; un entier seul est lu comme secondes, tout le reste comme
+  HTTP-date (« 21 Oct … » ne vaut plus 21 s).
+- **Mesure des deux autres emprunts — non retenus, chiffres dans le plan** :
+  vérifier le libellé rendu (numéro + rue) avant d'accepter = **~1,5 %** de vraies
+  mauvaises rues sous score 0,7 et ~0,2 % au-dessus (≈ 1 600 clés sur 424 000 ; un
+  juge strict jetterait 2 justes pour 1 fausse à cause des pluriels, graphies et de
+  la corruption RPPS `TH`→`E`) ; nettoyer BP/CS/TSA/cedex/parenthèses = **96
+  lignes** RPPS concernées après le repli FINESS 5c-bis, +1 à +3 acceptées sur 900
+  rejetées. Pas de module BAN partagé avec 1001 feuilles (décision).
 
 ### Fixed
+
+- **Backfill BAN : 9 305 rejets PÉRIMÉS (gate `score ≥ 0,7` du 2026-05-18, assoupli
+  à 0,5 le 2026-05-19) restaient figés par le cap de tentatives** (prouvé prod
+  2026-09-05 : toutes à `ban_attempt_count = 3`, `geocoded_at` 2026-05-18, portant
+  **15 903 lignes `rpps`** au centroïde commune = 22 % des 71 211 centroïdes, plus
+  des lignes Ameli via le cache partagé ; échantillon de 248 re-géocodées → 247
+  acceptées). Le cap protège d'une adresse durablement irrésolue, pas d'un
+  changement de règle. Fix `scripts/ban-backfill.mjs` : `isStaleRejection` re-soumet
+  malgré le cap une clé `rejected_low_score` dont le cache porte encore un résultat
+  que la règle courante accepterait — règle lue via le prédicat **partagé**
+  `meetsBanAcceptanceGate` (`core/ban-bulk-client.ts`, source unique du gate
+  score + précision, consommé aussi par `parseBanCsvResponse` : la copie de règle
+  qui avait divergé une fois ne peut plus diverger) ; plafond
+  `BAN_STALE_RESUBMIT_CAP` = une tentative au-delà du cap (convergence par
+  construction, testée) ; règle et type de ligne `GeocodedCacheRow` typés dans
+  `core/geocoded-cache-row.ts` (le `.mjs` n'est pas sous `tsc` : un renommage de
+  champ RPC y dégraderait en `undefined` muet) ; compteurs `staleResubmitted`
+  (compté APRÈS la borne `--max`, sur la liste réellement soumise), `staleDeferred`
+  (+ warn : un canari `--max` diffère TOUS les périmés, qui sont en queue de tri),
+  `staleRerejected` (+ warn : re-soumis puis re-rejeté = contrat BAN à vérifier) ;
+  garde de contrat : RPC sans les champs de gate → warn explicite + détection
+  désactivée (jamais un « 0 stale » muet). `geocoded` compte désormais les clés
+  réellement traitées (plus la taille de la tranche, qui incluait les chunks en
+  échec). La RPC `rpps_geocoded_cache_lookup` expose `result_score` /
+  `result_type` / `ban_last_status` (migration `20260905T180000`, **appliquée prod
+  2026-09-05** via MCP, additive). **À déclencher après merge** : workflows
+  `Backfill BAN RPPS` puis `Backfill BAN Ameli` (manuel, **sans `max`** : un canari
+  `--max` sert d'abord les clés jamais vues et diffère tous les périmés — le log le
+  dit) ; les coords sont posées dans `rpps` au prochain cron (`ban_join`), par
+  design. Limite connue : les jauges SQL `*_measure_ban_to_geocode` comptent
+  encore « cap atteint = fait » (backlog P3, fenêtre courte et auto-fermante).
 
 - **RPPS : ~54 K lignes de professionnels rattachés à un établissement FINESS
   géolocalisé restaient au centroïde de commune** (step 5c-bis

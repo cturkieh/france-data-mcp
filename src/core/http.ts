@@ -7,6 +7,7 @@
  *  - apprécient un User-Agent identifiable pour pouvoir contacter en cas d'usage anormal.
  */
 
+import { backoffDelayMs, jitter, sleep } from "./backoff.js";
 import type { RateLimitOptions } from "./types.js";
 
 export const DEFAULT_USER_AGENT =
@@ -91,7 +92,8 @@ async function fetchWithRetry<T>(
       }
 
       if (response.status === 429) {
-        const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
+        // Défaut 5 s quand l'amont ne dit rien (cf. `parseRetryAfterSeconds`).
+        const retryAfter = parseRetryAfterSeconds(response.headers.get("retry-after")) ?? 5;
         if (attempt === maxRetries) {
           throw new RateLimitExceededError(url, retryAfter);
         }
@@ -100,7 +102,7 @@ async function fetchWithRetry<T>(
       }
 
       if (response.status >= 500 && response.status < 600 && attempt < maxRetries) {
-        await sleep(baseDelayMs * 2 ** attempt + jitter());
+        await sleep(backoffDelayMs(attempt, baseDelayMs));
         continue;
       }
 
@@ -133,7 +135,7 @@ async function fetchWithRetry<T>(
           `[france-data-mcp] invalid JSON response from ${url} (attempt ${attempt + 1}/${maxRetries + 1}): ${lastError.message}`,
         );
         if (isFinalAttempt) break;
-        await sleep(baseDelayMs * 2 ** attempt + jitter());
+        await sleep(backoffDelayMs(attempt, baseDelayMs));
         continue;
       }
       // Si le caller a annulé via AbortSignal, ne pas tenter de retry — un
@@ -159,7 +161,7 @@ async function fetchWithRetry<T>(
         `[france-data-mcp] network error on ${url} (attempt ${attempt + 1}/${maxRetries + 1}): ${lastError.message}`,
       );
       if (isFinalAttempt) break;
-      await sleep(baseDelayMs * 2 ** attempt + jitter());
+      await sleep(backoffDelayMs(attempt, baseDelayMs));
     }
   }
 
@@ -199,25 +201,40 @@ export function fetchText(url: string, options: FetchJsonOptions = {}): Promise<
   return fetchWithRetry<string>(url, accept, (response) => response.text(), options);
 }
 
-function parseRetryAfter(header: string | null): number {
-  if (!header) return 5;
-  // Cap à 60 s : si une API exige une attente plus longue, on préfère échouer
-  // (et laisser le caller gérer) plutôt que bloquer un handler MCP/serveur.
-  const seconds = Number.parseInt(header, 10);
-  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, 60);
-  // Format HTTP-date (RFC 7231 §7.1.3) : "Wed, 21 Oct 2015 07:28:00 GMT"
-  const dateMs = Date.parse(header);
-  if (Number.isFinite(dateMs)) {
-    const deltaSec = Math.ceil((dateMs - Date.now()) / 1000);
-    if (deltaSec > 0) return Math.min(deltaSec, 60);
+/**
+ * Lit un header `retry-after` (entier de secondes OU HTTP-date RFC 7231 §7.1.3) et
+ * le rend en SECONDES ∈ ]0, maxSeconds], ou `null` quand le header est absent, une
+ * date déjà passée (= « maintenant »), ou illisible. Header PRÉSENT mais illisible,
+ * ou écrêté par le plafond → `console.warn` (une dégradation amont n'est jamais
+ * muette ; un plafond qui mord = retry potentiellement prématuré sur un service
+ * public). Plafond 60 s par défaut : si une API exige plus, on préfère échouer (et
+ * laisser le caller gérer) plutôt que bloquer un handler MCP. Chaque caller choisit
+ * SON défaut sur `null` (5 s pour `fetchJson`, barème 2/4/8 s pour le client BAN
+ * bulk). Source unique : ne pas ré-implémenter la lecture du header ailleurs.
+ */
+export function parseRetryAfterSeconds(header: string | null, maxSeconds = 60): number | null {
+  if (header === null) return null;
+  const raw = header.trim();
+  let seconds: number;
+  if (/^\d+$/.test(raw)) {
+    seconds = Number.parseInt(raw, 10);
+  } else {
+    // `parseInt` seul lirait « 21 Oct 2025 … » comme 21 s et « 1e3 » comme 1 s.
+    const dateMs = Date.parse(raw);
+    if (!Number.isFinite(dateMs)) {
+      console.warn(
+        `[france-data-mcp] retry-after header unreadable (${JSON.stringify(raw.slice(0, 40))}) — caller default applies`,
+      );
+      return null;
+    }
+    seconds = Math.ceil((dateMs - Date.now()) / 1000);
   }
-  return 5;
-}
-
-function jitter(): number {
-  return Math.floor(Math.random() * 250);
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  if (seconds <= 0) return null;
+  if (seconds > maxSeconds) {
+    console.warn(
+      `[france-data-mcp] retry-after ${seconds}s capped to ${maxSeconds}s — retry may be premature`,
+    );
+    return maxSeconds;
+  }
+  return seconds;
 }

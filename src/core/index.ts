@@ -3,7 +3,9 @@ export type { Coordinates, RateLimitOptions, DataSource, SourceAttribution } fro
 export { normalizeAddressKey, normalizeAddressKey3 } from "./address-geocode.js";
 export { banLastStatus } from "./ban-last-status.js";
 export type { BanLastStatus } from "./ban-last-status.js";
-export { geocodeAddressesBatch } from "./ban-bulk-client.js";
+export { geocodeAddressesBatch, meetsBanAcceptanceGate } from "./ban-bulk-client.js";
+export { hasGateFields, isStaleRejection } from "./geocoded-cache-row.js";
+export type { GeocodedCacheRow, StaleRejectionOptions } from "./geocoded-cache-row.js";
 export type { BanGeocodeResult, BanGeocodeBatchOutcome } from "./ban-bulk-client.js";
 export { withTimeout } from "./with-timeout.js";
 export { parseRpcCount } from "./parse-rpc-count.js";

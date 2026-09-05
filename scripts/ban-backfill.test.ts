@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BanGeocodeBatchOutcome } from "../src/core/index.js";
+import type { BanGeocodeBatchOutcome, GeocodedCacheRow } from "../src/core/index.js";
 import { normalizeAddressKey } from "../src/core/index.js";
 
 // `runBanBackfill` (ban-backfill.mjs) importe `geocodeAddressesBatch` depuis
@@ -48,7 +48,15 @@ function banOutcome(
   apiFailures: number,
   chunksTotal: number,
 ): BanGeocodeBatchOutcome {
-  return { results: new Map(results), apiFailures, chunksTotal };
+  return {
+    results: new Map(results),
+    apiFailures,
+    chunksTotal,
+    chunksByHost:
+      chunksTotal - apiFailures > 0 ? { "data.geopf.fr": chunksTotal - apiFailures } : {},
+    hostSwitches: 0,
+    rateLimitRetries: 0,
+  };
 }
 
 // Fixtures adresses RPPS RÉELLES (style ANS). On NE passe plus par
@@ -115,7 +123,12 @@ function makeTransientGate(count: number): () => Promise<never> | null {
 function makeStub(opts: {
   distinctRows: DistinctRow[];
   serverCap?: number;
-  cacheRows?: Array<{ address_key: string; accepted: boolean; ban_attempt_count: number }>;
+  // Type PARTAGÉ avec le consommateur (`GeocodedCacheRow`, core) : un renommage de
+  // champ RPC casse ici la compilation au lieu de dégrader en `undefined` muet.
+  cacheRows?: GeocodedCacheRow[];
+  // Simule une RPC PRÉ-migration 20260905T180000 (sans les 3 champs de gate) :
+  // le backfill doit le DIRE et désactiver la détection des rejets périmés.
+  legacyCacheLookup?: boolean;
   // Force une erreur RPC au Nᵉ appel (1-based) → fail-loud test.
   rpcErrorOnCall?: number;
   // Le Nᵉ appel RPC (1-based) ne résout JAMAIS → withTimeout test.
@@ -177,10 +190,7 @@ function makeStub(opts: {
   });
   const upserts: unknown[][] = [];
   const rpcCalls: Array<{ p_after: unknown; returned: number }> = [];
-  const cache = new Map<
-    string,
-    { address_key: string; accepted: boolean; ban_attempt_count: number }
-  >();
+  const cache = new Map<string, GeocodedCacheRow>();
   for (const c of opts.cacheRows ?? []) cache.set(c.address_key, c);
 
   const rpc = vi.fn((fn: string, args: Record<string, unknown>) => {
@@ -204,9 +214,25 @@ function makeStub(opts: {
       const crT = cacheReadTransientGate();
       if (crT) return crT;
       const vals = (args.p_keys as string[] | undefined) ?? [];
+      // La RPC réelle (≥ 20260905T180000) émet TOUJOURS les 6 clés (null si vide) ;
+      // en mode legacy elle n'émet que les 3 historiques.
       const data = vals
         .map((v) => cache.get(v))
-        .filter((c): c is NonNullable<typeof c> => c !== undefined);
+        .filter((c): c is NonNullable<typeof c> => c !== undefined)
+        .map((c) =>
+          opts.legacyCacheLookup
+            ? {
+                address_key: c.address_key,
+                accepted: c.accepted,
+                ban_attempt_count: c.ban_attempt_count,
+              }
+            : {
+                ban_last_status: null,
+                result_score: null,
+                result_type: null,
+                ...c,
+              },
+        );
       return Promise.resolve({ data, error: null });
     }
     if (fn !== SRC.enumRpc) {
@@ -680,6 +706,173 @@ describe("runBanBackfill", () => {
     expect(res.skippedCached).toBe(2);
   });
 
+  // Rejet PÉRIMÉ (prouvé prod 2026-09-05 : 9 305 clés rejetées sous le gate 0,7 du
+  // 2026-05-18, figées à attempts=3, alors que la règle courante (0,5 + type précis)
+  // les accepterait — 15 903 lignes rpps au centroïde pour rien). Matrice du gate :
+  // seule la 1ʳᵉ ligne est re-soumise ; « 0.62 » en STRING = réalisme PostgREST
+  // (NUMERIC sérialisé en string, coercé au boundary).
+  const cappedRejection = (key: string, score: number | string, type: string, attempts = 3) => ({
+    address_key: key,
+    accepted: false,
+    ban_attempt_count: attempts,
+    ban_last_status: "rejected_low_score",
+    result_score: score,
+    result_type: type,
+  });
+  const STALE_CASES: Array<[number | string, string, number, boolean, string]> = [
+    [0.62, "housenumber", 3, true, "périmé : le gate courant l'accepterait"],
+    ["0.62", "housenumber", 3, true, "périmé, score en string (PostgREST)"],
+    [0.41, "housenumber", 3, false, "vrai rejet : score sous le seuil courant"],
+    [0.9, "municipality", 3, false, "type non précis (= centroïde, aucun gain)"],
+    [
+      0.62,
+      "housenumber",
+      4,
+      false,
+      "déjà re-soumis une fois : plafond BAN_STALE_RESUBMIT_CAP (convergence)",
+    ],
+  ];
+  it.each(STALE_CASES)(
+    "rejet périmé — score %s / type %s / attempts %s → re-soumis: %s (%s)",
+    async (score, type, attempts, resubmitted, _label) => {
+      const keyA = normalizeAddressKey(ROW_A.adresse, ROW_A.code_postal, ROW_A.code_insee);
+      let submitted: Array<{ key: string }> = [];
+      geocodeAddressesBatchMock.mockImplementation(async (rows) => {
+        submitted = rows as typeof submitted;
+        return banOutcome([], 0, 1);
+      });
+      const stub = makeStub({
+        distinctRows: [distinctKeyRow(ROW_A)],
+        cacheRows: [cappedRejection(keyA, score, type, attempts)],
+      });
+
+      const res = await runBanBackfill(stub.client, {});
+
+      expect(submitted.map((r) => r.key)).toEqual(resubmitted ? [keyA] : []);
+      expect(res.staleResubmitted).toBe(resubmitted ? 1 : 0);
+      expect(res.skippedCached).toBe(resubmitted ? 0 : 1);
+    },
+  );
+
+  it("rejet périmé re-soumis et accepté → upsert accepted=true à attempts=4 : figé, plus jamais « périmé » (convergence)", async () => {
+    const keyA = normalizeAddressKey(ROW_A.adresse, ROW_A.code_postal, ROW_A.code_insee);
+    geocodeAddressesBatchMock.mockResolvedValue(
+      banOutcome(
+        [
+          [
+            keyA,
+            { accepted: true, lat: 45.7, lon: 4.8, resultScore: 0.62, resultType: "housenumber" },
+          ],
+        ],
+        0,
+        1,
+      ),
+    );
+    const stub = makeStub({
+      distinctRows: [distinctKeyRow(ROW_A)],
+      cacheRows: [cappedRejection(keyA, 0.62, "housenumber")],
+    });
+
+    const res = await runBanBackfill(stub.client, {});
+
+    expect(res.staleResubmitted).toBe(1);
+    expect(res.accepted).toBe(1);
+    const up = stub.upserts.flat() as Array<{
+      address_key: string;
+      accepted: boolean;
+      ban_attempt_count: number;
+    }>;
+    expect(up.find((u) => u.address_key === keyA)).toMatchObject({
+      accepted: true,
+      ban_attempt_count: 4,
+    });
+  });
+
+  it("RPC pré-migration (sans champs de gate) → warn explicite + détection des rejets périmés DÉSACTIVÉE (jamais un « 0 stale » muet)", async () => {
+    const keyA = normalizeAddressKey(ROW_A.adresse, ROW_A.code_postal, ROW_A.code_insee);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    geocodeAddressesBatchMock.mockResolvedValue(banOutcome([], 0, 0));
+    const stub = makeStub({
+      distinctRows: [distinctKeyRow(ROW_A)],
+      cacheRows: [cappedRejection(keyA, 0.62, "housenumber")],
+      legacyCacheLookup: true,
+    });
+
+    try {
+      const res = await runBanBackfill(stub.client, {});
+
+      expect(res.staleDetectionEnabled).toBe(false);
+      expect(res.staleResubmitted).toBe(0);
+      expect(geocodeAddressesBatchMock).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("20260905T180000 non appliquée"),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("--max canari : les rejets périmés (attempts=3, queue de tri) sont DIFFÉRÉS → staleResubmitted=0, staleDeferred compté + warn (jamais un compteur qui affirme un travail non fait)", async () => {
+    const keyA = normalizeAddressKey(ROW_A.adresse, ROW_A.code_postal, ROW_A.code_insee);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let submitted: Array<{ key: string }> = [];
+    geocodeAddressesBatchMock.mockImplementation(async (rows) => {
+      submitted = rows as typeof submitted;
+      return banOutcome([], 0, 1);
+    });
+    const stub = makeStub({
+      distinctRows: [distinctKeyRow(ROW_A), distinctKeyRow(ROW_B)], // B jamais vue → servie d'abord
+      cacheRows: [cappedRejection(keyA, 0.62, "housenumber")],
+    });
+
+    try {
+      const res = await runBanBackfill(stub.client, { maxNew: 1 });
+
+      expect(submitted.map((r) => r.key)).not.toContain(keyA);
+      expect(res.staleResubmitted).toBe(0);
+      expect(res.staleDeferred).toBe(1);
+      expect(res.remaining).toBe(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("NON re-soumis ce run"));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("rejet périmé re-soumis puis RE-rejeté par la BAN → compté staleRerejected + warn (rupture de contrat isolée, pas enterrée dans rejected)", async () => {
+    const keyA = normalizeAddressKey(ROW_A.adresse, ROW_A.code_postal, ROW_A.code_insee);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    geocodeAddressesBatchMock.mockResolvedValue(
+      banOutcome(
+        [
+          [
+            keyA,
+            { accepted: false, lat: null, lon: null, resultScore: 0.62, resultType: "housenumber" },
+          ],
+        ],
+        0,
+        1,
+      ),
+    );
+    const stub = makeStub({
+      distinctRows: [distinctKeyRow(ROW_A)],
+      cacheRows: [cappedRejection(keyA, 0.62, "housenumber")],
+    });
+
+    try {
+      const res = await runBanBackfill(stub.client, {});
+
+      expect(res.staleResubmitted).toBe(1);
+      expect(res.staleRerejected).toBe(1);
+      expect(res.rejected).toBe(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("RE-rejeté"));
+      // attempts 3 → 4 : au plafond, plus jamais re-soumis.
+      const up = stub.upserts.flat() as Array<{ address_key: string; ban_attempt_count: number }>;
+      expect(up.find((u) => u.address_key === keyA)?.ban_attempt_count).toBe(4);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("nothing-to-do : 0 clé éligible (RPC renvoie page vide d'emblée) → no-op idempotent, retour cohérent, BAN jamais appelé", async () => {
     geocodeAddressesBatchMock.mockResolvedValue(banOutcome([], 0, 0));
     const stub = makeStub({ distinctRows: [], cacheRows: [] });
@@ -689,10 +882,39 @@ describe("runBanBackfill", () => {
     expect(res.totalEligibleDistinct).toBe(0);
     expect(res.geocoded).toBe(0);
     expect(res.skippedCached).toBe(0);
+    // Le retour no-op expose la MÊME forme que le retour final (un caller qui lit
+    // `res.banHostSwitches` sur un re-run idempotent ne doit pas recevoir undefined).
+    expect(res).toMatchObject({
+      staleResubmitted: 0,
+      staleDeferred: 0,
+      staleDetectionEnabled: true,
+      staleRerejected: 0,
+      banChunksByHost: {},
+      banHostSwitches: 0,
+      banRateLimitRetries: 0,
+    });
     expect(geocodeAddressesBatchMock).not.toHaveBeenCalled();
     // Une seule page RPC : la page VIDE qui termine d'emblée.
     expect(stub.rpcCalls.length).toBe(1);
     expect(stub.rpcCalls[0]?.returned).toBe(0);
+  });
+
+  it("stats multi-hôte du client BAN (chunksByHost / hostSwitches / rateLimitRetries) agrégées sur les tranches et exposées", async () => {
+    geocodeAddressesBatchMock.mockResolvedValue({
+      ...banOutcome([], 0, 1),
+      chunksByHost: { "api-adresse.data.gouv.fr": 1 },
+      hostSwitches: 1,
+      rateLimitRetries: 2,
+    });
+    const stub = makeStub({ distinctRows: [distinctKeyRow(ROW_A)], cacheRows: [] });
+
+    const res = await runBanBackfill(stub.client, {});
+
+    expect(res).toMatchObject({
+      banChunksByHost: { "api-adresse.data.gouv.fr": 1 },
+      banHostSwitches: 1,
+      banRateLimitRetries: 2,
+    });
   });
 
   it("best-effort : apiFailures du client comptés et exposés, jamais d'arrêt silencieux", async () => {
