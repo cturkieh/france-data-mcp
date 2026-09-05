@@ -10,7 +10,13 @@ import { IngestError, type IngestLogEntry } from "./shared.js";
 const RPPS_SRC = readFileSync(`${ingestDir}/rpps.ts`, "utf8");
 
 const { __TESTING__ } = await import("./rpps.js");
-const { parseRppsRecord, COL, rebuildRppsMatviews, evaluateBanJoinOutcome } = __TESTING__;
+const {
+  parseRppsRecord,
+  COL,
+  rebuildRppsMatviews,
+  evaluateBanJoinOutcome,
+  evaluateFinessFallbackOutcome,
+} = __TESTING__;
 
 const fixtures: Commune[] = [
   {
@@ -377,8 +383,8 @@ describe("rebuildRppsMatviews", () => {
 // et verrouille l'ORDRE TEXTUEL des sites d'appel (même discipline que les
 // guards de parité migrations : textuel mais load-bearing, ancré sur de
 // vrais sites d'appel, jamais un `.includes()` flou).
-describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→5d re-ANALYZE→6→6d mesure (séquence load-bearing)", () => {
-  it("les sites d'appel apparaissent dans l'ordre 5a ANALYZE → 5b FINESS → 5c count → 5c ban_join apply → 5d re-ANALYZE → 6 swap → 6d mesure", async () => {
+describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→5c-bis repli FINESS→5d re-ANALYZE→6→6d mesure (séquence load-bearing)", () => {
+  it("les sites d'appel apparaissent dans l'ordre 5a ANALYZE → 5b FINESS → 5c count → 5c ban_join apply → 5c-bis repli FINESS → 5d re-ANALYZE → 6 swap → 6d mesure", async () => {
     const fs = await import("node:fs");
     const url = await import("node:url");
     const rppsSrc = fs.readFileSync(
@@ -409,6 +415,10 @@ describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→5d re-ANALYZE�
     const i5bEnrich = body.indexOf('"ingest_apply_rpps_finess_enrichment_batch"');
     const i5cCount = body.indexOf('supabase.rpc("rpps_count_ban_eligible_rows"');
     const i5cBanJoin = body.indexOf('"ingest_apply_rpps_ban_join_batch"');
+    // 5c-bis (2026-09-05) : repli FINESS sur les centroïdes à num_finess — APRÈS
+    // ban_join (BAN housenumber > point FINESS DREES) et AVANT le re-ANALYZE
+    // (la pose change la distribution `geom_source` que 5d re-statistique).
+    const i5cbisFallback = body.indexOf('"ingest_apply_rpps_finess_centroid_fallback_batch"');
     const i5dReAnalyze = body.indexOf('"Failed to re-ANALYZE rpps_staging after ban_join"');
     const i6Swap = body.indexOf('atomicSwapTables({ prodTable: "rpps" })');
     const i6dMeasure = body.indexOf('supabase.rpc("rpps_measure_ban_to_geocode"');
@@ -418,6 +428,7 @@ describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→5d re-ANALYZE�
       ["5b enrichment FINESS", i5bEnrich],
       ["5c ban_join count", i5cCount],
       ["5c ban_join apply (ingest_apply_rpps_ban_join_batch)", i5cBanJoin],
+      ["5c-bis repli FINESS (ingest_apply_rpps_finess_centroid_fallback_batch)", i5cbisFallback],
       ["5d re-ANALYZE post-ban_join (jauge 6d)", i5dReAnalyze],
       ["6 atomicSwapTables", i6Swap],
       ["6d mesure rpps_measure_ban_to_geocode", i6dMeasure],
@@ -442,7 +453,8 @@ describe("rpps.ts main() — ordre strict 5a→5b→5c ban_join→5d re-ANALYZE�
     expect(i5aAnalyze).toBeLessThan(i5bEnrich);
     expect(i5bEnrich).toBeLessThan(i5cCount);
     expect(i5cCount).toBeLessThan(i5cBanJoin);
-    expect(i5cBanJoin).toBeLessThan(i5dReAnalyze);
+    expect(i5cBanJoin).toBeLessThan(i5cbisFallback);
+    expect(i5cbisFallback).toBeLessThan(i5dReAnalyze);
     expect(i5dReAnalyze).toBeLessThan(i6Swap);
     expect(i6Swap).toBeLessThan(i6dMeasure);
   });
@@ -554,5 +566,30 @@ describe("rpps.ts wiring relance de la jauge 6d (retryTransient, allow-list 5701
     expect(delay, "MEASURE_RETRY_DELAY_MS introuvable").toBeDefined();
     // ≥ 30 s : laisser le checkpoint post-run se terminer avant la 2e tentative.
     expect(Number(String(delay).replace(/_/g, ""))).toBeGreaterThanOrEqual(30_000);
+  });
+});
+
+// Sentinelle 5c-bis (pure) — jumelle d'evaluateBanJoinOutcome. Binaire faute de
+// count (retiré en revue, 8 s hérités) : la seule information disponible est le
+// nombre d'itérations keyset (≥ 2 = une page non vide vue).
+describe("evaluateFinessFallbackOutcome — sentinelle du repli FINESS 5c-bis (pure)", () => {
+  it("nominal (des lignes posées) → ni partial ni warn", () => {
+    expect(evaluateFinessFallbackOutcome({ applied: 53_605, iterations: 9 })).toEqual({
+      partial: false,
+    });
+  });
+
+  it("0 posé alors qu'une page non vide a été vue → partial + warn + trace audit", () => {
+    const o = evaluateFinessFallbackOutcome({ applied: 0, iterations: 2 });
+    expect(o.partial).toBe(true);
+    expect(o.warn).toMatch(/^\[france-data-mcp\]\[rpps\]\[finess_fallback\] /);
+    expect(o.logMessage).toContain("0 rows posed on a non-empty eligible set");
+  });
+
+  it("page vide d'emblée (aucun éligible) → warn « suspect en prod » SANS partial", () => {
+    const o = evaluateFinessFallbackOutcome({ applied: 0, iterations: 1 });
+    expect(o.partial).toBe(false);
+    expect(o.warn).toMatch(/0 eligible rows seen/);
+    expect(o.logMessage).toBeUndefined();
   });
 });

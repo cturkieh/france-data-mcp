@@ -8,6 +8,57 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Fixed
 
+- **RPPS : ~54 K lignes de professionnels rattachés à un établissement FINESS
+  géolocalisé restaient au centroïde de commune** (step 5c-bis
+  `ingest_apply_rpps_finess_centroid_fallback_batch`, migration
+  `20260905T140000`, prouvé prod 2026-09-05 sur la table post-swap : 70 677
+  lignes `commune_centroid` avec `num_finess`, 57 462 dont l'établissement a un
+  `geom` dans `finess`, dont **3 857 dans une AUTRE commune que celle déclarée**
+  — exclues par une garde `f.code_insee = b.code_insee`, sinon « Dr X, ville B »
+  pointé en A → **53 605 lignes corrigées**, zéro incohérence). Cause :
+  l'enrichment FINESS (5b) ne vise que les lignes SANS geom (commune
+  introuvable) ; une ligne à commune reconnue reçoit le centroïde puis dépend du
+  cache BAN, or les adresses d'établissements (nom de structure devant
+  l'adresse, CS/BP, cedex) se géocodent mal → la position exacte de l'hôpital
+  était dans notre table et jamais utilisée (ex. la ligne CHU d'un médecin
+  mixte au centre des Abymes). Fix : après ban_join (BAN housenumber reste
+  prioritaire sur le point FINESS DREES) et avant le re-ANALYZE, une RPC keyset
+  jumelle de ban_join pose `finess.geom` + `geom_source='finess_join'` (jointure
+  via cast explicite côté texte `::CHAR(9)` + `length(num_finess) = 9` — le cast
+  TRONQUE en silence, une dérive amont matcherait un établissement réel mais
+  faux ; `SET statement_timeout 55s` ; ~8 lots de 10 K, ~4,5 s/lot mesuré) ;
+  `code_insee`/`code_departement` inchangés. Ces lignes entrent dans le GiST
+  partiel `precise` de `rpps_in_radius`. **Step BEST-EFFORT** (même classe que
+  le re-ANALYZE 5d) : toute erreur → warn + `partial` + trace, jamais de throw
+  — un run aux données bonnes ne meurt pas pour un raffinement de précision ;
+  **aucun COUNT PostgREST préalable** (trouvé en revue, mesuré prod : 4,4 s sur
+  table propre sous un budget hérité de 8 s → 57014 sur la staging ballonnée
+  post-ban_join → run tué avant le swap) : borne de convergence =
+  `stats.inserted`, la garde réelle est la non-progression du curseur.
+  **Effet de bord assumé (mesuré prod)** : ces ~54 K lignes sortent de
+  l'éligibilité BAN → **5 908 clés d'adresse distinctes (14 %) quittent le
+  périmètre**, dont 3 697 déjà REJETÉES par la BAN qui ne seront plus jamais
+  re-tentées (le rattrapage par changement de doctrine d'acceptation ne les
+  verra plus) et 2 211 acceptées en cache (posées en `ban_address` par ban_join
+  AVANT 5c-bis au prochain cron, donc pas perdues) ; `ban_eligible_distinct`
+  chute d'autant au 1er run — ce n'est PAS un progrès BAN ; `to_geocode_distinct`
+  (jamais-tenté, = 0 aujourd'hui) n'est pas affecté. Arbitrage : point FINESS
+  ~50-100 m ≫ centroïde ~3 km, et la BAN a déjà échoué sur ces adresses
+  d'établissement. La jauge 6d gagne au passage une trace `ingest_log` sur son
+  échec (elle était NULL sur les 4 derniers runs sans qu'aucune ligne DB ne dise
+  pourquoi), et le catch racine n'écrase plus les notes `partial` des steps
+  best-effort (`appendLogMessage` au lieu de `=`). Dette
+  voisine fermée dans la même passe : `rpps_count_ban_eligible_rows` n'avait
+  PAS de `SET statement_timeout` (dernière RPC d'ingestion RPPS exemptée,
+  ~5 s mesurés, passait par chance car appelée avant ban_join) → migration
+  `20260905T150000` (corps VERBATIM + SET). Garde-fous :
+  `rpps-finess-fallback.test.ts` (contrat SQL : keyset, prédicat + longueur,
+  cast, même commune, liste SET verrouillée, GRANT ; câblage best-effort sans
+  count, sentinelle audit) + `enrichment-statement-timeout.test.ts` (les 2 RPC
+  dans l'invariant ≤ 55 s) + séquence `rpps.test.ts` (5c → 5c-bis → 5d).
+  Preuve : RPC testée en prod sur table temporaire de session + run forcé du
+  cron (cf. PR #66).
+
 - **Crons : budget RPPS 60 → 120 min, alerte LOUD sur run tué (`cancelled()`)
   sur les 7 workflows ingest/backfill, relance de la jauge BAN sur 57014**
   (post-mortem prod 2026-09-05). Durée réelle du cron RPPS : 54 → 57 → 60 min
