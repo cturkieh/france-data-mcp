@@ -33,6 +33,13 @@ jobs:
     # systeme (gdal-bin + p7zip), un data.geopf.fr lent et la contention PostgREST.
     timeout-minutes: 30
     steps:
+      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
+      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
+      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
+      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
+      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
+      - uses: actions/checkout@v6
+
       # Preflight AVANT checkout/install : echoue vite et clairement si un secret
       # manque (convention pour tout nouveau workflow Supabase) plutot que de
       # crasher opaquement au milieu de l'ingestion.
@@ -49,8 +56,6 @@ jobs:
             exit 1
           fi
           echo "Secrets requis presents."
-
-      - uses: actions/checkout@v6
 
       # Dependances SYSTEME specifiques a l'IRIS (geometrie polygones) :
       #   - gdal-bin : ogr2ogr (reprojection Lambert-93 -> WGS84 + export WKT)
@@ -85,18 +90,19 @@ jobs:
           FORCE_REINGEST: ${{ inputs.force && '1' || '0' }}
         run: pnpm ingest:iris
 
-      - name: Open issue on failure
-        if: failure()
-        uses: actions/github-script@v9
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
         with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `[ingestion-failure] IRIS run failed (run #${context.runId})`,
-              body: `Le workflow d'ingestion IRIS (contours IGN + demographie INSEE) a echoue.\n\n` +
-                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-                    `Verifier la table \`ingest_log\` (source = 'iris') pour error_phase / error_message. ` +
-                    `Modes d'echec frequents : IRIS_CONTOURS_URL perimee (millesime change cote data.geopf.fr), ogr2ogr/7z absents (install systeme), row count hors [40K, 55K] (changement de schema IGN), timeout PostgREST sur grosses geometries.`,
-              labels: ['ingestion-failure', 'iris'],
-            })
+          source-label: IRIS
+          ingest-log-source: iris
+          issue-labels: ingestion-failure,iris
+          failure-modes: "IRIS_CONTOURS_URL périmée (millésime changé côté data.geopf.fr), ogr2ogr/7z absents (install système), row count hors [40K, 55K] (changement de schéma IGN), timeout PostgREST sur grosses géométries."
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

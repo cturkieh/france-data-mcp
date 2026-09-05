@@ -68,18 +68,19 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      - name: Open issue on failure
-        if: failure()
-        uses: actions/github-script@v9
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
         with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `[ingestion-failure] Ameli run failed (run #${context.runId})`,
-              body: `The Annuaire Sante Ameli ingestion workflow failed.\n\n` +
-                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-                    `Check the \`ingest_log\` table for the latest \`failed\` row (source = 'ameli_ps') to see error_phase and error_message. ` +
-                    `Common failure modes: AMELI_PS_CSV_URL stale (resource id rotated), unmatched_locality > 5% (INSEE drift), structural anomaly > 1% (column rename).`,
-              labels: ['ingestion-failure', 'ameli'],
-            })
+          source-label: Ameli
+          ingest-log-source: ameli_ps
+          issue-labels: ingestion-failure,ameli
+          failure-modes: "AMELI_PS_CSV_URL stale (resource id rotated), unmatched_locality > 5% (INSEE drift), structural anomaly > 1% (column rename)."
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

@@ -156,8 +156,17 @@ export async function retryTransient<T>(
 ): Promise<T> {
   const { maxRetries = 3, baseDelayMs = 500, onRetry, isRetryableResult } = opts;
   const retryWarnLine = (attempt: number, reason: string): string =>
-    `[france-data-mcp] transient transport error on ${label} ` +
+    `[france-data-mcp] transient error on ${label} ` +
     `(attempt ${attempt + 1}/${maxRetries + 1}): ${reason} — retrying`;
+  // Raison lisible pour le chemin `{ error }` résolu : le message de l'erreur
+  // quand la valeur en porte un (supabase-js), sinon un libellé générique —
+  // `isRetryableResult` décide (transport, 57014…), le warn dit POURQUOI.
+  const resolvedReason = (value: unknown): string => {
+    const msg = (value as { error?: { message?: unknown } } | null)?.error?.message;
+    return typeof msg === "string" && msg.length > 0
+      ? `supabase resolved a retryable error: ${msg}`
+      : "supabase resolved a retryable error";
+  };
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -176,11 +185,20 @@ export async function retryTransient<T>(
       continue;
     }
     // Résolu : un échec transport peut revenir en `{ error }` (PAS un throw).
-    if (attempt < maxRetries && isRetryableResult?.(value)) {
-      onRetry?.();
-      console.warn(retryWarnLine(attempt, "supabase resolved a transient transport error"));
-      await sleep(backoffDelayMs(attempt, baseDelayMs));
-      continue;
+    if (isRetryableResult?.(value)) {
+      if (attempt < maxRetries) {
+        onRetry?.();
+        console.warn(retryWarnLine(attempt, resolvedReason(value)));
+        await sleep(backoffDelayMs(attempt, baseDelayMs));
+        continue;
+      }
+      // Épuisement sur le chemin résolu : le caller reçoit la valeur telle
+      // quelle (son `if (error)` décide), mais l'abandon est tracé ICI — sinon
+      // une relance épuisée est indistinguable d'un échec sans relance dans
+      // les logs (grep « gave up »).
+      console.warn(
+        `[france-data-mcp] gave up on ${label} after ${maxRetries + 1} attempts: ${resolvedReason(value)}`,
+      );
     }
     // Non transitoire, OU dernière tentative : retourne tel quel (le caller
     // déstructure `{ data, error }` et son `if (error) throw` tire fail-loud).

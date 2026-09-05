@@ -18,6 +18,11 @@
 //     de matcher l'ancre stricte), `latestFunctionDef`, `functionBodyInFile`,
 //     `allMigrationsSql` (lowercased), `ingestDir`.
 //
+//  3. Famille CI/YAML (garde-fous d'alerting des workflows) —
+//     `workflows-alerting.test.ts` : n'emprunte ICI que le chemin `githubDir`
+//     (même patron `fileURLToPath(new URL(…))` que `migrationsDir`/`ingestDir`,
+//     immunisé au cwd) — aucun parsing SQL.
+//
 // ⚠️ LES DEUX `latestFunctionBody*` COEXISTENT VOLONTAIREMENT — contrats
 // DIFFÉRENTS (stricte ancrée pour les RPC BAN à `$q$` interne ; lâche pour les
 // fonctions d'ingestion anciennes). NE PAS « factoriser » naïvement en une
@@ -37,6 +42,9 @@ export const migrationsDir = fileURLToPath(new URL("../../supabase/migrations", 
 
 /** Dossier `scripts/ingest/` (pour scanner les `*.ts` appelant un RPC). */
 export const ingestDir = fileURLToPath(new URL(".", import.meta.url));
+
+/** Dossier `.github/` (workflows + composite actions, lus en texte par les garde-fous CI). */
+export const githubDir = fileURLToPath(new URL("../../.github", import.meta.url));
 
 /**
  * Toutes les migrations SQL concaténées dans l'ordre d'application (tri nom de

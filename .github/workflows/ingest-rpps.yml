@@ -27,10 +27,19 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    # RPPS is ~803 MB CSV / ~2.23 M rows + 35 K commune fetch. A full
-    # ingestion runs in ~15-25 minutes locally; 60 minutes leaves head room
-    # for slow data.gouv days and PostgREST contention.
-    timeout-minutes: 60
+    # RPPS is ~818 MB CSV / ~2.28 M rows + 35 K commune fetch. Durée RÉELLE
+    # du cron en prod : 54 → 57 → 60 min entre 2026-05 et 2026-09 (COPY ~18
+    # min + enrichment FINESS ~4 min + ban_join ~33-35 min + matviews ~1 min),
+    # et le CSV ANS grossit de ~15 K lignes/mois. L'ancien budget de 60 min a
+    # TUÉ le run 2026-08-05 (#30981501695) en plein ban_join, AVANT le swap :
+    # mois perdu en silence (statut `cancelled` ≠ `failure` → aucune issue,
+    # aucun email, aucune ligne ingest_log). Le run 2026-09-05 (#33954453629)
+    # a swappé à 59 min 59 s puis a été tué 5 s après → drain BAN auto skippé.
+    # 120 min = ×2 la durée observée ; GitHub facture le temps réel, pas le
+    # budget, donc aucun surcoût en fonctionnement normal. Garde-fou :
+    # `scripts/ingest/workflows-alerting.test.ts` (parité avec `RPPS_JOB_BUDGET_MINUTES`
+    # dans `scripts/ingest/rpps.ts`, qui émet un préavis de dérive à 60 % du budget).
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
 
@@ -80,18 +89,23 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      - name: Open issue on failure
-        if: failure()
-        uses: actions/github-script@v9
+      # Alerte LOUD sur échec OU run tué. `cancelled()` est load-bearing : un
+      # `timeout-minutes` atteint met le job en `cancelled`, PAS `failure` —
+      # avec `failure()` seul, le run 2026-08-05 tué à 60 min (swap non fait,
+      # mois perdu) n'a produit NI issue NI email. Détail et wording :
+      # `.github/actions/notify-ingest-failure`.
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
         with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `[ingestion-failure] RPPS run failed (run #${context.runId})`,
-              body: `The RPPS Annuaire Sante ANS ingestion workflow failed.\n\n` +
-                    `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n` +
-                    `Check the \`ingest_log\` table for the latest \`failed\` row (source = 'rpps') to see error_phase and error_message. ` +
-                    `Common failure modes: RPPS_CSV_URL stale (resource id rotated, override via env if needed), unmatched_locality > 8% (INSEE drift), structural anomaly > 1% (column rename), row count out of [1.8M, 2.6M] bounds (format change).`,
-              labels: ['ingestion-failure', 'rpps'],
-            })
+          source-label: RPPS
+          ingest-log-source: rpps
+          issue-labels: ingestion-failure,rpps
+          killed-hint: "Un run RPPS tué sort en `cancelled` : le drain BAN auto (`ban-backfill-rpps.yml`, gardé sur conclusion == success) N'A PAS été déclenché → le lancer à la main via workflow_dispatch (idempotent). Le swap a PEUT-ÊTRE eu lieu (run 2026-09-05 : swap à 59:59 puis tué 5 s après) : comparer la fraîcheur de `rpps` vs `rpps_previous` (`pg_stat_user_tables.last_analyze`) AVANT de relancer l'ingestion."
+          failure-modes: "RPPS_CSV_URL stale (resource id rotated, override via env if needed), unmatched_locality > 8% (INSEE drift), structural anomaly > 1% (column rename), row count out of [1.8M, 2.6M] bounds (format change)."
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

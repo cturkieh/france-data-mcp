@@ -31,6 +31,7 @@ on:
 
 permissions:
   contents: read
+  issues: write # alerte notify-ingest-failure
 
 # JAMAIS concurrent du cron Ameli : son swap atomique renommerait `annuaire_ameli`
 # en pleine énumération keyset (la RPC résout `FROM annuaire_ameli` PAR NOM à
@@ -52,8 +53,15 @@ jobs:
     # milliers d'adresses, chunké). 30 min = large marge (jours BAN lents).
     timeout-minutes: 30
     steps:
-      # Preflight secrets AVANT checkout/install (convention nouveaux workflows
-      # Supabase) : échec EXPLICITE et immédiat si un secret manque, plutôt qu'une
+      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
+      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
+      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
+      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
+      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
+      - uses: actions/checkout@v6
+
+      # Preflight secrets AVANT install (convention nouveaux workflows Supabase ;
+      # après le checkout, cf. ci-dessus) : échec EXPLICITE et immédiat si un secret manque, plutôt qu'une
       # panne opaque au 1er appel RPC.
       - name: Validate required secrets present
         env:
@@ -67,8 +75,6 @@ jobs:
             echo "::error::Secrets manquants: ${missing[*]}"
             exit 1
           fi
-
-      - uses: actions/checkout@v6
 
       - uses: pnpm/action-setup@v6
         with:
@@ -96,3 +102,21 @@ jobs:
             echo "Drainage complet"
             pnpm exec tsx scripts/ban-backfill.mjs --source ameli
           fi
+
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
+        with:
+          source-label: Backfill BAN Ameli
+          ingest-log-source: "" # pas d'ingest_log côté backfill (cache-only)
+          issue-labels: backfill-failure,ameli
+          failure-modes: "API BAN (api-adresse) indisponible ou lente (réessayer plus tard), RPC d'énumération keyset absente (migration T-format non appliquée), secrets Supabase manquants (preflight)."
+          killed-hint: "Le drain BAN remplit le cache geocoded_addresses au fil de l'eau (idempotent) : relancer via workflow_dispatch pour finir le drain ; les coords sont posées dans la table au prochain cron (ban_join)."
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

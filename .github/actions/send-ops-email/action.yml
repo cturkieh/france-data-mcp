@@ -1,0 +1,81 @@
+# Composite action — émetteur UNIQUE d'email ops (Resend).
+#
+# Consommée par `notify-pending-geocode` (résidu BAN après un cron réussi) et
+# `notify-ingest-failure` (échec / run tué). Un seul endroit porte l'endpoint,
+# l'auth, la forme du payload et la politique best-effort — avant, le bloc
+# `jq` + `curl` était recopié par step (dérive silencieuse garantie au premier
+# changement : domaine vérifié, `reply_to`, rotation de clé).
+#
+# BEST-EFFORT PAR CONTRAT : clé absente → `::warning::` + exit 0 ; envoi KO →
+# `::warning::`. Jamais d'échec de step : un email est un canal secondaire, il
+# ne doit ni re-rouger un cron réussi ni masquer l'issue GitHub créée à côté.
+# Sujet/texte voyagent par `env` (jamais interpolés dans le shell = anti-injection).
+name: Send ops email (Resend)
+description: Envoie un email texte via Resend, best-effort (warning au lieu d'échec).
+
+inputs:
+  resend-api-key:
+    description: "Clé API Resend. Vide → email skippé avec ::warning::."
+    required: false
+    default: ""
+  email-to:
+    description: "Destinataire."
+    required: false
+    default: "cturkieh@gmail.com"
+  email-from:
+    description: "Expéditeur (domaine vérifié Resend, sinon onboarding@resend.dev)."
+    required: false
+    default: "France Data MCP <onboarding@resend.dev>"
+  subject:
+    description: "Sujet de l'email."
+    required: true
+  text:
+    description: "Corps texte brut."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Send email (Resend, best-effort)
+      shell: bash
+      env:
+        RESEND_API_KEY: ${{ inputs.resend-api-key }}
+        EMAIL_TO: ${{ inputs.email-to }}
+        EMAIL_FROM: ${{ inputs.email-from }}
+        SUBJECT: ${{ inputs.subject }}
+        TEXT: ${{ inputs.text }}
+      run: |
+        # `required: true` n'est PAS appliqué par GitHub sur une composite : un
+        # sujet vide = appelant fautif → annotation error + sujet de repli
+        # (l'email part quand même : mieux vaut un mail laconique que rien).
+        if [ -z "$SUBJECT" ]; then
+          echo "::error::send-ops-email : sujet VIDE (appelant fautif) — envoi avec un sujet de repli."
+          SUBJECT="[france-data-mcp] alerte ops (sujet manquant)"
+        fi
+        if [ -z "$RESEND_API_KEY" ]; then
+          echo "::warning::RESEND_API_KEY absent — email non envoyé (« $SUBJECT »). Ajoute le secret pour activer l'alerte mail."
+          exit 0
+        fi
+        payload=$(jq -n \
+          --arg from "$EMAIL_FROM" \
+          --arg to "$EMAIL_TO" \
+          --arg subject "$SUBJECT" \
+          --arg text "$TEXT" \
+          '{from:$from, to:[$to], subject:$subject, text:$text}')
+        # `--max-time` : dans un job ANNULÉ, la fenêtre de grâce est bornée — un
+        # Resend pendu consommerait la grâce et l'alerte mourrait sans trace.
+        # Classement du retour : 2xx notice ; 401/403 = clé révoquée/compte
+        # suspendu = panne SYSTÉMIQUE (`::error::`, toutes les alertes futures
+        # partiraient en silence) ; le reste = transitoire (`::warning::`).
+        # Jamais d'échec de step (best-effort).
+        out=$(mktemp)
+        http=$(curl -sS --max-time 20 --retry 2 --retry-connrefused \
+          -o "$out" -w '%{http_code}' -X POST https://api.resend.com/emails \
+          -H "Authorization: Bearer $RESEND_API_KEY" \
+          -H "Content-Type: application/json" \
+          -d "$payload") || http=000
+        case "$http" in
+          2*) echo "::notice::Email ops envoyé (« $SUBJECT »)." ;;
+          401|403) echo "::error::Resend REFUSE la clé (HTTP $http) — canal email ops MORT jusqu'à rotation du secret RESEND_API_KEY. Alerte « $SUBJECT » NON envoyée. $(cat "$out")" ;;
+          *) echo "::warning::Envoi email Resend échoué (HTTP $http, best-effort) : « $SUBJECT ». $(cat "$out")" ;;
+        esac

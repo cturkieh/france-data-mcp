@@ -4,9 +4,91 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700` + timeout `count_rpps_by_commune` aligné 15 s
+## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700` + timeout `count_rpps_by_commune` aligné 15 s + cron RPPS : budget 120 min, alerte sur run tué, relance de la jauge
 
 ### Fixed
+
+- **Crons : budget RPPS 60 → 120 min, alerte LOUD sur run tué (`cancelled()`)
+  sur les 7 workflows ingest/backfill, relance de la jauge BAN sur 57014**
+  (post-mortem prod 2026-09-05). Durée réelle du cron RPPS : 54 → 57 → 60 min
+  entre mai et septembre (COPY ~18 min + enrichment FINESS ~4 min + **ban_join
+  33-35 min réels**, pas les ~11 min extrapolés en mai d'un lot mesuré à vide ;
+  CSV ANS +15 K lignes/mois). Conséquences prouvées : **le run 2026-08-05
+  (#30981501695) a été tué à 60 min en plein ban_join, AVANT le swap — mois
+  RPPS perdu en silence** (un timeout GitHub met le job en `cancelled`, pas
+  `failure` → le step d'issue gardé par `failure()` n'a pas tourné ; le script
+  tué en SIGTERM n'écrit pas de ligne `ingest_log` ; aucun email) ; le run
+  2026-09-05 (#33954453629) a swappé à 59 min 59 s puis a été tué 5 s après →
+  `conclusion=cancelled` → **drain BAN auto (`workflow_run`, gardé sur
+  `success`) skippé** (7 048 adresses, drainées à la main le jour même).
+  Fix, en 4 pièces :
+  - `ingest-rpps.yml` : `timeout-minutes: 120` (GitHub facture le temps réel,
+    pas le budget ; un run RPPS *hung* coûterait désormais 120 min de quota au
+    lieu de 60 — 1 run/mois, prix accepté du filet) + **préavis de dérive de
+    durée** (`RPPS_JOB_BUDGET_MINUTES`, miroir du YAML gardé par test) : au-delà
+    de 60 % du budget, warn `DÉRIVE DE DURÉE` + annotation `::warning::` sur la
+    page du run — la dérive 54→57→60 min s'était faite 4 mois sans aucun signal.
+  - Composite `.github/actions/notify-ingest-failure` (issue + email, message
+    discriminé par `job.status` passé en input : « run TUÉ, aucune ligne
+    ingest_log, swap probablement non fait, relancer via workflow_dispatch »
+    vs échec classique + causes fréquentes par source) branchée avec
+    `if: failure() || cancelled()` sur **les 5 crons d'ingestion** (RPPS,
+    Ameli, FINESS, CDS, IRIS — remplace 5 blocs `github-script` inline
+    divergents), **les 2 backfills BAN** (qui n'avaient AUCUNE alerte, même
+    sur `failure()`) **et `cleanup-stale-previous`**. **`actions/checkout`
+    passe en PREMIER step** des 4 workflows qui avaient un preflight secrets
+    avant lui (backfills, IRIS, cleanup) : l'alerte est une action LOCALE, lue
+    dans le workspace — sans checkout, un preflight qui échoue rendait l'alerte
+    MUETTE sur la panne même qu'elle doit rapporter (trouvé en revue). L'email
+    est sous `if: always()` avec sujet de repli (un step issue mort durement ne
+    tue plus le seul canal qui sort de GitHub) ; `job-status` validé dans le
+    script (`required` n'est pas appliqué sur une composite). Le hint « run
+    tué » ne dit PLUS « swap non fait » (septembre a swappé PUIS a été tué) :
+    il renvoie vers la fraîcheur `rpps` vs `rpps_previous`, et le hint RPPS
+    rappelle que le drain BAN auto a été sauté (`workflow_run` gardé sur
+    `success`).
+  - Composite `.github/actions/send-ops-email` = émetteur Resend UNIQUE
+    (best-effort : jamais d'échec de step), consommé par `notify-ingest-failure`
+    ET `notify-pending-geocode` (dont le `curl` inline est retiré ; ses outputs
+    passent en heredoc délimité et son step issue sous `always() &&` — les 2
+    canaux redeviennent indépendants). `curl --max-time 20 --retry 2` (dans
+    un job annulé la fenêtre de grâce est bornée) ; **401/403 = `::error::`**
+    (clé révoquée = panne SYSTÉMIQUE, toutes les alertes futures partiraient en
+    silence) vs `::warning::` transitoire ; sujet vide = `::error::` + repli.
+  - Jauge 6d `rpps_measure_ban_to_geocode` (`scripts/ingest/rpps.ts`) :
+    `retryTransient({ maxRetries: 1, baseDelayMs: 60 s, isRetryableResult:
+    isStatementTimeoutError })` — nouveau `src/core/pg-errors.ts`
+    (`PG_STATEMENT_TIMEOUT` déplacé de `sante/db-helpers` avec ré-export,
+    classifieur `isStatementTimeoutError(error: PgErrorLike | null)` — type
+    STRUCTUREL, passer le résultat entier ou une string est une erreur de
+    compilation ; `code` (`String()` défensif) puis regex sur
+    `message`/`details`/`hint` en filet ; `PG_TRANSIENT_REBUILD_CODES` remplace
+    les 2 Sets littéraux jumeaux de `rpps.ts`/`ameli.ts`). Prédicat de relance
+    = allow-list `57014 || isTransientSupabaseError` (un blip transport résolu
+    G5 est relancé aussi) ; après épuisement, le warn nomme l'hypothèse
+    STRUCTURELLE (« si récurrent d'un cycle à l'autre → EXPLAIN à froid ») et
+    `retryTransient` trace désormais `gave up on … after N attempts`. L'hypothèse
+    « stats périmées » du fix 2026-07 est réfutée comme cause unique
+    (re-ANALYZE 5d passé à 09:06:58, 57014 quand même à 09:08:34 pendant un
+    checkpoint de 612 Mo ; la même RPC répond < 1 s à vide 20 min plus tard :
+    contention I/O post-run). Le warn de `retryTransient` dit désormais le
+    message de l'erreur relancée (« transient error on … : <message> »).
+  Garde-fous : `scripts/ingest/workflows-alerting.test.ts` (itère sur TOUT
+  `.github/` avec liste d'EXEMPTION explicite `ci`/`keep-warm`/`release` — tout
+  nouveau workflow est présumé devoir alerter ; scalaires `if: >-` aplatis ;
+  aucun `failure()` sans `cancelled()` ; les 8 workflows passent par la
+  composite avec `job.status` + `issues: write` ; **checkout = 1er step** ;
+  Resend appelé en un seul endroit, `--max-time`, 401/403 en `::error::` ;
+  email `always()` + repli ; budget RPPS ≥ 120 ET parité avec
+  `RPPS_JOB_BUDGET_MINUTES` ; `success()` conservé sur la notif BAN) +
+  `src/core/pg-errors.test.ts` + wiring `rpps.test.ts`. Sémantique GitHub
+  vérifiée doc + source du runner (steps `cancelled()` exécutés après
+  annulation, `job.status` lisible dans `with:`, composite locale imbriquée,
+  `success()` interne évalué sur l'action pas sur le job) et **prouvée par un
+  run annulé à la main** (cf. PR). Différés (backlog) : dead-man's switch
+  « run jamais démarré », sortie de la jauge du cron, handler SIGTERM
+  `ingest_log` (piège `partial` : septembre a swappé PUIS a été tué),
+  idempotence des issues d'échec.
 
 - **`count_rpps_by_commune` rejoint le tier 15 s de statement_timeout**
   (migration `20260804T090000`, issue `FRANCE-DATA-MCP-M`, 2 events

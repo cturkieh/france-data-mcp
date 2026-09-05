@@ -61,22 +61,16 @@ runs:
         SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase-service-role-key }}
       run: pnpm notify:pending-geocode ${{ inputs.source }}
 
-    - name: Email — adresses à géocoder
+    - name: Compose email — adresses à géocoder
+      id: compose
       if: steps.pending_geocode.outputs.should_notify == 'true'
       shell: bash
       env:
-        RESEND_API_KEY: ${{ inputs.resend-api-key }}
-        NOTIFY_EMAIL_TO: ${{ inputs.email-to }}
-        NOTIFY_EMAIL_FROM: ${{ inputs.email-from }}
         SOURCE_LABEL: ${{ inputs.source-label }}
         PENDING: ${{ steps.pending_geocode.outputs.pending }}
         MEASUREMENT_UNAVAILABLE: ${{ steps.pending_geocode.outputs.measurement_unavailable }}
         RUN_URL: ${{ inputs.run-url }}
       run: |
-        if [ -z "$RESEND_API_KEY" ]; then
-          echo "::warning::RESEND_API_KEY absent — email non envoyé. Ajoute le secret pour activer l'alerte mail (l'issue GitHub est créée quand même)."
-          exit 0
-        fi
         # Mesure amont indisponible (compte null/corrompu sur un run réussi) :
         # message DÉGRADÉ — surtout pas "0 adresses" (trompeur).
         if [ "$MEASUREMENT_UNAVAILABLE" = "true" ]; then
@@ -86,21 +80,31 @@ runs:
           subject="[france-data-mcp] $SOURCE_LABEL : $PENDING adresses en attente de géocodage auto"
           text="Le cron $SOURCE_LABEL a ingéré de nouvelles données. $PENDING adresses distinctes seront géocodées AUTOMATIQUEMENT au prochain drain BAN (déclenché tout seul après ce cron). Aucune action requise. Si ce compte ne baisse pas sur plusieurs cycles, le drain auto est peut-être cassé : vérifier les workflows « Backfill BAN ». Run : $RUN_URL"
         fi
-        payload=$(jq -n \
-          --arg from "$NOTIFY_EMAIL_FROM" \
-          --arg to "$NOTIFY_EMAIL_TO" \
-          --arg subject "$subject" \
-          --arg text "$text" \
-          '{from:$from, to:[$to], subject:$subject, text:$text}')
-        # `|| ::warning::` : un échec d'envoi ne doit pas court-circuiter le step
-        # issue qui suit (sinon une panne Resend supprimerait AUSSI l'issue).
-        curl -sS --fail-with-body -X POST https://api.resend.com/emails \
-          -H "Authorization: Bearer $RESEND_API_KEY" \
-          -H "Content-Type: application/json" \
-          -d "$payload" || echo "::warning::Envoi email Resend échoué (best-effort) — voir l'issue GitHub."
+        # Heredoc délimité : robuste à un saut de ligne dans la valeur (un
+        # `PENDING` corrompu ferait sinon échouer le step en « Invalid format »).
+        {
+          echo "subject<<__OPS_EOF__"; echo "$subject"; echo "__OPS_EOF__"
+          echo "text<<__OPS_EOF__";    echo "$text";    echo "__OPS_EOF__"
+        } >> "$GITHUB_OUTPUT"
 
-    - name: Issue — adresses à géocoder
+    # Émission déléguée à l'émetteur unique (best-effort : un échec d'envoi ne
+    # court-circuite pas le step issue qui suit — sinon une panne Resend
+    # supprimerait AUSSI l'issue).
+    - name: Email — adresses à géocoder
       if: steps.pending_geocode.outputs.should_notify == 'true'
+      uses: ./.github/actions/send-ops-email
+      with:
+        resend-api-key: ${{ inputs.resend-api-key }}
+        email-to: ${{ inputs.email-to }}
+        email-from: ${{ inputs.email-from }}
+        subject: ${{ steps.compose.outputs.subject }}
+        text: ${{ steps.compose.outputs.text }}
+
+    # `always() &&` : un échec du compose/email (action locale non résolue,
+    # jq en erreur) ne doit PAS supprimer l'issue — les deux canaux sont
+    # indépendants par contrat.
+    - name: Issue — adresses à géocoder
+      if: always() && steps.pending_geocode.outputs.should_notify == 'true'
       uses: actions/github-script@v9
       env:
         SOURCE: ${{ inputs.source }}

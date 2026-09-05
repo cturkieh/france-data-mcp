@@ -523,3 +523,36 @@ describe("rpps.ts wiring mesure BAN delta : post-swap, sur rpps", () => {
     ).toBeGreaterThan(swapIdx);
   });
 });
+
+// Jauge 6d — relance UNIQUE sur 57014 (post-mortem run #33954453629, 2026-09-05).
+// La RPC `rpps_measure_ban_to_geocode` a fait statement timeout ALORS QUE le
+// re-ANALYZE 5d avait tourné (stats fraîches) : cause = contention I/O post-run
+// (checkpoint 612 Mo en cours), pas la requête (< 1 s à vide 20 min plus tard).
+// Le mécanisme est `retryTransient` (src/core/retry-transient.ts, déjà testé) +
+// le classifieur `isStatementTimeoutError` (src/core/pg-errors.test.ts) : ici on
+// ne garde que le WIRING — une relance, repos ≥ 30 s, prédicat 57014 seul.
+describe("rpps.ts wiring relance de la jauge 6d (retryTransient, allow-list 57014 + transport)", () => {
+  it("la mesure est enveloppée dans retryTransient({ maxRetries: 1, repos ≥ 30 s, 57014 })", () => {
+    const measureIdx = RPPS_SRC.indexOf('supabase.rpc("rpps_measure_ban_to_geocode"');
+    expect(measureIdx).toBeGreaterThan(0);
+    const start = RPPS_SRC.lastIndexOf("retryTransient(", measureIdx);
+    expect(start, "la mesure doit être passée à retryTransient(").toBeGreaterThan(0);
+    // Le `retryTransient(` trouvé doit être CELUI de la mesure (quelques lignes
+    // au-dessus), pas un appel homonyme plus haut dans main().
+    expect(measureIdx - start).toBeLessThan(200);
+    const canaryIdx = RPPS_SRC.indexOf('runAndRecordCanary(supabase, "rpps"', measureIdx);
+    expect(canaryIdx, "canary post-mesure introuvable").toBeGreaterThan(measureIdx);
+    const block = RPPS_SRC.slice(start, canaryIdx);
+    expect(block).toMatch(/maxRetries:\s*1\b/);
+    expect(block).toContain("baseDelayMs: MEASURE_RETRY_DELAY_MS");
+    // Prédicat = allow-list stricte 57014 OU blip transport résolu (G5) —
+    // jamais un `() => true` (relancerait une RPC absente = 60 s de masquage).
+    expect(block).toMatch(
+      /isRetryableResult:\s*\(r\)\s*=>\s*isStatementTimeoutError\(r\.error\)\s*\|\|\s*isTransientSupabaseError\(r\.error\)/,
+    );
+    const delay = RPPS_SRC.match(/^const MEASURE_RETRY_DELAY_MS = ([\d_]+);$/m)?.[1];
+    expect(delay, "MEASURE_RETRY_DELAY_MS introuvable").toBeDefined();
+    // ≥ 30 s : laisser le checkpoint post-run se terminer avant la 2e tentative.
+    expect(Number(String(delay).replace(/_/g, ""))).toBeGreaterThanOrEqual(30_000);
+  });
+});

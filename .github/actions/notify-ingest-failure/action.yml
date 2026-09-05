@@ -1,0 +1,160 @@
+# Composite action — alerte ops « run échoué OU run tué » (issue GitHub + email).
+#
+# Remplace les 5 blocs `github-script` inline (`[ingestion-failure] X run
+# failed`) recopiés par workflow. Le call-site garde la condition :
+#
+#     if: failure() || cancelled()
+#
+# `cancelled()` est LOAD-BEARING (post-mortem 2026-09-05, prouvé prod) : un
+# `timeout-minutes` atteint met le job en `cancelled`, PAS en `failure`. Avec
+# `failure()` seul, le run RPPS 2026-08-05 tué à 60 min en plein ban_join, AVANT
+# le swap, n'a produit NI issue NI email — mois perdu, découvert 2 mois après.
+# Le script tué en SIGTERM n'écrit pas non plus de ligne `ingest_log` : sans
+# alerte workflow, l'incident est totalement muet. `job.status` (passé en input
+# — le contexte `job` n'est pas lisible depuis une composite) discrimine les 2
+# cas pour un message ACTIONNABLE : sur un run tué il n'y a justement AUCUNE
+# ligne ingest_log à aller voir.
+#
+# Best-effort de bout en bout : l'issue en try/catch → `core.warning`, l'email
+# via `send-ops-email` (warning, jamais d'échec) sous `if: always()` avec un
+# sujet de repli — si le step issue meurt DUREMENT (téléchargement de
+# github-script KO), l'email part quand même. Le call-site est déjà sur un
+# chemin d'échec — cette action ne doit jamais masquer la cause d'origine.
+#
+# Action LOCALE (`uses: ./.github/actions/…`, y compris l'imbriquée
+# `send-ops-email`) : exige `actions/checkout` AVANT tout step qui peut échouer
+# (garde-fou `workflows-alerting.test.ts`), et n'est PAS réutilisable cross-repo
+# sans réécrire ces chemins.
+name: Notify ingest failure
+description: >
+  Ouvre une issue et envoie un email quand un workflow d'ingestion échoue ou
+  est tué (timeout / annulation), avec un message adapté au cas.
+
+inputs:
+  source-label:
+    description: "Libellé humain : RPPS | Ameli | FINESS | CDS | IRIS | Backfill BAN RPPS…"
+    required: true
+  ingest-log-source:
+    description: "Valeur `ingest_log.source` du script (rpps | ameli_ps | finess | …). Vide = le workflow n'écrit pas ingest_log (backfill) → diagnostic ingest_log omis."
+    required: false
+    default: ""
+  issue-labels:
+    description: "Labels de l'issue, séparés par des virgules (ex. `ingestion-failure,rpps`)."
+    required: false
+    default: "ingestion-failure"
+  failure-modes:
+    description: "Causes fréquentes propres à la source (texte libre, ajouté au corps du cas « échoué »)."
+    required: false
+    default: ""
+  killed-hint:
+    description: "Conséquence propre au workflow quand le run est TUÉ (texte libre, ajouté au corps du cas « tué »)."
+    required: false
+    default: "Le swap atomique a PEUT-ÊTRE eu lieu (prouvé : run RPPS 2026-09-05 swappé à 59:59 puis tué 5 s après) — VÉRIFIER la fraîcheur de la table servie vs sa `_previous` (`pg_stat_user_tables.last_analyze`) AVANT de relancer via workflow_dispatch (une relance re-swappe ~1 h pour rien si le mois est déjà en prod ; le court-circuit SHA256 ne joue pas, le checksum n'a pas été enregistré)."
+  job-status:
+    description: "Passer `${{ job.status }}` : `failure` ou `cancelled` (timeout-minutes atteint ou annulation)."
+    required: true
+  github-token:
+    description: "Token pour créer l'issue."
+    required: true
+  resend-api-key:
+    description: "Clé API Resend. Vide → email skippé avec ::warning::."
+    required: false
+    default: ""
+  email-to:
+    description: "Destinataire de l'alerte mail."
+    required: false
+    default: "cturkieh@gmail.com"
+  email-from:
+    description: "Expéditeur."
+    required: false
+    default: "France Data MCP <onboarding@resend.dev>"
+  run-url:
+    description: "URL du run GitHub Actions (traçabilité)."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Issue — run échoué ou tué
+      id: issue
+      uses: actions/github-script@v9
+      env:
+        SOURCE_LABEL: ${{ inputs.source-label }}
+        INGEST_LOG_SOURCE: ${{ inputs.ingest-log-source }}
+        ISSUE_LABELS: ${{ inputs.issue-labels }}
+        FAILURE_MODES: ${{ inputs.failure-modes }}
+        KILLED_HINT: ${{ inputs.killed-hint }}
+        JOB_STATUS: ${{ inputs.job-status }}
+        RUN_URL: ${{ inputs.run-url }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const label = process.env.SOURCE_LABEL;
+          const logSource = process.env.INGEST_LOG_SOURCE;
+          const killed = process.env.JOB_STATUS === 'cancelled';
+          const runUrl = process.env.RUN_URL;
+          const labels = process.env.ISSUE_LABELS.split(',').map((l) => l.trim()).filter(Boolean);
+          const failureModes = process.env.FAILURE_MODES;
+          const killedHint = process.env.KILLED_HINT;
+          const prefix = `[${labels[0] ?? 'ingestion-failure'}]`;
+
+          // `required: true` n'est PAS appliqué par GitHub sur une composite :
+          // un job-status absent/inattendu rendrait `killed=false` → message
+          // « voir la ligne failed d'ingest_log » sur un run tué (trompeur).
+          if (!['failure', 'cancelled'].includes(process.env.JOB_STATUS)) {
+            core.warning(`notify-ingest-failure: job-status inattendu « ${process.env.JOB_STATUS} » (attendu failure|cancelled) — passer \`job-status: \${{ job.status }}\` au call-site`);
+          }
+
+          // Diagnostic ingest_log : seulement pour un script qui en écrit. Sur un
+          // run TUÉ, ingest_log ne peut PAS trancher (rien n'est écrit en SIGTERM) :
+          // on renvoie vers la fraîcheur de la table, pas vers la ligne absente.
+          const logDiag = logSource
+            ? (killed
+                ? `Aucune ligne \`ingest_log\` (source = '${logSource}') n'est écrite par un run tué : son ABSENCE ne prouve PAS l'absence de swap. `
+                : `Voir la dernière ligne \`failed\` de \`ingest_log\` (source = '${logSource}') : \`error_phase\` / \`error_message\`. `)
+            : '';
+
+          const title = killed
+            ? `${prefix} ${label} run TUÉ (timeout ou annulation) (run #${context.runId})`
+            : `${prefix} ${label} run failed (run #${context.runId})`;
+          const body = killed
+            ? `Le workflow ${label} a été **tué** avant la fin (\`timeout-minutes\` atteint ou annulation manuelle) : le script meurt en SIGTERM, donc **aucune ligne \`ingest_log\`** n'est écrite. ${killedHint}\n\n` +
+              `**Run :** ${runUrl}\n\n` +
+              `${logDiag}Si le budget a été dépassé, regarder quelle phase a grossi dans le log du run avant d'augmenter \`timeout-minutes\`.`
+            : `Le workflow ${label} a échoué.\n\n` +
+              `**Run :** ${runUrl}\n\n` +
+              `${logDiag}${failureModes ? `Causes fréquentes : ${failureModes}` : ''}`;
+
+          // Sujet/texte de l'email composés ICI (source unique du wording),
+          // consommés par le step send-ops-email qui suit.
+          core.setOutput('subject', killed
+            ? `[france-data-mcp] ${label} : 🛑 run TUÉ (timeout/annulation)`
+            : `[france-data-mcp] ${label} : ❌ run échoué`);
+          core.setOutput('text', killed
+            ? `Le workflow ${label} a été tué avant la fin (timeout-minutes atteint ou annulation). Aucune ligne ingest_log n'est écrite dans ce cas. ${killedHint} Run : ${runUrl}`
+            : `Le workflow ${label} a échoué. Voir l'issue GitHub ouverte automatiquement${logSource ? ` et la dernière ligne failed d'ingest_log (source='${logSource}')` : ''}. Run : ${runUrl}`);
+
+          try {
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels,
+            });
+          } catch (err) {
+            // Best-effort : une panne de l'API issues ne doit pas masquer l'échec d'origine.
+            core.warning(`Création de l'issue d'échec échouée (best-effort) : ${err.message}`);
+          }
+
+    # `always()` : si le step issue meurt DUREMENT (outputs vides), l'email —
+    # seul canal qui sort de GitHub — part quand même, avec un repli explicite.
+    - name: Email — run échoué ou tué
+      if: always()
+      uses: ./.github/actions/send-ops-email
+      with:
+        resend-api-key: ${{ inputs.resend-api-key }}
+        email-to: ${{ inputs.email-to }}
+        email-from: ${{ inputs.email-from }}
+        subject: "${{ steps.issue.outputs.subject || format('[france-data-mcp] {0} : alerte run ({1}) — issue NON créée', inputs.source-label, inputs.job-status) }}"
+        text: "${{ steps.issue.outputs.text || format('Alerte {0} : job-status={1}. Le step issue a échoué DUREMENT (aucune issue GitHub créée) — voir le run : {2}', inputs.source-label, inputs.job-status, inputs.run-url) }}"
