@@ -14,8 +14,10 @@ import { fetchAllCommunes } from "../../src/territoire/communes.js";
 import {
   IngestError,
   type IngestLogEntry,
+  assertStagingRowBand,
   atomicSwapTables,
   downloadCsv,
+  getLastRealIngestRowCount,
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
@@ -258,9 +260,10 @@ async function main(): Promise<void> {
     // 1. DOWNLOAD + last checksum en parallèle. Le CSV CDS est petit (~3 Mo)
     // mais regenerated hebdo → un build sans changement clinique produit
     // souvent un CSV byte-identique. Skip économise COPY/VALIDATE/SWAP.
-    const [downloaded, lastSha] = await Promise.all([
+    const [downloaded, lastSha, referenceRows] = await Promise.all([
       downloadCsv(CDS_CSV_URL, "annuaire-sante-ameli-cds.csv"),
       getLastSuccessChecksum("cds"),
+      getLastRealIngestRowCount("cds"),
     ]);
     log.csv_size_bytes = downloaded.sizeBytes;
     log.csv_sha256 = downloaded.sha256;
@@ -363,6 +366,9 @@ async function main(): Promise<void> {
         `CDS count ${stats.inserted} above maximum ${MAX_CDS} — suspected format change (CNAM dénormalisation modifiée?)`,
       );
     }
+    // Bande RELATIVE à la dernière ingestion réelle : CDS n'avait AUCUN
+    // plancher calibré sur le réel (2 000 pour ~2 500 centres).
+    assertStagingRowBand(stats.inserted, referenceRows, "cds");
 
     const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
     // Denominator = lignes brutes CSV (skip uniques + groupées CDS uniques).

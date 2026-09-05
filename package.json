@@ -88,6 +88,7 @@
     "ingest:cds": "tsx scripts/ingest/cds.ts",
     "ingest:iris": "tsx scripts/ingest/iris.ts",
     "notify:pending-geocode": "tsx scripts/ingest/notify-pending-geocode.ts",
+    "notify:ingest-anomaly": "tsx scripts/ingest/notify-ingest-anomaly.ts",
     "cleanup:stale-previous": "tsx scripts/ingest/drop-stale-previous.ts"
   },
   "engines": {
@@ -103,7 +104,8 @@
     "tsup": "^8.3.5",
     "tsx": "^4.19.0",
     "typescript": "^5.6.3",
-    "vitest": "^2.1.5"
+    "vitest": "^2.1.5",
+    "yaml": "^2.9.0"
   },
   "dependencies": {
     "@sentry/node": "^10.53.1",

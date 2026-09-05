@@ -26,8 +26,10 @@ import {
   type IngestLogEntry,
   PGRST_COLUMN_CACHE_MISS,
   appendLogMessage,
+  assertStagingRowBand,
   atomicSwapTables,
   downloadCsv,
+  getLastRealIngestRowCount,
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
@@ -296,9 +298,10 @@ async function main(): Promise<void> {
 
   try {
     // 1. DOWNLOAD + lookup last success checksum en parallèle
-    const [downloaded, lastSha] = await Promise.all([
+    const [downloaded, lastSha, referenceRows] = await Promise.all([
       downloadCsv(RPPS_CSV_URL, "rpps-personne-activite.txt"),
       getLastSuccessChecksum("rpps"),
+      getLastRealIngestRowCount("rpps"),
     ]);
     log.csv_size_bytes = downloaded.sizeBytes;
     log.csv_sha256 = downloaded.sha256;
@@ -383,6 +386,9 @@ async function main(): Promise<void> {
         `Row count ${stats.inserted} above maximum ${MAX_ROWS} — suspected format change`,
       );
     }
+    // Bande RELATIVE à la dernière ingestion réelle : le plancher absolu
+    // (2,0 M vs 2,28 M réels) laissait passer une troncature de 230 K lignes.
+    assertStagingRowBand(stats.inserted, referenceRows, "rpps");
 
     const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
     const denominator = stats.inserted + stats.skippedNoIdentity;

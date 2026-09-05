@@ -14,8 +14,10 @@ import { fetchAllCommunes } from "../../src/territoire/communes.js";
 import {
   IngestError,
   type IngestLogEntry,
+  assertStagingRowBand,
   atomicSwapTables,
   downloadCsv,
+  getLastRealIngestRowCount,
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
@@ -195,9 +197,10 @@ async function main(): Promise<void> {
     // RTT Supabase. Ameli regenerates l'extract hebdomadaire ; sur 154 MB un
     // build sans nouveau PS conventionné peut produire un CSV byte-identique.
     // Skip COPY/VALIDATE/SWAP économise plusieurs min (~485K rows + index).
-    const [downloaded, lastSha] = await Promise.all([
+    const [downloaded, lastSha, referenceRows] = await Promise.all([
       downloadCsv(AMELI_PS_CSV_URL, "annuaire-sante-ameli-ps.csv"),
       getLastSuccessChecksum("ameli_ps"),
+      getLastRealIngestRowCount("ameli_ps"),
     ]);
     log.csv_size_bytes = downloaded.sizeBytes;
     log.csv_sha256 = downloaded.sha256;
@@ -298,6 +301,9 @@ async function main(): Promise<void> {
         `Row count ${stats.inserted} above maximum ${MAX_ROWS} — suspected format change`,
       );
     }
+    // Bande RELATIVE à la dernière ingestion réelle : le plancher absolu
+    // (400 K vs ~485 K réels) laissait passer une troncature de 85 K PS.
+    assertStagingRowBand(stats.inserted, referenceRows, "ameli");
 
     const fmt = (n: number) => `${(n * 100).toFixed(2)}%`;
     const denominator =

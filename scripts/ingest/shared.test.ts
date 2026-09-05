@@ -8,6 +8,13 @@ import {
   IngestError,
   type IngestLogEntry,
   type PreValidateConfig,
+  ROW_BAND_MAX_RATIO,
+  ROW_BAND_MIN_RATIO,
+  type RowCountReference,
+  SEVENZIP_MAGIC,
+  ZIP_MAGIC,
+  assertStagingRowBand,
+  getLastRealIngestRowCount,
   getNonEmpty,
   insertStagingBatchWithRetry,
   isForceReingestEnv,
@@ -16,6 +23,7 @@ import {
   runBatchedRpc,
   runKeysetRpc,
   shortCircuitIfSameChecksum,
+  writeGithubOutput,
   writeIngestLog,
   writeIngestLogFailureFallback,
   writeIngestLogSuccessSafe,
@@ -57,6 +65,16 @@ describe("preValidateFile", () => {
       `num_finess;raison_sociale\n080000017;CH Charleville\n${"x".repeat(200)}`,
     );
     await expect(preValidateFile(file, baseConfig)).resolves.toBeUndefined();
+  });
+
+  it("minSizeBytes invalide (0, négatif, NaN) → IngestError, jamais un contrôle éteint en silence", async () => {
+    const file = tempFileWith(`num_finess;raison_sociale\n${"x".repeat(200)}`);
+    for (const minSizeBytes of [0, -1, Number.NaN, 1.5]) {
+      await expect(preValidateFile(file, { ...baseConfig, minSizeBytes })).rejects.toMatchObject({
+        phase: "pre_validate",
+        message: expect.stringContaining("minSizeBytes invalide"),
+      });
+    }
   });
 
   it("throws IngestError(phase=pre_validate) when file too small", async () => {
@@ -101,6 +119,259 @@ describe("preValidateFile", () => {
       phase: "pre_validate",
       message: expect.stringContaining("signature"),
     });
+  });
+
+  // Archives IRIS (backlog phase 2 item 6) : `.7z` IGN et `.zip` INSEE. Les
+  // signatures sont celles des formats (7z : 37 7A BC AF 27 1C ; zip local
+  // file header : 50 4B 03 04) — un test qui les recopierait depuis la
+  // constante ne prouverait rien, elles sont écrites ici en dur.
+  it("SEVENZIP_MAGIC / ZIP_MAGIC : valeurs des formats, acceptées par preValidateFile", async () => {
+    expect([...SEVENZIP_MAGIC]).toEqual([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]);
+    expect([...ZIP_MAGIC]).toEqual([0x50, 0x4b, 0x03, 0x04]);
+    const sevenZip = binFile(Buffer.concat([Buffer.from(SEVENZIP_MAGIC), Buffer.alloc(64)]));
+    await expect(
+      preValidateFile(sevenZip, { minSizeBytes: 1, magicBytes: SEVENZIP_MAGIC }),
+    ).resolves.toBeUndefined();
+    const zip = binFile(Buffer.concat([Buffer.from(ZIP_MAGIC), Buffer.alloc(64)]));
+    await expect(
+      preValidateFile(zip, { minSizeBytes: 1, magicBytes: ZIP_MAGIC }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("archive IRIS : une page de maintenance de 2 Mo en 200 passe la taille mais PAS la signature, et le label nomme le fichier", async () => {
+    const file = binFile(
+      Buffer.from(`<!doctype html><title>Maintenance</title>${"x".repeat(2_000_000)}`),
+    );
+    await expect(
+      preValidateFile(file, {
+        minSizeBytes: 300_000,
+        magicBytes: SEVENZIP_MAGIC,
+        label: "contours .7z",
+      }),
+    ).rejects.toMatchObject({
+      phase: "pre_validate",
+      message: expect.stringMatching(/^contours \.7z: file signature 3c21646f6374 does not match/),
+    });
+  });
+
+  it("label absent → le nom du fichier préfixe le message (taille et en-tête)", async () => {
+    const file = tempFileWith("tiny");
+    await expect(preValidateFile(file, baseConfig)).rejects.toMatchObject({
+      message: expect.stringMatching(new RegExp(`^${path.basename(file)}: file size`)),
+    });
+  });
+});
+
+describe("bande de volume relative à la dernière ingestion réelle (backlog FINESS phase 2 item 5)", () => {
+  const quiet = () => vi.spyOn(console, "log").mockImplementation(() => {});
+  const known = (rows: number): RowCountReference => ({ kind: "known", rows });
+
+  it("bande [0,9 ; 1,3] — commune aux sources, jamais une constante absolue", () => {
+    expect([ROW_BAND_MIN_RATIO, ROW_BAND_MAX_RATIO]).toEqual([0.9, 1.3]);
+  });
+
+  it("troncature Ameli : 400 K lignes pour 485 K réels passe MIN_ROWS=400 K mais PAS la bande", () => {
+    // Le cas exact du backlog : plancher absolu 400 K, réel ~485 K → −85 K PS
+    // perdus en silence. La bande à 0,9 refuse (82,5 %).
+    expect(() => assertStagingRowBand(400_000, known(485_000), "ameli")).toThrow(
+      expect.objectContaining({
+        phase: "validate",
+        message: expect.stringMatching(
+          /82\.5% of the last real ingestion \(485000\) — below 0\.9 band/,
+        ),
+      }),
+    );
+  });
+
+  it("troncature RPPS : 2,0 M pour 2,28 M réels (−230 K) est refusée ; croissance +0,7 %/mois acceptée", () => {
+    const log = quiet();
+    try {
+      expect(() => assertStagingRowBand(2_000_000, known(2_280_000), "rpps")).toThrow(IngestError);
+      expect(() => assertStagingRowBand(2_296_000, known(2_280_000), "rpps")).not.toThrow();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("plafond : +30 % = dénormalisation amont, refusé ; juste en dessous accepté", () => {
+    const log = quiet();
+    try {
+      expect(() => assertStagingRowBand(3_251, known(2_500), "cds")).toThrow(/above 1\.3 band/);
+      expect(() => assertStagingRowBand(3_250, known(2_500), "cds")).not.toThrow();
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("`none` (première ingestion) : warn simple, aucun refus — jamais un faux refus au 1er run", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = quiet();
+    try {
+      expect(() => assertStagingRowBand(10, { kind: "none" }, "cds")).not.toThrow();
+      expect(warn.mock.calls[0]?.[0]).toMatch(/^\[cds\] aucune ingestion réelle antérieure/);
+      // Pas d'annotation GitHub : c'est normal, pas une dégradation.
+      expect(log.mock.calls.some((c) => String(c[0]).startsWith("::warning::"))).toBe(false);
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it("`unavailable` (ingest_log illisible) : garde DÉSACTIVÉ → warn + annotation ::warning:: nommant la raison", () => {
+    // « pas de résultat » ≠ « erreur » : ici le garde anti-troncature ne tourne
+    // pas sur ce run, ce doit être visible sur la page du run, pas dans 50 000
+    // lignes de log.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = quiet();
+    try {
+      expect(() =>
+        assertStagingRowBand(10, { kind: "unavailable", reason: "boom" }, "rpps"),
+      ).not.toThrow();
+      expect(warn.mock.calls[0]?.[0]).toMatch(
+        /INDISPONIBLE \(boom\) — bande relative NON vérifiée/,
+      );
+      expect(log.mock.calls[0]?.[0]).toMatch(
+        /^::warning::\[rpps\] référence de volume INDISPONIBLE/,
+      );
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it("dans la bande : log info avec le ratio, pas de throw", () => {
+    const log = quiet();
+    try {
+      expect(() => assertStagingRowBand(485_000, known(480_000), "ameli")).not.toThrow();
+      expect(log.mock.calls[0]?.[0]).toMatch(
+        /^\[ameli\] volume vs dernière ingestion réelle : 485000\/480000 \(101\.0%\)/,
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+});
+
+describe("writeGithubOutput — encodeur UNIQUE de $GITHUB_OUTPUT (heredoc, délimiteur aléatoire)", () => {
+  it("écrit chaque clé en heredoc au délimiteur aléatoire par appel ; une valeur multi-ligne reste intacte", () => {
+    const out = tempFileWith("");
+    vi.stubEnv("GITHUB_OUTPUT", out);
+    try {
+      writeGithubOutput("t", { should_notify: "true", body: "ligne 1\n\nligne 3" });
+      const written = fs.readFileSync(out, "utf8");
+      const m =
+        /^should_notify<<(__OPS_[0-9a-f-]{36}__)\ntrue\n\1\nbody<<\1\nligne 1\n\nligne 3\n\1\n$/.exec(
+          written,
+        );
+      expect(m, written).not.toBeNull();
+      // Un délimiteur FIXE (`__OPS_EOF__`) qu'une valeur venue de la base
+      // contiendrait fermerait le heredoc et injecterait des outputs.
+      expect(written).not.toContain("__OPS_EOF__");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("GITHUB_OUTPUT absent → warn préfixé, rien d'écrit, pas de throw (run local)", () => {
+    vi.stubEnv("GITHUB_OUTPUT", "");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => writeGithubOutput("notify-x", { a: "1" })).not.toThrow();
+      expect(warn.mock.calls[0]?.[0]).toMatch(/^\[notify-x\] GITHUB_OUTPUT absent/);
+    } finally {
+      warn.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("écriture impossible → ::error:: (le canal de sortie est mort, l'annotation est le seul repli)", () => {
+    vi.stubEnv("GITHUB_OUTPUT", path.join(os.tmpdir(), "inexistant-dir-xyz", "out.txt"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(() => writeGithubOutput("t", { a: "1" })).not.toThrow();
+      expect(log.mock.calls[0]?.[0]).toMatch(/^::error::\[t\] écriture \$GITHUB_OUTPUT échouée/);
+      expect(error).toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+      log.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("getLastRealIngestRowCount — référence prod pour la bande (résultat DISCRIMINÉ)", () => {
+  /** Faux client : capture la chaîne de filtres, renvoie `result` au `limit`. */
+  function fakeIngestLog(result: { data?: unknown; error?: { message: string } | null }) {
+    const calls: Array<[string, unknown[]]> = [];
+    const chain: Record<string, unknown> = {};
+    for (const m of ["select", "eq", "in", "is", "not", "order"]) {
+      chain[m] = (...args: unknown[]) => {
+        calls.push([m, args]);
+        return chain;
+      };
+    }
+    chain.limit = async (...args: unknown[]) => {
+      calls.push(["limit", args]);
+      return { data: result.data ?? null, error: result.error ?? null };
+    };
+    return { client: { from: vi.fn(() => chain) } as never, calls };
+  }
+
+  it("`known` : filtres load-bearing (ingestion RÉELLE) et coercition par parseRpcCount (string acceptée)", async () => {
+    const { client, calls } = fakeIngestLog({ data: [{ row_count: "485123" }] });
+    await expect(getLastRealIngestRowCount("ameli_ps", client)).resolves.toEqual({
+      kind: "known",
+      rows: 485_123,
+    });
+    // Sinon un skip same_checksum (row_count null) serait la référence.
+    expect(calls).toContainEqual(["eq", ["source", "ameli_ps"]]);
+    // Statuts = `REAL_INGEST_STATUSES` (règle partagée avec data_freshness).
+    expect(calls).toContainEqual(["in", ["status", ["success", "partial"]]]);
+    expect(calls).toContainEqual(["is", ["skip_reason", null]]);
+    expect(calls).toContainEqual(["not", ["row_count", "is", null]]);
+    expect(calls).toContainEqual(["order", ["started_at", { ascending: false }]]);
+  });
+
+  it("erreur de lecture → `unavailable` + raison + console.error (jamais un throw : ingestion continue)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { client } = fakeIngestLog({ error: { message: "boom" } });
+      await expect(getLastRealIngestRowCount("rpps", client)).resolves.toEqual({
+        kind: "unavailable",
+        reason: "lecture ingest_log échouée: boom",
+      });
+      expect(error.mock.calls[0]?.[0]).toMatch(
+        /getLastRealIngestRowCount\(rpps\) lecture ingest_log échouée: boom/,
+      );
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("aucune ligne → `none` ; valeur non numérique ou `1e5` → `unavailable` (parseRpcCount, jamais NaN)", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        getLastRealIngestRowCount("cds", fakeIngestLog({ data: [] }).client),
+      ).resolves.toEqual({ kind: "none" });
+      const bad = await getLastRealIngestRowCount(
+        "cds",
+        fakeIngestLog({ data: [{ row_count: "N/A" }] }).client,
+      );
+      expect(bad.kind).toBe("unavailable");
+      const sci = await getLastRealIngestRowCount(
+        "cds",
+        fakeIngestLog({ data: [{ row_count: "1e5" }] }).client,
+      );
+      expect(sci).toMatchObject({
+        kind: "unavailable",
+        reason: expect.stringMatching(/non-decimal string/),
+      });
+      expect(error).toHaveBeenCalledTimes(2);
+    } finally {
+      error.mockRestore();
+    }
   });
 });
 
