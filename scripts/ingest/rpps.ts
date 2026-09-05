@@ -547,54 +547,54 @@ async function main(): Promise<void> {
     }
 
     // 5c-bis. REPLI FINESS sur les lignes restées `commune_centroid` APRÈS
-    // ban_join et portant un `num_finess`. Prouvé prod 2026-09-05 (table `rpps`
-    // post-swap) : 70 677 lignes au centroïde AVEC un num_finess, dont 57 462
-    // dont l'établissement est géolocalisé dans `finess` — la position exacte
-    // était sous la main et jamais utilisée. Cause : l'enrichment 5b ne vise
-    // que les lignes SANS geom (commune introuvable) ; une ligne à commune
-    // reconnue reçoit le centroïde puis dépend du cache BAN, or les adresses
-    // d'établissements (nom de structure, CS/BP, cedex) se géocodent mal.
-    // Ordre : APRÈS ban_join (BAN housenumber > point FINESS DREES Lambert93
-    // grossier), AVANT le re-ANALYZE 5d (stats fraîches) et le swap. Keyset
-    // via `runKeysetRpc` (jumeau ban_join, RPC migration 20260905T140000).
-    // `code_insee`/`code_departement` inchangés (commune déclarée = référence
-    // des comptages ; seul le point change). Fail-loud : erreur SQL →
-    // IngestError AVANT le swap (`rpps` intact).
-    const { count: fallbackEligibleRaw, error: fallbackCountErr } = await supabase
-      .from("rpps_staging")
-      .select("*", { count: "exact", head: true })
-      .eq("geom_source", GEOM_SOURCES.COMMUNE_CENTROID)
-      .not("num_finess", "is", null);
-    if (fallbackCountErr) {
-      throw new IngestError(
-        "validate",
-        `Failed to count FINESS fallback eligible rows: ${fallbackCountErr.message}`,
-      );
-    }
-    const fallbackEligible = fallbackEligibleRaw ?? 0;
-    if (fallbackEligible > 0) {
+    // ban_join et portant un `num_finess` géolocalisé DANS LA MÊME COMMUNE.
+    // Prouvé prod 2026-09-05 (table `rpps` post-swap) : 70 677 lignes au
+    // centroïde AVEC un num_finess, 57 462 géolocalisables, dont 3 857 dans une
+    // AUTRE commune que celle déclarée (exclues : incohérence exposée) →
+    // ~53 605 lignes corrigées. Cause : l'enrichment 5b ne vise que les lignes
+    // SANS geom ; une ligne à commune reconnue reçoit le centroïde puis dépend
+    // du cache BAN, or les adresses d'établissements (nom de structure, CS/BP,
+    // cedex) se géocodent mal. Détail + décisions : migration 20260905T140000.
+    //
+    // Ordre : APRÈS ban_join (BAN housenumber > point FINESS DREES), AVANT le
+    // re-ANALYZE 5d (stats fraîches) et le swap. EFFET DE BORD ASSUMÉ : ces
+    // lignes sortent de l'éligibilité BAN → la jauge 6d chute d'un cran (~54 K)
+    // au 1er run, ce n'est PAS un progrès BAN ; le drain ne les soumettra plus.
+    //
+    // BEST-EFFORT (même classe que le re-ANALYZE 5d, ≠ 5a/5b/5c fail-loud) :
+    // une erreur ici (57014 sur un lot, RPC absente du cache PostgREST,
+    // contrat) ne doit PAS tuer un run dont les données sont BONNES — juste
+    // moins précises → warn LOUD + `partial` + trace audit `ingest_log`.
+    // PAS de COUNT PostgREST préalable des éligibles (revue 2026-09-05, mesuré
+    // prod) : une requête nue hérite du budget 8 s et prend déjà 4,4 s sur
+    // table PROPRE ; sur la staging ballonnée post-ban_join (~1 M entrées
+    // d'index mortes) elle ferait 57014. `expectedTotal` = `stats.inserted`
+    // (borne LARGE de la garde de convergence de `runKeysetRpc` ; la vraie
+    // protection anti-boucle est sa garde de NON-PROGRESSION du curseur).
+    try {
       const { totalApplied: fallbackApplied, iterations: fallbackIterations } = await runKeysetRpc(
         supabase,
         "ingest_apply_rpps_finess_centroid_fallback_batch",
         { p_limit: ENRICH_BATCH_SIZE },
-        fallbackEligible,
+        stats.inserted,
         RPC_BATCH_TIMEOUT_MS,
       );
       console.log(
-        `[rpps] finess_fallback: ${fallbackApplied} posed / ${fallbackEligible} centroid rows with num_finess in ${fallbackIterations} batches`,
+        `[rpps] finess_fallback: ${fallbackApplied} rows posed (centroid rows with a geolocated num_finess in the same commune) in ${fallbackIterations} batches`,
       );
-      if (fallbackApplied === 0) {
-        // Sentinelle cohérence (même politique que ban_join) : ~57 K posables
-        // prouvés prod → 0 posé sur N > 0 éligibles = régression (cast CHAR(9)
-        // de la jointure, `finess.geom` vide, GRANT). Données correctes mais
-        // moins précises → `partial` + trace audit, pas de throw.
-        const msg = `finess_fallback: 0 rows posed on ${fallbackEligible} eligible — suspect (finess.geom empty? join cast? GRANT?)`;
-        console.warn(`[rpps] ${msg}`);
-        log.status = "partial";
-        appendLogMessage(log, msg);
-      }
-    } else {
-      console.log("[rpps] finess_fallback: 0 eligible rows, skipped");
+      const outcome = evaluateFinessFallbackOutcome({
+        applied: fallbackApplied,
+        iterations: fallbackIterations,
+      });
+      if (outcome.warn) console.warn(outcome.warn);
+      if (outcome.partial) log.status = "partial";
+      if (outcome.logMessage) appendLogMessage(log, outcome.logMessage);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const fallbackMsg = `finess_fallback skipped (best-effort, run continues — ~53 K lignes restent au centroïde ce mois): ${reason}${missingRpcHint(reason)}`;
+      console.warn(`[france-data-mcp][rpps][finess_fallback] ${fallbackMsg}`);
+      log.status = "partial";
+      appendLogMessage(log, fallbackMsg);
     }
 
     // 5d. RE-ANALYZE post-ban_join — stats fraîches pour la MESURE 6d.
@@ -682,9 +682,12 @@ async function main(): Promise<void> {
         const structuralHint = isStatementTimeoutError(deltaErr)
           ? " — 57014 APRÈS relance : si le symptôme se répète d'un cycle à l'autre, ce n'est PAS de la contention I/O mais du STRUCTUREL (index perdu au swap, plan dégradé) → EXPLAIN ANALYZE la RPC à froid"
           : "";
-        console.warn(
-          `[rpps] BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}${structuralHint}`,
-        );
+        const skippedMsg = `BAN delta measurement skipped: ${deltaErr.message}${missingRpcHint(deltaErr.message)}${structuralHint}`;
+        console.warn(`[rpps] ${skippedMsg}`);
+        // Trace audit `ingest_log` (revue 2026-09-05) : la jauge est NULL sur
+        // les 4 derniers runs sans qu'aucune ligne DB ne dise pourquoi — le
+        // `console.warn` seul se perd dans les logs GitHub Actions.
+        appendLogMessage(log, skippedMsg);
       } else {
         const row = (
           deltaData as Array<{
@@ -758,7 +761,9 @@ async function main(): Promise<void> {
           );
     log.status = "failed";
     log.error_phase = ingestErr.phase;
-    log.error_message = ingestErr.message;
+    // `appendLogMessage` (pas `=`) : conserve les notes `partial` posées par les
+    // steps best-effort (5c-bis, 5d, 6d) si un step ultérieur throw.
+    appendLogMessage(log, ingestErr.message);
     log.finished_at = new Date().toISOString();
     await writeIngestLogFailureFallback(log, "rpps");
     console.error(`[rpps] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
@@ -1094,11 +1099,44 @@ export async function rebuildRppsMatviews(
   await rebuildHostedActivities(supabase, log, "rpps");
 }
 
+/**
+ * Décision de la sentinelle du repli FINESS 5c-bis (pure, testable sans DB) —
+ * jumelle de `evaluateBanJoinOutcome`. Binaire faute de count des éligibles
+ * (retiré en revue : un count PostgREST nu hérite du budget 8 s → 57014 sur
+ * staging ballonnée) : `iterations >= 2` = au moins UNE page non vide vue, donc
+ * des éligibles existaient ; `applied === 0` dans ce cas = régression (cast
+ * CHAR(9), `finess.geom` vide, GRANT) → `partial` + trace audit, jamais de
+ * throw (données correctes, juste moins précises). `iterations <= 1` = page
+ * vide d'emblée = aucun éligible : légitime SUR UN JEU DE TEST, suspect en
+ * prod (~70 K attendus) → warn sans `partial`. Une chute PARTIELLE
+ * (3 000/53 000) n'est pas détectable sans count — limite assumée, backlog.
+ */
+export function evaluateFinessFallbackOutcome(args: { applied: number; iterations: number }): {
+  partial: boolean;
+  warn?: string;
+  logMessage?: string;
+} {
+  const prefix = "[france-data-mcp][rpps][finess_fallback]";
+  if (args.iterations <= 1) {
+    return {
+      partial: false,
+      warn: `${prefix} 0 eligible rows seen (empty first page) — suspect en prod (~70 K attendus : geom_source ? num_finess ?), légitime sur un jeu réduit`,
+    };
+  }
+  if (args.applied === 0) {
+    const msg =
+      "finess_fallback: 0 rows posed on a non-empty eligible set — suspect (finess.geom empty? join cast? GRANT?)";
+    return { partial: true, warn: `${prefix} ${msg}`, logMessage: msg };
+  }
+  return { partial: false };
+}
+
 export const __TESTING__ = {
   parseRppsRecord,
   COL,
   rebuildRppsMatviews,
   evaluateBanJoinOutcome,
+  evaluateFinessFallbackOutcome,
 };
 
 await runIfMain(import.meta.url, main);

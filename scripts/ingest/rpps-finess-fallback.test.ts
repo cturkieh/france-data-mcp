@@ -1,32 +1,34 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ingestDir, latestFunctionDef } from "./migration-sql.js";
+import { ingestDir, latestFunctionDef, migrationsDir } from "./migration-sql.js";
 
 // Step 5c-bis du cron RPPS — repli FINESS sur les lignes restées
-// `commune_centroid` après ban_join et portant un `num_finess` géolocalisé.
-//
-// Prouvé prod 2026-09-05 (table `rpps` post-swap) : 70 677 lignes au centroïde
-// AVEC un num_finess, dont 57 462 dont l'établissement a un `geom` dans
-// `finess`. Cause : l'enrichment 5b ne vise que les lignes SANS geom ; les
-// adresses d'établissements (nom de structure, CS/BP, cedex) se géocodent mal
-// en BAN → la position exacte de l'hôpital était dans notre table et jamais
-// utilisée. Ces garde-fous verrouillent le CONTRAT de la RPC (migration
-// 20260905T140000) et son câblage (`rpps.ts`), lus en texte comme les autres
-// gardes structurels du repo (pas de DB).
+// `commune_centroid` après ban_join (post-mortem + décisions : en-tête de la
+// migration 20260905T140000). Garde-fous du CONTRAT SQL et du câblage
+// (`rpps.ts`), lus en texte comme les autres gardes structurels du repo.
+// Le `SET statement_timeout ≤ 55 s` est gardé dans
+// `enrichment-statement-timeout.test.ts` (source unique de cet invariant).
 
 const RPC = "ingest_apply_rpps_finess_centroid_fallback_batch";
 const RPPS_SRC = readFileSync(`${ingestDir}/rpps.ts`, "utf8");
 const DEF = latestFunctionDef(RPC);
+const MIGRATION_SQL = readFileSync(
+  `${migrationsDir}/20260905T140000_rpps_finess_centroid_fallback.sql`,
+  "utf8",
+);
+
+/** Bloc 5c-bis de main() : du marqueur `// 5c-bis.` au marqueur `// 5d.`. */
+function step5cBis(): string {
+  const a = RPPS_SRC.indexOf("// 5c-bis.");
+  const b = RPPS_SRC.indexOf("// 5d.", a);
+  expect(a, "marqueur 5c-bis introuvable dans rpps.ts").toBeGreaterThan(0);
+  expect(b, "marqueur 5d introuvable après 5c-bis").toBeGreaterThan(a);
+  return RPPS_SRC.slice(a, b);
+}
 
 describe(`${RPC} — contrat SQL (migration 20260905T140000)`, () => {
-  it("existe et porte un SET statement_timeout ≤ 55 s (sinon budget 8 s hérité → 57014)", () => {
+  it("existe et est KEYSET (p_after + p_limit → TABLE(last_id, applied)), jamais sentinelle", () => {
     expect(DEF.length, `def ${RPC} introuvable dans supabase/migrations`).toBeGreaterThan(0);
-    const m = DEF.match(/set\s+statement_timeout\s+to\s+'(\d+)s'/i);
-    expect(m, "SET statement_timeout au niveau fonction manquant").not.toBeNull();
-    expect(Number(m?.[1])).toBeLessThanOrEqual(55);
-  });
-
-  it("est KEYSET (p_after + p_limit → TABLE(last_id, applied)), jamais sentinelle", () => {
     expect(DEF).toMatch(/p_after\s+bigint/i);
     expect(DEF).toMatch(/p_limit\s+int(eger)?/i);
     expect(DEF).toMatch(/returns\s+table\s*\(\s*last_id\s+bigint\s*,\s*applied\s+int(eger)?\s*\)/i);
@@ -35,47 +37,45 @@ describe(`${RPC} — contrat SQL (migration 20260905T140000)`, () => {
     expect(DEF).toMatch(/max\(b\.id\)::bigint/i);
   });
 
-  it("ne cible QUE les centroïdes à num_finess, sur rpps_staging (jamais la table servie)", () => {
+  it("ne cible QUE les centroïdes à num_finess de 9 caractères, sur rpps_staging", () => {
     expect(DEF).toMatch(/geom_source\s*=\s*'commune_centroid'/i);
     expect(DEF).toMatch(/num_finess\s+is\s+not\s+null/i);
+    // `::CHAR(9)` TRONQUE en silence : une dérive amont vers 10 caractères
+    // matcherait un établissement RÉEL mais FAUX → filtre de longueur.
+    expect(DEF).toMatch(/length\(num_finess\)\s*=\s*9/i);
     expect(DEF).toMatch(/from\s+rpps_staging/i);
     expect(DEF).toMatch(/update\s+rpps_staging/i);
-    // Aucune référence à la table servie `rpps` nue (le swap est atomique : on
-    // ne modifie JAMAIS la table en ligne hors bascule).
-    expect(DEF).not.toMatch(/\b(from|update)\s+rpps\b(?!_staging)/i);
+    // Jamais la table servie `rpps` nue (le swap est atomique : on ne modifie
+    // JAMAIS la table en ligne hors bascule).
+    expect(DEF).not.toMatch(/\b(from|update)\s+rpps\b/i);
   });
 
-  it("joint finess par PK via cast EXPLICITE ::CHAR(9) et exige un geom FINESS", () => {
-    // Gotcha CLAUDE.md : `col_char = p_text` caste la COLONNE indexée en text →
-    // `finess_pkey` inutilisable. Le cast doit être côté texte (rpps).
+  it("joint finess par cast EXPLICITE ::CHAR(9) côté texte, MÊME commune, geom FINESS présent", () => {
+    // Gotcha CLAUDE.md : `col_char = p_text` caste la COLONNE indexée en text.
     expect(DEF).toMatch(/join\s+finess\s+f/i);
     expect(DEF).toMatch(/f\.num_finess\s*=\s*b\.num_finess::char\(9\)/i);
+    // Revue 2026-09-05 (mesuré prod) : 3 857 FINESS dans une AUTRE commune que
+    // celle déclarée → exclus, sinon « Dr X, ville B » pointé en A.
+    expect(DEF).toMatch(/f\.code_insee\s*=\s*b\.code_insee/i);
     expect(DEF).toMatch(/f\.geom\s+is\s+not\s+null/i);
   });
 
-  it("pose geom + geom_source='finess_join' SANS écraser la commune déclarée", () => {
-    expect(DEF).toMatch(/set\s+geom\s*=\s*f\.geom/i);
-    expect(DEF).toMatch(/geom_source\s*=\s*'finess_join'/i);
-    // ≠ 5b : ici la ligne a déjà sa commune (reconnue) → référence des
-    // comptages par commune ; seul le point change.
-    expect(DEF).not.toMatch(/code_insee\s*=/i);
-    expect(DEF).not.toMatch(/code_departement\s*=/i);
+  it("pose EXACTEMENT geom + geom_source='finess_join' (commune déclarée inchangée)", () => {
+    // Liste SET verrouillée : ≠ 5b, ici la ligne a déjà sa commune (référence
+    // des comptages par commune) ; seul le point change.
+    expect(DEF).toMatch(/set\s+geom\s*=\s*f\.geom\s*,\s*geom_source\s*=\s*'finess_join'\s+from/i);
     expect(DEF).toMatch(/returning\s+1/i);
   });
 
   it("est SECURITY DEFINER, exécutable par service_role seulement", () => {
     expect(DEF).toMatch(/security\s+definer/i);
-    const sql = readFileSync(
-      `${ingestDir}/../../supabase/migrations/20260905T140000_rpps_finess_centroid_fallback.sql`,
-      "utf8",
-    );
-    expect(sql).toMatch(
+    expect(MIGRATION_SQL).toMatch(
       new RegExp(
         `revoke\\s+execute\\s+on\\s+function\\s+(?:public\\.)?${RPC}[^;]*from\\s+public`,
         "i",
       ),
     );
-    expect(sql).toMatch(
+    expect(MIGRATION_SQL).toMatch(
       new RegExp(
         `grant\\s+execute\\s+on\\s+function\\s+(?:public\\.)?${RPC}[^;]*to\\s+service_role`,
         "i",
@@ -84,36 +84,38 @@ describe(`${RPC} — contrat SQL (migration 20260905T140000)`, () => {
   });
 });
 
-describe("rpps.ts — câblage 5c-bis", () => {
-  it("appelle la RPC via runKeysetRpc avec p_limit entier et le timeout par lot", () => {
-    const idx = RPPS_SRC.indexOf(`"${RPC}"`);
-    expect(idx, "site d'appel introuvable dans rpps.ts").toBeGreaterThan(0);
-    const start = RPPS_SRC.lastIndexOf("runKeysetRpc(", idx);
-    expect(
-      start,
-      "la RPC doit être pilotée par runKeysetRpc (keyset, garde de convergence)",
-    ).toBeGreaterThan(0);
-    expect(idx - start).toBeLessThan(200);
-    const block = RPPS_SRC.slice(start, RPPS_SRC.indexOf(");", idx));
+describe("rpps.ts — câblage 5c-bis (best-effort, keyset, sans count PostgREST)", () => {
+  it("appelle la RPC via runKeysetRpc avec p_limit entier, borne LARGE stats.inserted et timeout par lot", () => {
+    const block = step5cBis();
+    expect(block).toContain(`"${RPC}"`);
+    expect(block).toMatch(/runKeysetRpc\(/);
     expect(block).toMatch(/p_limit:\s*ENRICH_BATCH_SIZE/);
-    expect(block).toContain("RPC_BATCH_TIMEOUT_MS");
+    // Revue 2026-09-05 (mesuré prod) : un COUNT PostgREST nu hérite du budget
+    // 8 s et prend 4,4 s sur table PROPRE → 57014 sur la staging ballonnée →
+    // run tué avant le swap. Borne large à la place, garde de non-progression.
+    expect(block).not.toMatch(/\.from\("rpps_staging"\)/);
+    expect(block).toMatch(/stats\.inserted,\s*\n\s*RPC_BATCH_TIMEOUT_MS/);
   });
 
-  it("compte les éligibles sur rpps_staging avec le MÊME prédicat que la RPC (centroid + num_finess non null)", () => {
-    const idx = RPPS_SRC.indexOf(`"${RPC}"`);
-    const before = RPPS_SRC.slice(Math.max(0, idx - 2500), idx);
-    expect(before).toMatch(
-      /\.from\("rpps_staging"\)[\s\S]*\.eq\("geom_source",\s*GEOM_SOURCES\.COMMUNE_CENTROID\)[\s\S]*\.not\("num_finess",\s*"is",\s*null\)/,
+  it("est BEST-EFFORT : toute erreur → warn LOUD + partial + trace audit, jamais de throw", () => {
+    const block = step5cBis();
+    expect(block).toMatch(/try \{[\s\S]*runKeysetRpc\([\s\S]*\} catch \(err\) \{/);
+    const catchPart = block.slice(block.indexOf("} catch (err) {"));
+    expect(catchPart).toMatch(/console\.warn\(/);
+    expect(catchPart).toMatch(/log\.status = "partial"/);
+    expect(catchPart).toMatch(/appendLogMessage\(log,/);
+    expect(catchPart).toMatch(/missingRpcHint\(/);
+    expect(block).not.toMatch(/throw new IngestError/);
+  });
+
+  it("la sentinelle passe par evaluateFinessFallbackOutcome (pure, testée dans rpps.test.ts)", () => {
+    const block = step5cBis();
+    expect(block).toMatch(
+      /evaluateFinessFallbackOutcome\(\{[\s\S]*applied: fallbackApplied[\s\S]*iterations: fallbackIterations/,
     );
-    // Un échec du count est fail-loud (IngestError), jamais un 0 silencieux.
-    expect(before).toMatch(/Failed to count FINESS fallback eligible rows/);
-  });
-
-  it("sentinelle « 0 posé sur N éligibles » → partial + trace audit (même politique que ban_join)", () => {
-    const idx = RPPS_SRC.indexOf(`"${RPC}"`);
-    const after = RPPS_SRC.slice(idx, idx + 2500);
-    expect(after).toMatch(/fallbackApplied === 0/);
-    expect(after).toMatch(/log\.status = "partial"/);
-    expect(after).toMatch(/appendLogMessage\(log,/);
+    expect(block).toMatch(/if \(outcome\.partial\) log\.status = "partial"/);
+    expect(block).toMatch(
+      /if \(outcome\.logMessage\) appendLogMessage\(log, outcome\.logMessage\)/,
+    );
   });
 });

@@ -256,3 +256,23 @@ describe("Chantier C — RPC Ameli statement_timeout fonction ≤ 55s (parité R
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// RPPS 5c-bis (2026-09-05) + count BAN : les DEUX dernières RPC d'ingestion RPPS
+// à entrer dans l'invariant. `rpps_count_ban_eligible_rows` tournait SANS SET
+// depuis 2026-05 (prouvé prod `proconfig` — ~5 s sur table propre, passait
+// seulement parce qu'appelée AVANT ban_join, peu de bloat) : migration
+// 20260905T150000 la ré-émet VERBATIM avec le SET.
+const RPPS_FINESS_FALLBACK = "ingest_apply_rpps_finess_centroid_fallback_batch";
+const RPPS_COUNT_BAN = "rpps_count_ban_eligible_rows";
+
+describe("RPPS 5c-bis + count BAN — statement_timeout fonction ≤ 55s (parité invariant fix C)", () => {
+  for (const fn of [RPPS_FINESS_FALLBACK, RPPS_COUNT_BAN]) {
+    it(`${fn} a un SET statement_timeout fonction ≤ 55s`, () => {
+      expectStatementTimeoutBound(
+        fn,
+        `${fn} SANS SET statement_timeout → hérite du budget 8 s service_role→authenticator → 57014 sur staging ballonnée post-ban_join`,
+      );
+    });
+  }
+});

@@ -10,7 +10,13 @@ import { IngestError, type IngestLogEntry } from "./shared.js";
 const RPPS_SRC = readFileSync(`${ingestDir}/rpps.ts`, "utf8");
 
 const { __TESTING__ } = await import("./rpps.js");
-const { parseRppsRecord, COL, rebuildRppsMatviews, evaluateBanJoinOutcome } = __TESTING__;
+const {
+  parseRppsRecord,
+  COL,
+  rebuildRppsMatviews,
+  evaluateBanJoinOutcome,
+  evaluateFinessFallbackOutcome,
+} = __TESTING__;
 
 const fixtures: Commune[] = [
   {
@@ -560,5 +566,30 @@ describe("rpps.ts wiring relance de la jauge 6d (retryTransient, allow-list 5701
     expect(delay, "MEASURE_RETRY_DELAY_MS introuvable").toBeDefined();
     // ≥ 30 s : laisser le checkpoint post-run se terminer avant la 2e tentative.
     expect(Number(String(delay).replace(/_/g, ""))).toBeGreaterThanOrEqual(30_000);
+  });
+});
+
+// Sentinelle 5c-bis (pure) — jumelle d'evaluateBanJoinOutcome. Binaire faute de
+// count (retiré en revue, 8 s hérités) : la seule information disponible est le
+// nombre d'itérations keyset (≥ 2 = une page non vide vue).
+describe("evaluateFinessFallbackOutcome — sentinelle du repli FINESS 5c-bis (pure)", () => {
+  it("nominal (des lignes posées) → ni partial ni warn", () => {
+    expect(evaluateFinessFallbackOutcome({ applied: 53_605, iterations: 9 })).toEqual({
+      partial: false,
+    });
+  });
+
+  it("0 posé alors qu'une page non vide a été vue → partial + warn + trace audit", () => {
+    const o = evaluateFinessFallbackOutcome({ applied: 0, iterations: 2 });
+    expect(o.partial).toBe(true);
+    expect(o.warn).toMatch(/^\[france-data-mcp\]\[rpps\]\[finess_fallback\] /);
+    expect(o.logMessage).toContain("0 rows posed on a non-empty eligible set");
+  });
+
+  it("page vide d'emblée (aucun éligible) → warn « suspect en prod » SANS partial", () => {
+    const o = evaluateFinessFallbackOutcome({ applied: 0, iterations: 1 });
+    expect(o.partial).toBe(false);
+    expect(o.warn).toMatch(/0 eligible rows seen/);
+    expect(o.logMessage).toBeUndefined();
   });
 });
