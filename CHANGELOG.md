@@ -8,6 +8,28 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Fixed
 
+- **RPPS : ~57 K lignes de professionnels rattachés à un établissement FINESS
+  géolocalisé restaient au centroïde de commune** (step 5c-bis
+  `ingest_apply_rpps_finess_centroid_fallback_batch`, migration
+  `20260905T140000`, prouvé prod 2026-09-05 sur la table post-swap : 70 677
+  lignes `commune_centroid` avec `num_finess`, dont 57 462 dont l'établissement
+  a un `geom` dans `finess`). Cause : l'enrichment FINESS (5b) ne vise que les
+  lignes SANS geom (commune introuvable) ; une ligne à commune reconnue reçoit
+  le centroïde puis dépend du cache BAN, or les adresses d'établissements (nom
+  de structure devant l'adresse, CS/BP, cedex) se géocodent mal → la position
+  exacte de l'hôpital était dans notre table et jamais utilisée (ex. la ligne
+  CHU d'un médecin mixte au centre des Abymes). Fix : après ban_join (BAN
+  housenumber reste prioritaire sur le point FINESS DREES) et avant le
+  re-ANALYZE, une RPC keyset jumelle de ban_join pose `finess.geom` +
+  `geom_source='finess_join'` sur ces lignes (jointure `finess_pkey` via cast
+  explicite `::CHAR(9)`, `SET statement_timeout 55s`, ~8 lots de 10 K) ;
+  `code_insee`/`code_departement` inchangés (commune déclarée = référence des
+  comptages). Ces lignes entrent dans le GiST partiel `precise` de
+  `rpps_in_radius`. Sentinelle « 0 posé sur N éligibles → partial + trace »
+  (même politique que ban_join). Garde-fous : `rpps-finess-fallback.test.ts`
+  (def SQL : keyset, timeout, prédicat, cast, pas de `code_insee`, GRANT ;
+  wiring `runKeysetRpc`) + séquence `rpps.test.ts` (5c → 5c-bis → 5d).
+
 - **Crons : budget RPPS 60 → 120 min, alerte LOUD sur run tué (`cancelled()`)
   sur les 7 workflows ingest/backfill, relance de la jauge BAN sur 57014**
   (post-mortem prod 2026-09-05). Durée réelle du cron RPPS : 54 → 57 → 60 min

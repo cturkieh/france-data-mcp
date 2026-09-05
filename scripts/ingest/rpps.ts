@@ -236,7 +236,9 @@ const COL = {
  * Provenance du `geom` d'une row RPPS, pour observabilité. `commune_centroid`
  * est appliqué par le parser TS quand le CP+ville match une commune INSEE ;
  * `finess_join` est appliqué côté SQL par `ingest_apply_rpps_finess_enrichment_batch`
- * quand la row est enrichie via JOIN sur `num_finess`. NULL = pas de geom.
+ * (5b, rows sans geom) ET par `ingest_apply_rpps_finess_centroid_fallback_batch`
+ * (5c-bis, rows restées `commune_centroid` après ban_join avec `num_finess`
+ * géolocalisé) quand la row est enrichie via JOIN sur `num_finess`. NULL = pas de geom.
  *
  * Const exporté pour servir de source unique de vérité (TS + SQL + tests).
  */
@@ -542,6 +544,57 @@ async function main(): Promise<void> {
       }
     } else {
       console.log("[rpps] ban_join: 0 eligible rows, skipped");
+    }
+
+    // 5c-bis. REPLI FINESS sur les lignes restées `commune_centroid` APRÈS
+    // ban_join et portant un `num_finess`. Prouvé prod 2026-09-05 (table `rpps`
+    // post-swap) : 70 677 lignes au centroïde AVEC un num_finess, dont 57 462
+    // dont l'établissement est géolocalisé dans `finess` — la position exacte
+    // était sous la main et jamais utilisée. Cause : l'enrichment 5b ne vise
+    // que les lignes SANS geom (commune introuvable) ; une ligne à commune
+    // reconnue reçoit le centroïde puis dépend du cache BAN, or les adresses
+    // d'établissements (nom de structure, CS/BP, cedex) se géocodent mal.
+    // Ordre : APRÈS ban_join (BAN housenumber > point FINESS DREES Lambert93
+    // grossier), AVANT le re-ANALYZE 5d (stats fraîches) et le swap. Keyset
+    // via `runKeysetRpc` (jumeau ban_join, RPC migration 20260905T140000).
+    // `code_insee`/`code_departement` inchangés (commune déclarée = référence
+    // des comptages ; seul le point change). Fail-loud : erreur SQL →
+    // IngestError AVANT le swap (`rpps` intact).
+    const { count: fallbackEligibleRaw, error: fallbackCountErr } = await supabase
+      .from("rpps_staging")
+      .select("*", { count: "exact", head: true })
+      .eq("geom_source", GEOM_SOURCES.COMMUNE_CENTROID)
+      .not("num_finess", "is", null);
+    if (fallbackCountErr) {
+      throw new IngestError(
+        "validate",
+        `Failed to count FINESS fallback eligible rows: ${fallbackCountErr.message}`,
+      );
+    }
+    const fallbackEligible = fallbackEligibleRaw ?? 0;
+    if (fallbackEligible > 0) {
+      const { totalApplied: fallbackApplied, iterations: fallbackIterations } = await runKeysetRpc(
+        supabase,
+        "ingest_apply_rpps_finess_centroid_fallback_batch",
+        { p_limit: ENRICH_BATCH_SIZE },
+        fallbackEligible,
+        RPC_BATCH_TIMEOUT_MS,
+      );
+      console.log(
+        `[rpps] finess_fallback: ${fallbackApplied} posed / ${fallbackEligible} centroid rows with num_finess in ${fallbackIterations} batches`,
+      );
+      if (fallbackApplied === 0) {
+        // Sentinelle cohérence (même politique que ban_join) : ~57 K posables
+        // prouvés prod → 0 posé sur N > 0 éligibles = régression (cast CHAR(9)
+        // de la jointure, `finess.geom` vide, GRANT). Données correctes mais
+        // moins précises → `partial` + trace audit, pas de throw.
+        const msg = `finess_fallback: 0 rows posed on ${fallbackEligible} eligible — suspect (finess.geom empty? join cast? GRANT?)`;
+        console.warn(`[rpps] ${msg}`);
+        log.status = "partial";
+        appendLogMessage(log, msg);
+      }
+    } else {
+      console.log("[rpps] finess_fallback: 0 eligible rows, skipped");
     }
 
     // 5d. RE-ANALYZE post-ban_join — stats fraîches pour la MESURE 6d.
