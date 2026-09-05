@@ -4,7 +4,9 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.28.0] — 2026-09-06 — FINESS : la source DREES s'était tarie, remplacée par le flux ANS quotidien (+2 816 DOM, +6 064 géolocalisés, 6 119 fermés évacués), fraîcheur honnête (`data_age_days`), canary en `partial`, politique de validation testée
+
+> Surface MCP : 13 référentiels / 36 outils inchangés ; `data_freshness` expose trois champs de plus (`last_data_change_at`, `data_age_days`, `expected_max_age_days`). Deux migrations appliquées en prod (`20260905T210000`, `20260905T213000`), deux runs réels le 2026-09-05, PR #69 revue `/review-fix` complet.
 
 ### Changed
 
