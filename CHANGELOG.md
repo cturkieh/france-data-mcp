@@ -4,7 +4,9 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased] — Observabilité : flush Sentry/Axiom non-bloquant (`waitUntil`) + jauge BAN post-swap fiabilisée + JSON malformé rendu au caller en `-32700` + timeout `count_rpps_by_commune` aligné 15 s + cron RPPS : budget 120 min, alerte sur run tué, relance de la jauge + BAN bulk : repli d'hôte Géoplateforme ↔ api-adresse, `Retry-After` 2/4/8 s, rejets périmés re-soumis
+## [0.27.0] — 2026-09-05 — Ingestion plus robuste : géocodage BAN sur deux hôtes avec repli, 9 305 rejets périmés récupérés, positions RPPS affinées (repli FINESS), cron RPPS fiabilisé, observabilité non-bloquante
+
+> Regroupe tout le travail depuis la 0.26.3 (juin → septembre 2026). Surface MCP inchangée : 13 référentiels / 36 outils.
 
 ### Added
 
@@ -314,9 +316,9 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   83 corrections **type-only** (casts `as`, retypes à la source — zéro `!`/
   `@ts-ignore`, comportement runtime inchangé, 1720 tests verts).
 
-## [Unreleased] — Automatisation backfill BAN (RPPS + Ameli) — bouton Ameli (keyset id) + drain auto post-ingestion
+### Automatisation backfill BAN (RPPS + Ameli) — bouton Ameli (keyset id) + drain auto post-ingestion
 
-### Added
+#### Added
 
 - **Bouton GitHub « Backfill BAN Ameli (manuel) »** (`.github/workflows/ban-backfill-ameli.yml`) —
   jumeau du bouton RPPS. Draine le résidu d'adresses Ameli au centroïde commune vers le cache
@@ -336,7 +338,7 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   `concurrency.group` partagé cron↔backfill préservé (jamais concurrent du swap). S'active au 1ᵉʳ
   cron post-merge (contrainte `workflow_run` = version du workflow sur la branche par défaut).
 
-### Changed
+#### Changed
 
 - **Le backfill Ameli énumère désormais par `id` (PK), plus par la clé d'adresse**
   (`scripts/ban-backfill.mjs` `SOURCES.ameli`). **Élimine la cause-racine** de la corvée manuelle

@@ -4,11 +4,11 @@
  *
  * Usage :
  *   node scripts/smoke-deploy.mjs [baseUrl] [expectedVersion]
- *   defaults : https://france-data-mcp.vercel.app   0.26.2
+ *   defaults : https://france-data-mcp.vercel.app   0.27.0
  *
  * Sort en code 1 si un GATE échoue (CI-friendly). Les valeurs INFO ne gatent jamais.
  *
- * Gates (cible V0.26.2 — commune résolue par frontières sur site isolé) :
+ * Gates (cible V0.27.0 — commune résolue par frontières sur site isolé) :
  *   1. /healthz .version === expectedVersion
  *   2. IMMO La Hague (site isolé/littoral) : couverture.permis === "ok"
  *      ∧ meta.code_commune === "50041" ∧ meta.commune === "La Hague"
@@ -33,7 +33,7 @@
  */
 
 const BASE = process.argv[2] ?? "https://france-data-mcp.vercel.app";
-const EXPECTED_VERSION = process.argv[3] ?? "0.26.2";
+const EXPECTED_VERSION = process.argv[3] ?? "0.27.0";
 
 // Point du smoke : usine Orano / commune de La Hague (50041), sans adresse proche.
 const LA_HAGUE = { lat: 49.6546, lon: -1.8214 };
