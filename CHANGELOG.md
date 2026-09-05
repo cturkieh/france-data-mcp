@@ -66,7 +66,7 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   champ RPC y dégraderait en `undefined` muet) ; compteurs `staleResubmitted`
   (compté APRÈS la borne `--max`, sur la liste réellement soumise), `staleDeferred`
   (+ warn : un canari `--max` diffère TOUS les périmés, qui sont en queue de tri),
-  `staleRerejected` (+ warn : re-soumis puis re-rejeté = contrat BAN à vérifier) ;
+  `staleRerejected` (+ warn : re-soumis puis re-rejeté sous la règle courante — 1er drain prod 2026-09-05 : 83 sur 8 616, la BAN ayant évolué depuis mai) ;
   garde de contrat : RPC sans les champs de gate → warn explicite + détection
   désactivée (jamais un « 0 stale » muet). `geocoded` compte désormais les clés
   réellement traitées (plus la taille de la tranche, qui incluait les chunks en
