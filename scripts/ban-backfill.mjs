@@ -538,9 +538,11 @@ export async function runBanBackfill(supabase, opts = {}) {
   let accepted = 0;
   let rejected = 0;
   let unresolved = 0;
-  // Rejet périmé re-soumis et RE-rejeté : score/type acceptables mais résultat
-  // inexploitable (coords invalides ?) — signal d'une rupture de contrat BAN, isolé
-  // du `rejected` ordinaire (sinon enterré).
+  // Rejet périmé re-soumis et RE-rejeté sous la règle COURANTE : la BAN a évolué
+  // depuis mai (score désormais < seuil, ou plus résolu du tout — 1er drain prod
+  // 2026-09-05 : 83/8 616, dont 56 sous le seuil et 27 irrésolus), plus rarement
+  // un résultat inexploitable (coords invalides). Isolé du `rejected` ordinaire pour
+  // que l'ops voie la part du lot périmé qui ne se récupère pas.
   let staleRerejected = 0;
   // Observabilité multi-hôte du client BAN (cf. `BanGeocodeBatchOutcome`).
   const banChunksByHost = {};
@@ -640,7 +642,7 @@ export async function runBanBackfill(supabase, opts = {}) {
 
   if (staleRerejected > 0) {
     console.warn(
-      `[ban-backfill] ${staleRerejected} rejet(s) périmé(s) re-soumis et RE-rejeté(s) — score/type acceptables mais résultat inexploitable (coords invalides ?) : vérifier le contrat BAN (plafond BAN_STALE_RESUBMIT_CAP : plus jamais re-soumis)`,
+      `[ban-backfill] ${staleRerejected} rejet(s) périmé(s) re-soumis et RE-rejeté(s) sous la règle courante (BAN : score désormais < seuil ou adresse irrésolue ; rarement coords invalides) — plafond BAN_STALE_RESUBMIT_CAP atteint, plus jamais re-soumis`,
     );
   }
   console.log(
