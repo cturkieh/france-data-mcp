@@ -203,6 +203,25 @@ describe("ingest-rpps.yml — budget de temps (post-mortem 2026-08/09)", () => {
   });
 });
 
+describe("composites — aucune expression sur un contexte indisponible (job, secrets)", () => {
+  // PROUVÉ PROD (run #33960886473, 2026-09-05) : le runner évalue `${{ }}`
+  // PARTOUT dans action.yml — `description` d'un input et `script` compris —
+  // et le contexte `job` n'existe pas dans une composite → « Unrecognized
+  // named-value: 'job' » au CHARGEMENT de l'action → step d'alerte en failure,
+  // 0 issue, 0 email. La prose documentaire « passer ${{ job.status }} »
+  // suffisait à tuer l'alerte. Même classe pour `secrets` (indisponible aussi).
+  for (const [dir, src] of actions) {
+    it(`${dir}/action.yml : aucun \$\{\{ job.* \}\} ni \$\{\{ secrets.* \}\}, même en prose`, () => {
+      expect(src, `${dir} : contexte job indisponible dans une composite`).not.toMatch(
+        /\$\{\{\s*job\./,
+      );
+      expect(src, `${dir} : contexte secrets indisponible dans une composite`).not.toMatch(
+        /\$\{\{\s*secrets\./,
+      );
+    });
+  }
+});
+
 describe("composite notify-ingest-failure — message actionnable, best-effort", () => {
   const action = mustGet(actions, "notify-ingest-failure");
 

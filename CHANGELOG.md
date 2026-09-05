@@ -85,7 +85,12 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   vérifiée doc + source du runner (steps `cancelled()` exécutés après
   annulation, `job.status` lisible dans `with:`, composite locale imbriquée,
   `success()` interne évalué sur l'action pas sur le job) et **prouvée par un
-  run annulé à la main** (cf. PR). Différés (backlog) : dead-man's switch
+  run annulé à la main** (cf. PR). Leçon de la 1ʳᵉ preuve (run #33960886473) :
+  le runner évalue `${{ }}` PARTOUT dans une composite, `description` d'input
+  et `script` compris, et le contexte `job` n'y existe pas — la prose « passer
+  `${{ job.status }}` » faisait échouer le CHARGEMENT de l'action (alerte
+  muette) ; garde-fou « aucun `job.`/`secrets.` en expression dans une
+  composite ». Différés (backlog) : dead-man's switch
   « run jamais démarré », sortie de la jauge du cron, handler SIGTERM
   `ingest_log` (piège `partial` : septembre a swappé PUIS a été tué),
   idempotence des issues d'échec.

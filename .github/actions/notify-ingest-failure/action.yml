@@ -51,7 +51,12 @@ inputs:
     required: false
     default: "Le swap atomique a PEUT-ÊTRE eu lieu (prouvé : run RPPS 2026-09-05 swappé à 59:59 puis tué 5 s après) — VÉRIFIER la fraîcheur de la table servie vs sa `_previous` (`pg_stat_user_tables.last_analyze`) AVANT de relancer via workflow_dispatch (une relance re-swappe ~1 h pour rien si le mois est déjà en prod ; le court-circuit SHA256 ne joue pas, le checksum n'a pas été enregistré)."
   job-status:
-    description: "Passer `${{ job.status }}` : `failure` ou `cancelled` (timeout-minutes atteint ou annulation)."
+    # ⚠️ PROUVÉ PROD (run #33960886473) : le runner évalue les expressions
+    # `$` `{{ }}` PARTOUT dans ce fichier, description comprise, et le contexte
+    # `job` n'existe pas dans une composite → écrire la syntaxe ici faisait
+    # échouer le CHARGEMENT de l'action (alerte muette). Ne jamais écrire
+    # l'expression littérale, même en prose — cf. garde-fou workflows-alerting.
+    description: "Statut du job passé par le call-site (expression job.status du workflow) : failure ou cancelled (timeout-minutes atteint ou annulation)."
     required: true
   github-token:
     description: "Token pour créer l'issue."
@@ -102,7 +107,7 @@ runs:
           // un job-status absent/inattendu rendrait `killed=false` → message
           // « voir la ligne failed d'ingest_log » sur un run tué (trompeur).
           if (!['failure', 'cancelled'].includes(process.env.JOB_STATUS)) {
-            core.warning(`notify-ingest-failure: job-status inattendu « ${process.env.JOB_STATUS} » (attendu failure|cancelled) — passer \`job-status: \${{ job.status }}\` au call-site`);
+            core.warning(`notify-ingest-failure: job-status inattendu « ${process.env.JOB_STATUS} » (attendu failure|cancelled) — le call-site doit passer l'input job-status depuis le contexte job.status du workflow`);
           }
 
           // Diagnostic ingest_log : seulement pour un script qui en écrit. Sur un
