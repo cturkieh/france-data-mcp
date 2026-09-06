@@ -276,3 +276,18 @@ describe("RPPS 5c-bis + count BAN — statement_timeout fonction ≤ 55s (parit�
     });
   }
 });
+
+describe("pose BAN FINESS (20260906T120000) — statement_timeout fonction ≤ 55s sur les 3 RPC", () => {
+  for (const fn of [
+    "ingest_apply_finess_ban_join",
+    "finess_count_ban_eligible_rows",
+    "finess_eligible_rows_after_id",
+  ]) {
+    it(`${fn}`, () => {
+      expectStatementTimeoutBound(
+        fn,
+        "57014 sur la pose/énumération FINESS avant le swap (prod intacte mais cron rouge, ou drain qui boucle)",
+      );
+    });
+  }
+});

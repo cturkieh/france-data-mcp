@@ -172,11 +172,24 @@ export interface FinessStagingRow {
  * `raw->>'geom_source'`. SOURCE UNIQUE des valeurs : `ANS` est posé ici,
  * `PREVIOUS_INGEST` par la RPC `ingest_apply_finess_geom_previous`
  * (migration 20260905T210000) — la parité du littéral SQL est testée dans
- * `finess-column-rules-parity.test.ts`. Namespace DISTINCT du `geom_source`
- * RPPS/Ameli (`finess_join` | `ban_address` | `commune_centroid`) : autres
- * tables, autre sémantique, ne pas les fusionner.
+ * `finess-column-rules-parity.test.ts`. Vocabulaire propre à FINESS
+ * (`ans` | `previous_ingest` | `ban_address`) — seule `ban_address` est
+ * commune avec RPPS/Ameli, avec la même sémantique ; `finess_join` et
+ * `commune_centroid` n'existent que côté RPPS/Ameli (ne jamais les écrire ici :
+ * un centroïde dans finess.geom serait recopié par le RPPS en tier précis).
  */
-export const GEOM_SOURCES = { ANS: "ans", PREVIOUS_INGEST: "previous_ingest" } as const;
+export const GEOM_SOURCES = {
+  ANS: "ans",
+  PREVIOUS_INGEST: "previous_ingest",
+  /**
+   * Posé UNIQUEMENT par `ingest_apply_finess_ban_join` (SQL, migration
+   * 20260906T120000) et propagé par le repli — jamais par le parseur. Même
+   * sémantique que le `ban_address` de RPPS/Ameli (point BAN rue/lieu-dit/
+   * bâtiment). Le vocabulaire est FERMÉ : `finess-column-rules-parity.test.ts`
+   * impose que tout littéral écrit en SQL soit une de ces constantes.
+   */
+  BAN_ADDRESS: "ban_address",
+} as const;
 export type FinessGeomSource = (typeof GEOM_SOURCES)[keyof typeof GEOM_SOURCES];
 
 /**

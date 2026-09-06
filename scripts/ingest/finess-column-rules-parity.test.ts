@@ -79,22 +79,34 @@ describe("COLUMN_RULES ↔ DDL finess_staging", () => {
     }
   });
 
-  it("le littéral SQL de provenance `previous_ingest` (RPC de repli) = la constante TS (source unique)", () => {
-    // `raw->>'geom_source'` est écrit par deux producteurs : le parseur TS
-    // (`GEOM_SOURCES.ANS`) et le PL/pgSQL du repli. Une divergence de
-    // libellé ne se verrait que dans la clé `staging_geom_source` du log de
-    // diff, que personne ne relit ligne à ligne.
-    // Déclarée schéma-qualifiée (`public.…`) : `latestFunctionBody` matche le
-    // nom tel qu'écrit après `FUNCTION`, préfixe compris.
-    const body = latestFunctionBody(
-      allMigrationsSql(),
-      "public.ingest_apply_finess_geom_previous",
-      {
-        stripComments: true,
-      },
+  it("vocabulaire `geom_source` FERMÉ : tout littéral écrit en SQL est une constante TS, et réciproquement (hors `ans`, posé par le parseur)", () => {
+    // `raw->>'geom_source'` a trois producteurs : le parseur TS (`ANS`), le repli
+    // `ingest_apply_finess_geom_previous` (`previous_ingest`, ou propagation d'un
+    // `ban_address` hérité) et la pose `ingest_apply_finess_ban_join`
+    // (`ban_address`). Égalité stricte des ensembles : un 4e producteur SQL avec
+    // un libellé nouveau, OU une constante TS que rien n'écrit, fait rougir.
+    const sqlSrc = allMigrationsSql();
+    const written = new Set<string>();
+    for (const m of sqlSrc.matchAll(
+      /jsonb_build_object\(\s*'geom_source'\s*,([\s\S]{0,400}?)\)\s*(?:from|\|\||\)|,)/g,
+    )) {
+      // `f.raw->>'geom_source'` dans le CASE du repli n'est pas une VALEUR.
+      for (const lit of (m[1] ?? "").matchAll(/'([a-z_]+)'/g)) {
+        if (lit[1] !== "geom_source") written.add(lit[1] ?? "");
+      }
+    }
+    const ts = new Set<string>(Object.values(GEOM_SOURCES));
+    ts.delete(GEOM_SOURCES.ANS);
+    expect([...written].sort()).toEqual([...ts].sort());
+    // Le repli PROPAGE un point BAN hérité (sinon la pose serait réétiquetée au cron suivant).
+    const previous = latestFunctionBody(sqlSrc, "public.ingest_apply_finess_geom_previous", {
+      stripComments: true,
+      compact: true,
+    });
+    expect(previous).not.toBe("");
+    expect(previous).toMatch(
+      /case when f\.raw->>'geom_source' = 'ban_address' then 'ban_address' else 'previous_ingest' end/,
     );
-    expect(body, "def de la RPC introuvable dans les migrations").not.toBe("");
-    expect(body).toContain(`jsonb_build_object('geom_source', '${GEOM_SOURCES.PREVIOUS_INGEST}')`);
   });
 
   it("toute colonne texte bornée de la DDL est couverte par une règle ou validée ailleurs", () => {
