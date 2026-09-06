@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FINESS phase 2 — clôture (plan)</title>
+<style>
+  :root{
+    --marine:#0b2e4f; --marine2:#14385f; --bleu:#1d6fd6; --bleu-pale:#e8f1fc;
+    --bg:#eef2f6; --card:#ffffff; --ink:#1a2a3a; --muted:#5b6b7d;
+    --rouge:#c0271a; --rouge-pale:#fbe9e7; --vert:#16794c; --vert-pale:#e6f4ec;
+    --ambre:#b06f00; --ambre-pale:#fdf3e0; --bord:#dce4ec;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px;}
+  header{background:linear-gradient(135deg,var(--marine),var(--marine2));color:#fff;padding:48px 24px 40px;margin-bottom:36px;}
+  .header-inner{max-width:1080px;margin:0 auto;padding:0 24px;}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8fb9e6;font-weight:700;margin-bottom:10px;}
+  h1{font-size:32px;line-height:1.2;font-weight:800;margin-bottom:18px;max-width:860px;}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;}
+  .chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:600;color:#dce9f7;}
+  .chip.go{background:var(--vert);border-color:var(--vert);color:#fff;}
+  .chip.wait{background:var(--ambre);border-color:var(--ambre);color:#fff;}
+  .tldr{margin-top:18px;font-size:16px;line-height:1.55;color:#cfdaea;max-width:820px;}
+  .tldr strong{color:#fff;}
+  section{margin-bottom:34px;}
+  h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--bleu);font-weight:800;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  h2 .num{background:var(--bleu);color:#fff;width:24px;height:24px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;letter-spacing:0;flex-shrink:0;}
+  h3{font-size:16px;font-weight:700;margin:18px 0 8px;color:var(--marine);}
+  p{margin-bottom:10px;}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;padding:22px 24px;box-shadow:0 1px 3px rgba(11,46,79,.05);}
+  .card + .card{margin-top:14px;}
+  .grid{display:grid;gap:14px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  @media(max-width:720px){.g2{grid-template-columns:1fr;}}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0;}
+  th{background:var(--bleu-pale);color:var(--marine);text-align:left;padding:9px 12px;font-weight:700;font-size:12.5px;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid #cfe0f3;}
+  td{padding:9px 12px;border-bottom:1px solid var(--bord);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  code{background:#eef2f6;border:1px solid var(--bord);border-radius:4px;padding:1px 5px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;color:var(--marine);}
+  .badge{display:inline-block;padding:2px 9px;border-radius:5px;font-size:12px;font-weight:700;white-space:nowrap;}
+  .b-ok{background:var(--vert-pale);color:var(--vert);}
+  .b-no{background:var(--rouge-pale);color:var(--rouge);}
+  .b-mid{background:var(--ambre-pale);color:var(--ambre);}
+  .b-info{background:var(--bleu-pale);color:var(--bleu);}
+  .callout{border-left:4px solid var(--bleu);background:var(--bleu-pale);padding:16px 20px;border-radius:0 10px 10px 0;}
+  .callout.warn{border-color:var(--ambre);background:var(--ambre-pale);}
+  .callout.danger{border-color:var(--rouge);background:var(--rouge-pale);}
+  .callout.good{border-color:var(--vert);background:var(--vert-pale);}
+  .callout .lbl{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.07em;display:block;margin-bottom:5px;color:var(--bleu);}
+  .callout.warn .lbl{color:var(--ambre);}
+  .callout.danger .lbl{color:var(--rouge);}
+  .callout.good .lbl{color:var(--vert);}
+  .diagram{background:#0e2138;color:#cfe0f3;border-radius:10px;padding:18px 20px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;overflow-x:auto;white-space:pre;}
+  .diagram .h{color:#ffd07a;font-weight:700;} .diagram .o{color:#9fffb8;} .diagram .n{color:#ff9a8c;} .diagram .a{color:#7ab7ff;}
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0;}
+  .stat{flex:1;min-width:150px;background:var(--card);border:1px solid var(--bord);border-radius:10px;padding:14px 16px;}
+  .stat .v{font-size:24px;font-weight:800;color:var(--marine);}
+  .stat .l{font-size:12px;color:var(--muted);margin-top:2px;}
+  ul{margin:6px 0 10px 20px;} li{margin-bottom:5px;}
+  .step{display:flex;gap:12px;align-items:flex-start;margin-bottom:10px;}
+  .step .n{background:var(--bleu);color:#fff;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;}
+  .muted{color:var(--muted);}
+</style>
+</head>
+<body>
+<header><div class="header-inner">
+  <div class="kicker">Plan pré-implémentation · 2026-09-06</div>
+  <h1>FINESS phase 2 — clôture : colonnes dédiées, précision par résultat, drain BAN factorisé, autorisations d'activité</h1>
+  <div class="meta">
+    <span class="chip go">2 lots · 2 PR · version 0.30.0</span>
+    <span class="chip">Items backlog 2 · 9 · 10 → faits</span>
+    <span class="chip wait">Item 3 → reclassé V1.0+</span>
+  </div>
+  <p class="tldr"><strong>En simple.</strong> Le FINESS est branché sur l'ANS et sert 97,6 % d'établissements géolocalisés. Ce plan range ce qui a été stocké « en vrac » (provenance du point, SIRET, clé BAN) dans de vraies colonnes, dit à chaque résultat d'où vient son point, fait du SIRET ANS un candidat du resolver, factorise trois workflows jumeaux et ferme seules les issues de surveillance. Le jeu des autorisations d'activité est un produit à part : hors clôture, faits conservés.</p>
+</div></header>
+<div class="wrap">
+
+<section><h2><span class="num">0</span>Décisions arrêtées</h2><div class="card">
+<table><tr><th>Item backlog</th><th>Décision</th><th>Lot</th></tr>
+<tr><td>2 — colonnes dédiées <code>siret</code>, <code>cle_ban</code>, <code>score_ban</code>, <code>geom_source</code></td><td><span class="badge b-ok">Fait</span> une migration, <code>raw</code> cesse de porter la provenance</td><td>Lot 1</td></tr>
+<tr><td>10 — <code>geo_precision</code> par résultat FINESS</td><td><span class="badge b-ok">Fait</span> sur le vocabulaire existant, <strong>sans centroïde communal</strong> ; les 647 sans voie restent sans point, par doctrine</td><td>Lot 1</td></tr>
+<tr><td>(nouveau) SIRET natif ANS</td><td><span class="badge b-ok">Fait</span> fait brut <code>siret_ans</code> + candidat du resolver, mesuré contre SIRENE avant merge</td><td>Lot 1</td></tr>
+<tr><td>9 — trois workflows de drain BAN identiques</td><td><span class="badge b-ok">Fait</span> un <code>workflow_call</code> + trois appelants ; fermeture automatique des issues <code>pending-geocode</code></td><td>Lot 2</td></tr>
+<tr><td>3 — consommer <code>finess-activites-1</code></td><td><span class="badge b-mid">Hors clôture</span> chantier produit à part (1,45 Go/jour, table relationnelle, 8 nomenclatures). Reclassé V1.0+ avec les faits</td><td>Décision</td></tr>
+</table></div></section>
+
+<section><h2><span class="num">1</span>Pourquoi deux lots et une décision</h2><div class="card">
+<p>Les items 2 et 10 touchent <strong>la même migration</strong> : sortir <code>geom_source</code> de <code>raw</code> est leur préalable commun. Séparés, ils imposeraient deux recréations successives de <code>ingest_create_finess_staging</code> et deux réécritures du test de vocabulaire fermé.</p>
+<p>L'item 9 est indépendant et c'est l'endroit naturel pour corriger un défaut vu ce matin : les issues <code>pending-geocode</code> (#56, #63) ne se ferment jamais seules, même file vidée.</p>
+<p>L'item 3 n'est pas une finition : le flux structures ne contient <strong>aucun</strong> champ d'activité, tout serait nouveau.</p>
+</div></section>
+
+<section><h2><span class="num">2</span>Lot 1 — schéma <code>finess</code> : colonnes dédiées, <code>geo_precision</code>, SIRET ANS</h2>
+<div class="card"><h3>Mesures prod du 2026-09-06 (104 734 établissements en service)</h3>
+<table><tr><th><code>raw->>'geom_source'</code></th><th>Lignes</th><th>Avec SIRET ANS</th><th>Avec clé BAN</th></tr>
+<tr><td><code>ans</code></td><td>78 243</td><td>69 469</td><td>78 243</td></tr>
+<tr><td><code>previous_ingest</code></td><td>21 222</td><td>18 544</td><td>186</td></tr>
+<tr><td><code>ban_address</code></td><td>2 720</td><td>1 986</td><td>0</td></tr>
+<tr><td>absent (<code>geom IS NULL</code>)</td><td>2 549</td><td>1 543</td><td>0</td></tr></table>
+<p class="muted">Les 2 549 sans point = 647 sans voie (jamais géocodables) + 1 902 rejets BAN.</p>
+<div class="callout"><span class="lbl">SIRET</span>Sur 3 000 EGE porteurs d'un SIRET ANS bien formé, 1 241 ont un SIRET côté <code>rpps</code> et 1 241 concordent. Ce n'est pas une preuve d'actualité : même producteur (ANS). La confrontation qui compte est contre SIRENE. Point clé : <strong>59 % de l'échantillon n'a aucun SIRET côté RPPS</strong> — le SIRET ANS couvre là où la cascade actuelle n'a que le repli géographique.</div>
+</div>
+<div class="card"><h3>Migration <code>20260907T…_finess_dedicated_columns.sql</code> (format T, apply via MCP)</h3>
+<div class="diagram"><span class="h">ALTER TABLE finess</span>
+  ADD siret CHAR(14), cle_ban TEXT, score_ban REAL,
+  ADD geom_source TEXT <span class="a">CHECK (geom_source IN ('ans','previous_ingest','ban_address'))</span>,
+  ADD CONSTRAINT finess_geom_source_iff_geom <span class="a">CHECK ((geom IS NULL) = (geom_source IS NULL))</span>;
+<span class="h">UPDATE finess</span> SET siret/cle_ban/score_ban/geom_source <span class="o">FROM raw</span>  -- one-shot, ~105 K lignes
+<span class="h">CREATE INDEX</span> finess_siret_idx ON finess (siret) WHERE siret IS NOT NULL;
+<span class="h">ingest_create_finess_staging()</span>  → recréée en <span class="o">superset strict</span> (4 colonnes + index + contrainte)
+<span class="h">RPC d'ingestion</span> (repli, pose BAN, diff) → écrivent/lisent <span class="o">la colonne</span>, plus jsonb dans raw
+<span class="h">RPC de lecture</span> ×3 → DROP + recréation avec <span class="o">siret, geom_source</span> dans RETURNS TABLE</div>
+<p>Invariant nouveau, porté par la contrainte : un point a toujours une provenance, une ligne sans point n'en a jamais.</p>
+</div>
+<div class="card"><h3>Parseur, lib, tools, resolver</h3>
+<ul>
+<li><code>FinessStagingRow</code> gagne <code>siret</code> (validé <code>^\d{14}$</code>, sinon null + compteur), <code>cle_ban</code>, <code>score_ban</code>, <code>geom_source</code>. <code>raw</code> = payload ANS brut.</li>
+<li>Tests : règle de colonne <code>siret</code> ; vocabulaire fermé vérifié sur la colonne ; <strong>trou comblé</strong> : bloc <code>finess</code> dans <code>staging-parity.test.ts</code>.</li>
+<li><code>FinessResult</code> gagne <code>geo_precision</code> (posé seulement si <code>coords</code>, comme Ameli ; les trois provenances → <code>adresse</code> ; warn 1-shot de drift) et <code>siret_ans</code> (fait brut).</li>
+<li>Étiquette globale <code>lambert93_natif_finess</code>, mensongère depuis l'ANS → <code>point_etablissement_finess</code> ; notes réécrites ; changement de contrat au CHANGELOG (raison du 0.30.0). <code>countPrecis()</code> du panorama appliqué aux FINESS.</li>
+<li>Resolver : le SIRET ANS entre <strong>en source 1, à côté des SIRET RPPS</strong>. La cascade valide déjà chaque candidat contre DINUM et fait primer l'actif : un SIRET ANS périmé est traité comme l'est un SIRET RPPS périmé. <code>method = siret_ans</code> quand il porte le <code>best_match</code>. Aucune recalibration des seuils.</li>
+</ul>
+<div class="callout warn"><span class="lbl">Mesure avant merge</span>~300 EGE tirés au sort parmi ceux <strong>sans</strong> SIRET RPPS, DINUM live : part des SIRET ANS actifs, part où le repli géographique trouvait autre chose et lequel est actif. Renoncement si &gt; 10 % de SIRET ANS fermés <em>et</em> repli plus juste : le SIRET ANS reste un fait brut hors cascade.</div>
+</div>
+<div class="card"><h3>Les 647 sans voie : décision</h3>
+<div class="callout danger"><span class="lbl">Pas de centroïde</span>Admettre un centroïde communal dans <code>finess</code>, même marqué, contamine le tier précis de <code>rpps</code> : le cron RPPS recopie le point FINESS sous <code>geom_source = 'finess_join'</code>, prédicat du GiST partiel verrouillé par <code>staging-parity.test.ts</code>. Les 647 restent visibles par catégorie et par numéro, <code>coords: null</code>, sans <code>geo_precision</code>, invisibles des recherches par rayon. C'est la vérité. Item 10 clos par décision.</div>
+</div>
+<div class="card"><h3>Méthode de preuve</h3>
+<div class="step"><span class="n">1</span><div><strong>Unit</strong> : parité staging finess, règles + vocabulaire réécrits, contrat <code>FinessResult</code>, mapping + warn, resolver avec candidat ANS (DINUM mocké), parseur.</div></div>
+<div class="step"><span class="n">2</span><div><strong>Migration prod</strong> via MCP ; vérification : lignes sans <code>geom_source</code> = lignes sans <code>geom</code> = 2 549, distribution = tableau ci-dessus, <code>EXPLAIN</code> de <code>finess_in_radius</code> inchangé (KNN GiST).</div></div>
+<div class="step"><span class="n">3</span><div><strong>Dry-run sans swap</strong> : diff propre, 0 point déplacé, <code>staging_geom_source</code> cohérent, <code>siret_malformed</code> reporté.</div></div>
+<div class="step"><span class="n">4</span><div><strong>Run réel forcé</strong> puis appels MCP prod : <code>etablissement_by_finess</code> sur un EGE ANS, un BAN, un sans point ; rayon avec <code>geo_precision</code> ; <code>reconcilier_finess_sirene</code> sur un EGE sans SIRET RPPS → <code>method = siret_ans</code>.</div></div>
+<div class="step"><span class="n">5</span><div><strong>Non-régression géo</strong> : 0 point déplacé, couverture ≥ 97,5 %.</div></div>
+</div></section>
+
+<section><h2><span class="num">3</span>Lot 2 — <code>workflow_call</code> de drain BAN + fermeture automatique des issues</h2>
+<div class="card"><p>Trois fichiers de 121-132 lignes, <strong>six valeurs varient</strong> plus un bloc FINESS (exit 2 = canari avec backlog restant). Aucun <code>workflow_call</code> dans le repo ; une composite ne peut référencer ni <code>job.*</code> ni <code>secrets.*</code> (prouvé run #33960886473) — argument pour un <code>workflow_call</code>, qui accepte <code>secrets: inherit</code>.</p>
+<div class="diagram"><span class="h">.github/workflows/ban-backfill.yml</span>  (on: workflow_call)
+  inputs : source · source-label · issue-labels · failure-modes · killed-hint · max · tolerate-canary-backlog
+  secrets: inherit · permissions: contents read, issues write
+  steps  : checkout <span class="o">(premier)</span> → preflight secrets → pnpm/node → drain
+           → <span class="a">Close pending-geocode issue</span> (nouveau) → Alert on failure or cancelled run
+<span class="h">ban-backfill-{rpps,ameli,finess}.yml</span>  (~30 lignes)
+  on: workflow_run [cron surveillé] + workflow_dispatch(max) · concurrency · garde conclusion == success
+  permissions (redéclaration exigée) · jobs.backfill.uses: ./.github/workflows/ban-backfill.yml · with: 6 valeurs</div>
+<div class="callout good"><span class="lbl">Fermeture automatique</span>Drain terminé en <strong>exit 0</strong> (file vidée, pas un canari) → l'issue ouverte labellisée <code>pending-geocode,&lt;source&gt;</code> est fermée avec « ✅ File vidée par le drain du &lt;date&gt; : N traitées, M acceptées ». <code>upsert-ops-issue</code> gagne <code>action: open|close</code> (émetteur unique préservé) ; <code>ban-backfill.mjs</code> écrit <code>processed / accepted / remaining</code> en <code>GITHUB_OUTPUT</code>. Best-effort : échec = log LOUD, jamais un run rouge.</div>
+<h3><code>workflows-alerting.test.ts</code></h3>
+<p>Partition par parse YAML : réutilisable, appelants, workflows à steps. Le réutilisable porte checkout premier + alerte <code>failure() || cancelled()</code> + <code>issues: write</code> ; chaque appelant : <code>permissions.issues = write</code>, <code>uses</code> vers le réutilisable, <code>with.source</code> cohérent avec le nom du fichier, <code>secrets: inherit</code> ; compte explicite 7 + 1 ; chaque source de <code>notify-pending-geocode</code> a un drain qui ferme.</p>
+<h3>Méthode de preuve</h3>
+<div class="step"><span class="n">1</span><div><code>pnpm test:unit</code> (partition, invariants, outputs du script).</div></div>
+<div class="step"><span class="n">2</span><div><code>workflow_dispatch</code> de <strong>chaque</strong> appelant avec <code>max</code> canari → 3 runs verts, step d'alerte présent et skippé, FINESS exit 2 toléré.</div></div>
+<div class="step"><span class="n">3</span><div>Issue test <code>pending-geocode,ameli</code> ouverte à la main → drain Ameli (mesure = 0) la ferme ; drain RPPS <code>max=1</code> ne ferme pas (canari).</div></div>
+<div class="step"><span class="n">4</span><div>Annulation manuelle d'un run → issue + email, rejoué une fois sur le réutilisable.</div></div>
+</div></section>
+
+<section><h2><span class="num">4</span>Décision — <code>finess-activites-1</code> hors clôture</h2><div class="card">
+<div class="stat-row">
+<div class="stat"><div class="v">1,45 Go</div><div class="l">décompressé, chaque jour (2× le flux structures)</div></div>
+<div class="stat"><div class="v">294 329</div><div class="l">activités exercées, 161 034 actives, 139 817 EGE</div></div>
+<div class="stat"><div class="v">8</div><div class="l">nomenclatures TRE à figer (1 aujourd'hui)</div></div>
+<div class="stat"><div class="v">2</div><div class="l">erreurs vérifiées dans le schéma officiel</div></div>
+</div>
+<ul>
+<li>Fiche data.gouv ANS, quotidien, ressource stable <code>ed12913c…</code> ; le snapshot annuel annoncé <strong>n'existe pas</strong>. Aucune nomenclature jointe ; <code>typeActiviteSMSSE</code> (100 % des lignes) irrésoluble publiquement.</li>
+<li><code>activite_hebergee</code> est aujourd'hui une <strong>inférence RPPS</strong>. Le déclaratif la recoupe partiellement : biologie ~1 260 sites hors labo (la lentille en voit 688) ; imagerie 1 685 vs 1 631 (recoupement 2/3) ; <strong>pharmacie : rien</strong>.</li>
+<li>Matières nouvelles absentes de toute source : parc d'équipements lourds (1 246 sites scanner, 1 156 IRM, 231 TEMP, 226 TEP autorisés) et capacités lits/places (36 940 établissements), avec deux pièges de comptage (×3 à ×4 en sommant naïvement).</li>
+</ul>
+<div class="callout"><span class="lbl">Décision</span>Domaine produit nouveau (autorisations, équipements, capacités) avec sa table, son cron, ses nomenclatures et ses tools. Il ne « termine » pas la migration ANS. <strong>Reclassé V1.0+ au backlog</strong> avec ces faits, pour ne pas les réinstruire.</div>
+</div></section>
+
+<section><h2><span class="num">5</span>Ordre, versions, risques</h2><div class="card">
+<table><tr><th>Étape</th><th>Livrable</th><th>Version</th></tr>
+<tr><td>Lot 1</td><td>PR <code>feat/finess-dedicated-columns-geo-precision</code> : migration + parseur + lib + resolver + tests ; mesure SIRET dans l'en-tête de migration</td><td>0.30.0</td></tr>
+<tr><td>Lot 2</td><td>PR <code>refactor/ban-backfill-workflow-call</code> : réutilisable + 3 appelants + fermeture auto + test</td><td>même release</td></tr>
+<tr><td>Docs</td><td>CHANGELOG (deux entrées + décisions 3 et 10), backlog, <code>PROJECT-STATE.html</code></td><td>—</td></tr></table>
+<table><tr><th>Risque</th><th>Parade</th></tr>
+<tr><td><code>DROP FUNCTION</code> des RPC de lecture = fenêtre sans RPC</td><td>Une transaction ; l'apply MCP est atomique</td></tr>
+<tr><td>Contrainte <code>geom ⇔ geom_source</code> fait échouer un swap si une RPC oublie la colonne</td><td>Le dry-run sans swap l'attrape ; contrainte aussi en staging</td></tr>
+<tr><td>Renommage de l'étiquette casse un caller qui la matche</td><td>Documenté 0.30.0 ; champ de métadonnées, pas un résultat</td></tr>
+<tr><td>SIRET ANS périmé promu <code>best_match</code></td><td>Impossible par construction (DINUM + actif prime) ; mesure avant merge</td></tr>
+<tr><td>Appelant sans <code>permissions</code> → issue non créée</td><td>Assertion dédiée + run réel de chaque appelant</td></tr></table>
+<p class="muted">Cyril merge chaque PR ; la migration du lot 1 est appliquée en prod par Claude via MCP avant le run de preuve, comme pour les lots précédents.</p>
+</div></section>
+</div>
+</body>
+</html>
