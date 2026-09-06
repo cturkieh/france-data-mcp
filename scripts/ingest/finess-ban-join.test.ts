@@ -32,6 +32,7 @@ const { SOURCES } = (await import("../ban-backfill.mjs")) as {
 const RPCS = [
   "ingest_apply_finess_ban_join",
   "finess_count_ban_eligible_rows",
+  "finess_count_ban_posable",
   "finess_eligible_rows_after_id",
 ] as const;
 const sql = allMigrationsSql(); // lowercased (contrat du helper) → attendus en minuscules
@@ -62,11 +63,17 @@ describe("pose BAN FINESS — parité du prédicat et politique de précision", 
     expect(sqlTypes).toEqual([...ACCEPTED_PRECISION_TYPES].sort());
     expect(sqlTypes).not.toContain("municipality");
     expect(body).toContain("'geom_source', 'ban_address'");
+    // Le count des POSABLES (dénominateur de la sentinelle) partage la jointure
+    // et le filtre de précision de la pose — sinon posé < posable à tort.
+    const posable = bodies.finess_count_ban_posable;
+    expect(posable).toContain("g.accepted = true");
+    expect(posable.match(/result_type in \(([^)]*)\)/)?.[1]).toBe(inList);
   });
 
   it("clé d'adresse = voie SEULE via rpps_address_key_for_index des deux côtés (jamais num_voie/type_voie, jamais le jumeau nu)", () => {
     const key = "rpps_address_key_for_index(s.voie, s.code_postal::text, s.code_insee::text)";
     expect(bodies.ingest_apply_finess_ban_join).toContain(key);
+    expect(bodies.finess_count_ban_posable).toContain(key);
     expect(bodies.finess_eligible_rows_after_id).toContain(key.replaceAll("s.", "t."));
     for (const fn of RPCS) {
       expect(bodies[fn]).not.toMatch(/num_voie|type_voie/);
@@ -147,14 +154,18 @@ describe("finess.ts — câblage de la pose (supprimer le bloc laisserait le dra
       return i;
     };
     const previous = at('rpc(\n      "ingest_apply_finess_geom_previous"');
-    const count = at('"finess_count_ban_eligible_rows"');
+    const count = at('"finess_count_ban_posable"');
     const pose = at('rpc("ingest_apply_finess_ban_join")');
     const diff = at("fetchStagingDiff(supabase)");
     expect(previous).toBeLessThan(count);
     expect(count).toBeLessThan(pose);
     expect(pose).toBeLessThan(diff);
-    // Sentinelle « 0 posé » : partial + trace en base, jamais un throw.
-    expect(src).toContain("banEligible > 0 && banCount === 0");
-    expect(src).toMatch(/evaluateBanJoinOutcome\(\{\s+source: "finess"/);
+    // Sentinelle « posé < posable » (pas « 0 posé sur éligibles » : faux positif
+    // prouvé au 2e run du 2026-09-06, issue #76) : partial + trace, jamais un throw.
+    expect(src).toContain("if (banCount < banPosable)");
+    expect(src).not.toContain("banEligible > 0 && banCount === 0");
+    expect(src).toMatch(
+      /log\.status = "partial";\s+appendLogMessage\(log, `ban_join: \$\{banCount\} posed \/ \$\{banPosable\} posable/,
+    );
   });
 });
