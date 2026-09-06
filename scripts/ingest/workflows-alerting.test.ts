@@ -1,8 +1,15 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { githubDir, ingestDir } from "./migration-sql.js";
+import {
+  MEASURE_UNAVAILABLE_LABEL,
+  PENDING_GEOCODE_LABEL,
+  SOURCES as PENDING_GEOCODE_SOURCES,
+} from "./notify-pending-geocode.js";
 
 // Garde-fous d'alerting des workflows GitHub Actions (`.github/`).
 //
@@ -13,15 +20,18 @@ import { githubDir, ingestDir } from "./migration-sql.js";
 // (mois RPPS perdu, découvert 2 mois après). Le script tué en SIGTERM n'écrit
 // pas non plus de ligne `ingest_log` : sans alerte workflow, l'incident est muet.
 //
-// Lecture TEXTE du YAML (patron du repo — aucun parseur YAML en dépendance, on
-// n'en ajoute pas pour un test), mais :
-//  - itération sur TOUT `.github/` avec liste d'EXEMPTION explicite (tout
-//    nouveau workflow est PRÉSUMÉ devoir alerter — l'exempter est un acte revu),
-//  - scalaires pliés `if: >-` APLATIS (sinon un `failure()` sur la 2e ligne
-//    échappe au filet = faux vert),
-//  - bloc de step borné par l'INDENTATION capturée (workflows 6 espaces,
-//    composites 4) et ancré en début de ligne (un `# - name:` commenté ne
-//    compte pas).
+// DEUX lectures, chacune à son emploi :
+//  - PARSE YAML (`yaml`, déjà en devDependency) pour la STRUCTURE : partition
+//    réutilisable / appelants / workflows à steps, `permissions`, `with:` d'un
+//    appelant. Un nom de fichier ne prouve rien, la structure si ;
+//  - lecture TEXTE pour le CÂBLAGE fin (ordre des steps, conditions `if:`
+//    pliées, corps d'un `script:`), que l'arbre YAML aplatit en chaînes.
+// Dans les deux cas : itération sur TOUT `.github/` avec liste d'EXEMPTION
+// explicite (tout nouveau workflow est PRÉSUMÉ devoir alerter — l'exempter est
+// un acte revu), scalaires pliés `if: >-` APLATIS (sinon un `failure()` sur la
+// 2e ligne échappe au filet = faux vert), bloc de step borné par l'INDENTATION
+// capturée (workflows 6 espaces, composites 4) et ancré en début de ligne (un
+// `# - name:` commenté ne compte pas).
 
 const read = (rel: string): string => readFileSync(join(githubDir, rel), "utf8");
 const isYaml = (f: string): boolean => /\.ya?ml$/.test(f);
@@ -35,6 +45,19 @@ const actionDirs = readdirSync(join(githubDir, "actions"), { withFileTypes: true
   .map((d) => d.name)
   .sort();
 const actions = new Map(actionDirs.map((d) => [d, read(`actions/${d}/action.yml`)]));
+/**
+ * Scripts EXTERNES des composites (`.cjs` chargé par `actions/github-script`
+ * via `require`) : ils portent de la logique d'alerting au même titre que le
+ * YAML — les invariants « émetteur unique » doivent les scanner AUSSI, sinon
+ * déplacer un appel API hors du YAML suffirait à échapper au filet.
+ */
+const actionScripts = new Map(
+  actionDirs.flatMap((d) =>
+    readdirSync(join(githubDir, "actions", d), { withFileTypes: true })
+      .filter((f) => f.isFile() && /\.c?js$/.test(f.name))
+      .map((f): [string, string] => [`${d}/${f.name}`, read(`actions/${d}/${f.name}`)]),
+  ),
+);
 
 function mustGet(map: Map<string, string>, key: string): string {
   const v = map.get(key);
@@ -48,7 +71,33 @@ function mustGet(map: Map<string, string>, key: string): string {
  * suivie en direct). Tout autre workflow DOIT passer par la composite.
  */
 const NO_ALERT_BY_DESIGN = new Set(["ci.yml", "keep-warm.yml", "release.yml"]);
-const alerting = workflowFiles.filter((f) => !NO_ALERT_BY_DESIGN.has(f));
+
+/**
+ * Partition STRUCTURELLE (par parse YAML, pas par nom de fichier) depuis la
+ * factorisation du drain BAN (2026-09-06) : un workflow est soit RÉUTILISABLE
+ * (`on: workflow_call`, il porte les steps et l'alerte), soit APPELANT
+ * (`jobs.*.uses`, il n'a AUCUN step à lui — lui exiger un checkout ou un step
+ * d'alerte n'aurait pas de sens), soit un workflow à steps ordinaire.
+ */
+interface WorkflowDoc {
+  name?: string;
+  on?: Record<string, unknown>;
+  permissions?: Record<string, string>;
+  jobs?: Record<
+    string,
+    { uses?: string; with?: Record<string, unknown>; secrets?: string; if?: string }
+  >;
+}
+const docs = new Map<string, WorkflowDoc>(
+  workflowFiles.map((f) => [f, parseYaml(mustGet(workflows, f)) as WorkflowDoc]),
+);
+const jobsOf = (f: string) => Object.values(docs.get(f)?.jobs ?? {});
+const reusableFiles = workflowFiles.filter((f) => docs.get(f)?.on?.workflow_call !== undefined);
+const callerFiles = workflowFiles.filter((f) => jobsOf(f).some((j) => typeof j?.uses === "string"));
+/** Non exemptés = tout ce qui doit alerter, appelants COMPRIS (garde failure()/cancelled()). */
+const nonExempt = workflowFiles.filter((f) => !NO_ALERT_BY_DESIGN.has(f));
+/** Workflows à STEPS devant porter checkout + step d'alerte (le réutilisable en fait partie). */
+const alerting = nonExempt.filter((f) => !callerFiles.includes(f));
 
 const NOTIFY_FAILURE = "./.github/actions/notify-ingest-failure";
 const SEND_EMAIL = "./.github/actions/send-ops-email";
@@ -128,8 +177,9 @@ describe("tout .github/**/*.yml PARSE (le garde-fou textuel ne voit pas un YAML 
 
 describe("workflows d'alerte + composites — aucun `failure()` sans `cancelled()` (timeout GitHub = cancelled)", () => {
   const files: Array<[string, string]> = [
-    ...alerting.map((f): [string, string] => [f, mustGet(workflows, f)]),
+    ...nonExempt.map((f): [string, string] => [f, mustGet(workflows, f)]),
     ...actions,
+    ...actionScripts,
   ];
   for (const [file, src] of files) {
     it(`${file} : chaque condition à failure() porte aussi cancelled() (plié inclus)`, () => {
@@ -144,8 +194,32 @@ describe("workflows d'alerte + composites — aucun `failure()` sans `cancelled(
 });
 
 describe("tout workflow non exempté alerte via notify-ingest-failure", () => {
-  it("le filet couvre les 8 workflows attendus (nouveau cron = présumé alertant, exemption = acte revu)", () => {
-    expect(alerting.length).toBeGreaterThanOrEqual(8);
+  // Compte EXPLICITE depuis la factorisation du drain BAN : un `>= 8` implicite
+  // restait vert si un workflow perdait son alerte en changeant de catégorie.
+  // Ajouter un workflow oblige à trancher ICI dans quelle case il tombe.
+  const EXPECTED_REUSABLE = ["ban-backfill.yml"];
+  const EXPECTED_CALLERS = [
+    "ban-backfill-ameli.yml",
+    "ban-backfill-finess.yml",
+    "ban-backfill-rpps.yml",
+  ];
+  const EXPECTED_ALERTING = [
+    "ban-backfill.yml",
+    "cleanup-stale-previous.yml",
+    "ingest-ameli.yml",
+    "ingest-cds.yml",
+    "ingest-finess.yml",
+    "ingest-iris.yml",
+    "ingest-rpps.yml",
+  ];
+
+  it("partition EXPLICITE : 1 réutilisable + 3 appelants + 7 workflows à steps + 3 exemptés", () => {
+    expect(reusableFiles).toEqual(EXPECTED_REUSABLE);
+    expect(callerFiles).toEqual(EXPECTED_CALLERS);
+    expect(alerting).toEqual(EXPECTED_ALERTING);
+    // Exhaustivité : tout fichier de `workflows/` tombe dans EXACTEMENT une case
+    // (le réutilisable est compté dans `alerting`, il porte les steps).
+    expect([...alerting, ...callerFiles, ...NO_ALERT_BY_DESIGN].sort()).toEqual(workflowFiles);
     for (const f of NO_ALERT_BY_DESIGN) {
       expect(
         workflowFiles,
@@ -190,6 +264,201 @@ describe("tout workflow non exempté alerte via notify-ingest-failure", () => {
         "run failed (run #${context.runId})",
       );
     }
+  });
+});
+
+describe("drain BAN — un corps réutilisable + trois appelants (backlog FINESS phase 2, item 9)", () => {
+  // Trois fichiers de 121-132 lignes dont SIX valeurs variaient : toute
+  // correction (le `cancelled()` de septembre) devait être recopiée 3 fois. Le
+  // corps vit désormais dans `ban-backfill.yml` (`workflow_call` — seul véhicule
+  // qui lit `job.status` et accepte `secrets: inherit`, contrairement à une
+  // composite, cf. run #33960886473).
+  const REUSABLE_PATH = "./.github/workflows/ban-backfill.yml";
+  const DRAIN_SOURCES = ["rpps", "ameli", "finess"];
+  const REUSABLE_FILE = "ban-backfill.yml";
+  const reusable = mustGet(workflows, REUSABLE_FILE);
+  const CLOSE_STEP = "Close pending-geocode issue";
+
+  it("le réutilisable expose EXACTEMENT les valeurs qui divergeaient entre les 3 copies", () => {
+    const call = docs.get(REUSABLE_FILE)?.on?.workflow_call as
+      | { inputs?: Record<string, unknown> }
+      | undefined;
+    expect(Object.keys(call?.inputs ?? {}).sort()).toEqual([
+      "failure-modes",
+      "issue-labels",
+      "killed-hint",
+      "max",
+      "source",
+      "source-label",
+    ]);
+    expect(docs.get(REUSABLE_FILE)?.permissions?.issues).toBe("write");
+  });
+
+  for (const file of callerFiles) {
+    const source = /^ban-backfill-(.+)\.ya?ml$/.exec(file)?.[1];
+
+    it(`${file} : délègue au réutilisable, source cohérente avec le nom, secrets hérités, permissions redéclarées`, () => {
+      const job = jobsOf(file)[0];
+      expect(job?.uses).toBe(REUSABLE_PATH);
+      // Sans `secrets: inherit`, AUCUN secret ne traverse un workflow_call :
+      // le preflight du corps appelé échouerait à chaque run.
+      expect(job?.secrets).toBe("inherit");
+      // GitHub calcule les permissions chez l'APPELANT (l'appelé ne peut qu'en
+      // avoir moins) : les omettre rendrait issue et fermeture muettes.
+      expect(docs.get(file)?.permissions?.issues).toBe("write");
+      expect(DRAIN_SOURCES, `${file} : source de drain inconnue`).toContain(source);
+      // Cohérence nom de fichier ↔ `with.source` : un copier-coller qui draine
+      // Ameli depuis le bouton RPPS serait invisible autrement.
+      expect(job?.with?.source).toBe(source);
+      expect(job?.with?.["issue-labels"]).toBe(`backfill-failure,${source}`);
+      // Garde AUTO : jamais de drain après une ingestion ÉCHOUÉE.
+      expect(job?.if ?? "").toContain("github.event.workflow_run.conclusion == 'success'");
+    });
+
+    it(`${file} : le cron surveillé (workflow_run) porte le nom EXACT d'un ingest-*.yml existant`, () => {
+      const watched =
+        (docs.get(file)?.on?.workflow_run as { workflows?: string[] } | undefined)?.workflows ?? [];
+      expect(watched.length, `${file} : aucun workflow_run surveillé`).toBeGreaterThan(0);
+      const ingestNames = workflowFiles
+        .filter((f) => /^ingest-.*\.ya?ml$/.test(f))
+        .map((f) => docs.get(f)?.name);
+      for (const w of watched) {
+        expect(
+          ingestNames,
+          `${file} : « ${w} » ne correspond à AUCUN name: de ingest-*.yml — le drain auto ne se déclencherait JAMAIS (silence total)`,
+        ).toContain(w);
+      }
+    });
+  }
+
+  it(`le réutilisable ferme l'issue pending-geocode (file VRAIMENT vidée), jamais sur un canari`, () => {
+    const block = stepBlock(reusable, CLOSE_STEP);
+    expect(block, "step de fermeture introuvable").not.toBeNull();
+    expect(block).toContain(`uses: ${UPSERT_ISSUE}`);
+    expect(block).toContain("action: close");
+    // Même clé d'idempotence que l'ouverture (`notify-pending-geocode`), et
+    // label PRIMAIRE du registre INFORMATIF seulement.
+    expect(block).toContain(`labels: ${PENDING_GEOCODE_LABEL},\${{ inputs.source }}`);
+    // Best-effort : une API issues en panne ne re-rougit pas un drain réussi.
+    expect(block).toMatch(/^\s+continue-on-error: true$/m);
+    const cond = stepIfCondition(reusable, CLOSE_STEP) ?? "";
+    expect(cond).toContain("success()");
+    // Un canari (`max`) ne prétend jamais avoir vidé la file.
+    expect(cond).toContain("inputs.max == ''");
+    // ⚠️ `remaining` ne mesure QUE la troncature `--max` : garder dessus
+    // laisserait un drain qui REJETTE tout fermer la vigie sur un « ✅ file
+    // vidée » mensonger. `still_pending` mesure la même grandeur que la RPC
+    // qui a OUVERT l'issue (revue 2026-09-06).
+    expect(cond).toContain("steps.drain.outputs.still_pending == '0'");
+    expect(cond).not.toContain("steps.drain.outputs.remaining");
+  });
+
+  it("un échec de la fermeture (composite non chargée comprise) est ANNONCÉ, jamais muet", () => {
+    // `continue-on-error` maintient le job vert : le step d'alerte final ne se
+    // déclenche donc pas. Sans ce contrôle aval, une action locale non résolue
+    // (la panne du run #33960886473) rendrait la fermeture TOTALEMENT muette.
+    const block = stepBlock(reusable, "Warn if issue closure did not happen");
+    expect(block, "step de contrôle de la fermeture introuvable").not.toBeNull();
+    expect(stepIfCondition(reusable, "Warn if issue closure did not happen")).toContain(
+      "steps.close.conclusion != 'skipped'",
+    );
+    expect(block).toContain("steps.close.outputs.outcome");
+    expect(block).toContain("::warning::");
+    // L'issue de fermeture est lue via un `id:` — sans lui, aucun output.
+    expect(stepBlock(reusable, CLOSE_STEP)).toMatch(/^\s+id: close$/m);
+  });
+
+  it("chaque source de notify-pending-geocode a un drain qui la REFERME (issue jamais orpheline)", () => {
+    // #56 et #63 sont restées ouvertes jusqu'à une fermeture manuelle le
+    // 2026-09-06 : ouvrir sans jamais fermer est un canal qui se décrédibilise.
+    for (const source of PENDING_GEOCODE_SOURCES) {
+      const file = `ban-backfill-${source}.yml`;
+      expect(
+        callerFiles,
+        `source ${source} signalée par notify-pending-geocode sans drain qui la referme`,
+      ).toContain(file);
+      // Et le drain doit viser CETTE source : le réutilisable compose ses
+      // labels de fermeture avec `inputs.source`.
+      expect(jobsOf(file)[0]?.with?.source).toBe(source);
+    }
+  });
+
+  it("le registre DÉGRADÉ (mesure indisponible) échappe au filtre de fermeture", () => {
+    // Le filtre `labels` de l'API GitHub est un ET : si les deux registres
+    // partageaient leur label primaire, un drain réussi — qui ne dit RIEN de
+    // l'état de la RPC de mesure — fermerait la seule alerte actionnable.
+    expect(MEASURE_UNAVAILABLE_LABEL).not.toBe(PENDING_GEOCODE_LABEL);
+    expect(
+      MEASURE_UNAVAILABLE_LABEL.split(",")[0],
+      "le label dégradé ne doit pas contenir le label informatif comme label à part entière",
+    ).not.toBe(PENDING_GEOCODE_LABEL);
+    const block = stepBlock(reusable, CLOSE_STEP) ?? "";
+    expect(block).not.toContain(MEASURE_UNAVAILABLE_LABEL);
+  });
+
+  it("les compteurs du drain sont publiés par le script ET consommés par le step de fermeture", () => {
+    const script = readFileSync(join(ingestDir, "..", "ban-backfill.mjs"), "utf8");
+    // Le step lit les outputs du step `drain` : sans l'id, tout `steps.drain.*`
+    // vaudrait la chaîne vide → fermeture jamais déclenchée (silence).
+    expect(
+      stepBlock(
+        reusable,
+        "Drain BAN ${{ inputs.source-label }} (géocode le résidu → remplit le cache)",
+      ),
+    ).toContain("id: drain");
+    for (const key of ["processed", "accepted", "still_pending", "finished_at"]) {
+      expect(script, `output ${key} non produit par ban-backfill.mjs`).toMatch(
+        new RegExp(`^\\s+${key}: `, "m"),
+      );
+      expect(reusable, `output ${key} non consommé par le workflow`).toContain(
+        `steps.drain.outputs.${key}`,
+      );
+    }
+    // Écriture APRÈS le run, AVANT le code de sortie (un exit 2 canari doit
+    // publier remaining > 0 — c'est ce qui interdit la fermeture).
+    expect(script).toContain("writeGithubOutput(banBackfillOutputs(r))");
+  });
+
+  // Le corps bash du step est EXÉCUTÉ tel qu'il est écrit dans le YAML (extrait
+  // par le parseur, jamais retapé), l'invocation du script étant remplacée par
+  // un code de sortie choisi — `bash -e` comme le runner. Assertion textuelle
+  // impossible ici : ce qui compte est le CODE DE SORTIE final. L'exit 2 sous
+  // `--max` (backlog restant après un canari borné) est nominal pour TOUTE
+  // source depuis le 2026-09-06 — mais la tolérance doit rester CHIRURGICALE :
+  // ni l'exit 3 (apiFailures), ni l'exit 1 (fatal), ni un exit 2 hors canari ne
+  // doivent passer, ils rendraient un drain cassé VERT.
+  const drainRun = (
+    (docs.get(REUSABLE_FILE)?.jobs?.backfill as { steps?: Array<{ id?: string; run?: string }> })
+      ?.steps ?? []
+  ).find((s) => s.id === "drain")?.run;
+
+  it.each([
+    { code: 2, max: "5", expected: 0, why: "canari : backlog restant = nominal, toute source" },
+    { code: 2, max: "", expected: 2, why: "HORS canari : un exit 2 reste une anomalie rouge" },
+    { code: 3, max: "5", expected: 3, why: "apiFailures : JAMAIS avalé" },
+    { code: 1, max: "5", expected: 1, why: "fatal : JAMAIS avalé" },
+    { code: 0, max: "5", expected: 0, why: "canari complet" },
+    { code: 0, max: "", expected: 0, why: "drain complet" },
+  ])("drain : script exit $code + max='$max' → step exit $expected ($why)", (c) => {
+    expect(drainRun, "corps du step `drain` introuvable").toBeDefined();
+    const file = join(mkdtempSync(join(tmpdir(), "drain-step-")), "step.sh");
+    writeFileSync(
+      file,
+      (drainRun ?? "").replaceAll(
+        "pnpm exec tsx scripts/ban-backfill.mjs",
+        `bash -c "exit ${c.code}"`,
+      ),
+    );
+    let status = 0;
+    try {
+      execFileSync("bash", ["-e", file], {
+        env: { ...process.env, MAX: c.max, SOURCE: "finess" },
+        stdio: "pipe",
+      });
+    } catch (err) {
+      status = (err as { status?: number }).status ?? -1;
+    }
+    expect(status).toBe(c.expected);
   });
 });
 
@@ -303,22 +572,50 @@ describe("vigie « run vert mais donnée malade » — notify-ingest-anomaly sur
   });
 });
 
-describe("composite upsert-ops-issue — émetteur UNIQUE d'issue idempotente", () => {
+describe("composite upsert-ops-issue — émetteur UNIQUE d'issue idempotente (ouverture ET fermeture)", () => {
   const upsert = mustGet(actions, "upsert-ops-issue");
+  const closeScript = mustGet(actionScripts, "upsert-ops-issue/close-ops-issue.cjs");
 
-  it("est le SEUL endroit de .github/ qui liste/commente une issue (idempotence en un point)", () => {
+  it("est le SEUL endroit de .github/ qui liste/commente/ferme une issue (idempotence en un point)", () => {
     expect(upsert).toContain("github.rest.issues.listForRepo");
     expect(upsert).toContain("github.rest.issues.createComment");
-    for (const [file, src] of [...workflows, ...actions]) {
-      if (file === "upsert-ops-issue") continue;
+    // La fermeture vit dans le .cjs de CETTE MÊME action : l'invariant
+    // « un seul fichier de .github/ touche l'API issues en idempotent » tient.
+    expect(closeScript).toContain("github.rest.issues.listForRepo");
+    for (const [file, src] of [...workflows, ...actions, ...actionScripts]) {
+      if (file === "upsert-ops-issue" || file.startsWith("upsert-ops-issue/")) continue;
       expect(
         src,
         `${file} : idempotence d'issue inline — passer par ${UPSERT_ISSUE}`,
       ).not.toContain("listForRepo");
+      expect(
+        src,
+        `${file} : fermeture d'issue inline — passer par ${UPSERT_ISSUE} (action: close)`,
+      ).not.toContain("state: 'closed'");
     }
   });
 
-  it("outcome tri-état : `failed` par défaut AVANT le try, `commented` / `created` dans les branches", () => {
+  it("branche `close` : logique dans un .cjs TESTÉ, câblée par un chemin ABSOLU, action inconnue = refus", () => {
+    // Le YAML ne fait que router : la logique (filtre labels, PR écartées,
+    // commentaire puis fermeture, best-effort) est couverte par
+    // `close-ops-issue.test.ts` — un canal d'alerte ne doit pas n'être
+    // vérifiable que par assertion textuelle sur du YAML.
+    expect(upsert).toMatch(/action:\s*\n\s+description:/);
+    expect(upsert).toContain("ACTION_PATH: ${{ github.action_path }}");
+    expect(upsert).toContain("require(`${process.env.ACTION_PATH}/close-ops-issue.cjs`)");
+    // Fail-loud : une action inconnue ne retombe JAMAIS sur `open` (elle
+    // créerait une issue à contretemps), et un require cassé est ::error::.
+    expect(upsert).toMatch(/action !== 'open' && action !== 'close'[\s\S]*?core\.error\(/);
+    expect(upsert).toMatch(/catch \(err\) \{[\s\S]*?INCHARGEABLE/);
+    // Le filtre de labels est la SEULE chose qui empêche de fermer tout le
+    // dépôt — et il porte sur les labels NETTOYÉS (`[""]` produirait un filtre
+    // vide, cf. `close-ops-issue.test.ts`).
+    expect(closeScript).toMatch(/clean\.length === 0[\s\S]*?core\.error\(/);
+    expect(closeScript).toMatch(/state: "closed",\n\s+state_reason: "completed"/);
+    expect(closeScript).toMatch(/catch \(err\)[\s\S]*core\.warning/);
+  });
+
+  it("outcome pessimiste : `failed` par défaut AVANT le try, `commented` / `created` dans les branches", () => {
     expect(upsert).toMatch(/outputs:\s+outcome:/);
     expect(upsert.indexOf("core.setOutput('outcome', 'failed')")).toBeLessThan(
       upsert.indexOf("try {"),
@@ -405,7 +702,7 @@ describe("composite send-ops-email — émetteur Resend UNIQUE et best-effort", 
 
   it("est le SEUL endroit de .github/ qui appelle api.resend.com", () => {
     expect(sender).toContain("https://api.resend.com/emails");
-    for (const [file, src] of [...workflows, ...actions]) {
+    for (const [file, src] of [...workflows, ...actions, ...actionScripts]) {
       if (file === "send-ops-email") continue;
       expect(src, `${file} : appel Resend inline — passer par ${SEND_EMAIL}`).not.toContain(
         "api.resend.com",

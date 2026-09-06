@@ -1,17 +1,16 @@
-# Drain BAN Ameli — géocode le résidu d'adresses éligibles non encore en cache
-# (geocoded_addresses) et REMPLIT le cache. Les coords sont POSÉES dans
-# annuaire_ameli au prochain cron Ameli via ban_join (décalage d'UNE passe, par design).
+# Drain BAN Ameli — appelant du corps unique `ban-backfill.yml` (workflow_call).
+# Le RÉSIDU hebdo d'`annuaire_ameli` est géocodé dans le cache
+# `geocoded_addresses` ; les coords y sont POSÉES au prochain cron Ameli via
+# `ban_join` (décalage d'UNE passe, par design).
 #
 # DEUX déclencheurs (étape 2 du cadrage docs/plans/automatisation-backfill-ban.md) :
 #  - AUTO : à la complétion RÉUSSIE du cron « Ingest Annuaire Sante Ameli »
 #    (`workflow_run`) → zéro-clic, le résidu hebdo est drainé sans intervention ;
 #  - MANUEL : `workflow_dispatch` (bouton de secours + canari via input `max`).
-# Idempotent : si le cron a short-circuité (checksum identique), le drain dit
-# « nothing to do » (coût négligeable).
 #
-# Énumération ROBUSTE : keyset SUR `id` (PK) via `ameli_eligible_rows_after_id` —
-# AUCUN index BAN à construire ni à recréer (jumeau du bouton RPPS ; résout la
-# corvée d'index orphéliné au swap, cf. docs/plans/automatisation-backfill-ban.md).
+# Énumération keyset sur `id` (PK) via `ameli_eligible_rows_after_id` : AUCUN
+# index BAN à construire ni à recréer — ce qui résout la corvée d'index
+# orphéliné au swap (cf. docs/plans/automatisation-backfill-ban.md).
 name: Backfill BAN Ameli (auto + manuel)
 
 on:
@@ -29,9 +28,12 @@ on:
     workflows: ["Ingest Annuaire Sante Ameli"]
     types: [completed]
 
+# Redéclarées ICI : GitHub calcule les permissions du job appelant, le workflow
+# appelé ne peut qu'en hériter (ou en avoir moins) — les omettre rendrait
+# l'alerte et la fermeture d'issue muettes.
 permissions:
   contents: read
-  issues: write # alerte notify-ingest-failure
+  issues: write
 
 # JAMAIS concurrent du cron Ameli : son swap atomique renommerait `annuaire_ameli`
 # en pleine énumération keyset (la RPC résout `FROM annuaire_ameli` PAR NOM à
@@ -48,75 +50,13 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    # Énumération keyset (pages bornées) + géocodage BAN du résidu (~quelques
-    # milliers d'adresses, chunké). 30 min = large marge (jours BAN lents).
-    timeout-minutes: 30
-    steps:
-      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
-      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
-      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
-      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
-      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
-      - uses: actions/checkout@v6
-
-      # Preflight secrets AVANT install (convention nouveaux workflows Supabase ;
-      # après le checkout, cf. ci-dessus) : échec EXPLICITE et immédiat si un secret manque, plutôt qu'une
-      # panne opaque au 1er appel RPC.
-      - name: Validate required secrets present
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          missing=()
-          [ -z "$SUPABASE_URL" ] && missing+=("SUPABASE_URL")
-          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::Secrets manquants: ${missing[*]}"
-            exit 1
-          fi
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: 9.12.0
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Drain BAN Ameli (géocode le résidu → remplit le cache)
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          # Input passé via env (jamais interpolé dans le shell = anti-injection).
-          MAX: ${{ inputs.max }}
-        run: |
-          if [ -n "$MAX" ]; then
-            echo "Canari : $MAX adresses max"
-            pnpm exec tsx scripts/ban-backfill.mjs --source ameli --max "$MAX"
-          else
-            echo "Drainage complet"
-            pnpm exec tsx scripts/ban-backfill.mjs --source ameli
-          fi
-
-      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
-      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
-      - name: Alert on failure or cancelled run
-        if: failure() || cancelled()
-        uses: ./.github/actions/notify-ingest-failure
-        with:
-          source-label: Backfill BAN Ameli
-          ingest-log-source: "" # pas d'ingest_log côté backfill (cache-only)
-          issue-labels: backfill-failure,ameli
-          failure-modes: "Géocodage BAN indisponible ou lent sur les DEUX hôtes (data.geopf.fr puis repli api-adresse — réessayer plus tard), RPC d'énumération keyset absente (migration T-format non appliquée), secrets Supabase manquants (preflight)."
-          killed-hint: "Le drain BAN remplit le cache geocoded_addresses au fil de l'eau (idempotent) : relancer via workflow_dispatch pour finir le drain ; les coords sont posées dans la table au prochain cron (ban_join)."
-          job-status: ${{ job.status }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          resend-api-key: ${{ secrets.RESEND_API_KEY }}
-          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
-          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
-          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    uses: ./.github/workflows/ban-backfill.yml
+    secrets: inherit
+    with:
+      source: ameli
+      source-label: Ameli
+      issue-labels: backfill-failure,ameli
+      failure-modes: "Géocodage BAN indisponible ou lent sur les DEUX hôtes (data.geopf.fr puis repli api-adresse — réessayer plus tard), RPC d'énumération keyset absente (migration T-format non appliquée), secrets Supabase manquants (preflight)."
+      killed-hint: "Le drain BAN remplit le cache geocoded_addresses au fil de l'eau (idempotent) : relancer via workflow_dispatch pour finir le drain ; les coords sont posées dans la table au prochain cron (ban_join)."
+      # Vide sur `workflow_run` (contexte `inputs` absent) → drain complet.
+      max: ${{ inputs.max || '' }}

@@ -20,6 +20,8 @@
 // client BAN sont comptés et exposés (jamais un arrêt silencieux ayant fait
 // une fraction tout en rapportant un succès — la classe de bug combattue).
 
+import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
 import {
   banLastStatus,
@@ -708,6 +710,98 @@ export async function runBanBackfill(supabase, opts = {}) {
 }
 
 /**
+ * Sentinelle d'un compteur ABSENT ou non numérique. JAMAIS `0` : ces valeurs
+ * AUTORISENT la fermeture d'une issue de surveillance en aval — un défaut
+ * permissif transformerait un compteur oublié (il y a deux `return` distincts
+ * dans `runBanBackfill`) en « file vidée » définitif et muet.
+ */
+const OUTPUT_UNKNOWN = "unknown";
+
+/**
+ * Compteurs du run exposés au workflow (`$GITHUB_OUTPUT`), déjà tous présents
+ * dans le log `DONE:` — ce n'est qu'un second média, lisible par un STEP.
+ *
+ * `still_pending` est le SEUL compteur qui autorise la fermeture de l'issue
+ * `pending-geocode`, et il mesure la MÊME grandeur que celle qui l'a ouverte
+ * (`<source>_measure_ban_to_geocode` : clés éligibles ni acceptées ni
+ * plafonnées à `BAN_MAX_ATTEMPTS`). `remaining` ne dit RIEN de la file — il ne
+ * compte que la troncature `--max` : fermer dessus laisserait un drain qui
+ * REJETTE tout (seuil de score, adresses irrésolues, dérive de prédicat)
+ * clore la vigie avec un « ✅ file vidée » MENSONGER, alors que les adresses
+ * repartent à `attempt < 3`, donc toujours dans la file.
+ *
+ * Sur-compte volontairement les clés qui viennent d'atteindre le plafond
+ * d'essais (elles sortent de la file côté mesure) : le biais va vers le
+ * fail-CLOSED (on n'ose pas fermer), jamais vers la fermeture à tort.
+ *
+ * `finished_at` est déjà formaté (UTC, minute) : GitHub Actions n'a aucune
+ * fonction de date en expression, composer la ligne côté YAML est impossible.
+ *
+ * @param {{geocoded?: number, accepted?: number, remaining?: number, rejected?: number, unresolved?: number, contractBreached?: number}} result Retour de `runBanBackfill`.
+ * @param {Date} [now] Injectable pour le test.
+ * @returns {Record<string, string>}
+ */
+export function banBackfillOutputs(result, now = new Date()) {
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const out = (v) => (num(v) === null ? OUTPUT_UNKNOWN : String(v));
+  // Reste-à-géocoder APRÈS ce run, au sens de la mesure qui ouvre l'issue.
+  const pendingParts = [
+    result.rejected,
+    result.unresolved,
+    result.contractBreached,
+    result.remaining,
+  ].map(num);
+  return {
+    processed: out(result.geocoded),
+    accepted: out(result.accepted),
+    remaining: out(result.remaining),
+    still_pending: pendingParts.some((n) => n === null)
+      ? OUTPUT_UNKNOWN
+      : String(pendingParts.reduce((a, b) => a + b, 0)),
+    finished_at: `${now.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+  };
+}
+
+/**
+ * Écrit les outputs dans `$GITHUB_OUTPUT` (heredoc à délimiteur ALÉATOIRE,
+ * même geste que `scripts/ingest/shared.ts:writeGithubOutput` — dupliqué et
+ * PAS importé : ce script est un `.mjs` autonome, sa seule dépendance TS est
+ * `src/core`). Best-effort : hors CI (variable absente) ou canal mort, on log
+ * LOUD et on continue — le drain, lui, a réussi ; c'est la fermeture d'issue
+ * en aval qui sera simplement skippée (garde `still_pending == '0'`, jamais
+ * satisfaite par une valeur absente).
+ *
+ * Pas de garde anti-collision de délimiteur ici (contrairement à `shared.ts`) :
+ * les valeurs sont des ENTIERS et une date formatée, jamais du texte libre venu
+ * de la base — `banBackfillOutputs` est la seule fabrique de ces valeurs.
+ *
+ * @param {Record<string, string>} entries
+ */
+export function writeGithubOutput(entries) {
+  const out = process.env.GITHUB_OUTPUT;
+  if (!out) {
+    const msg =
+      "[ban-backfill] GITHUB_OUTPUT absent — outputs non écrits (run hors GitHub Actions ?)";
+    console.warn(msg);
+    // En CI la variable est TOUJOURS posée : son absence y serait une anomalie
+    // de runner, pas un lancement local → annotation, comme le catch plus bas.
+    console.log(`::warning::${msg}`);
+    return;
+  }
+  const delim = `__BAN_${randomUUID()}__`;
+  const payload = Object.entries(entries)
+    .map(([k, v]) => `${k}<<${delim}\n${v}\n${delim}\n`)
+    .join("");
+  try {
+    appendFileSync(out, payload);
+  } catch (err) {
+    const msg = `[ban-backfill] écriture $GITHUB_OUTPUT échouée — la fermeture d'issue en aval sera skippée: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(msg);
+    console.log(`::error::${msg}`);
+  }
+}
+
+/**
  * Parse `--source rpps|ameli|finess` depuis argv (tolère `--source=ameli`). Défaut
  * `"rpps"`. Une valeur hors `SOURCES` → throw (fail-loud : un drainage mal
  * ciblé doit être BRUYANT, jamais silencieusement redirigé sur RPPS).
@@ -729,18 +823,28 @@ function parseSourceArg(argv) {
   return "rpps";
 }
 
-/** Parse `--max N` depuis argv (tolère `--max=N`). */
-function parseMaxArg(argv) {
+/**
+ * Parse `--max N` depuis argv (tolère `--max=N`). Absent → `undefined` (drain
+ * complet, cas nominal). Une valeur PRÉSENTE mais invalide → throw (doctrine
+ * `parseSourceArg` : un canari mal saisi doit être BRUYANT). Avant, `--max abc`
+ * / `--max 0` retombait sur `undefined` = drainage COMPLET silencieux : le
+ * workflow annonçait « Canari : abc adresses max » puis lançait un drain non
+ * borné de centaines de milliers d'adresses vers la BAN (revue 2026-09-06).
+ */
+export function parseMaxArg(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--max") {
-      const v = Number(argv[i + 1]);
-      return Number.isFinite(v) && v > 0 ? v : undefined;
+    let raw;
+    if (a === "--max") raw = argv[i + 1];
+    else if (a?.startsWith("--max=")) raw = a.slice("--max=".length);
+    else continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0) {
+      throw new Error(
+        `[ban-backfill] --max invalide ${JSON.stringify(raw)} (attendu: nombre > 0) — refus de dégrader un canari en drainage complet`,
+      );
     }
-    if (a?.startsWith("--max=")) {
-      const v = Number(a.slice("--max=".length));
-      return Number.isFinite(v) && v > 0 ? v : undefined;
-    }
+    return Math.floor(v);
   }
   return undefined;
 }
@@ -755,6 +859,10 @@ if (invokedDirectly) {
   console.log(`[ban-backfill] source=${source}${maxNew ? ` --max ${maxNew}` : ""}`);
   runBanBackfill(buildServiceClient(), { source, ...(maxNew ? { maxNew } : {}) })
     .then((r) => {
+      // Compteurs exposés au STEP appelant (fermeture auto de l'issue
+      // `pending-geocode`) AVANT le code de sortie : un exit 2 canari doit
+      // publier `remaining > 0`, c'est ce qui INTERDIT la fermeture.
+      writeGithubOutput(banBackfillOutputs(r));
       // Sortie non-zéro si le drain n'est pas COMPLET, pour que le bouton CI ne
       // mente PAS « vert = 100 % géocodé » (F-2 silent-failure review) :
       //  3 = des chunks BAN ont échoué (apiFailures) → re-run (idempotent, reprend

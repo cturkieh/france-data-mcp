@@ -5,10 +5,12 @@ import { getUntypedServiceClient, oneLine, runIfMain, writeGithubOutput } from "
 /**
  * Alerte ops : signale quand un cron d'ingestion (RPPS / Ameli) vient de poser
  * de nouvelles adresses restant à géocoder (BAN). Le re-géocodage est désormais
- * AUTOMATISÉ (drain BAN en `workflow_run` post-cron, cf.
- * `ban-backfill-{rpps,ameli}.yml`) : l'alerte normale est INFORMATIVE (résidu
- * auto-géocodé, aucune action requise) ; seule la mesure indisponible reste une
- * vraie anomalie actionnable.
+ * AUTOMATISÉ (drain BAN en `workflow_run` post-cron : les boutons
+ * `ban-backfill-{rpps,ameli}.yml` appellent le corps unique `ban-backfill.yml`)
+ * : l'alerte normale est INFORMATIVE (résidu auto-géocodé, aucune action
+ * requise) et le drain la REFERME quand il a vidé la file ; seule la mesure
+ * indisponible reste une vraie anomalie actionnable — d'où son registre de
+ * labels distinct, qu'aucun drain ne ferme (`MEASURE_UNAVAILABLE_LABEL`).
  *
  * Lit la dernière ligne `ingest_log` de la source (le cron vient de l'écrire),
  * décide s'il faut alerter, et expose la décision via `$GITHUB_OUTPUT` — les
@@ -20,8 +22,15 @@ import { getUntypedServiceClient, oneLine, runIfMain, writeGithubOutput } from "
  * sans throw. Le prochain cron retentera.
  */
 
-/** Sources qui posent des adresses BAN (FINESS/CDS n'en posent pas). */
-const SOURCES = ["rpps", "ameli"] as const;
+/**
+ * Sources qui posent des adresses BAN (FINESS/CDS n'en posent pas).
+ *
+ * EXPORTÉ : `workflows-alerting.test.ts` s'en sert pour exiger que CHAQUE
+ * source signalée ici ait un appelant de drain BAN (`ban-backfill-<source>.yml`)
+ * — sans quoi une issue `pending-geocode` s'ouvrirait sans jamais être ni
+ * drainée ni fermée.
+ */
+export const SOURCES = ["rpps", "ameli"] as const;
 type Source = (typeof SOURCES)[number];
 
 /**
@@ -126,14 +135,35 @@ export interface PendingMessage {
   issueBody: string;
   /** Commentaire posé sur l'issue déjà ouverte (idempotence, `upsert-ops-issue`). */
   issueComment: string;
+  /** Labels de l'issue — clé d'idempotence ET registre (cf. `PENDING_GEOCODE_LABEL`). */
+  issueLabels: string[];
 }
+
+/**
+ * Label PRIMAIRE du registre INFORMATIF (résidu BAN normal). C'est CE registre,
+ * et lui seul, que le drain BAN referme quand il a vidé la file
+ * (`ban-backfill.yml`, `action: close`).
+ */
+export const PENDING_GEOCODE_LABEL = "pending-geocode";
+
+/**
+ * Label PRIMAIRE du registre DÉGRADÉ (la RPC de mesure a échoué : comptage
+ * inconnu). DISTINCT du précédent, et pas un simple label en plus : le filtre
+ * `labels` de l'API GitHub est un ET, une issue portant un label de PLUS
+ * matcherait toujours `pending-geocode,<source>` — et un drain réussi, qui ne
+ * dit RIEN de l'état de la RPC de mesure, aurait fermé la seule alerte
+ * actionnable du canal (revue 2026-09-06).
+ */
+export const MEASURE_UNAVAILABLE_LABEL = "pending-geocode-measure";
 
 /**
  * Wording unique (email + issue), composé ici et TESTÉ — plus dans un step bash
  * du YAML (un heredoc multi-ligne y a déjà cassé le parse de la composite, ce
- * que le test de câblage textuel ne voyait pas). Deux registres : mesure amont
- * indisponible = message DÉGRADÉ (surtout pas « 0 adresses », trompeur) ;
- * résidu normal = INFORMATIF (le drain BAN auto géocode, aucune action manuelle).
+ * que le test de câblage textuel ne voyait pas). Deux registres, DEUX jeux de
+ * labels : mesure amont indisponible = message DÉGRADÉ (surtout pas
+ * « 0 adresses », trompeur) que rien ne ferme automatiquement ; résidu normal =
+ * INFORMATIF (le drain BAN auto géocode, aucune action manuelle) que le drain
+ * referme quand la file est vide.
  */
 export function composePendingMessage(
   source: Source,
@@ -149,6 +179,7 @@ export function composePendingMessage(
       issueTitle: `[pending-geocode] ${label} : ⚠️ mesure des adresses à géocoder indisponible`,
       issueBody: `${body}\n\nRun : ${runUrl}`,
       issueComment: `⚠️ Mesure des adresses ${label} à géocoder INDISPONIBLE (RPC de mesure échouée) — comptage inconnu, vérifier le cron.\n\nRun : ${runUrl}`,
+      issueLabels: [MEASURE_UNAVAILABLE_LABEL, source],
     };
   }
   const n = decision.pending;
@@ -163,6 +194,7 @@ export function composePendingMessage(
       `Run : ${runUrl}`,
     ].join("\n\n"),
     issueComment: `🔄 Mise à jour : **${n}** adresses ${label} en attente de géocodage automatique (drain BAN auto à suivre).\n\nRun : ${runUrl}`,
+    issueLabels: [PENDING_GEOCODE_LABEL, source],
   };
 }
 
@@ -227,6 +259,9 @@ export async function runNotifyCheck(source: Source): Promise<NotifyDecision> {
       issue_title: msg.issueTitle,
       issue_body: msg.issueBody,
       issue_comment: msg.issueComment,
+      // Le REGISTRE (informatif / dégradé) vient de la décision, jamais du
+      // YAML : c'est lui qui décide si le drain BAN pourra refermer l'issue.
+      issue_labels: msg.issueLabels.join(","),
     });
   }
   writeGithubOutput("notify-pending-geocode", outputs);
