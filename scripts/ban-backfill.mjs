@@ -20,6 +20,8 @@
 // client BAN sont comptés et exposés (jamais un arrêt silencieux ayant fait
 // une fraction tout en rapportant un succès — la classe de bug combattue).
 
+import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
 import {
   banLastStatus,
@@ -708,6 +710,64 @@ export async function runBanBackfill(supabase, opts = {}) {
 }
 
 /**
+ * Compteurs du run exposés au workflow (`$GITHUB_OUTPUT`), déjà tous présents
+ * dans le log `DONE:` — ce n'est qu'un second média, lisible par un STEP.
+ * Consommés par `ban-backfill.yml` : le step « Close pending-geocode issue »
+ * ne ferme QUE si `remaining === "0"` (file réellement vidée, jamais un canari)
+ * et compose son commentaire avec `processed` / `accepted` / `finished_at`.
+ *
+ * `finished_at` est déjà formaté (UTC, minute) : GitHub Actions n'a aucune
+ * fonction de date en expression, composer la ligne côté YAML est impossible.
+ *
+ * @param {{geocoded?: number, accepted?: number, remaining?: number}} result Retour de `runBanBackfill`.
+ * @param {Date} [now] Injectable pour le test.
+ * @returns {Record<string, string>}
+ */
+export function banBackfillOutputs(result, now = new Date()) {
+  return {
+    processed: String(result.geocoded ?? 0),
+    accepted: String(result.accepted ?? 0),
+    remaining: String(result.remaining ?? 0),
+    finished_at: `${now.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+  };
+}
+
+/**
+ * Écrit les outputs dans `$GITHUB_OUTPUT` (heredoc à délimiteur ALÉATOIRE,
+ * même geste que `scripts/ingest/shared.ts:writeGithubOutput` — dupliqué et
+ * PAS importé : ce script est un `.mjs` autonome, sa seule dépendance TS est
+ * `src/core`). Best-effort : hors CI (variable absente) ou canal mort, on log
+ * LOUD et on continue — le drain, lui, a réussi ; c'est la fermeture d'issue
+ * en aval qui sera simplement skippée (garde `remaining == '0'`).
+ *
+ * Pas de garde anti-collision de délimiteur ici (contrairement à `shared.ts`) :
+ * les valeurs sont des ENTIERS et une date formatée, jamais du texte libre venu
+ * de la base — `banBackfillOutputs` est la seule fabrique de ces valeurs.
+ *
+ * @param {Record<string, string>} entries
+ */
+export function writeGithubOutput(entries) {
+  const out = process.env.GITHUB_OUTPUT;
+  if (!out) {
+    console.warn(
+      "[ban-backfill] GITHUB_OUTPUT absent — outputs non écrits (run hors GitHub Actions ?)",
+    );
+    return;
+  }
+  const delim = `__BAN_${randomUUID()}__`;
+  const payload = Object.entries(entries)
+    .map(([k, v]) => `${k}<<${delim}\n${v}\n${delim}\n`)
+    .join("");
+  try {
+    appendFileSync(out, payload);
+  } catch (err) {
+    const msg = `[ban-backfill] écriture $GITHUB_OUTPUT échouée — la fermeture d'issue en aval sera skippée: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(msg);
+    console.log(`::error::${msg}`);
+  }
+}
+
+/**
  * Parse `--source rpps|ameli|finess` depuis argv (tolère `--source=ameli`). Défaut
  * `"rpps"`. Une valeur hors `SOURCES` → throw (fail-loud : un drainage mal
  * ciblé doit être BRUYANT, jamais silencieusement redirigé sur RPPS).
@@ -755,6 +815,10 @@ if (invokedDirectly) {
   console.log(`[ban-backfill] source=${source}${maxNew ? ` --max ${maxNew}` : ""}`);
   runBanBackfill(buildServiceClient(), { source, ...(maxNew ? { maxNew } : {}) })
     .then((r) => {
+      // Compteurs exposés au STEP appelant (fermeture auto de l'issue
+      // `pending-geocode`) AVANT le code de sortie : un exit 2 canari doit
+      // publier `remaining > 0`, c'est ce qui INTERDIT la fermeture.
+      writeGithubOutput(banBackfillOutputs(r));
       // Sortie non-zéro si le drain n'est pas COMPLET, pour que le bouton CI ne
       // mente PAS « vert = 100 % géocodé » (F-2 silent-failure review) :
       //  3 = des chunks BAN ont échoué (apiFailures) → re-run (idempotent, reprend

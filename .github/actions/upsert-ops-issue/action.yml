@@ -12,29 +12,44 @@
 # une issue de repli pointant sur le run — jamais un abandon, le step n'a été
 # atteint que parce que l'appelant a DÉJÀ décidé d'alerter. L'API issues en
 # panne → `core.warning`, jamais d'échec de step (un cron réussi ne doit pas
-# re-rougir). Expose `outcome` ∈ created | commented | failed pour que
-# l'appelant module ses AUTRES canaux : l'email « source tarie » ne part que
-# si l'issue est OUVERTE ou si ce canal a ÉCHOUÉ — jamais sur un commentaire.
+# re-rougir). Expose `outcome` ∈ created | commented | closed | absent | failed
+# pour que l'appelant module ses AUTRES canaux : l'email « source tarie » ne
+# part que si l'issue est OUVERTE ou si ce canal a ÉCHOUÉ — jamais sur un
+# commentaire.
+#
+# DEUX SENS depuis 2026-09-06 (input `action`) : l'ouverture (défaut, inchangée)
+# ET la FERMETURE, quand le drain BAN a vidé la file que `notify-pending-geocode`
+# avait signalée (#56 et #63 ont dû être fermées à la main). Garder les deux ici
+# préserve l'invariant « émetteur UNIQUE d'issues » : un seul fichier de `.github/`
+# liste, commente et ferme. La logique de fermeture vit dans `close-ops-issue.cjs`
+# (chargé par `require`) pour être TESTÉE hors Actions.
 name: Upsert ops issue
 description: >
-  Ouvre une issue GitHub, ou commente l'issue ouverte portant déjà les mêmes
-  labels (idempotence). Best-effort : warning au lieu d'échec.
+  Ouvre une issue GitHub, commente l'issue ouverte portant déjà les mêmes labels
+  (idempotence), ou la FERME (action: close). Best-effort : warning au lieu d'échec.
 
 inputs:
+  action:
+    description: "`open` (défaut : ouvre ou commente) | `close` (ferme l'issue ouverte portant les labels)."
+    required: false
+    default: "open"
   labels:
-    description: "Labels de l'issue, séparés par des virgules. Clé d'idempotence (AND sur tous)."
+    description: "Labels de l'issue, séparés par des virgules. Clé d'idempotence (AND sur tous), et FILTRE de fermeture — vide = refus net."
     required: true
   title:
-    description: "Titre à la création."
-    required: true
+    description: "Titre à la création (action `open` uniquement)."
+    required: false
+    default: ""
   body:
-    description: "Corps à la création (Markdown)."
-    required: true
+    description: "Corps à la création (Markdown ; action `open` uniquement)."
+    required: false
+    default: ""
   comment:
-    description: "Corps du commentaire quand une issue ouverte existe déjà."
-    required: true
+    description: "Corps du commentaire posté sur l'issue déjà ouverte (`open`) ou avant sa fermeture (`close`)."
+    required: false
+    default: ""
   github-token:
-    description: "Token pour créer/commenter l'issue."
+    description: "Token pour créer/commenter/fermer l'issue."
     required: true
   run-url:
     description: "URL du run (repli quand le corps est vide)."
@@ -43,7 +58,7 @@ inputs:
 
 outputs:
   outcome:
-    description: "`created` (issue OUVERTE par cet appel), `commented` (issue existante commentée) ou `failed` (API en échec, ou step mort → vide)."
+    description: "`created` (issue OUVERTE par cet appel), `commented` (issue existante commentée), `closed` (issue fermée), `absent` (rien d'ouvert à fermer) ou `failed` (API en échec, action inconnue, ou step mort → vide)."
     value: ${{ steps.upsert.outputs.outcome }}
 
 runs:
@@ -53,6 +68,11 @@ runs:
       id: upsert
       uses: actions/github-script@v9
       env:
+        ACTION: ${{ inputs.action }}
+        # Chemin ABSOLU du répertoire de cette action (seul contexte qui le
+        # donne dans une composite) : `require` d'un chemin relatif se
+        # résoudrait depuis le workspace, pas depuis l'action.
+        ACTION_PATH: ${{ github.action_path }}
         LABELS: ${{ inputs.labels }}
         TITLE: ${{ inputs.title }}
         BODY: ${{ inputs.body }}
@@ -62,10 +82,31 @@ runs:
         github-token: ${{ inputs.github-token }}
         script: |
           // Défaut PESSIMISTE : tout chemin qui ne pose pas explicitement
-          // created/commented est un échec (y compris une exception hors try).
+          // created/commented/closed/absent est un échec (y compris une
+          // exception hors try).
           core.setOutput('outcome', 'failed');
           const runUrl = process.env.RUN_URL || '(run inconnu)';
           let labels = process.env.LABELS.split(',').map((l) => l.trim()).filter(Boolean);
+          const action = process.env.ACTION || 'open';
+          // Fail-loud : une action inconnue (typo d'appelant) ne doit SURTOUT
+          // pas retomber sur `open` — elle créerait une issue à contretemps.
+          if (action !== 'open' && action !== 'close') {
+            core.error(`upsert-ops-issue : action inconnue « ${action} » (attendu open|close) — AUCUNE issue touchée. Run : ${runUrl}`);
+            return;
+          }
+          if (action === 'close') {
+            // Logique dans un .cjs TESTÉ (close-ops-issue.test.ts) : un canal
+            // d'alerte ne doit pas n'être vérifiable que par assertion textuelle.
+            try {
+              const { closeOpsIssue } = require(`${process.env.ACTION_PATH}/close-ops-issue.cjs`);
+              core.setOutput('outcome', await closeOpsIssue({ github, context, core, labels, comment: process.env.COMMENT, runUrl }));
+            } catch (err) {
+              // Câblage rompu (fichier absent, chemin faux) : ::error:: — c'est
+              // un bug de dépôt, pas une panne d'API — mais jamais un throw.
+              core.error(`upsert-ops-issue : close-ops-issue.cjs INCHARGEABLE (câblage rompu, aucune issue fermée) : ${err.message}. Run : ${runUrl}`);
+            }
+            return;
+          }
           let title = process.env.TITLE;
           let body = process.env.BODY;
           let comment = process.env.COMMENT;

@@ -20,8 +20,15 @@ import { getUntypedServiceClient, oneLine, runIfMain, writeGithubOutput } from "
  * sans throw. Le prochain cron retentera.
  */
 
-/** Sources qui posent des adresses BAN (FINESS/CDS n'en posent pas). */
-const SOURCES = ["rpps", "ameli"] as const;
+/**
+ * Sources qui posent des adresses BAN (FINESS/CDS n'en posent pas).
+ *
+ * EXPORTÉ : `workflows-alerting.test.ts` s'en sert pour exiger que CHAQUE
+ * source signalée ici ait un appelant de drain BAN (`ban-backfill-<source>.yml`)
+ * — sans quoi une issue `pending-geocode` s'ouvrirait sans jamais être ni
+ * drainée ni fermée.
+ */
+export const SOURCES = ["rpps", "ameli"] as const;
 type Source = (typeof SOURCES)[number];
 
 /**

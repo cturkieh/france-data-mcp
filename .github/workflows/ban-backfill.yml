@@ -1,0 +1,179 @@
+# Drain BAN — workflow RÉUTILISABLE (`workflow_call`), corps UNIQUE des trois
+# boutons `ban-backfill-{rpps,ameli,finess}.yml`.
+#
+# Ce que fait un drain : géocoder le résidu d'adresses éligibles pas encore en
+# cache (`geocoded_addresses`) et REMPLIR ce cache. CACHE-ONLY : il n'écrit
+# JAMAIS la table servie — les coords y sont POSÉES au prochain cron de la
+# source via `ban_join` (décalage d'UNE passe, par design ; cf.
+# docs/plans/ban-join.md). Idempotent : si le cron a court-circuité (checksum
+# identique), le drain dit « nothing to do » (coût négligeable).
+#
+# Énumération ROBUSTE : keyset sur la PK via `<source>_eligible_rows_after_id` —
+# AUCUN index BAN à construire (2 dead-ends prouvés prod 2026-06-05 : build
+# d'index via RPC = cap passerelle 60 s ; passe unique = ~147k évals > 55 s).
+#
+# POURQUOI un `workflow_call` et pas une composite : une composite ne peut
+# référencer NI `job.*` NI `secrets.*` (prouvé prod, run #33960886473 : la seule
+# PROSE `job.status` dans une description faisait échouer le CHARGEMENT de
+# l'action → alerte muette). Un workflow réutilisable, lui, lit `job.status` et
+# accepte `secrets: inherit` — c'est le seul véhicule qui factorise un corps de
+# job PORTANT une alerte.
+#
+# Les six valeurs qui variaient entre les trois copies sont des inputs ; les
+# appelants (~40 lignes) portent le déclencheur, la concurrence et la doctrine
+# propre à leur source.
+name: Drain BAN (réutilisable)
+
+on:
+  workflow_call:
+    inputs:
+      source:
+        description: "Slug source du drain (`--source` de scripts/ban-backfill.mjs) : rpps | ameli | finess."
+        type: string
+        required: true
+      source-label:
+        description: "Libellé humain (nom du step, alerte ops) : RPPS | Ameli | FINESS."
+        type: string
+        required: true
+      issue-labels:
+        description: "Labels de l'issue d'ÉCHEC, séparés par des virgules (ex. `backfill-failure,rpps`)."
+        type: string
+        required: true
+      failure-modes:
+        description: "Causes fréquentes propres à la source, ajoutées au corps de l'issue d'échec."
+        type: string
+        required: true
+      killed-hint:
+        description: "Conséquence propre à la source quand le run est TUÉ (timeout / annulation)."
+        type: string
+        required: true
+      max:
+        description: "Nb max de NOUVELLES adresses géocodées ce run (canari). Vide = drainage complet."
+        type: string
+        required: false
+        default: ""
+      tolerate-canary-backlog:
+        description: >
+          `true` : le code de sortie 2 du script (backlog restant APRÈS un canari
+          borné) vaut SUCCÈS. Sans ça, chaque canari d'une source au résiduel
+          large ouvrirait une issue « backfill-failure » pour un comportement
+          nominal. N'a d'effet qu'avec `max` renseigné.
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  issues: write # alerte notify-ingest-failure + fermeture pending-geocode
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # Énumération keyset (pages bornées) + géocodage BAN du résidu (~quelques
+    # milliers d'adresses, chunké). 30 min = large marge (jours BAN lents).
+    timeout-minutes: 30
+    steps:
+      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
+      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
+      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
+      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
+      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
+      - uses: actions/checkout@v6
+
+      # Preflight secrets AVANT install (convention nouveaux workflows Supabase ;
+      # après le checkout, cf. ci-dessus) : échec EXPLICITE et immédiat si un secret manque, plutôt qu'une
+      # panne opaque au 1er appel RPC.
+      - name: Validate required secrets present
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          missing=()
+          [ -z "$SUPABASE_URL" ] && missing+=("SUPABASE_URL")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Secrets manquants: ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Drain BAN ${{ inputs.source-label }} (géocode le résidu → remplit le cache)
+        id: drain
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Inputs passés via env (jamais interpolés dans le shell = anti-injection).
+          MAX: ${{ inputs.max }}
+          SOURCE: ${{ inputs.source }}
+          TOLERATE_CANARY_BACKLOG: ${{ inputs.tolerate-canary-backlog }}
+        run: |
+          if [ -n "$MAX" ]; then
+            echo "Canari : $MAX adresses max"
+            set +e
+            pnpm exec tsx scripts/ban-backfill.mjs --source "$SOURCE" --max "$MAX"; code=$?
+            set -e
+            # Exit 2 = backlog restant APRÈS un canari borné : nominal, pas une
+            # panne — pour les sources qui le déclarent tolérable.
+            if [ "$code" -eq 2 ] && [ "$TOLERATE_CANARY_BACKLOG" = "true" ]; then
+              echo "::notice::canari OK, backlog restant (exit 2 attendu avec --max)"
+              exit 0
+            fi
+            exit "$code"
+          else
+            echo "Drainage complet"
+            pnpm exec tsx scripts/ban-backfill.mjs --source "$SOURCE"
+          fi
+
+      # Fermeture AUTOMATIQUE de l'issue de surveillance `pending-geocode`
+      # ouverte par `notify-pending-geocode` après un cron : le drain qui vide la
+      # file EST le signal de fermeture (avant ce step, #56 et #63 sont restées
+      # ouvertes jusqu'à une fermeture manuelle le 2026-09-06).
+      #
+      # Trois gardes, toutes nécessaires : `success()` (exit 0 — un exit 3
+      # apiFailures ou un exit 1 fatal a déjà rougi le job), `inputs.max == ''`
+      # (un canari NE VIDE PAS la file, même quand son exit 2 est toléré) et
+      # `remaining == '0'` (ceinture : le compteur du script lui-même ; vide ou
+      # absent = pas de fermeture, cf. `writeGithubOutput` best-effort).
+      # `continue-on-error` : un drain RÉUSSI ne doit jamais rougir parce que
+      # l'API issues a hoqueté (la composite log déjà LOUD).
+      - name: Close pending-geocode issue
+        if: success() && inputs.max == '' && steps.drain.outputs.remaining == '0'
+        continue-on-error: true
+        uses: ./.github/actions/upsert-ops-issue
+        with:
+          action: close
+          # MÊME clé que `notify-pending-geocode` (labels: pending-geocode,<source>) :
+          # ce qu'une source ouvre, son drain le referme.
+          labels: pending-geocode,${{ inputs.source }}
+          comment: "✅ File vidée par le drain du ${{ steps.drain.outputs.finished_at }} : ${{ steps.drain.outputs.processed }} adresses traitées, ${{ steps.drain.outputs.accepted }} acceptées. Run : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
+        with:
+          source-label: Backfill BAN ${{ inputs.source-label }}
+          ingest-log-source: "" # pas d'ingest_log côté backfill (cache-only)
+          issue-labels: ${{ inputs.issue-labels }}
+          failure-modes: ${{ inputs.failure-modes }}
+          killed-hint: ${{ inputs.killed-hint }}
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

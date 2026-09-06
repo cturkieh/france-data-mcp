@@ -4,6 +4,55 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+### Changed
+
+- **Drain BAN : un `workflow_call` + trois appelants, et les issues
+  `pending-geocode` se ferment toutes seules** (backlog FINESS phase 2, item 9 ;
+  plan `docs/plans/finess-phase-2-cloture.md` §3). Les trois fichiers
+  `ban-backfill-{rpps,ameli,finess}.yml` (121-132 lignes chacun, **six** valeurs
+  divergentes + un bloc d'exit code 2 propre à FINESS) deviennent un corps
+  UNIQUE `.github/workflows/ban-backfill.yml` (`on: workflow_call`, inputs
+  `source`, `source-label`, `issue-labels`, `failure-modes`, `killed-hint`,
+  `max`, `tolerate-canary-backlog`) et trois appelants de ~55 lignes qui ne
+  portent plus que le déclencheur (`workflow_run` + `workflow_dispatch`), la
+  concurrence, la garde `conclusion == 'success'`, `permissions` (GitHub les
+  calcule chez l'appelant) et `secrets: inherit`. Un `workflow_call` et pas une
+  composite : une composite ne peut lire NI `job.*` NI `secrets.*` (prouvé prod,
+  run #33960886473) — le corps porte justement l'alerte `job-status`. Toute
+  correction du drain (le `cancelled()` de septembre) ne se recopie plus 3 fois.
+- **Fermeture automatique des issues `pending-geocode`** — `notify-pending-geocode`
+  ouvrait une issue de surveillance après chaque cron et **rien** ne la fermait :
+  #56 (Ameli) et #63 (RPPS) ont dû l'être à la main le 2026-09-06. Le drain qui
+  vide la file EST le signal : le step « Close pending-geocode issue » appelle
+  `upsert-ops-issue` (nouvel input `action: open | close` — l'émetteur d'issues
+  reste UNIQUE, invariant vérifié par `workflows-alerting.test.ts`) sous trois
+  gardes — `success()`, `inputs.max == ''` (un canari ne vide pas la file) et
+  `steps.drain.outputs.remaining == '0'`. `scripts/ban-backfill.mjs` publie
+  `processed` / `accepted` / `remaining` / `finished_at` en `$GITHUB_OUTPUT`
+  (heredoc à délimiteur aléatoire, patron `shared.ts`) ; le commentaire de
+  fermeture dit « ✅ File vidée par le drain du &lt;date UTC&gt; : N adresses
+  traitées, M acceptées ». Best-effort de bout en bout (`continue-on-error` +
+  `core.warning`/`core.error`) : une API issues en panne ne rougit jamais un
+  drain réussi. La logique GitHub API vit dans
+  `.github/actions/upsert-ops-issue/close-ops-issue.cjs` — TESTÉE
+  (`close-ops-issue.test.ts`, 7 cas : labels vides = refus net, PR écartées,
+  commentaire avant fermeture, API en panne) et chargée par `require` comme le
+  fait le runner, plutôt qu'un bloc inline vérifiable seulement par grep.
+- **`workflows-alerting.test.ts` partitionne par parse YAML** (au lieu d'un
+  `>= 8` implicite) : 1 réutilisable + 3 appelants + 7 workflows à steps + 3
+  exemptés, liste attendue EXPLICITE et exhaustive. Nouvelles assertions : un
+  appelant délègue bien au réutilisable, son `with.source` est cohérent avec le
+  nom du fichier, `secrets: inherit` et `permissions.issues: write` sont
+  présents, et le cron cité par `workflow_run` porte le `name:` EXACT d'un
+  `ingest-*.yml` existant (un nom faux = drain auto jamais déclenché, silence
+  total) ; chaque source de `notify-pending-geocode` (`SOURCES`, désormais
+  exporté) a un drain qui la referme. **Prouvé en conditions réelles** : les
+  trois appelants lancés en canari (`max=5`), FINESS en exit 2 toléré → vert,
+  et une issue de test `pending-geocode,ameli` fermée automatiquement par un
+  drain Ameli complet.
+
 ## [0.29.0] — 2026-09-06 — FINESS phase 2 : géocodage BAN du résiduel (+2 720 points, couverture 94,97 % → 97,57 %), libellés de catégorie source unique SMT/ANS, vigie post-cron « run vert mais donnée malade » (issue + email), planchers relatifs Ameli/RPPS/IRIS
 
 > Surface MCP : 13 référentiels / 36 outils inchangés. Deux migrations appliquées en prod (`20260906T120000`, `20260906T140000`), premier run réel de la pose BAN le 2026-09-06, chaîne d'alerte (issue #76 + email) exercée en conditions réelles. PR #70, #73, #74, #77.

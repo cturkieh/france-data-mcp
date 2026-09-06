@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BanGeocodeBatchOutcome, GeocodedCacheRow } from "../src/core/index.js";
 import { normalizeAddressKey } from "../src/core/index.js";
@@ -30,7 +33,9 @@ vi.mock("../src/core/index.js", async (importOriginal) => {
 });
 
 // @ts-expect-error import .mjs sans déclaration de types
-const { runBanBackfill, SOURCES, assertSourcesValid } = await import("./ban-backfill.mjs");
+const banBackfill = await import("./ban-backfill.mjs");
+const { runBanBackfill, SOURCES, assertSourcesValid, banBackfillOutputs, writeGithubOutput } =
+  banBackfill;
 
 function banOutcome(
   results: Array<
@@ -1151,5 +1156,68 @@ describe("assertSourcesValid : garde structurel SOURCES (anti mis-pagination S-1
         x: { ...base, cursorParam: "p_after", cursorField: "address_key", cursorInit: null },
       }),
     ).not.toThrow();
+  });
+});
+
+describe("outputs $GITHUB_OUTPUT — le drain rend ses compteurs lisibles par le STEP suivant", () => {
+  // Consommés par `ban-backfill.yml` : `remaining` GARDE la fermeture auto de
+  // l'issue `pending-geocode` (un canari, exit 2, laisse remaining > 0 → pas de
+  // fermeture) ; `processed`/`accepted`/`finished_at` composent son commentaire.
+  it("mappe les compteurs du run et FORMATE la date en UTC (Actions n'a aucune fonction de date)", () => {
+    expect(
+      banBackfillOutputs(
+        { geocoded: 1234, accepted: 1200, remaining: 0 },
+        new Date("2026-09-06T12:34:56.789Z"),
+      ),
+    ).toEqual({
+      processed: "1234",
+      accepted: "1200",
+      remaining: "0",
+      finished_at: "2026-09-06 12:34 UTC",
+    });
+  });
+
+  it("compteurs absents → 0 (jamais `undefined` : le step lirait une chaîne vide et ne fermerait rien)", () => {
+    expect(banBackfillOutputs({}, new Date("2026-09-06T00:00:00Z"))).toMatchObject({
+      processed: "0",
+      accepted: "0",
+      remaining: "0",
+    });
+  });
+
+  it("canari : remaining > 0 est publié TEL QUEL (c'est ce qui INTERDIT la fermeture d'issue)", () => {
+    expect(banBackfillOutputs({ geocoded: 5, accepted: 5, remaining: 1897 }).remaining).toBe(
+      "1897",
+    );
+  });
+
+  it("écrit un heredoc à délimiteur aléatoire, relisible par GitHub Actions", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "ban-backfill-out-")), "out.txt");
+    writeFileSync(file, "");
+    const prev = process.env.GITHUB_OUTPUT;
+    process.env.GITHUB_OUTPUT = file;
+    try {
+      writeGithubOutput({ processed: "12", remaining: "0" });
+    } finally {
+      // `Reflect.deleteProperty` et pas `delete` (règle biome noDelete).
+      if (prev === undefined) Reflect.deleteProperty(process.env, "GITHUB_OUTPUT");
+      else process.env.GITHUB_OUTPUT = prev;
+    }
+    const written = readFileSync(file, "utf8");
+    expect(written).toMatch(/^processed<<__BAN_[0-9a-f-]+__\n12\n__BAN_[0-9a-f-]+__\n/);
+    expect(written).toMatch(/remaining<<__BAN_[0-9a-f-]+__\n0\n/);
+  });
+
+  it("hors GitHub Actions (variable absente) : warn LOUD, aucun throw (le drain, lui, a réussi)", () => {
+    const prev = process.env.GITHUB_OUTPUT;
+    Reflect.deleteProperty(process.env, "GITHUB_OUTPUT");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => writeGithubOutput({ processed: "1" })).not.toThrow();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("GITHUB_OUTPUT absent"));
+    } finally {
+      warn.mockRestore();
+      if (prev !== undefined) process.env.GITHUB_OUTPUT = prev;
+    }
   });
 });
