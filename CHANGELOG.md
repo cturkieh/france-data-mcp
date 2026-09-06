@@ -4,7 +4,9 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.29.0] — 2026-09-06 — FINESS phase 2 : géocodage BAN du résiduel (+2 720 points, couverture 94,97 % → 97,57 %), libellés de catégorie source unique SMT/ANS, vigie post-cron « run vert mais donnée malade » (issue + email), planchers relatifs Ameli/RPPS/IRIS
+
+> Surface MCP : 13 référentiels / 36 outils inchangés. Deux migrations appliquées en prod (`20260906T120000`, `20260906T140000`), premier run réel de la pose BAN le 2026-09-06, chaîne d'alerte (issue #76 + email) exercée en conditions réelles. PR #70, #73, #74, #77.
 
 ### Added
 

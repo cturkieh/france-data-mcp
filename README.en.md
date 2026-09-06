@@ -82,15 +82,9 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.27.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+✅ **v0.29.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
-> Latest release (v0.27.0): more robust ingestion — BAN geocoding on two hosts with automatic fallback, refined RPPS practitioner positions (FINESS facility, re-geocoded addresses). Surface unchanged (13 reference datasets / 36 tools).
-
-### Roadmap
-
-- [ ] **v1.0+**: DOM-COM (IRIS + health), DPC.
-
-Shipped-version history: [CHANGELOG](CHANGELOG.md).
+> Latest release (v0.29.0): FINESS now fed by the daily ANS feed (the DREES CSV had gone stale), 97.6% of facilities geolocated, post-cron watchdog that opens an issue and emails when a green run serves unhealthy data. Surface unchanged (13 reference datasets / 36 tools).
 
 ---
 

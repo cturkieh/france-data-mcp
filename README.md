@@ -131,15 +131,9 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.27.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.29.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
-> Dernière version (V0.27.0) : ingestion plus robuste — géocodage BAN sur deux hôtes avec repli automatique, positions des professionnels RPPS affinées (établissement FINESS, adresses re-géocodées). Surface inchangée (13 référentiels / 36 outils).
-
-### Roadmap
-
-- [ ] **V1.0+** : DOM-COM (IRIS + santé), DPC.
-
-Historique des versions livrées : [CHANGELOG](CHANGELOG.md).
+> Dernière version (V0.29.0) : FINESS alimenté par le flux ANS quotidien (le CSV DREES s'était tari), 97,6 % des établissements géolocalisés, vigie post-cron qui ouvre une issue et envoie un email quand un run vert sert une donnée malade. Surface inchangée (13 référentiels / 36 outils).
 
 ---
 
