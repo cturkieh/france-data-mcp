@@ -59,6 +59,7 @@ export {
   FINESS_EHPAD,
   FINESS_MSP_CPTS,
   libelleCategorieFiness,
+  isFinessCategorieCode,
   finessFamille,
   type FinessCategorieCode,
   type FinessFamille,

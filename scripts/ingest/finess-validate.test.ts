@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { FINESS_CATEGORIE_LABELS_REFRESHED_AT } from "../../src/sante/finess-categories-labels.js";
 import {
   COORDS_UNUSABLE_FAIL_RATE,
   type IngestStreamStats,
@@ -13,10 +14,12 @@ import {
   MIN_GEOM_COVERAGE,
   MIN_ROWS,
   MOVED_MAX_RATE,
+  NOMENCLATURE_MAX_AGE_DAYS,
   REMOVED_MAX_RATE,
   type StagingDiff,
   assessParsedRows,
   assessStagingDiff,
+  nomenclatureAgeDays,
 } from "./finess-validate.js";
 
 /** Run réel du 2026-09-05 21:24 UTC (dry-run n°3 identique). */
@@ -151,7 +154,7 @@ describe("assessParsedRows — chiffres réels", () => {
       realStats({ unknownCategorieCounts: new Map([["999", 60_000]]) }),
     );
     expect(broken.fatal[0]).toMatch(/"autre" rate 57\.29% above 50\.00%/);
-    // finess-categories-labels.json tronqué : des milliers de libellés NULL.
+    // finess-categories-labels.ts tronqué : des milliers de libellés NULL.
     const emptied = assessParsedRows(realStats({ missingLabelCounts: new Map([["620", 19_921]]) }));
     expect(emptied.fatal[0]).toMatch(/19921 rows \(19\.02%\) without categorie_libelle/);
   });
@@ -230,5 +233,20 @@ describe("assessStagingDiff — chiffres réels et dérives", () => {
       realDiff({ staging_rows: 0, staging_geom_null: 0 }),
     );
     expect(a.fatal[0]).toMatch(/Only 0\/0 rows have a geom \(0\.00%/);
+  });
+});
+
+describe("assessParsedRows — âge de la nomenclature TRE_R397 (post-mortem DREES transposé)", () => {
+  const refreshed = Date.parse(FINESS_CATEGORIE_LABELS_REFRESHED_AT);
+  const day = 86_400_000;
+
+  it("info à chaque run ; warn (jamais fatal) au-delà de NOMENCLATURE_MAX_AGE_DAYS", () => {
+    const fresh = assessParsedRows(realStats(), refreshed + 10 * day);
+    expect(fresh.info.some((l) => /nomenclature TRE_R397 figée depuis 10 j/.test(l))).toBe(true);
+    expect(fresh.warnings.some((l) => /nomenclature TRE_R397 vieille/.test(l))).toBe(false);
+    const old = assessParsedRows(realStats(), refreshed + (NOMENCLATURE_MAX_AGE_DAYS + 1) * day);
+    expect(old.warnings.some((l) => /vieille de 181 j/.test(l))).toBe(true);
+    expect(old.fatal).toEqual([]);
+    expect(nomenclatureAgeDays(refreshed + 5 * day)).toBe(5);
   });
 });

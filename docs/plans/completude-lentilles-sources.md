@@ -156,7 +156,7 @@ révèle une dérive à deux faces :
 
 | Code | Libellé catalogue | Famille MCP | Conséquence |
 |---|---|---|---|
-| `108` | Centre Hospitalier Universitaire (C.H.U.) | `mco` | Inerte (les CHU sont en `101`/`355`) — bénin |
+| `108` | Etablissement de Convalescence et de Repos (libellé SMT ; l'ancien catalogue disait « C.H.U. ») | `ssr` depuis le 2026-09-06 | Inerte (0 établissement) — bénin |
 | `600` | Foyer d'hébergement pour adultes handicapés | `handicap_adultes` | Inerte — bénin |
 | **`619`** | **Cabinet d'imagerie médicale** | **`imagerie`** | **`famille=imagerie` renvoie 0 ligne, toujours — bug actif** |
 
