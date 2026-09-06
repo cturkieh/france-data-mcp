@@ -77,6 +77,25 @@ describe("closeOpsIssue — fermeture best-effort de l'issue de surveillance", (
     expect(core.error.mock.calls[0]?.[0]).toMatch(/labels VIDES/);
   });
 
+  it.each([[[""]], [["  "]], [[null as unknown as string]], [undefined as unknown as string[]]])(
+    'labels BLANCS/invalides (%j) → refus AUSSI : `labels=""` ferait lister TOUT le dépôt',
+    async (labels) => {
+      const core = fakeCore();
+      const { github, calls } = fakeGithub([{ number: 1 }]);
+      const outcome = await closeOpsIssue({
+        github,
+        context,
+        core,
+        labels,
+        comment: "peu importe",
+        runUrl: RUN_URL,
+      });
+      expect(outcome).toBe("failed");
+      expect(calls.listForRepo).not.toHaveBeenCalled();
+      expect(core.error).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("aucune issue ouverte → `absent` (cas nominal : rien à fermer, aucun bruit)", async () => {
     const core = fakeCore();
     const { github, calls } = fakeGithub([]);
@@ -153,6 +172,21 @@ describe("closeOpsIssue — fermeture best-effort de l'issue de surveillance", (
     });
     expect(outcome).toBe("absent");
     expect(calls.update).not.toHaveBeenCalled();
+  });
+
+  it("page PLEINE (100) → warning : ne jamais rendre un « closed » qui ment sur le reste", async () => {
+    const core = fakeCore();
+    const { github } = fakeGithub(Array.from({ length: 100 }, (_, i) => ({ number: i + 1 })));
+    const outcome = await closeOpsIssue({
+      github,
+      context,
+      core,
+      labels: ["pending-geocode", "ameli"],
+      comment: "✅ File vidée",
+      runUrl: RUN_URL,
+    });
+    expect(outcome).toBe("closed");
+    expect(core.warning.mock.calls[0]?.[0]).toMatch(/page pleine/);
   });
 
   it("API en panne → `failed` + LOUD (warning), JAMAIS de throw (le drain a réussi)", async () => {

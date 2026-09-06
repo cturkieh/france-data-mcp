@@ -140,15 +140,24 @@ jobs:
       # file EST le signal de fermeture (avant ce step, #56 et #63 sont restées
       # ouvertes jusqu'à une fermeture manuelle le 2026-09-06).
       #
-      # Trois gardes, toutes nécessaires : `success()` (exit 0 — un exit 3
-      # apiFailures ou un exit 1 fatal a déjà rougi le job), `inputs.max == ''`
-      # (un canari NE VIDE PAS la file, même quand son exit 2 est toléré) et
-      # `remaining == '0'` (ceinture : le compteur du script lui-même ; vide ou
-      # absent = pas de fermeture, cf. `writeGithubOutput` best-effort).
+      # Trois gardes : `success()` (exit 0 — un exit 3 apiFailures ou un exit 1
+      # fatal a déjà rougi le job), `inputs.max == ''` (un canari ne prétend
+      # jamais avoir vidé la file, même quand son exit 2 est toléré) et surtout
+      # `still_pending == '0'` — le RESTE-À-GÉOCODER au sens de la mesure qui a
+      # OUVERT l'issue (`<source>_measure_ban_to_geocode`). Fermer sur
+      # `remaining` (troncature `--max`) était un piège : un drain qui REJETTE
+      # tout sort en 0/0 et aurait clos la vigie sur un « ✅ file vidée »
+      # mensonger (revue 2026-09-06). Valeur absente ou `unknown` ⇒ pas de
+      # fermeture (fail-closed).
       # `continue-on-error` : un drain RÉUSSI ne doit jamais rougir parce que
-      # l'API issues a hoqueté (la composite log déjà LOUD).
+      # l'API issues a hoqueté (la composite log déjà LOUD). NB : ce step ne
+      # vise QUE le registre informatif ; le registre dégradé « mesure
+      # indisponible » porte un libellé PRIMAIRE distinct
+      # (`pending-geocode-measure`) qu'aucun drain ne ferme — un drain réussi
+      # ne dit rien de l'état de la RPC de mesure.
       - name: Close pending-geocode issue
-        if: success() && inputs.max == '' && steps.drain.outputs.remaining == '0'
+        id: close
+        if: success() && inputs.max == '' && steps.drain.outputs.still_pending == '0'
         continue-on-error: true
         uses: ./.github/actions/upsert-ops-issue
         with:
@@ -156,9 +165,26 @@ jobs:
           # MÊME clé que `notify-pending-geocode` (labels: pending-geocode,<source>) :
           # ce qu'une source ouvre, son drain le referme.
           labels: pending-geocode,${{ inputs.source }}
-          comment: "✅ File vidée par le drain du ${{ steps.drain.outputs.finished_at }} : ${{ steps.drain.outputs.processed }} adresses traitées, ${{ steps.drain.outputs.accepted }} acceptées. Run : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          comment: "✅ Drain du ${{ steps.drain.outputs.finished_at }} : ${{ steps.drain.outputs.processed }} adresses traitées, ${{ steps.drain.outputs.accepted }} acceptées, 0 restant à géocoder — file vidée. Run : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           github-token: ${{ secrets.GITHUB_TOKEN }}
           run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # Le `continue-on-error` ci-dessus n'attrape PAS que « l'API issues a
+      # hoqueté » (la composite ne throw pas) : il avale surtout un échec de
+      # CHARGEMENT de l'action locale — la panne prouvée du run #33960886473,
+      # qui rendait l'alerte muette. Comme il maintient le job vert, le step
+      # d'alerte final ne se déclenche pas non plus : sans ce contrôle, une
+      # fermeture jamais faite serait TOTALEMENT silencieuse.
+      - name: Warn if issue closure did not happen
+        if: always() && steps.close.conclusion != 'skipped'
+        env:
+          STEP_OUTCOME: ${{ steps.close.outcome }}
+          ISSUE_OUTCOME: ${{ steps.close.outputs.outcome }}
+        run: |
+          case "$ISSUE_OUTCOME" in
+            closed|absent) echo "Fermeture pending-geocode : $ISSUE_OUTCOME" ;;
+            *) echo "::warning::Fermeture pending-geocode NON confirmée (step=$STEP_OUTCOME, outcome='$ISSUE_OUTCOME') — l'issue reste ouverte, reprise au prochain drain. Un outcome VIDE signifie que la composite a échoué au CHARGEMENT." ;;
+          esac
 
       # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
       # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).

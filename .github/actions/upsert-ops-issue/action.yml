@@ -103,7 +103,7 @@ runs:
             } catch (err) {
               // Câblage rompu (fichier absent, chemin faux) : ::error:: — c'est
               // un bug de dépôt, pas une panne d'API — mais jamais un throw.
-              core.error(`upsert-ops-issue : close-ops-issue.cjs INCHARGEABLE (câblage rompu, aucune issue fermée) : ${err.message}. Run : ${runUrl}`);
+              core.error(`upsert-ops-issue : close-ops-issue.cjs INCHARGEABLE (câblage rompu, aucune issue fermée) : ${err instanceof Error ? err.message : String(err)}. Run : ${runUrl}`);
             }
             return;
           }

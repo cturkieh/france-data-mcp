@@ -28,18 +28,40 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   vide la file EST le signal : le step « Close pending-geocode issue » appelle
   `upsert-ops-issue` (nouvel input `action: open | close` — l'émetteur d'issues
   reste UNIQUE, invariant vérifié par `workflows-alerting.test.ts`) sous trois
-  gardes — `success()`, `inputs.max == ''` (un canari ne vide pas la file) et
-  `steps.drain.outputs.remaining == '0'`. `scripts/ban-backfill.mjs` publie
-  `processed` / `accepted` / `remaining` / `finished_at` en `$GITHUB_OUTPUT`
-  (heredoc à délimiteur aléatoire, patron `shared.ts`) ; le commentaire de
-  fermeture dit « ✅ File vidée par le drain du &lt;date UTC&gt; : N adresses
-  traitées, M acceptées ». Best-effort de bout en bout (`continue-on-error` +
-  `core.warning`/`core.error`) : une API issues en panne ne rougit jamais un
-  drain réussi. La logique GitHub API vit dans
+  gardes — `success()`, `inputs.max == ''` (un canari ne prétend jamais avoir
+  vidé la file) et `steps.drain.outputs.still_pending == '0'`.
+  `still_pending` (= `rejected + unresolved + contractBreached + remaining`)
+  mesure la **même grandeur** que la RPC qui a OUVERT l'issue
+  (`<source>_measure_ban_to_geocode` : clés ni acceptées ni plafonnées à
+  `BAN_MAX_ATTEMPTS`) : fermer sur `remaining` — qui ne compte que la
+  troncature `--max` — aurait laissé un drain **qui rejette tout** clore la
+  vigie sur un « ✅ file vidée » mensonger (revue). Tout compteur absent vaut
+  `unknown`, jamais `0` : le défaut est fail-CLOSED. `scripts/ban-backfill.mjs`
+  publie `processed` / `accepted` / `remaining` / `still_pending` /
+  `finished_at` en `$GITHUB_OUTPUT` (heredoc à délimiteur aléatoire, patron
+  `shared.ts`). Best-effort de bout en bout (`continue-on-error` +
+  `core.warning`/`core.error`) **doublé d'un step de contrôle** : une fermeture
+  non confirmée — API en panne, mais surtout composite non chargée, la panne du
+  run #33960886473 — sort en `::warning::` au lieu d'être avalée par le
+  `continue-on-error`. La logique GitHub API vit dans
   `.github/actions/upsert-ops-issue/close-ops-issue.cjs` — TESTÉE
-  (`close-ops-issue.test.ts`, 7 cas : labels vides = refus net, PR écartées,
-  commentaire avant fermeture, API en panne) et chargée par `require` comme le
-  fait le runner, plutôt qu'un bloc inline vérifiable seulement par grep.
+  (`close-ops-issue.test.ts`, 12 cas : labels vides **ou blancs** = refus net
+  — un filtre vide fermerait tout le dépôt —, PR écartées, commentaire avant
+  fermeture, page pleine, API en panne) et chargée par `require` comme le fait
+  le runner, plutôt qu'un bloc inline vérifiable seulement par grep.
+- **`notify-pending-geocode` : deux registres d'issue, deux jeux de labels.**
+  Le registre DÉGRADÉ (« ⚠️ mesure des adresses à géocoder indisponible », la
+  seule alerte actionnable du canal) portait les mêmes labels que le registre
+  informatif : le drain l'aurait fermé alors qu'un drain réussi ne dit **rien**
+  de l'état de la RPC de mesure (revue). Son label primaire devient
+  `pending-geocode-measure` (`MEASURE_UNAVAILABLE_LABEL`) — pas un label en
+  plus : le filtre `labels` de l'API GitHub est un ET, un sur-ensemble aurait
+  continué de matcher. Les labels viennent désormais de la décision TS (output
+  `issue_labels`), plus du YAML.
+- **`scripts/ban-backfill.mjs` : `--max` invalide = throw.** `--max abc`,
+  `--max 0`, `--max -5` retombaient sur `undefined` = **drainage complet**
+  silencieux, alors que le workflow venait d'annoncer « Canari : abc adresses
+  max » (doctrine `parseSourceArg`, appliquée ici après revue).
 - **`workflows-alerting.test.ts` partitionne par parse YAML** (au lieu d'un
   `>= 8` implicite) : 1 réutilisable + 3 appelants + 7 workflows à steps + 3
   exemptés, liste attendue EXPLICITE et exhaustive. Nouvelles assertions : un
@@ -48,10 +70,14 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   présents, et le cron cité par `workflow_run` porte le `name:` EXACT d'un
   `ingest-*.yml` existant (un nom faux = drain auto jamais déclenché, silence
   total) ; chaque source de `notify-pending-geocode` (`SOURCES`, désormais
-  exporté) a un drain qui la referme. **Prouvé en conditions réelles** : les
-  trois appelants lancés en canari (`max=5`), FINESS en exit 2 toléré → vert,
-  et une issue de test `pending-geocode,ameli` fermée automatiquement par un
-  drain Ameli complet.
+  exporté) a un drain qui la referme. Le corps bash du step de drain est
+  EXÉCUTÉ par le test (extrait du YAML, invocation du script stubbée, `bash -e`
+  comme le runner) sur 5 codes de sortie : la tolérance du canari FINESS
+  n'avale ni l'exit 3 (`apiFailures`) ni l'exit 1 (fatal), qui rendraient un
+  drain cassé VERT. **Prouvé en conditions réelles le 2026-09-06** : les trois
+  appelants lancés en canari (`max=5`) → 3 runs verts, step d'alerte présent et
+  skippé ; drain Ameli complet → issue de test #78 (`pending-geocode,ameli`)
+  **fermée automatiquement** (`state_reason: completed`) avec son commentaire.
 
 ## [0.29.0] — 2026-09-06 — FINESS phase 2 : géocodage BAN du résiduel (+2 720 points, couverture 94,97 % → 97,57 %), libellés de catégorie source unique SMT/ANS, vigie post-cron « run vert mais donnée malade » (issue + email), planchers relatifs Ameli/RPPS/IRIS
 

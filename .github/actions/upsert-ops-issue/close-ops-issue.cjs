@@ -33,7 +33,14 @@
  */
 async function closeOpsIssue({ github, context, core, labels, comment, runUrl }) {
   const url = runUrl || "(run inconnu)";
-  if (!Array.isArray(labels) || labels.length === 0) {
+  // Nettoyage ICI et pas seulement chez l'appelant : `[""]` ou `["  "]`
+  // passerait un test de longueur, produirait un `labels=""` et ferait renvoyer
+  // à `listForRepo` TOUTES les issues ouvertes du dépôt. La garantie doit vivre
+  // à la frontière testée (revue 2026-09-06).
+  const clean = (Array.isArray(labels) ? labels : [])
+    .map((l) => String(l ?? "").trim())
+    .filter(Boolean);
+  if (clean.length === 0) {
     // Fermer sans filtre = fermer tout le dépôt. Refus BRUYANT, jamais un repli.
     core.error(
       `close-ops-issue : labels VIDES (composition amont perdue) — AUCUNE fermeture (un filtre vide fermerait toutes les issues ouvertes). Run : ${url}`,
@@ -41,21 +48,29 @@ async function closeOpsIssue({ github, context, core, labels, comment, runUrl })
     return "failed";
   }
   const body = comment || `✅ Fermeture automatique (corps manquant). Run : ${url}`;
+  const PAGE = 100;
   let closed = 0;
   try {
     const { data } = await github.rest.issues.listForRepo({
       owner: context.repo.owner,
       repo: context.repo.repo,
       state: "open",
-      labels: labels.join(","),
-      per_page: 100,
+      labels: clean.join(","),
+      per_page: PAGE,
     });
     // `listForRepo` renvoie AUSSI les pull requests (même endpoint côté API) :
     // les écarter, une PR labellisée ne doit jamais être fermée par un cron.
     const issues = data.filter((i) => !i.pull_request);
+    if (data.length === PAGE) {
+      // Une seule page lue : le dire plutôt que rendre un « closed » qui ment
+      // (cas jamais vu — le registre est idempotent, 1 à 2 issues au plus).
+      core.warning(
+        `close-ops-issue : ${PAGE} issues ouvertes [${clean.join(",")}] (page pleine) — seule la 1re page est fermée, relancer le drain pour le reste.`,
+      );
+    }
     if (issues.length === 0) {
       core.info(
-        `close-ops-issue : aucune issue ouverte [${labels.join(",")}] — rien à fermer (cas nominal).`,
+        `close-ops-issue : aucune issue ouverte [${clean.join(",")}] — rien à fermer (cas nominal).`,
       );
       return "absent";
     }
@@ -74,12 +89,12 @@ async function closeOpsIssue({ github, context, core, labels, comment, runUrl })
         state_reason: "completed",
       });
       closed++;
-      core.info(`close-ops-issue : issue #${issue.number} fermée [${labels.join(",")}].`);
+      core.info(`close-ops-issue : issue #${issue.number} fermée [${clean.join(",")}].`);
     }
     return "closed";
   } catch (err) {
     // Best-effort : une panne de l'API issues ne re-rougit pas un drain réussi.
-    const msg = `close-ops-issue : fermeture [${labels.join(",")}] échouée après ${closed} fermeture(s) (best-effort, l'issue sera reprise au prochain drain) : ${err instanceof Error ? err.message : String(err)}`;
+    const msg = `close-ops-issue : fermeture [${clean.join(",")}] échouée après ${closed} fermeture(s) (best-effort, l'issue sera reprise au prochain drain) : ${err instanceof Error ? err.message : String(err)}`;
     core.warning(msg);
     console.warn(msg);
     return "failed";

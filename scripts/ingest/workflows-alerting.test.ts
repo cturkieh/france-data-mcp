@@ -1,9 +1,15 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { githubDir, ingestDir } from "./migration-sql.js";
-import { SOURCES as PENDING_GEOCODE_SOURCES } from "./notify-pending-geocode.js";
+import {
+  MEASURE_UNAVAILABLE_LABEL,
+  PENDING_GEOCODE_LABEL,
+  SOURCES as PENDING_GEOCODE_SOURCES,
+} from "./notify-pending-geocode.js";
 
 // Garde-fous d'alerting des workflows GitHub Actions (`.github/`).
 //
@@ -326,32 +332,69 @@ describe("drain BAN — un corps réutilisable + trois appelants (backlog FINESS
     });
   }
 
-  it(`le réutilisable ferme l'issue pending-geocode (file vidée), jamais sur un canari`, () => {
+  it(`le réutilisable ferme l'issue pending-geocode (file VRAIMENT vidée), jamais sur un canari`, () => {
     const block = stepBlock(reusable, CLOSE_STEP);
     expect(block, "step de fermeture introuvable").not.toBeNull();
     expect(block).toContain(`uses: ${UPSERT_ISSUE}`);
     expect(block).toContain("action: close");
-    // Même clé d'idempotence que l'ouverture (`notify-pending-geocode`).
-    expect(block).toContain("labels: pending-geocode,${{ inputs.source }}");
+    // Même clé d'idempotence que l'ouverture (`notify-pending-geocode`), et
+    // label PRIMAIRE du registre INFORMATIF seulement.
+    expect(block).toContain(`labels: ${PENDING_GEOCODE_LABEL},\${{ inputs.source }}`);
     // Best-effort : une API issues en panne ne re-rougit pas un drain réussi.
     expect(block).toMatch(/^\s+continue-on-error: true$/m);
     const cond = stepIfCondition(reusable, CLOSE_STEP) ?? "";
     expect(cond).toContain("success()");
-    // Un canari (`max`) NE VIDE PAS la file — même quand son exit 2 est toléré.
+    // Un canari (`max`) ne prétend jamais avoir vidé la file.
     expect(cond).toContain("inputs.max == ''");
-    expect(cond).toContain("steps.drain.outputs.remaining == '0'");
+    // ⚠️ `remaining` ne mesure QUE la troncature `--max` : garder dessus
+    // laisserait un drain qui REJETTE tout fermer la vigie sur un « ✅ file
+    // vidée » mensonger. `still_pending` mesure la même grandeur que la RPC
+    // qui a OUVERT l'issue (revue 2026-09-06).
+    expect(cond).toContain("steps.drain.outputs.still_pending == '0'");
+    expect(cond).not.toContain("steps.drain.outputs.remaining");
+  });
+
+  it("un échec de la fermeture (composite non chargée comprise) est ANNONCÉ, jamais muet", () => {
+    // `continue-on-error` maintient le job vert : le step d'alerte final ne se
+    // déclenche donc pas. Sans ce contrôle aval, une action locale non résolue
+    // (la panne du run #33960886473) rendrait la fermeture TOTALEMENT muette.
+    const block = stepBlock(reusable, "Warn if issue closure did not happen");
+    expect(block, "step de contrôle de la fermeture introuvable").not.toBeNull();
+    expect(stepIfCondition(reusable, "Warn if issue closure did not happen")).toContain(
+      "steps.close.conclusion != 'skipped'",
+    );
+    expect(block).toContain("steps.close.outputs.outcome");
+    expect(block).toContain("::warning::");
+    // L'issue de fermeture est lue via un `id:` — sans lui, aucun output.
+    expect(stepBlock(reusable, CLOSE_STEP)).toMatch(/^\s+id: close$/m);
   });
 
   it("chaque source de notify-pending-geocode a un drain qui la REFERME (issue jamais orpheline)", () => {
     // #56 et #63 sont restées ouvertes jusqu'à une fermeture manuelle le
     // 2026-09-06 : ouvrir sans jamais fermer est un canal qui se décrédibilise.
     for (const source of PENDING_GEOCODE_SOURCES) {
+      const file = `ban-backfill-${source}.yml`;
       expect(
         callerFiles,
         `source ${source} signalée par notify-pending-geocode sans drain qui la referme`,
-      ).toContain(`ban-backfill-${source}.yml`);
+      ).toContain(file);
+      // Et le drain doit viser CETTE source : le réutilisable compose ses
+      // labels de fermeture avec `inputs.source`.
+      expect(jobsOf(file)[0]?.with?.source).toBe(source);
     }
-    expect(reusable).toContain("action: close");
+  });
+
+  it("le registre DÉGRADÉ (mesure indisponible) échappe au filtre de fermeture", () => {
+    // Le filtre `labels` de l'API GitHub est un ET : si les deux registres
+    // partageaient leur label primaire, un drain réussi — qui ne dit RIEN de
+    // l'état de la RPC de mesure — fermerait la seule alerte actionnable.
+    expect(MEASURE_UNAVAILABLE_LABEL).not.toBe(PENDING_GEOCODE_LABEL);
+    expect(
+      MEASURE_UNAVAILABLE_LABEL.split(",")[0],
+      "le label dégradé ne doit pas contenir le label informatif comme label à part entière",
+    ).not.toBe(PENDING_GEOCODE_LABEL);
+    const block = stepBlock(reusable, CLOSE_STEP) ?? "";
+    expect(block).not.toContain(MEASURE_UNAVAILABLE_LABEL);
   });
 
   it("les compteurs du drain sont publiés par le script ET consommés par le step de fermeture", () => {
@@ -364,7 +407,7 @@ describe("drain BAN — un corps réutilisable + trois appelants (backlog FINESS
         "Drain BAN ${{ inputs.source-label }} (géocode le résidu → remplit le cache)",
       ),
     ).toContain("id: drain");
-    for (const key of ["processed", "accepted", "remaining", "finished_at"]) {
+    for (const key of ["processed", "accepted", "still_pending", "finished_at"]) {
       expect(script, `output ${key} non produit par ban-backfill.mjs`).toMatch(
         new RegExp(`^\\s+${key}: `, "m"),
       );
@@ -375,6 +418,45 @@ describe("drain BAN — un corps réutilisable + trois appelants (backlog FINESS
     // Écriture APRÈS le run, AVANT le code de sortie (un exit 2 canari doit
     // publier remaining > 0 — c'est ce qui interdit la fermeture).
     expect(script).toContain("writeGithubOutput(banBackfillOutputs(r))");
+  });
+
+  // Le corps bash du step est EXÉCUTÉ tel qu'il est écrit dans le YAML (extrait
+  // par le parseur, jamais retapé), l'invocation du script étant remplacée par
+  // un code de sortie choisi — `bash -e` comme le runner. Assertion textuelle
+  // impossible ici : ce qui compte est le CODE DE SORTIE final, et la tolérance
+  // du canari FINESS ne doit surtout pas avaler un exit 3 (apiFailures) ou 1
+  // (fatal), qui rendraient un drain cassé VERT.
+  const drainRun = (
+    (docs.get(REUSABLE_FILE)?.jobs?.backfill as { steps?: Array<{ id?: string; run?: string }> })
+      ?.steps ?? []
+  ).find((s) => s.id === "drain")?.run;
+
+  it.each([
+    { code: 2, tolerate: "true", expected: 0, why: "canari FINESS : backlog restant = nominal" },
+    { code: 2, tolerate: "false", expected: 2, why: "canari sans tolérance : exit 2 remonte" },
+    { code: 3, tolerate: "true", expected: 3, why: "apiFailures : JAMAIS avalé" },
+    { code: 1, tolerate: "true", expected: 1, why: "fatal : JAMAIS avalé" },
+    { code: 0, tolerate: "true", expected: 0, why: "canari complet" },
+  ])("drain canari : script exit $code + tolerate=$tolerate → step exit $expected ($why)", (c) => {
+    expect(drainRun, "corps du step `drain` introuvable").toBeDefined();
+    const file = join(mkdtempSync(join(tmpdir(), "drain-step-")), "step.sh");
+    writeFileSync(
+      file,
+      (drainRun ?? "").replaceAll(
+        "pnpm exec tsx scripts/ban-backfill.mjs",
+        `bash -c "exit ${c.code}"`,
+      ),
+    );
+    let status = 0;
+    try {
+      execFileSync("bash", ["-e", file], {
+        env: { ...process.env, MAX: "5", SOURCE: "finess", TOLERATE_CANARY_BACKLOG: c.tolerate },
+        stdio: "pipe",
+      });
+    } catch (err) {
+      status = (err as { status?: number }).status ?? -1;
+    }
+    expect(status).toBe(c.expected);
   });
 });
 
@@ -523,8 +605,10 @@ describe("composite upsert-ops-issue — émetteur UNIQUE d'issue idempotente (o
     // créerait une issue à contretemps), et un require cassé est ::error::.
     expect(upsert).toMatch(/action !== 'open' && action !== 'close'[\s\S]*?core\.error\(/);
     expect(upsert).toMatch(/catch \(err\) \{[\s\S]*?INCHARGEABLE/);
-    // Le filtre de labels est la SEULE chose qui empêche de fermer tout le dépôt.
-    expect(closeScript).toMatch(/labels\.length === 0[\s\S]*?core\.error\(/);
+    // Le filtre de labels est la SEULE chose qui empêche de fermer tout le
+    // dépôt — et il porte sur les labels NETTOYÉS (`[""]` produirait un filtre
+    // vide, cf. `close-ops-issue.test.ts`).
+    expect(closeScript).toMatch(/clean\.length === 0[\s\S]*?core\.error\(/);
     expect(closeScript).toMatch(/state: "closed",\n\s+state_reason: "completed"/);
     expect(closeScript).toMatch(/catch \(err\)[\s\S]*core\.warning/);
   });
