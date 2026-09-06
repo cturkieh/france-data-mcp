@@ -15,7 +15,7 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   divergentes + un bloc d'exit code 2 propre à FINESS) deviennent un corps
   UNIQUE `.github/workflows/ban-backfill.yml` (`on: workflow_call`, inputs
   `source`, `source-label`, `issue-labels`, `failure-modes`, `killed-hint`,
-  `max`, `tolerate-canary-backlog`) et trois appelants de ~55 lignes qui ne
+  `max`) et trois appelants de ~55 lignes qui ne
   portent plus que le déclencheur (`workflow_run` + `workflow_dispatch`), la
   concurrence, la garde `conclusion == 'success'`, `permissions` (GitHub les
   calcule chez l'appelant) et `secrets: inherit`. Un `workflow_call` et pas une
@@ -72,9 +72,15 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   total) ; chaque source de `notify-pending-geocode` (`SOURCES`, désormais
   exporté) a un drain qui la referme. Le corps bash du step de drain est
   EXÉCUTÉ par le test (extrait du YAML, invocation du script stubbée, `bash -e`
-  comme le runner) sur 5 codes de sortie : la tolérance du canari FINESS
-  n'avale ni l'exit 3 (`apiFailures`) ni l'exit 1 (fatal), qui rendraient un
-  drain cassé VERT. **Prouvé en conditions réelles le 2026-09-06** : les trois
+  comme le runner) sur 6 combinaisons code de sortie × canari : la tolérance
+  n'avale ni l'exit 3 (`apiFailures`), ni l'exit 1 (fatal), ni un exit 2 HORS
+  canari, qui rendraient un drain cassé VERT.
+- **Le code de sortie 2 d'un canari (`--max`) vaut succès pour les TROIS
+  sources** (décision 2026-09-06), l'input `tolerate-canary-backlog` disparaît :
+  le script ne peut renvoyer 2 que sous `--max` (`remaining > 0` exige la
+  troncature), c'est donc l'issue nominale d'un canari — le rougir ouvrait une
+  issue `backfill-failure` et envoyait un email pour un comportement attendu.
+  Seul FINESS le tolérait, par accident des copies successives. **Prouvé en conditions réelles le 2026-09-06** : les trois
   appelants lancés en canari (`max=5`) → 3 runs verts, steps de fermeture et
   d'alerte présents et skippés ; drain Ameli complet (run 34036070910) → issue
   de test #79 (`pending-geocode,ameli`) **fermée automatiquement**

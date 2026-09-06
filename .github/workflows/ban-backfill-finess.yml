@@ -61,5 +61,3 @@ jobs:
       killed-hint: "Le drain BAN remplit le cache geocoded_addresses au fil de l'eau (idempotent) : relancer via workflow_dispatch pour finir le drain ; les coords sont posées dans `finess` au prochain cron FINESS (1er/15, `ingest_apply_finess_ban_join`) ou via workflow_dispatch « Ingest FINESS » avec force."
       # Vide sur `workflow_run` (contexte `inputs` absent) → drain complet.
       max: ${{ inputs.max || '' }}
-      # Le résiduel FINESS dépasse largement un canari : exit 2 = nominal.
-      tolerate-canary-backlog: true

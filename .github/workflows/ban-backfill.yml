@@ -52,15 +52,6 @@ on:
         type: string
         required: false
         default: ""
-      tolerate-canary-backlog:
-        description: >
-          `true` : le code de sortie 2 du script (backlog restant APRÈS un canari
-          borné) vaut SUCCÈS. Sans ça, chaque canari d'une source au résiduel
-          large ouvrirait une issue « backfill-failure » pour un comportement
-          nominal. N'a d'effet qu'avec `max` renseigné.
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
@@ -116,16 +107,20 @@ jobs:
           # Inputs passés via env (jamais interpolés dans le shell = anti-injection).
           MAX: ${{ inputs.max }}
           SOURCE: ${{ inputs.source }}
-          TOLERATE_CANARY_BACKLOG: ${{ inputs.tolerate-canary-backlog }}
         run: |
           if [ -n "$MAX" ]; then
             echo "Canari : $MAX adresses max"
             set +e
             pnpm exec tsx scripts/ban-backfill.mjs --source "$SOURCE" --max "$MAX"; code=$?
             set -e
-            # Exit 2 = backlog restant APRÈS un canari borné : nominal, pas une
-            # panne — pour les sources qui le déclarent tolérable.
-            if [ "$code" -eq 2 ] && [ "$TOLERATE_CANARY_BACKLOG" = "true" ]; then
+            # Exit 2 = backlog restant APRÈS un canari borné. Le script ne PEUT
+            # le renvoyer que sous `--max` (`remaining > 0` exige la troncature) :
+            # c'est donc l'issue NOMINALE d'un canari, pour TOUTE source — le
+            # rougir ouvrirait une issue « backfill-failure » et enverrait un
+            # email pour un comportement attendu (décision 2026-09-06 ; avant,
+            # seul FINESS le tolérait, par accident des copies successives).
+            # Les codes 1 (fatal) et 3 (apiFailures) remontent, eux, toujours.
+            if [ "$code" -eq 2 ]; then
               echo "::notice::canari OK, backlog restant (exit 2 attendu avec --max)"
               exit 0
             fi

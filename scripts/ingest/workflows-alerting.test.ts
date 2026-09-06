@@ -290,7 +290,6 @@ describe("drain BAN — un corps réutilisable + trois appelants (backlog FINESS
       "max",
       "source",
       "source-label",
-      "tolerate-canary-backlog",
     ]);
     expect(docs.get(REUSABLE_FILE)?.permissions?.issues).toBe("write");
   });
@@ -423,21 +422,24 @@ describe("drain BAN — un corps réutilisable + trois appelants (backlog FINESS
   // Le corps bash du step est EXÉCUTÉ tel qu'il est écrit dans le YAML (extrait
   // par le parseur, jamais retapé), l'invocation du script étant remplacée par
   // un code de sortie choisi — `bash -e` comme le runner. Assertion textuelle
-  // impossible ici : ce qui compte est le CODE DE SORTIE final, et la tolérance
-  // du canari FINESS ne doit surtout pas avaler un exit 3 (apiFailures) ou 1
-  // (fatal), qui rendraient un drain cassé VERT.
+  // impossible ici : ce qui compte est le CODE DE SORTIE final. L'exit 2 sous
+  // `--max` (backlog restant après un canari borné) est nominal pour TOUTE
+  // source depuis le 2026-09-06 — mais la tolérance doit rester CHIRURGICALE :
+  // ni l'exit 3 (apiFailures), ni l'exit 1 (fatal), ni un exit 2 hors canari ne
+  // doivent passer, ils rendraient un drain cassé VERT.
   const drainRun = (
     (docs.get(REUSABLE_FILE)?.jobs?.backfill as { steps?: Array<{ id?: string; run?: string }> })
       ?.steps ?? []
   ).find((s) => s.id === "drain")?.run;
 
   it.each([
-    { code: 2, tolerate: "true", expected: 0, why: "canari FINESS : backlog restant = nominal" },
-    { code: 2, tolerate: "false", expected: 2, why: "canari sans tolérance : exit 2 remonte" },
-    { code: 3, tolerate: "true", expected: 3, why: "apiFailures : JAMAIS avalé" },
-    { code: 1, tolerate: "true", expected: 1, why: "fatal : JAMAIS avalé" },
-    { code: 0, tolerate: "true", expected: 0, why: "canari complet" },
-  ])("drain canari : script exit $code + tolerate=$tolerate → step exit $expected ($why)", (c) => {
+    { code: 2, max: "5", expected: 0, why: "canari : backlog restant = nominal, toute source" },
+    { code: 2, max: "", expected: 2, why: "HORS canari : un exit 2 reste une anomalie rouge" },
+    { code: 3, max: "5", expected: 3, why: "apiFailures : JAMAIS avalé" },
+    { code: 1, max: "5", expected: 1, why: "fatal : JAMAIS avalé" },
+    { code: 0, max: "5", expected: 0, why: "canari complet" },
+    { code: 0, max: "", expected: 0, why: "drain complet" },
+  ])("drain : script exit $code + max='$max' → step exit $expected ($why)", (c) => {
     expect(drainRun, "corps du step `drain` introuvable").toBeDefined();
     const file = join(mkdtempSync(join(tmpdir(), "drain-step-")), "step.sh");
     writeFileSync(
@@ -450,7 +452,7 @@ describe("drain BAN — un corps réutilisable + trois appelants (backlog FINESS
     let status = 0;
     try {
       execFileSync("bash", ["-e", file], {
-        env: { ...process.env, MAX: "5", SOURCE: "finess", TOLERATE_CANARY_BACKLOG: c.tolerate },
+        env: { ...process.env, MAX: c.max, SOURCE: "finess" },
         stdio: "pipe",
       });
     } catch (err) {
