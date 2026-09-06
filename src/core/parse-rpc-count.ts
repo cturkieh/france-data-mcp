@@ -1,6 +1,7 @@
 /**
- * Parse fail-loud la valeur d'une RPC `RETURNS BIGINT` sérialisée par
- * PostgREST (un `number`, ou une string décimale entière `"339000"`/`"0"`).
+ * Parse fail-loud tout scalaire de COMPTAGE rendu par une RPC : `BIGINT`
+ * sérialisé en string décimale par PostgREST (`"339000"`/`"0"`) ou `INTEGER` /
+ * `ROW_COUNT` rendu en `number`. Contrat unique : entier ≥ 0.
  *
  * BACKSTOP ANTI-S-1 : toute autre forme (`null`, `""`, objet, string non
  * décimale, valeur non finie) = régression de contrat RPC → `throw`. Le
@@ -35,6 +36,13 @@ export function parseRpcCount(value: unknown, label: string): number {
   if (!Number.isFinite(n)) {
     throw new Error(
       `${label} returned a non-finite value (${JSON.stringify(value)}) — RPC contract regression`,
+    );
+  }
+  // Même invariant que la branche string (`^\d+$`) : un compteur est un
+  // entier ≥ 0, qu'il arrive en number (INTEGER, ROW_COUNT) ou en string (BIGINT).
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(
+      `${label} returned ${JSON.stringify(value)} instead of a non-negative integer — RPC contract regression`,
     );
   }
   return n;

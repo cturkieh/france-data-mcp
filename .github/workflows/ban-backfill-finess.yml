@@ -1,0 +1,132 @@
+# Drain BAN FINESS — géocode le résiduel d'établissements SANS point (nouveaux
+# EGE du flux ANS ; chiffres mesurés : migration 20260906T120000) et REMPLIT le
+# cache `geocoded_addresses`.
+# Les coords sont POSÉES dans `finess` au prochain cron FINESS via
+# `ingest_apply_finess_ban_join` (décalage d'UNE passe, par design — jumeau des
+# drains RPPS/Ameli, cf. docs/plans/ban-join.md et migration 20260906T120000).
+#
+# DEUX déclencheurs :
+#  - AUTO : à la complétion RÉUSSIE du cron « Ingest FINESS » (`workflow_run`) →
+#    les nouveaux établissements de chaque quinzaine sont drainés sans clic ;
+#  - MANUEL : `workflow_dispatch` (bouton de secours + canari via input `max`).
+# Idempotent : si le cron a short-circuité (checksum identique), le drain dit
+# « nothing to do » (coût négligeable).
+#
+# Énumération keyset sur `num_finess` (PK CHAR(9), curseur TEXTE) via
+# `finess_eligible_rows_after_id` — AUCUN index à construire (bitmap index scan
+# sur `finess_geom_gist`, ~0,5 s par page mesuré). Adresse = `voie` seule (porte
+# déjà numéro + type de voie). Les EGE sans voie ne sont PAS éligibles : pas de
+# centroïde commune dans finess.geom (il contaminerait le RPPS en `finess_join`).
+#
+# JAMAIS concurrent du cron FINESS : son swap atomique renommerait `finess` en
+# pleine énumération keyset. Même groupe que ingest-finess.yml → sérialisés.
+name: Backfill BAN FINESS (auto + manuel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "Nb max de NOUVELLES adresses géocodées ce run (canari, ex. 1000). Vide = drainage complet."
+        type: string
+        required: false
+        default: ""
+  # AUTO post-ingestion : déclenché à la complétion du cron FINESS. La garde
+  # `conclusion == 'success'` (niveau job) évite de drainer après une ingestion
+  # ÉCHOUÉE (données non fiables). Sur cet événement, `inputs.max` est vide → drain complet.
+  workflow_run:
+    workflows: ["Ingest FINESS"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write # alerte notify-ingest-failure
+
+concurrency:
+  group: ingest-finess
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    # MANUEL → toujours ; AUTO (workflow_run) → seulement si l'ingestion a RÉUSSI
+    # (une ingestion échouée n'a pas produit de nouvelles données fiables à géocoder).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    # Énumération keyset (pages bornées) + géocodage BAN du résidu (~quelques
+    # milliers d'adresses, chunké). 30 min = large marge (jours BAN lents).
+    timeout-minutes: 30
+    steps:
+      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
+      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
+      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
+      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
+      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
+      - uses: actions/checkout@v6
+
+      # Preflight secrets AVANT install (convention nouveaux workflows Supabase ;
+      # après le checkout, cf. ci-dessus) : échec EXPLICITE et immédiat si un secret manque, plutôt qu'une
+      # panne opaque au 1er appel RPC.
+      - name: Validate required secrets present
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          missing=()
+          [ -z "$SUPABASE_URL" ] && missing+=("SUPABASE_URL")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Secrets manquants: ${missing[*]}"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Drain BAN FINESS (géocode le résiduel sans point → remplit le cache)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Input passé via env (jamais interpolé dans le shell = anti-injection).
+          MAX: ${{ inputs.max }}
+        run: |
+          if [ -n "$MAX" ]; then
+            echo "Canari : $MAX adresses max"
+            # Exit 2 = backlog restant APRÈS un canari borné : nominal, pas une
+            # panne (sinon chaque canari ouvrait une issue « backfill-failure »).
+            set +e
+            pnpm exec tsx scripts/ban-backfill.mjs --source finess --max "$MAX"; code=$?
+            set -e
+            if [ "$code" -eq 2 ]; then echo "::notice::canari OK, backlog restant (exit 2 attendu avec --max)"; exit 0; fi
+            exit "$code"
+          else
+            echo "Drainage complet"
+            pnpm exec tsx scripts/ban-backfill.mjs --source finess
+          fi
+
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
+        with:
+          source-label: Backfill BAN FINESS
+          ingest-log-source: "" # pas d'ingest_log côté backfill (cache-only)
+          issue-labels: backfill-failure,finess
+          failure-modes: "Géocodage BAN indisponible ou lent sur les DEUX hôtes (data.geopf.fr puis repli api-adresse — réessayer plus tard), RPC d'énumération keyset absente (migration 20260906T120000 non appliquée), secrets Supabase manquants (preflight), curseur num_finess divergent de la RETURNS TABLE (throw fail-loud, jamais une boucle)."
+          killed-hint: "Le drain BAN remplit le cache geocoded_addresses au fil de l'eau (idempotent) : relancer via workflow_dispatch pour finir le drain ; les coords sont posées dans `finess` au prochain cron FINESS (1er/15, `ingest_apply_finess_ban_join`) ou via workflow_dispatch « Ingest FINESS » avec force."
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

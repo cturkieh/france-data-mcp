@@ -64,6 +64,7 @@ function realDiff(overrides: Partial<StagingDiff> = {}): StagingDiff {
     lost_geom: 0,
     moved_gt_500m: 5_395,
     staging_geom_null: 5_271,
+    staging_no_voie: 647,
     staging_geom_source: { ans: 78_427, previous_ingest: 21_036, none: 5_271 },
     ...overrides,
   };
