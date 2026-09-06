@@ -81,8 +81,10 @@ export type GeoPrecision =
  * - `adresse` : coords BAN (rue, lieu-dit ou bâtiment) — `distance_km` exacte
  *   au m près, classement individuel fiable. Issu de `geom_source='ban_address'`
  *   en base (table `rpps`).
- * - `etablissement_finess` : coords FINESS DREES du site joint via `num_finess`
- *   — `distance_km` exacte au site (bâtiment FINESS). Issu de
+ * - `etablissement_finess` : point du site FINESS joint via `num_finess` —
+ *   point ANS quand l'ANS en fournit un, sinon point BAN de l'adresse du site
+ *   (bâtiment, rue ou lieu-dit) ou point hérité du run précédent, jamais un
+ *   centroïde commune. `distance_km` exacte au site. Issu de
  *   `geom_source='finess_join'` en base.
  * - `centroide_commune` : centroïde commune (~3 km moyenne) — `distance_km`
  *   IDENTIQUE pour tous les PS d'une même commune, NON discriminante pour

@@ -29,6 +29,7 @@ import {
   assertStagingRowBand,
   atomicSwapTables,
   downloadCsv,
+  evaluateBanJoinOutcome as evaluateBanJoinOutcomeShared,
   getLastRealIngestRowCount,
   getLastSuccessChecksum,
   getNonEmpty,
@@ -972,52 +973,18 @@ export function parseRppsRecord(rec: Record<string, string>, index: CommuneIndex
 // `appendLogMessage` est désormais exporté depuis `./shared.js` (Phase 2 /
 // Tâche 3) — partagé avec `finess.ts` qui consomme aussi `rebuildHostedActivities`.
 
-/**
- * Décision PURE du signal de cohérence post-`ban_join` (testable sans DB ni
- * cron — extraite du bloc 5c pour couverture unitaire). `ban_join` est
- * best-effort : JAMAIS de throw (un échec dur re-bloquerait un run sain —
- * CLAUDE.md « l'ingestion mensuelle n'est JAMAIS bloquée par BAN »). « 0 posé »
- * est AMBIGU : légitime (toutes les lignes éligibles sont de NOUVELLES adresses
- * pas encore en cache, `ban-backfill.mjs` pas relancé) OU pathologique (dérive
- * de parité clé RPC↔cache, OU cache `geocoded_addresses` wipé — classe S-1).
- * Indistinguable sans faux positif → on NE throw pas mais on TRACE TOUJOURS
- * (audit DB via `appendLogMessage`, pas juste un `console.log` éphémère) sur
- * CHACUN des 3 sous-cas anormaux — y compris « cache lisible mais 0 accepté »
- * (le seul qui n'émettait AUCUN signal avant ce correctif /review P1).
- * `cacheErrMessage` défini ⇒ la requête de sanity-check du cache a elle-même
- * échoué ; sinon `cacheAccepted` = nb de lignes `accepted=true` en cache.
- */
+/** Jumeau RPPS de `evaluateBanJoinOutcome` (shared) — fallback = centroïde commune. */
 export function evaluateBanJoinOutcome(args: {
   banApplied: number;
   banEligible: number;
   cacheAccepted: number;
   cacheErrMessage?: string;
 }): { partial: boolean; warn?: string; logMessage?: string } {
-  const { banApplied, banEligible, cacheAccepted, cacheErrMessage } = args;
-  if (banApplied > 0) return { partial: false };
-  if (cacheErrMessage !== undefined) {
-    return {
-      partial: true,
-      warn: `[france-data-mcp][rpps][ban_join] 0 posed; cache sanity check failed (non-blocking): ${cacheErrMessage}`,
-      logMessage: `ban_join: 0 posed, cache check failed: ${cacheErrMessage}`,
-    };
-  }
-  if (cacheAccepted > 0) {
-    return {
-      partial: true,
-      warn: `[france-data-mcp][rpps][ban_join] ⚠️ 0 posed over ${banEligible} eligible while geocoded_addresses has ${cacheAccepted} accepted — either all eligible rows are NEW uncached addresses (ban-backfill not re-run: legitimate) OR address-key parity drift RPC↔cache (S-1: investigate). Non-blocking; commune_centroid fallback served.`,
-      logMessage: `ban_join: 0 posed / ${banEligible} eligible while cache has ${cacheAccepted} accepted — investigate parity drift vs new-uncached`,
-    };
-  }
-  // 3e sous-cas (MEDIUM-1 /review P1) : cache LISIBLE mais 0 accepté ALORS que
-  // des lignes sont éligibles → 1er run pré-backfill (légitime) OU cache
-  // `geocoded_addresses` perdu/wipé/RLS (S-1). C'était le SEUL chemin sans
-  // aucune trace (console.log éphémère uniquement) — désormais tracé.
-  return {
-    partial: true,
-    warn: `[france-data-mcp][rpps][ban_join] ⚠️ 0 posed over ${banEligible} eligible while geocoded_addresses has 0 accepted — cache empty/wiped or never backfilled (S-1: investigate). Non-blocking; commune_centroid fallback served.`,
-    logMessage: `ban_join: 0 posed / ${banEligible} eligible while cache has 0 accepted — cache empty/wiped or pre-backfill`,
-  };
+  return evaluateBanJoinOutcomeShared({
+    ...args,
+    source: "rpps",
+    fallbackNote: "commune_centroid fallback served",
+  });
 }
 
 /**

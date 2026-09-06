@@ -43,6 +43,37 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   aucune ligne `ingest_log` sur un cron réussi, ligne de tête venue d'un autre
   run, lecture impossible, crash hors script (`|| echo "::error::"`).
 
+- **FINESS : géocodage BAN du résiduel sans point** (backlog FINESS phase 2,
+  item 1). Mesure prod du 2026-09-06 (détail : en-tête de la migration
+  `20260906T120000`) : 5 269 EGE sans point sur 104 734, dont 4 622 avec une
+  voie (4 251 clés distinctes) et 647 sans voie — jamais géocodables, pas de
+  centroïde dans `finess.geom` ; l'ANS ne fournit aucune `cleInInteropBAN` sur
+  ce résiduel. Même mécanisme que RPPS/Ameli : le cron POSE depuis le cache
+  (`ingest_apply_finess_ban_join`, étape 4b-bis après le repli
+  `previous_ingest`, un seul UPDATE mesuré 454 ms, précision
+  `ACCEPTED_PRECISION_TYPES` seulement — parité testée avec le TS —,
+  provenance `raw.geom_source = 'ban_address'` ajoutée au vocabulaire fermé
+  `GEOM_SOURCES` et PROPAGÉE par le repli au cron suivant), le drain
+  `ban-backfill.mjs --source finess` REMPLIT le cache (RPC jumelles
+  `finess_eligible_rows_after_id` — curseur TEXTE sur `num_finess`, sentinelle
+  NULL — et `finess_count_ban_eligible_rows`, prédicat écrit UNE fois dans
+  `finess_is_ban_eligible`), déclenché en `workflow_run` après chaque cron
+  FINESS (`ban-backfill-finess.yml`, canari `--max` sans fausse alerte). Clé
+  d'adresse = `voie` seule via le même wrapper des deux côtés. Sentinelle
+  « 0 posé alors que des lignes sont éligibles » → `partial` + trace en base
+  (`evaluateBanJoinOutcome` partagée avec RPPS) ; la diff expose
+  `staging_no_voie` et la provenance par source ; garde curseur dans le
+  backfill (colonne absente ou non croissante → throw, plus jamais une 1re
+  page en boucle) ; `parseRpcCount` exige un entier ≥ 0 sur les deux branches.
+  Droits : REVOKE FROM PUBLIC/anon/authenticated (le premier apply laissait un
+  UPDATE SECURITY DEFINER exécutable par PUBLIC — corrigé en revue).
+  **Prouvé le 2026-09-06** : drain complet 3 887 adresses géocodées (2 297
+  acceptées, 762 score < 0,5, 828 non résolues, 0 échec d'hôte) ; dry-run
+  FINESS sans swap : **2 720 points posés**, couverture géo **94,97 % →
+  97,57 %**, 0 point déplacé, diff propre. Servis au cron du 15 septembre (ou
+  via workflow_dispatch « Ingest FINESS » avec force). Le contrat
+  `etablissement_finess` de `geo_precision` dit désormais la vérité (point
+  ANS, BAN ou hérité — jamais un centroïde).
 ### Changed
 
 - **Libellés de catégorie FINESS : source unique SMT/ANS** (backlog FINESS

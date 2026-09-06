@@ -153,7 +153,10 @@ function makeStub(opts: {
   eligibleRowCount?: number;
   // Source ciblée — pilote les noms de RPC attendus + les tables d'écriture
   // interdites. Défaut "rpps".
-  source?: "rpps" | "ameli";
+  source?: "rpps" | "ameli" | "finess";
+  // Simule une RETURNS TABLE dont la colonne curseur ne s'appelle pas comme
+  // `cursorField` (descripteur désynchronisé) : la garde doit throw, jamais boucler.
+  dropCursorColumn?: boolean;
 }) {
   const rpcTransientGate = makeTransientGate(opts.rpcTransientFails ?? 0);
   const cacheReadTransientGate = makeTransientGate(opts.cacheReadTransientFails ?? 0);
@@ -173,13 +176,20 @@ function makeStub(opts: {
   const FORBID = {
     rpps: ["rpps", "rpps_staging"],
     ameli: ["annuaire_ameli", "annuaire_ameli_staging"],
+    finess: ["finess", "finess_staging"],
   };
   const SRC = { ...SOURCES[sourceKey], forbid: FORBID[sourceKey] };
   // Curseur keyset GÉNÉRIQUE : les 2 sources énumèrent par `id` (numérique). Le mock
   // reste générique (number OU string) pour couvrir une future source à curseur-clé :
   // on assigne un id stable (ordre fourni) puis on trie par le champ curseur de la
   // source — le mock pagine `> cursor` EXACTEMENT comme la RPC réelle.
-  const withIds = opts.distinctRows.map((r, i) => ({ ...r, id: i + 1 }));
+  // `id` (bigint, RPPS/Ameli) ET `num_finess` (CHAR(9) zéro-paddé, FINESS) : le
+  // mock porte les deux curseurs, la source choisit le sien via `cursorField`.
+  const withIds = opts.distinctRows.map((r, i) => ({
+    ...r,
+    id: i + 1,
+    num_finess: String(i + 1).padStart(9, "0"),
+  }));
   const cursorVal = (r: (typeof withIds)[number]): number | string | null =>
     r[SRC.cursorField as keyof typeof r];
   const sorted = [...withIds].sort((a, b) => {
@@ -265,7 +275,10 @@ function makeStub(opts: {
     const page =
       startIdx === -1 ? [] : sorted.slice(startIdx, startIdx + Math.min(limit, serverCap));
     rpcCalls.push({ p_after: after ?? null, returned: page.length });
-    return Promise.resolve({ data: page, error: null });
+    const data = opts.dropCursorColumn
+      ? page.map(({ [SRC.cursorField as "id"]: _dropped, ...rest }) => rest)
+      : page;
+    return Promise.resolve({ data, error: null });
   });
 
   const fromImpl = (table: string) => {
@@ -1027,9 +1040,69 @@ describe("runBanBackfill", () => {
 
   it("source inconnue → throw fail-loud (jamais un drainage silencieux mal ciblé)", async () => {
     const stub = makeStub({ distinctRows: [distinctKeyRow(ROW_A)] });
-    await expect(runBanBackfill(stub.client, { source: "finess" })).rejects.toThrow(
-      /unknown source "finess"/,
+    await expect(runBanBackfill(stub.client, { source: "nope" })).rejects.toThrow(
+      /unknown source "nope"/,
     );
+  });
+
+  it("source=finess : curseur TEXTE `num_finess` (sentinelle null), RPC jumelles FINESS, cache-only", async () => {
+    // 1re source à curseur-clé : `p_after_id` part à null (pas 0), la pagination
+    // suit `num_finess` et les écritures vers `finess`/`finess_staging` restent
+    // interdites (le drain remplit le cache, le cron pose).
+    const keyA = normalizeAddressKey(ROW_A.adresse, ROW_A.code_postal, ROW_A.code_insee);
+    const keyB = normalizeAddressKey(ROW_B.adresse, ROW_B.code_postal, ROW_B.code_insee);
+    geocodeAddressesBatchMock.mockResolvedValue(
+      banOutcome(
+        [
+          [
+            keyA,
+            { accepted: true, lat: 50.63, lon: 3.06, resultScore: 0.92, resultType: "street" },
+          ],
+          [
+            keyB,
+            { accepted: true, lat: 48.86, lon: 2.36, resultScore: 0.9, resultType: "housenumber" },
+          ],
+        ],
+        0,
+        1,
+      ),
+    );
+    const stub = makeStub({
+      source: "finess",
+      distinctRows: [distinctKeyRow(ROW_A), distinctKeyRow(ROW_B)],
+      cacheRows: [],
+    });
+    const r = await runBanBackfill(stub.client, { source: "finess" });
+    expect(r.geocoded).toBe(2);
+    const calls = (stub.client as unknown as { rpc: { mock: { calls: unknown[][] } } }).rpc.mock
+      .calls;
+    const calledRpcs = new Set(calls.map((c) => c[0] as string));
+    expect(calledRpcs.has("finess_eligible_rows_after_id")).toBe(true);
+    expect(calledRpcs.has("finess_count_ban_eligible_rows")).toBe(true);
+    expect(calledRpcs.has("rpps_eligible_rows_after_id")).toBe(false);
+    expect(calledRpcs.has("rpps_geocoded_cache_lookup")).toBe(true);
+    const enumArgs = calls
+      .filter((c) => c[0] === "finess_eligible_rows_after_id")
+      .map((c) => (c[1] as Record<string, unknown>).p_after_id);
+    expect(enumArgs[0]).toBeNull();
+    // Le curseur RÉEL a voyagé (jamais un `id` numérique sur une source texte).
+    expect(enumArgs.slice(1).every((v) => typeof v === "string")).toBe(true);
+  });
+
+  it("colonne curseur absente de la page (descripteur ↔ RETURNS TABLE divergents) → throw, JAMAIS une 1re page en boucle", async () => {
+    // Prouvé par harnais en revue : sans garde, `after = undefined` → JSON.stringify
+    // droppe `p_after_id` → PostgREST applique le DEFAULT → 1re page en boucle
+    // jusqu'au kill du job, sans log de progression.
+    const stub = makeStub({
+      source: "finess",
+      distinctRows: [distinctKeyRow(ROW_A), distinctKeyRow(ROW_B)],
+      cacheRows: [],
+      dropCursorColumn: true,
+    });
+    await expect(runBanBackfill(stub.client, { source: "finess" })).rejects.toThrow(
+      /colonne curseur "num_finess" absente\/NULL[\s\S]*pagination en boucle/,
+    );
+    expect(stub.upserts).toHaveLength(0);
   });
 });
 

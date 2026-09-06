@@ -7,6 +7,7 @@ import { parser } from "stream-json";
 import { pick } from "stream-json/filters/pick.js";
 import { streamArray } from "stream-json/streamers/stream-array.js";
 import { parseRpcCount } from "../../src/core/parse-rpc-count.js";
+import { missingRpcHint } from "../../src/core/retry-transient.js";
 import { finessFamille } from "../../src/sante/finess-categories.js";
 import { type AnsPmej, type FinessStagingRow, mapEgeToRow } from "./finess-ans-parse.js";
 import {
@@ -23,6 +24,7 @@ import {
   appendLogMessage,
   atomicSwapTables,
   downloadCsv,
+  evaluateBanJoinOutcome,
   getLastSuccessChecksum,
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
@@ -124,7 +126,7 @@ async function main(): Promise<void> {
       // ne signifient pas « rien de neuf » mais « publication ANS gelée » —
       // le symptôme exact de la panne DREES de 2026. Loud, puis court-circuit
       // (la donnée servie reste juste ; `data_age_days` le dit au caller).
-      const frozen = `fichier ANS identique au dernier run (${downloaded.sha256.slice(0, 8)}…) alors que le flux est quotidien — publication gelée côté ANS ?`;
+      const frozen = `fichier ANS identique au dernier run (${downloaded.sha256.slice(0, 8)}…) alors que le flux est quotidien — publication gelée côté ANS ? La pose BAN du résiduel est aussi sautée sur ce run (elle n'a lieu qu'avec une ingestion complète : forcer via workflow_dispatch pour poser un cache fraîchement drainé)`;
       console.warn(`[finess] ⚠️ ${frozen}`);
       // Aussi dans `ingest_log` : le log Actions expire à 90 jours, la
       // table est interrogeable en SQL.
@@ -182,6 +184,61 @@ async function main(): Promise<void> {
     }
     const previousCount = parseRpcCount(previousApplied, "ingest_apply_finess_geom_previous");
     console.log(`[finess] repli previous_ingest : ${previousCount} points repris de la prod`);
+
+    // 4b-bis. POSE BAN depuis le cache `geocoded_addresses` (migration
+    // 20260906T120000) pour ce qui reste SANS point après le repli : les
+    // établissements nouveaux. Même mécanisme que RPPS/Ameli : le cron pose,
+    // le drain `ban-backfill.mjs --source finess` (workflow_run post-cron)
+    // remplit le cache. Précision rue/bâtiment seulement — jamais de
+    // centroïde commune dans finess.geom. Un seul UPDATE (≤ ~5 K lignes).
+    // Le count d'éligibles AVANT la pose sert de dénominateur à la sentinelle.
+    const { data: banEligibleData, error: banEligibleErr } = await supabase.rpc(
+      "finess_count_ban_eligible_rows",
+      { p_source_table: "finess_staging" },
+    );
+    if (banEligibleErr) {
+      throw new IngestError(
+        "validate",
+        `finess_count_ban_eligible_rows failed: ${banEligibleErr.message}${missingRpcHint(banEligibleErr.message)}`,
+      );
+    }
+    const banEligible = parseRpcCount(banEligibleData, "finess_count_ban_eligible_rows");
+    const { data: banApplied, error: banErr } = await supabase.rpc("ingest_apply_finess_ban_join");
+    if (banErr) {
+      throw new IngestError(
+        "validate",
+        `ingest_apply_finess_ban_join failed: ${banErr.message}${missingRpcHint(banErr.message)}`,
+      );
+    }
+    const banCount = parseRpcCount(banApplied, "ingest_apply_finess_ban_join");
+    console.log(
+      `[finess] pose BAN (cache) : ${banCount} points posés sur ${banEligible} éligibles sans point`,
+    );
+    // « 0 posé » n'est légitime dans AUCUN run : le cache est partagé avec
+    // RPPS/Ameli (168 clés du résiduel y étaient AVANT le premier drain FINESS,
+    // migration 20260906T120000). 0 = dérive de parité de clé ou cache wipé →
+    // `partial` + trace en base (le log Actions expire à 90 j), jamais un throw
+    // (la table reste servable, le repli previous_ingest a fait son travail).
+    if (banEligible > 0 && banCount === 0) {
+      const { count: cacheAccepted, error: cacheErr } = await supabase
+        .from("geocoded_addresses")
+        .select("address_key", { count: "exact", head: true })
+        .eq("accepted", true);
+      const outcome = evaluateBanJoinOutcome({
+        source: "finess",
+        banApplied: banCount,
+        banEligible,
+        cacheAccepted: cacheAccepted ?? 0,
+        cacheErrMessage: cacheErr?.message,
+        fallbackNote: "rows stay without a point (no commune centroid in finess.geom)",
+      });
+      if (outcome.warn) {
+        console.warn(outcome.warn);
+        console.log(`::warning::${outcome.warn}`);
+      }
+      if (outcome.partial) log.status = "partial";
+      if (outcome.logMessage) appendLogMessage(log, outcome.logMessage);
+    }
 
     // 4c. DIFF STAGING ↔ PROD — une seule RPC porte la couverture géo, les
     // disparitions et la non-régression ; loguée systématiquement.
@@ -280,6 +337,7 @@ async function fetchStagingDiff(supabase: SupabaseClient): Promise<StagingDiff> 
     lost_geom: num("lost_geom"),
     moved_gt_500m: num("moved_gt_500m"),
     staging_geom_null: num("staging_geom_null"),
+    staging_no_voie: num("staging_no_voie"),
     staging_geom_source: sources,
   };
 }

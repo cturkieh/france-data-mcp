@@ -50,6 +50,9 @@ export const MIN_GEOM_COVERAGE = 0.93;
  */
 export const LOST_GEOM_MAX_RATE = 0.005;
 
+/** Établissements sans voie ni point : 647 mesurés le 2026-09-06 ; au-delà de 2× = dérive amont (warn, jamais fatal). */
+export const NO_VOIE_WARN_ABOVE = 1_300;
+
 /**
  * Part des établissements présents des DEUX côtés dont le point bouge de plus
  * de 500 m — LE garde de non-régression de la géolocalisation. Baseline du
@@ -138,6 +141,8 @@ export interface StagingDiff {
   lost_geom: number;
   moved_gt_500m: number;
   staging_geom_null: number;
+  /** Sans point ET sans voie : JAMAIS géocodable (pas de centroïde) — 647 mesurés le 2026-09-06. */
+  staging_no_voie: number;
   staging_geom_source: Record<string, number>;
 }
 
@@ -327,9 +332,37 @@ export function assessStagingDiff(stats: IngestStreamStats, diff: StagingDiff): 
   const withGeom = diff.staging_rows - diff.staging_geom_null;
   const coverage = stats.inserted > 0 ? withGeom / stats.inserted : 0;
   a.info.push(`[finess] couverture géo : ${withGeom}/${stats.inserted} (${fmt(coverage)})`);
+  // Provenance greppable (le `JSON.stringify` de la diff ne l'est pas) : c'est
+  // la seule trace par run de ce que chaque source a apporté.
+  a.info.push(
+    `[finess] provenance du point : ${Object.entries(diff.staging_geom_source)
+      .sort((x, y) => y[1] - x[1])
+      .map(([k, v]) => `${k}=${v}`)
+      .join(", ")}`,
+  );
   if (coverage < MIN_GEOM_COVERAGE) {
     a.fatal.push(
-      `Only ${withGeom}/${stats.inserted} rows have a geom (${fmt(coverage)} < ${fmt(MIN_GEOM_COVERAGE)}) — ANS coordinates + previous_ingest fallback insufficient, refusing to swap`,
+      `Only ${withGeom}/${stats.inserted} rows have a geom (${fmt(coverage)} < ${fmt(MIN_GEOM_COVERAGE)}) — ANS coordinates + previous_ingest fallback + BAN cache insufficient, refusing to swap`,
+    );
+  }
+  // Le résiduel sans point se lit en DEUX parts : ce que le drain BAN peut
+  // encore récupérer (voie présente) et ce qui ne sera JAMAIS géocodé sans
+  // centroïde commune (refusé : contaminerait le RPPS en `finess_join`).
+  const banRecoverable = diff.staging_geom_null - diff.staging_no_voie;
+  a.info.push(
+    `[finess] sans point : ${diff.staging_geom_null} dont ${banRecoverable} géocodables par BAN (voie présente) et ${diff.staging_no_voie} JAMAIS géocodables (aucune voie) — baseline 2026-09-06 : 2 549 / 647 après pose`,
+  );
+  if (diff.staging_no_voie > NO_VOIE_WARN_ABOVE) {
+    a.warnings.push(
+      `[finess] ⚠️ ${diff.staging_no_voie} établissements sans voie ni point (> ${NO_VOIE_WARN_ABOVE}, soit 2× la baseline de 647) — l'ANS omet-il la voie en masse ?`,
+    );
+  }
+  // Pose BAN muette : 0 `ban_address` alors qu'il reste des lignes géocodables
+  // = dérive de clé ou cache wipé (jumeau de la sentinelle de `finess.ts`, ici
+  // sur la DIFF — le pendant exact de la tautologie `lost_geom`).
+  if (banRecoverable > 0 && (diff.staging_geom_source.ban_address ?? 0) === 0) {
+    a.warnings.push(
+      `[finess] ⚠️ aucun point ban_address posé alors que ${banRecoverable} lignes sans point ont une voie — pose BAN muette (parité de clé ? cache geocoded_addresses vide ?)`,
     );
   }
   if (diff.prod_rows > 0) {

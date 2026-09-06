@@ -159,6 +159,20 @@ export const SOURCES = {
     cursorInit: 0,
     countRpc: "ameli_count_ban_eligible_rows",
   },
+  finess: {
+    table: "finess",
+    // FINESS phase 2 (item 1, migration 20260906T120000) : résiduel SANS point
+    // après le repli `previous_ingest` (établissements nouveaux, ~5 K). Pas
+    // d'id bigint : la PK est `num_finess` CHAR(9) → curseur TEXTE renvoyé
+    // sous son nom (sentinelle NULL, cf. `assertSourcesValid` : seul `id` est
+    // numérique). Adresse = `voie` seule (porte déjà numéro + type).
+    // Aucun index à entretenir : ~5 K éligibles sur 105 K, seq scan borné.
+    enumRpc: "finess_eligible_rows_after_id",
+    cursorParam: "p_after_id",
+    cursorField: "num_finess",
+    cursorInit: null,
+    countRpc: "finess_count_ban_eligible_rows",
+  },
 };
 
 /**
@@ -207,11 +221,11 @@ assertSourcesValid(SOURCES);
  * le cache persistant.
  *
  * @param {import("@supabase/supabase-js").SupabaseClient} supabase
- * @param {{ maxNew?: number, source?: "rpps"|"ameli", sourceTable?: string }} [opts]
+ * @param {{ maxNew?: number, source?: "rpps"|"ameli"|"finess", sourceTable?: string }} [opts]
  *   - maxNew : borne le nb de NOUVELLES adresses distinctes soumises ce run
  *     (slice déterministe de la tête triée → permet de lancer en tranches ;
  *     un re-run reprend où il en est via le cache). Défaut : illimité.
- *   - source : "rpps" (défaut) | "ameli" — sélectionne la table LIVE + les 2
+ *   - source : "rpps" (défaut) | "ameli" | "finess" — sélectionne la table LIVE + les 2
  *     RPC jumelles (énumération + count) via `SOURCES`. Le cache visé est le
  *     MÊME pour les deux (partagé par clé d'adresse normalisée).
  *   - sourceTable : SURCHARGE explicite de la table d'éligibilité, passée en
@@ -266,12 +280,12 @@ export async function runBanBackfill(supabase, opts = {}) {
   // lecture est BORNÉE par `withTimeout` (fail-loud : un dépassement throw,
   // PAS un statut "partial").
   const distinctKeyInputs = new Map();
-  // Curseur keyset GÉNÉRIQUE : les 2 sources énumèrent désormais par `id` (PK ;
-  // `cursorInit: 0`). Le mécanisme reste PARAMÉTRÉ (`srcCfg.cursorParam`/
-  // `cursorField`/`cursorInit`) et supporterait une future source à curseur-clé
-  // (le garde-fou de chargement valide `cursorInit ∈ {0, null}`). Le client
-  // déduplique TOUJOURS par `address_key` (les 2 RPC le renvoient) ; le curseur ne
-  // sert qu'à paginer.
+  // Curseur keyset GÉNÉRIQUE : RPPS et Ameli énumèrent par `id` (PK bigint,
+  // `cursorInit: 0`), FINESS par `num_finess` (PK CHAR(9), curseur TEXTE,
+  // `cursorInit: null`). Le mécanisme est PARAMÉTRÉ (`srcCfg.cursorParam`/
+  // `cursorField`/`cursorInit`, garde-fou de chargement `assertSourcesValid`).
+  // Le client déduplique TOUJOURS par `address_key` (les 3 RPC le renvoient) ;
+  // le curseur ne sert qu'à paginer.
   let after = srcCfg.cursorInit;
   let pageCount = 0;
   // F-1 (silent-failure review) : compte les lignes éligibles à clé vide/nulle,
@@ -341,7 +355,28 @@ export async function runBanBackfill(supabase, opts = {}) {
         });
       }
     }
-    after = rows[rows.length - 1][srcCfg.cursorField];
+    // Garde curseur (revue 2026-09-06, prouvé par harnais) : sans lui, un
+    // `cursorField` qui ne nomme pas une colonne de la RETURNS TABLE donne
+    // `after = undefined` → JSON.stringify DROPPE `p_after_id` → PostgREST
+    // applique le DEFAULT de la signature → 1re page en boucle jusqu'au kill
+    // du job (30 min), SANS log de progression (le compteur de clés plafonne).
+    // La colonne curseur est une PK NOT NULL : undefined/null = divergence
+    // descripteur ↔ RETURNS TABLE, jamais une donnée légitime.
+    const lastRow = rows[rows.length - 1];
+    const nextAfter = lastRow[srcCfg.cursorField];
+    if (nextAfter === undefined || nextAfter === null) {
+      throw new Error(
+        `[ban-backfill] ${RPC_LABEL} : colonne curseur "${srcCfg.cursorField}" absente/NULL de la dernière ligne (colonnes reçues : ${Object.keys(lastRow).join(", ")}) — SOURCES et la RETURNS TABLE ont divergé (S-1 : pagination en boucle)`,
+      );
+    }
+    // Monotonie stricte : un curseur qui n'avance pas = même boucle, autre cause
+    // (ORDER BY et prédicat keyset désaccordés).
+    if (after !== srcCfg.cursorInit && !(nextAfter > after)) {
+      throw new Error(
+        `[ban-backfill] ${RPC_LABEL} : curseur non strictement croissant (${JSON.stringify(after)} → ${JSON.stringify(nextAfter)}) — ORDER BY et prédicat keyset désaccordés`,
+      );
+    }
+    after = nextAfter;
     pageCount++;
     const keyMultiple = Math.floor(distinctKeyInputs.size / PROGRESS_EVERY);
     if (keyMultiple > loggedKeyMultiple) {
@@ -673,7 +708,7 @@ export async function runBanBackfill(supabase, opts = {}) {
 }
 
 /**
- * Parse `--source rpps|ameli` depuis argv (tolère `--source=ameli`). Défaut
+ * Parse `--source rpps|ameli|finess` depuis argv (tolère `--source=ameli`). Défaut
  * `"rpps"`. Une valeur hors `SOURCES` → throw (fail-loud : un drainage mal
  * ciblé doit être BRUYANT, jamais silencieusement redirigé sur RPPS).
  */
