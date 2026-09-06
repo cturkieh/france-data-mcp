@@ -2,21 +2,26 @@ import { describe, expect, it } from "vitest";
 import {
   DELIBERATELY_AUTRE,
   FINESS_CATEGORIES,
+  FINESS_CATEGORY_CODES,
   FINESS_FAMILY_CODES,
+  HORS_NOMENCLATURE_LABELS,
   finessFamille,
+  isFinessCategorieCode,
+  libelleCategorieFiness,
 } from "./finess-categories";
+import { SMT_CATEGORIE_LABELS } from "./finess-categories-labels.js";
 
 describe("finessFamille", () => {
   it("maps acute-care MCO codes to 'mco'", () => {
     expect(finessFamille("101")).toBe("mco"); // CHR
     expect(finessFamille("106")).toBe("mco"); // CH
-    expect(finessFamille("108")).toBe("mco"); // CHU
     expect(finessFamille("131")).toBe("mco"); // CLCC (real code, was 365 in v0.2.0 mistake)
     expect(finessFamille("355")).toBe("mco"); // CH
     expect(finessFamille("365")).toBe("mco"); // Etab Soins Pluridisciplinaire
   });
 
-  it("maps SSR codes to 'ssr'", () => {
+  it("maps SSR codes to 'ssr' — dont 108, convalescence et repos (jamais un CHU)", () => {
+    expect(finessFamille("108")).toBe("ssr");
     expect(finessFamille("109")).toBe("ssr");
   });
 
@@ -77,7 +82,6 @@ describe("finessFamille", () => {
     expect(finessFamille("445")).toBe("handicap_adultes"); // SAMSAH
     expect(finessFamille("446")).toBe("handicap_adultes"); // SAVS
     expect(finessFamille("382")).toBe("handicap_adultes"); // Foyer de vie
-    expect(finessFamille("600")).toBe("handicap_adultes"); // Foyer hébergement
   });
 
   it("maps aide_domicile (SAAD, SPASAD)", () => {
@@ -165,7 +169,7 @@ describe("finessFamille", () => {
   });
 
   it("trims surrounding whitespace before matching", () => {
-    expect(finessFamille(" 108 ")).toBe("mco");
+    expect(finessFamille(" 108 ")).toBe("ssr");
     expect(finessFamille("\t500\n")).toBe("ehpad");
     expect(finessFamille("109 ")).toBe("ssr");
   });
@@ -201,5 +205,49 @@ describe("finessFamille", () => {
     // would re-break the family classifier.
     expect(FINESS_FAMILY_CODES.mco).not.toContain("354");
     expect(FINESS_FAMILY_CODES.mco).not.toContain("295");
+  });
+});
+
+describe("libellés = nomenclature SMT (source unique, backlog FINESS phase 2 item 7)", () => {
+  it("les codes exposés = union des familles + autre délibéré, sans doublon, chacun avec un libellé (contrainte compilateur)", () => {
+    const fromFamilies = Object.values(FINESS_FAMILY_CODES).flat();
+    expect(new Set(FINESS_CATEGORY_CODES).size).toBe(fromFamilies.length + DELIBERATELY_AUTRE.size);
+    for (const code of FINESS_CATEGORY_CODES) {
+      expect(FINESS_CATEGORIES[code], `code ${code} sans libellé`).toBeTruthy();
+      expect(isFinessCategorieCode(code)).toBe(true);
+    }
+    expect(FINESS_CATEGORY_CODES).toHaveLength(100);
+  });
+
+  it("HORS_NOMENCLATURE ne porte QUE des codes absents du SMT — un code réapparu doit en sortir ET re-valider sa famille", () => {
+    for (const [code, label] of Object.entries(HORS_NOMENCLATURE_LABELS)) {
+      expect(
+        code in SMT_CATEGORIE_LABELS,
+        `${code} est revenu au SMT sous « ${(SMT_CATEGORIE_LABELS as Record<string, string>)[code]} » (hors nomenclature disait « ${label} ») : retirer de HORS_NOMENCLATURE_LABELS ET re-valider FINESS_FAMILY_CODES — le libellé suit le SMT, la famille NON.`,
+      ).toBe(false);
+      expect(isFinessCategorieCode(code)).toBe(true);
+    }
+    // 619 = seul porteur de la famille `imagerie` (enum public `familles`).
+    expect(FINESS_FAMILY_CODES.imagerie).toEqual(["619"]);
+    // 600 (doublon de 252, 0 établissement) retiré le 2026-09-06.
+    expect(isFinessCategorieCode("600")).toBe(false);
+    expect(finessFamille("600")).toBe("autre");
+  });
+
+  it("les 32 divergences DREES → SMT sont résolues côté SMT (réforme services autonomie, santé sexuelle)", () => {
+    expect(FINESS_CATEGORIES["460"]).toBe("Service autonomie aide (SAA)");
+    expect(FINESS_CATEGORIES["209"]).toBe("Service autonomie aide et soins (SAAS)");
+    expect(FINESS_CATEGORIES["228"]).toBe("Centre de Santé Sexuelle");
+    expect(FINESS_CATEGORIES["108"]).toBe("Etablissement de Convalescence et de Repos");
+    expect(FINESS_CATEGORIES["106"]).toBe("Centre hospitalier, ex Hôpital local");
+  });
+
+  it("libelleCategorieFiness couvre TOUTE la nomenclature (SMT + hors nomenclature), isFinessCategorieCode le seul catalogue", () => {
+    expect(libelleCategorieFiness("112")).toBe("Centre de Convalescence Cure ou Réadaptation");
+    expect(isFinessCategorieCode("112")).toBe(false);
+    expect(finessFamille("112")).toBe("autre");
+    expect(libelleCategorieFiness("619")).toBe("Cabinet d'imagerie médicale");
+    expect(libelleCategorieFiness("999")).toBeUndefined();
+    expect(isFinessCategorieCode("999")).toBe(false);
   });
 });

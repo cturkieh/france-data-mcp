@@ -45,6 +45,37 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Changed
 
+- **Libellés de catégorie FINESS : source unique SMT/ANS** (backlog FINESS
+  phase 2, item 7 — décision produit). La lib (`FINESS_CATEGORIES`,
+  `libelleCategorieFiness`) dérive désormais ses libellés du même module que
+  l'ingestion écrit dans `finess.categorie_libelle` :
+  `src/sante/finess-categories-labels.ts`, GÉNÉRÉ par
+  `pnpm finess:refresh-categories` (`refresh-finess-categories.ts`, TS testé,
+  reproductible byte à byte — ordre SMT, format Biome, marqueur
+  `@generated-count` relu par la garde anti-rétrécissement ; l'ancien `.mjs`
+  écrivait un JSON et sa garde comptait 0 ligne après passage de Biome).
+  Avant : copie DREES de mai 2026, **32 libellés divergents sur 101** —
+  réforme « services autonomie » (`460` → « Service autonomie aide (SAA) »,
+  `209` → SAAS), `228` → « Centre de Santé Sexuelle », `108` étiqueté « C.H.U. »
+  alors que le code désigne un établissement de convalescence (déplacé de `mco`
+  vers `ssr`, 0 établissement en prod). Les tools MCP servent déjà le libellé
+  de la base (SMT) : seuls les consommateurs npm de la lib voient bouger ces 32
+  libellés. `finess-categories.ts` ne porte plus que les décisions produit
+  (familles, `autre` délibéré) ; les codes exposés en DÉRIVENT, et chaque code
+  cité doit avoir un libellé connu — vérifié par le **compilateur**
+  (`satisfies readonly CodeConnu[]`), plus par un test. L'ingestion expose
+  l'âge de la nomenclature à chaque run et prévient au-delà de 180 jours
+  (`nomenclatureAgeDays`, les codes relibellés étant invisibles de
+  `missingLabelCounts`).
+  - **Breaking (0.x)** : `FINESS_CATEGORIES` vaut `Record<FinessCategorieCode,
+    string>` (plus de libellés littéraux typés : un rafraîchissement SMT ne doit
+    pas être un breaking de type) ; le code `600` (doublon de `252`, 0
+    établissement, absent du SMT) sort de `FinessCategorieCode` et de
+    `handicap_adultes` ; `libelleCategorieFiness` couvre les 429 codes de la
+    nomenclature (101 avant) — `undefined` signifie « inconnu du SMT », plus
+    « hors catalogue » : nouveau garde `isFinessCategorieCode` pour ce sens.
+    `619` (seul porteur de la famille `imagerie`, absent du SMT) est conservé
+    par décision produit dans `HORS_NOMENCLATURE_LABELS` (lib-only).
 - **Plancher de lignes RELATIF à la dernière ingestion réelle pour Ameli, RPPS
   et CDS** (backlog FINESS phase 2, item 5) — `assertStagingRowBand` +
   `getLastRealIngestRowCount` (`shared.ts`), bande par défaut `[0,9 ; 1,3]`

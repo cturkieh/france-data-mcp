@@ -18,6 +18,7 @@
  * sont stables : l'ops les grep dans les logs GitHub Actions.
  */
 
+import { FINESS_CATEGORIE_LABELS_REFRESHED_AT } from "../../src/sante/finess-categories-labels.js";
 import type { CoordLayout, OverflowField, SkipReason } from "./finess-ans-parse.js";
 
 /** 104 734 EGE en service le 2026-09-05 (93 403 dans l'ancien CSV DREES). */
@@ -160,7 +161,20 @@ const topCounts = (m: Map<string, number>, limit = Number.POSITIVE_INFINITY): st
  * Décisions prises sur le seul résultat du parsing (avant toute RPC).
  * Un volume hors bornes court-circuite le reste : les taux n'ont pas de sens.
  */
-export function assessParsedRows(stats: IngestStreamStats): Assessment {
+/**
+ * Âge (jours) de la nomenclature TRE_R397 figée dans le repo. Post-mortem DREES
+ * transposé : une nomenclature que personne ne rafraîchit vieillit en silence —
+ * `missingLabelCounts` voit les codes AJOUTÉS par l'ANS, jamais les codes
+ * RELIBELLÉS (les 32 divergences de 2026 ont tenu des mois sans signal).
+ * Exposé à chaque run (info) et warn au-delà de `NOMENCLATURE_MAX_AGE_DAYS` ;
+ * jamais fatal (une nomenclature vieille n'est pas une raison de refuser un swap).
+ */
+export const NOMENCLATURE_MAX_AGE_DAYS = 180;
+export function nomenclatureAgeDays(now: number = Date.now()): number {
+  return Math.floor((now - Date.parse(FINESS_CATEGORIE_LABELS_REFRESHED_AT)) / 86_400_000);
+}
+
+export function assessParsedRows(stats: IngestStreamStats, now: number = Date.now()): Assessment {
   const a: Assessment = { fatal: [], warnings: [], info: [] };
 
   if (stats.inserted < MIN_ROWS) {
@@ -172,6 +186,15 @@ export function assessParsedRows(stats: IngestStreamStats): Assessment {
     return a;
   }
   // `stats.inserted ≥ MIN_ROWS` : aucune division ci-dessous n'a besoin d'une garde « > 0 ».
+  const nomenclatureAge = nomenclatureAgeDays(now);
+  a.info.push(
+    `[finess] nomenclature TRE_R397 figée depuis ${nomenclatureAge} j (${FINESS_CATEGORIE_LABELS_REFRESHED_AT.slice(0, 10)})`,
+  );
+  if (nomenclatureAge > NOMENCLATURE_MAX_AGE_DAYS) {
+    a.warnings.push(
+      `[finess] ⚠️ nomenclature TRE_R397 vieille de ${nomenclatureAge} j (> ${NOMENCLATURE_MAX_AGE_DAYS}) — relancer pnpm finess:refresh-categories (les codes relibellés par l'ANS sont invisibles de missingLabelCounts)`,
+    );
+  }
 
   // Anomalies structurelles — `ferme`/`inactif` sont le périmètre attendu
   // (≈ 70 K EGE), PAS des anomalies ; les cinq autres le sont. Les lignes
@@ -250,13 +273,13 @@ export function assessParsedRows(stats: IngestStreamStats): Assessment {
     const totalMissing = [...stats.missingLabelCounts.values()].reduce((x, y) => x + y, 0);
     const missingRate = totalMissing / stats.inserted;
     a.warnings.push(
-      `[finess] ⚠️ ${stats.missingLabelCounts.size} codes catégorie SANS libellé dans finess-categories-labels.json (${topCounts(stats.missingLabelCounts)}) — relancer scripts/ingest/refresh-finess-categories.mjs`,
+      `[finess] ⚠️ ${stats.missingLabelCounts.size} codes catégorie SANS libellé dans src/sante/finess-categories-labels.ts (${topCounts(stats.missingLabelCounts)}) — relancer pnpm finess:refresh-categories ; si le code figure dans HORS_NOMENCLATURE_LABELS (lib), c'est un code hors SMT : décision produit, pas un refresh`,
     );
     // Une nomenclature figée vidée ou tronquée (SMT partiel) servirait des
     // dizaines de milliers de `categorie_libelle` NULL contre un warn.
     if (missingRate > STRUCTURAL_FAIL_THRESHOLD) {
       a.fatal.push(
-        `${totalMissing} rows (${fmt(missingRate)}) without categorie_libelle — finess-categories-labels.json incomplete, refusing to swap`,
+        `${totalMissing} rows (${fmt(missingRate)}) without categorie_libelle — finess-categories-labels.ts incomplete, refusing to swap`,
       );
     }
   }
