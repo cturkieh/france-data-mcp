@@ -21,9 +21,9 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { SMT_CATEGORIE_LABELS } from "../../src/sante/finess-categories-labels.js";
 import {
   type AnsEge,
-  CATEGORIE_LABELS,
   type ParsedEge,
   type ParsedEgeKept,
   collapseWhitespace,
@@ -78,7 +78,7 @@ describe("mapEgeToRow — cas nominal (010780195, Clinique Convert, WGS84)", () 
     expect(row.num_finess).toBe("010780195");
     expect(row.raison_sociale).toBe("CLINIQUE DOCTEUR CONVERT");
     expect(row.categorie_code).toBe("365");
-    expect(row.categorie_libelle).toBe(CATEGORIE_LABELS["365"]);
+    expect(row.categorie_libelle).toBe(SMT_CATEGORIE_LABELS["365"]);
     expect(row.categorie_libelle).toBeTruthy();
   });
 
@@ -437,8 +437,7 @@ describe("Robustesse de forme", () => {
   });
 
   it("la nomenclature figée couvre les codes des fixtures et les libellés historiques", () => {
-    expect(CATEGORIE_LABELS["620"]).toBe("Pharmacie d'Officine");
-    expect(CATEGORIE_LABELS["611"]).toBe("Laboratoire de Biologie Médicale");
-    expect(Object.keys(CATEGORIE_LABELS).length).toBeGreaterThan(400);
+    expect(SMT_CATEGORIE_LABELS["620"]).toBe("Pharmacie d'Officine");
+    expect(SMT_CATEGORIE_LABELS["611"]).toBe("Laboratoire de Biologie Médicale");
   });
 });

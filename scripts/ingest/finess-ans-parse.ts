@@ -14,17 +14,21 @@
  * du flux (`__fixtures__/finess-ans-ege.json`), sans monter une ingestion.
  */
 
+import { SMT_CATEGORIE_LABELS } from "../../src/sante/finess-categories-labels.js";
 import { deptFromCodeInsee, isValidCodeInsee } from "../../src/territoire/dept-codes.js";
-import labelsFile from "./finess-categories-labels.json" with { type: "json" };
 
 /**
  * Libellés officiels des catégories d'EGE (nomenclature TRE_R397 du serveur
  * multi-terminologies ANS), FIGÉS dans le repo par
- * `refresh-finess-categories.mjs`. Le flux ANS ne livre que le code ; le CSV
+ * `refresh-finess-categories.ts` — SOURCE UNIQUE partagée avec la lib
+ * (`src/sante/finess-categories.ts`). Le flux ANS ne livre que le code ; le CSV
  * DREES livrait le libellé. Figé plutôt qu'appelé au run : une indisponibilité
  * du SMT ne doit jamais produire un swap avec des `categorie_libelle` NULL.
+ * SMT NU, sans `HORS_NOMENCLATURE_LABELS` (lib-only, ex. 619 imagerie) : la
+ * base ne porte que des libellés officiels — un tel code arriverait avec
+ * `categorie_libelle` NULL, compté par `missingLabelCounts`.
  */
-export const CATEGORIE_LABELS: Record<string, string> = labelsFile.labels;
+const CATEGORIE_LABELS: Readonly<Record<string, string>> = SMT_CATEGORIE_LABELS;
 
 /**
  * `usageAdresse` de l'adresse à retenir : « Adresse géographique du lieu

@@ -89,6 +89,7 @@
     "ingest:iris": "tsx scripts/ingest/iris.ts",
     "notify:pending-geocode": "tsx scripts/ingest/notify-pending-geocode.ts",
     "notify:ingest-anomaly": "tsx scripts/ingest/notify-ingest-anomaly.ts",
+    "finess:refresh-categories": "tsx scripts/ingest/refresh-finess-categories.ts",
     "cleanup:stale-previous": "tsx scripts/ingest/drop-stale-previous.ts"
   },
   "engines": {

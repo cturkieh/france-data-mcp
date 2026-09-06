@@ -43,7 +43,7 @@ jour **quotidiennement**, JSON.gz. Complété par `finess-activites-1`
 | Structure | `{ generatedAt, schemaVersion, pmej[], gco[], gcc[] }` ; les établissements sont les **EGE**, imbriqués dans `pmej[].ege[]` |
 | Volumes (2026-09-05) | 98 208 PMEJ · **174 681 EGE** dont **104 734 en service** (`etatObjet = "A"` ET `dateFermeture` nulle) |
 | Schéma officiel | github.com/ansforge/finess `schema-structures-v1.json` |
-| Nomenclature catégories | **identique** au CSV DREES (620 pharmacie, 611 LBM, 124 centre de santé…) → `finessFamille` inchangé. Libellés : le flux ne donne que le code ; nomenclature TRE_R397 (428 concepts) figée dans `finess-categories-labels.json` par `refresh-finess-categories.mjs` |
+| Nomenclature catégories | **identique** au CSV DREES (620 pharmacie, 611 LBM, 124 centre de santé…) → `finessFamille` inchangé. Libellés : le flux ne donne que le code ; nomenclature TRE_R397 (428 concepts) figée dans `src/sante/finess-categories-labels.ts` (source unique lib + ingestion depuis le 2026-09-06) par `refresh-finess-categories.ts` |
 
 ### 2.1 Pièges du flux (tous mesurés, tous testés)
 
