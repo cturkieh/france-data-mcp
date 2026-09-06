@@ -8,6 +8,101 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Changed
 
+- **FINESS : colonnes dédiées `siret`, `cle_ban`, `score_ban`, `geom_source` et
+  précision par résultat** (backlog FINESS phase 2, items 2 et 10 — plan
+  `docs/plans/finess-phase-2-cloture.md`, migration `20260906T160000`
+  appliquée en prod le 2026-09-06). La provenance du point sort de `raw`
+  (jsonb, illisible des tools) pour une colonne sous **deux contraintes** :
+  vocabulaire fermé (`ans` | `previous_ingest` | `ban_address`, parité avec
+  `GEOM_SOURCES` TS ET avec le `CHECK` testée) et `geom ⇔ geom_source` (un
+  point a toujours une provenance, une ligne sans point n'en a jamais — l'ancienne
+  RPC Lambert 93 `ingest_apply_finess_geom_batch`, morte depuis l'ANS et
+  capable de poser un point sans provenance, est supprimée). Peuplement
+  one-shot depuis `raw`, vérifié à l'apply : 104 734 lignes, 2 549 sans point
+  = 2 549 sans provenance, 78 243 `ans` / 21 222 `previous_ingest` / 2 720
+  `ban_address`, 91 542 SIRET, 0 hors vocabulaire. Staging recréée en superset
+  strict ; **trou comblé** : `staging-parity.test.ts` gagne un bloc `finess`
+  (la table n'avait aucun garde de parité d'index). `cle_ban` et `score_ban`
+  n'ont pas encore de lecteur côté tools (décision assumée : matière d'audit
+  SQL — clé sans `_` = centroïde communal refusé, distribution des scores — et
+  future jointure BAN, sortie de `raw` en même temps que le reste pour ne pas
+  recréer la staging deux fois).
+  Repli, pose BAN et diff écrivent/lisent la colonne ; RPC de lecture
+  recréées avec `siret` + `geom_source` (et le `statement_timeout = '15s'` de
+  `20260528T130000`, qu'un `DROP FUNCTION` aurait perdu — attrapé par
+  `lookup-statement-timeout.test.ts`). `raw` reste dans le schéma, vide.
+  **Revue du même jour, seconde migration `20260906T170000`** : les RPC de
+  lecture comparaient `CHAR(n)` à un paramètre `TEXT` (post-mortem V0.10.1
+  recopié tel quel depuis 2026-05) → PK et index inutilisables ; cast côté
+  paramètre, mesuré prod : `finess_by_num_finess` **369-623 ms → 0,11 ms**,
+  `finess_by_categorie` 29,5 → 2,0 ms. Et `finess_siret_idx`, posé sans
+  consommateur (2 688 kB, 0 scan), retiré des deux côtés. Troisième migration
+  `20260906T180000` : le `CASE` de propagation du repli perd son `ELSE` (une
+  provenance inconnue → NULL → contrainte violée → cron en échec LOUD, jamais
+  dégradée en `previous_ingest`), et la vérification du peuplement one-shot
+  devient un bloc `DO` rejouable sur toute base (échec si `raw` bien formé
+  absent des colonnes).
+  Côté lib, `FinessResult` gagne **`geo_precision`** (posé seulement avec
+  `coords`, toujours `adresse` : point ANS natif, point BAN accepté par
+  précision ou hérité — warn 1-shot de drift si un point arrive sans
+  provenance) et **`siret_ans`** (fait brut, jamais interprété) — pas de
+  `precis_count` FINESS au panorama : il vaudrait `count` par construction.
+  **Décision (item 10 clos)** : pas
+  de centroïde communal pour les 647 sans voie — un centroïde dans `finess.geom`
+  serait recopié par le cron RPPS en `finess_join`, tier précis du GiST partiel ;
+  ils restent servis par catégorie et par numéro avec `coords: null`, invisibles
+  des recherches par rayon. `vitest.config.ts` exclut `.claude/worktrees/**`
+  (un worktree d'agent faisait tourner une seconde copie de chaque test).
+- **Étiquette de métadonnées `lambert93_natif_finess` → `point_etablissement_finess`**
+  (changement de contrat, d'où la V0.30.0) : l'ancienne décrivait le Lambert 93
+  du CSV DREES, mort le 2026-07-20 ; la note dit désormais la vérité (WGS84
+  ANS ou BAN, `geo_precision` par établissement, `siret_ans` non vérifié).
+  Descriptions des trois tools FINESS portées par UNE note partagée
+  (`FINESS_SOURCE_ANS_NOTE`) ; l'ancienne note « le dump DREES abrège à ~38
+  caractères » retirée (obsolète : 82 caractères max servis, 24 313
+  établissements au-delà de 38) ; message `not_found` de
+  `etablissement_by_finess` réécrit (« en service », plus « base DREES »).
+  Nouveau helper `core/warn-once.ts` : le warn 1-shot vivait en quatre copies
+  (Ameli, raffinage ×2, FINESS), chacune avec son reset à ne pas oublier.
+- **Resolver SIRET : le SIRET déclaré par l'ANS amorce la cascade** au même rang
+  que les SIRET RPPS (source `finess_ans`, dédoublonné). DINUM confronte chaque
+  candidat, « actif prime » et le repli géo L1 traitent un SIRET ANS périmé
+  exactement comme un SIRET RPPS périmé (testé : actif → `best_match`, fermé
+  → `best_match_ferme` + repli). `method` gagne `finess_ans` (cascade nominale
+  amorcée par l'ANS seul, sans déclaration RPPS) ; `no_rpps` couvre désormais
+  « ni RPPS ni ANS ». Mesure prod du 2026-09-06 : sur 3 000 EGE à SIRET ANS,
+  59 % n'ont AUCUN SIRET côté RPPS (là où la cascade n'avait que le repli
+  géographique) ; les 1 241 qui en ont un concordent à 100 % (même producteur
+  ANS — ce n'est pas une preuve d'actualité, la confrontation SIRENE l'est).
+  **Risque accepté, écrit ici** : quand le SIRET ANS est actif et matche
+  l'adresse, la cascade s'arrête comme avec un SIRET RPPS actif — le repli géo
+  et son arbitrage « actif prime » ne sont pas appelés ; un site repris dont la
+  déclaration ANS serait périmée MAIS encore active côté SIRENE sortirait
+  `actif` sur l'ancien SIRET (même comportement qu'un SIRET RPPS périmé et
+  actif). La mesure §2.5 du plan (300 EGE sans SIRET RPPS, DINUM live) est
+  reportée ci-dessous dès qu'elle est exécutée. `method = finess_ans` n'est
+  posé que sur une cascade nominale sans repli tenté.
+  Parseur : SIRET ANS hors 14 chiffres → colonne `null` + compteur
+  `siretMalformed` avec l'exemple rejeté (info sous 1 %, warning au-delà,
+  jamais fatal ; 0 mesuré), **plancher relatif de remplissage `MIN_SIRET_FILL`
+  0,80** (baseline 87,4 %) — un champ renommé côté ANS ne videra plus la
+  colonne en `success` —, et `scoreBanUnparsable` (même politique).
+- **Les warnings de validation FINESS atteignent enfin quelqu'un** (revue
+  silent-failure 2026-09-06) : ils étaient `console.warn` seuls, invisibles de
+  la vigie post-cron (qui lit `ingest_log.status`) et effacés avec le log
+  Actions à 90 jours. Désormais persistés dans `ingest_log.error_message` et
+  le run passe `partial` (swap maintenu, issue idempotente + email à
+  l'ouverture). Corollaire : un débordement de colonne anecdotique (1
+  téléphone) devient une info ; warning au-delà de 0,1 % (`OVERFLOW_WARN_RATE`),
+  fatal au-delà de 1 %, inchangé. `ingest_finess_staging_diff` sans
+  `staging_geom_source` → throw (plus de `{}` muet). Côté lib, un point servi
+  avec `geom_source` `null` ou hors vocabulaire → throw (états impossibles par
+  la contrainte, jumeau `rpps-db`) ; une RPC sans la colonne (fenêtre de
+  déploiement) → warn 1-shot ET note dans `query_metadata`. Le type
+  `FinessStagingRow` porte `geom ⇔ geom_source` (union discriminée, comme
+  `ResolvedCoordinates`), `FinessResult.geo_precision` est typé `"adresse"`,
+  et l'amorçage du resolver est un objet `SeedSirets { rpps, all }` impossible
+  à permuter (le SIRET ANS ne départage jamais deux candidats).
 - **Drain BAN : un `workflow_call` + trois appelants, et les issues
   `pending-geocode` se ferment toutes seules** (backlog FINESS phase 2, item 9 ;
   plan `docs/plans/finess-phase-2-cloture.md` §3). Les trois fichiers

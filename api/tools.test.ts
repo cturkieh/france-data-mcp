@@ -1703,16 +1703,21 @@ describe("lister_nomenclature — referentiel rpps_savoir_faire (limit + profess
   });
 });
 
-describe("FINESS — note troncature raison_sociale (régression B6)", () => {
+describe("FINESS — note de source partagée (V0.30.0, remplace la note troncature DREES B6)", () => {
+  // Le flux ANS livre le libellé long (82 caractères max servis le 2026-09-06) :
+  // la note « le dump DREES abrège à ~38 caractères » mentait. Les trois tools
+  // portent UNE note partagée (source ANS, geo_precision, siret_ans, email).
   for (const name of [
     "etablissement_by_finess",
     "etablissements_finess_in_radius",
     "etablissements_finess_by_categorie",
   ]) {
-    it(`${name} signale que raison_sociale est abrégée en amont DREES`, () => {
+    it(`${name} cite la source ANS, geo_precision et siret_ans, et plus la DREES`, () => {
       const tool = findTool(name);
-      expect(tool?.description).toMatch(/raison.?social/i);
-      expect(tool?.description).toMatch(/abrég|tronqu|38/i);
+      expect(tool?.description).toMatch(/FINESS \/ ANS/);
+      expect(tool?.description).toMatch(/geo_precision: "adresse"/);
+      expect(tool?.description).toMatch(/siret_ans/);
+      expect(tool?.description).not.toMatch(/DREES|abrég|tronqu/i);
     });
   }
 });

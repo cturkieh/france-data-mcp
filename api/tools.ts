@@ -730,13 +730,15 @@ const FINESS_FAMILLE_INPUTS = Object.keys(FINESS_FAMILY_CODES) as readonly Fines
 const FAMILLES_LIST = FINESS_FAMILLE_INPUTS.join(", ");
 
 /**
- * Note partagée (audit B6) : le dump FINESS DREES abrège les libellés longs
- * (~38 car. max). Limitation amont, pas une troncature de notre pipeline
- * (colonne DB `TEXT` illimitée). Injectée dans les descriptions des tools
- * FINESS exposant `raison_sociale`.
+ * Note partagée des trois tools FINESS (source, précision, SIRET, email).
+ * Remplace l'ancienne note « le dump DREES abrège à ~38 caractères » (audit
+ * B6) : le flux ANS livre le libellé long (max 82 caractères servis le
+ * 2026-09-06, 24 313 établissements au-delà de 38). Une seule constante — le
+ * contrat a changé une fois (V0.30.0) et il a fallu réécrire trois phrases
+ * divergentes ; la prochaine fois, une.
  */
-const FINESS_RS_TRUNCATION_NOTE =
-  "Note : `raison_sociale` provient du dump DREES qui abrège les libellés longs (~38 car. max, ex 'CERBALLIANCE HA' pour 'CERBALLIANCE HAZEBROUCK'). Pour le nom légal complet, cross-check via SIREN/SIRET (entreprise_by_siren / etablissement_by_siret).";
+const FINESS_SOURCE_ANS_NOTE =
+  "Source : FINESS / ANS (flux quotidien, ingéré le 1ᵉʳ et le 15 ; établissements EN SERVICE uniquement). Chaque résultat porte `geo_precision: \"adresse\"` dès que `coords` est présent (point WGS84 ANS ou point BAN de l'adresse, jamais un centroïde ; un établissement sans `coords` n'a pas de point connu et est invisible des recherches par rayon) et `siret_ans` (SIRET déclaré par l'ANS, fait brut non vérifié SIRENE — pour le verdict : reconcilier_finess_sirene / verifier_site_actif). Note : champ `email` toujours `null` (non exposé par FINESS public).";
 
 const FINESS_FAMILLE_LENS_NOTE =
   "Lentille : un filtre `familles` compte les établissements par leur " +
@@ -1414,7 +1416,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_in_radius",
-    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. Source : FINESS / DREES (dump CSV ingéré localement). Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
+    description: `Recherche d'établissements de santé FINESS dans un rayon géographique (PostGIS ST_DWithin). Filtrable par familles. 24 valeurs disponibles : ${FAMILLES_LIST}. ${FINESS_SOURCE_ANS_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1489,7 +1491,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissements_finess_by_categorie",
-    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}.\n\nV0.19.0 : accepte \`nom_commune\` (string) comme alternative à \`code_insee\` (résolu via geo.api.gouv.fr). XOR strict — passer SOIT \`departement\` SOIT \`code_insee\` SOIT \`nom_commune\` (combinable avec \`departement\` qui agit alors comme hint de désambiguïsation pour homonymes type "Saint-Martin"). Aucun param zone = France entière (acceptée).\n\nSource : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
+    description: `Liste des établissements FINESS par famille, avec filtre département ou commune optionnel. Pas de rayon — pour énumération exhaustive d'une zone administrative. 24 familles disponibles : ${FAMILLES_LIST}.\n\nV0.19.0 : accepte \`nom_commune\` (string) comme alternative à \`code_insee\` (résolu via geo.api.gouv.fr). XOR strict — passer SOIT \`departement\` SOIT \`code_insee\` SOIT \`nom_commune\` (combinable avec \`departement\` qui agit alors comme hint de désambiguïsation pour homonymes type "Saint-Martin"). Aucun param zone = France entière (acceptée).\n\n${FINESS_SOURCE_ANS_NOTE} ${FINESS_FAMILLE_LENS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {
@@ -1581,7 +1583,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "etablissement_by_finess",
-    description: `Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Retourne un objet \`LookupResult\` discriminé par \`found\`. \`found: true\` → champs FINESS à plat. \`found: false\` → \`{ found: false, key, lookupStatus: 'not_found', message }\`. Le référentiel DREES a 1-2 mois de retard sur le terrain : pour des structures émergentes (CPTS récentes, MSP en agrément), cross-check ARS / Service Public. Source : FINESS / DREES. Note : champ \`email\` toujours \`null\` (non exposé par FINESS public). ${FINESS_RS_TRUNCATION_NOTE}`,
+    description: `Récupère le détail complet d'un établissement de santé par son numéro FINESS (9 chiffres) : raison sociale, catégorie + famille, adresse complète (voie + CP + ville + code INSEE + département), coordonnées GPS, téléphone. Retourne un objet \`LookupResult\` discriminé par \`found\`. \`found: true\` → champs FINESS à plat. \`found: false\` → \`{ found: false, key, lookupStatus: 'not_found', message }\` (numéro inexistant, établissement fermé, ou trop récent pour le flux). ${FINESS_SOURCE_ANS_NOTE}`,
     inputSchema: {
       type: "object",
       properties: {

@@ -82,16 +82,17 @@ ALTER TABLE finess
 UPDATE finess SET
   siret       = CASE WHEN raw->>'siret' ~ '^\d{14}$' THEN raw->>'siret' END,
   cle_ban     = raw->>'cle_ban',
-  score_ban   = CASE WHEN raw->>'score_ban' ~ '^[0-9.]+$' THEN (raw->>'score_ban')::REAL END,
+  score_ban   = CASE WHEN raw->>'score_ban' ~ '^[0-9]+(\.[0-9]+)?$' THEN (raw->>'score_ban')::REAL END,
   geom_source = CASE WHEN geom IS NOT NULL THEN raw->>'geom_source' END;
 
-CREATE INDEX finess_siret_idx ON finess (siret) WHERE siret IS NOT NULL;
+-- (index `finess_siret_idx` prévu ici, RETIRÉ en revue le jour même :
+--  aucun consommateur, 0 scan — cf. migration 20260906T170000)
 ```
 
 Puis, dans la même migration :
 
 - `ingest_create_finess_staging()` recréée en **superset strict** (4 colonnes
-  + index `siret` + la contrainte, recopie verbatim de la dernière définition
+  + les contraintes, recopie verbatim de la dernière définition
   `20260509000001:24-73`) ;
 - les trois RPC d'ingestion réécrites : `ingest_apply_finess_geom_previous`
   (repli) et `ingest_apply_finess_ban_join` (pose) écrivent **la colonne**
@@ -137,8 +138,8 @@ provenance, une ligne sans point n'en a jamais.
   **`point_etablissement_finess`**, notes (`query-metadata.ts:20-22,128`)
   réécrites (« FINESS ANS, flux quotidien, cron le 1ᵉʳ et le 15 »). Changement
   de contrat documenté au CHANGELOG (raison du 0.30.0).
-- `panorama_implantation_complet` : `countPrecis()` (`:221-224`) appliqué aux
-  FINESS comme aux RPPS/Ameli.
+- `panorama_implantation_complet` : PAS de `precis_count` FINESS (revue :
+  il vaudrait `count` par construction, une identité déguisée en information).
 - Descriptions des tools `etablissements_finess_in_radius`,
   `etablissements_finess_by_categorie`, `etablissement_by_finess` : une phrase
   sur `geo_precision` et `siret_ans`.
@@ -151,7 +152,7 @@ géographique 150 m avec « actif prime ». Le SIRET ANS entre **en source 1, à
 côté des SIRET RPPS** (dédoublonnés, même validation `^\d{14}$`) : la cascade
 existante valide chaque candidat contre DINUM et fait primer l'établissement
 actif, donc un SIRET ANS périmé est traité comme l'est déjà un SIRET RPPS
-périmé. `method` gagne la valeur `siret_ans` quand c'est lui qui a porté le
+périmé. `method` gagne la valeur `finess_ans` quand c'est lui qui a porté le
 `best_match`. Aucune recalibration des seuils (mémoire `v016-succession-fix`).
 
 **Mesure avant merge** (script one-shot en scratchpad, DINUM live, ~300 EGE
@@ -194,7 +195,7 @@ rayon. C'est la vérité. Le déclencheur du backlog (« un caller signale un
 4. **Run réel forcé**, puis appels MCP prod : `etablissement_by_finess` sur un
    EGE `ans`, un `ban_address`, un sans point ; `etablissements_finess_in_radius`
    avec `geo_precision` sur chaque résultat ; `reconcilier_finess_sirene` sur
-   un EGE sans SIRET RPPS → `method = siret_ans`.
+   un EGE sans SIRET RPPS → `method = finess_ans`.
 5. **Non-régression géo** : taux de points déplacés au run réel = 0 ; couverture
    ≥ 97,5 %.
 

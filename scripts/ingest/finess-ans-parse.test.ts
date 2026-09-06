@@ -101,16 +101,59 @@ describe("mapEgeToRow — cas nominal (010780195, Clinique Convert, WGS84)", () 
     expect(row.coordy_lambert93).toBeCloseTo(6570414.61, 2);
     expect(coordLayout).toBe("wgs84_first");
     expect(coordsPresentButUnusable).toBe(false);
-    expect(row.raw.geom_source).toBe("ans");
+    expect(row.geom_source).toBe("ans");
     expect(overflows).toEqual([]);
   });
 
-  it("remonte SIRET, clé et score BAN dans raw (phase 2), téléphone depuis contact", () => {
-    expect(row.raw.siret).toBe("77220148900022");
-    expect(row.raw.cle_ban).toBe("01053_1950_00062");
-    expect(row.raw.score_ban).toMatch(/^0\.97/);
+  it("remonte SIRET, clé et score BAN en colonnes dédiées (phase 2), téléphone depuis contact", () => {
+    expect(row.siret).toBe("77220148900022");
+    expect(row.cle_ban).toBe("01053_1950_00062");
+    expect(row.score_ban).toBeCloseTo(0.97, 1);
     expect(row.telephone).toBe("0428631234");
     expect(row.email).toBeNull();
+  });
+
+  it("SIRET ANS hors format (pas 14 chiffres) → colonne null + siretMalformed, ligne conservée", () => {
+    for (const bad of ["7722014890002", "77220148900022A", "7722014890002200", "ABCDEFGHIJKLMN"]) {
+      const parsed = kept(
+        mutated("010780195", (e) => {
+          if (e.informationsGeneralesEGE) e.informationsGeneralesEGE.siret = bad;
+        }),
+      );
+      expect(parsed.row.siret, bad).toBeNull();
+      expect(parsed.siretMalformed, bad).toBe(bad);
+      expect(parsed.overflows, bad).toEqual([]);
+    }
+    const absent = kept(
+      mutated("010780195", (e) => {
+        if (e.informationsGeneralesEGE) e.informationsGeneralesEGE.siret = null;
+      }),
+    );
+    expect(absent.row.siret).toBeNull();
+    expect(absent.siretMalformed).toBeNull();
+    // Dérive de TYPE (l'ANS encapsule le champ) : présent mais pas une chaîne = malformé, compté.
+    const typed = kept(
+      mutated("010780195", (e) => {
+        if (e.informationsGeneralesEGE)
+          (e.informationsGeneralesEGE as { siret: unknown }).siret = { value: "77220148900022" };
+      }),
+    );
+    expect(typed.row.siret).toBeNull();
+    expect(typed.siretMalformed).toBe('{"value":"77220148900022"}');
+  });
+
+  it("score BAN non numérique → score_ban null (jamais NaN en base) ET compté (scoreBanUnparsable)", () => {
+    const parsed = kept(
+      mutated("010780195", (e) => {
+        const g = geoAddr(e).coordonneesGeographique;
+        if (g) g.scoreBAN = "0,97";
+      }),
+    );
+    expect(parsed.row.score_ban).toBeNull();
+    expect(parsed.scoreBanUnparsable).toBe(true);
+    expect(parsed.row.geom).not.toBeNull();
+    const nominal = rowOf("010780195");
+    expect(nominal.scoreBanUnparsable).toBe(false);
   });
 });
 
@@ -133,7 +176,7 @@ describe("resolveCoordinates — les deux systèmes coexistent, dans un ordre va
     expect(row.coordy_lambert93).not.toBeNull();
     // La disposition des paires n'est PAS une provenance : le point est du
     // WGS84 ANS dans les deux cas.
-    expect(row.raw.geom_source).toBe("ans");
+    expect(row.geom_source).toBe("ans");
   });
 
   it("aucune paire → tout null, present=false", () => {
@@ -222,8 +265,8 @@ describe("clé BAN commune = centroïde : jamais dans finess.geom", () => {
   it("clé sans `_` (commune) → point refusé, geom NULL, pas de provenance, layout null, compteur", () => {
     const parsed = kept(mutated("010780195", withCleBan("01053")));
     expect(parsed.row.geom).toBeNull();
-    expect(parsed.row.raw.geom_source).toBeUndefined();
-    expect(parsed.row.raw.cle_ban).toBe("01053");
+    expect(parsed.row.geom_source).toBeNull();
+    expect(parsed.row.cle_ban).toBe("01053");
     expect(parsed.row.coordx_lambert93).toBeNull();
     expect(parsed.coordLayout).toBeNull();
     expect(parsed.municipalityCentroidRejected).toBe(true);
@@ -247,7 +290,7 @@ describe("clé BAN commune = centroïde : jamais dans finess.geom", () => {
       }),
     );
     expect(parsed.row.geom).not.toBeNull();
-    expect(parsed.row.raw.cle_ban).toBeUndefined();
+    expect(parsed.row.cle_ban).toBeNull();
   });
 });
 
@@ -290,7 +333,7 @@ describe("Périmètre : en service uniquement, identifiants valides", () => {
     expect(row.coordx_lambert93).toBeNull();
     expect(coordLayout).toBeNull();
     expect(coordsPresentButUnusable).toBe(false);
-    expect(row.raw.geom_source).toBeUndefined();
+    expect(row.geom_source).toBeNull();
     expect(row.code_insee).toBe("08362");
   });
 

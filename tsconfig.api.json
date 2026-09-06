@@ -6,6 +6,6 @@
     "declaration": false,
     "declarationMap": false
   },
-  "include": ["api", "src", "scripts"],
+  "include": ["api", "src", "scripts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", "examples"]
 }

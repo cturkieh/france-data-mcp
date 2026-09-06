@@ -43,6 +43,10 @@ function realStats(overrides: Partial<IngestStreamStats> = {}): IngestStreamStat
     nullCategorieCode: 32,
     emptyRaisonSociale: 0,
     municipalityRejected: 186,
+    siretPresent: 91_542,
+    siretMalformed: 0,
+    siretMalformedSample: null,
+    scoreBanUnparsable: 0,
     unknownCategorieCounts: new Map([
       ["698", 1178],
       ["632", 919],
@@ -77,12 +81,13 @@ function realDiff(overrides: Partial<StagingDiff> = {}): StagingDiff {
 }
 
 describe("assessParsedRows — chiffres réels", () => {
-  it("le run réel passe sans fatal ; fermés/inactifs ne sont pas des anomalies ; les 32 sans catégorie sont SIGNALÉS", () => {
+  it("le run réel passe sans fatal NI warning (un warning = run partial + vigie) ; les 32 sans catégorie (0,03 %, chronique) sont SIGNALÉS en info", () => {
     const a = assessParsedRows(realStats());
     expect(a.fatal).toEqual([]);
-    expect(a.warnings).toEqual([
+    expect(a.warnings).toEqual([]);
+    expect(a.info).toContain(
       "[finess] content anomalies (0.03% of inserted): 32 without categorie_code, 0 with empty raison_sociale",
-    ]);
+    );
     expect(
       a.info.some((l) =>
         l.includes(
@@ -102,8 +107,11 @@ describe("assessParsedRows — chiffres réels", () => {
     expect(high.fatal[0]).toMatch(/above maximum/);
   });
 
-  it("anomalies structurelles : warn sous 1 % du total lu, fatal au-dessus", () => {
+  it("anomalies structurelles : info sous 0,1 %, warn entre 0,1 et 1 % du total lu, fatal au-dessus", () => {
     const skipped = realStats().skipped;
+    const infoOnly = assessParsedRows(realStats({ skipped: { ...skipped, bad_commune: 50 } }));
+    expect(infoOnly.warnings).toEqual([]);
+    expect(infoOnly.info.some((l) => /50 malformed cogCommune/.test(l))).toBe(true);
     const warnOnly = assessParsedRows(realStats({ skipped: { ...skipped, bad_commune: 500 } }));
     expect(warnOnly.fatal).toEqual([]);
     expect(warnOnly.warnings[0]).toMatch(/500 malformed cogCommune/);
@@ -138,10 +146,51 @@ describe("assessParsedRows — chiffres réels", () => {
     expect(fatal.fatal[0]).toMatch(/Unusable-coordinates rate/);
   });
 
-  it("débordement de colonne : 1 téléphone (cas réel) = warn ; > 1 % sur un champ = fatal", () => {
+  it("SIRET ANS hors format : silence à 0, info sous 1 %, warn (jamais fatal) au-dessus, avec l'exemple rejeté", () => {
+    const siret = (l: string) => /SIRET ANS hors format/.test(l);
+    const none = assessParsedRows(realStats({ siretMalformed: 0 }));
+    expect(none.info.some(siret)).toBe(false);
+    expect(none.warnings.some(siret)).toBe(false);
+    const few = assessParsedRows(
+      realStats({ siretMalformed: 12, siretMalformedSample: "7722014890002" }),
+    );
+    expect(few.info.find(siret)).toMatch(/: 12 rows \(0\.01%\), ex\. "7722014890002"/);
+    expect(few.warnings.some(siret)).toBe(false);
+    const many = assessParsedRows(realStats({ siretMalformed: 2_000, siretMalformedSample: "x" }));
+    expect(many.warnings.find(siret)).toMatch(/dérive de format amont/);
+    expect(many.fatal).toEqual([]);
+  });
+
+  it("remplissage siret : info au nominal (87,4 %), warning (jamais fatal) sous le plancher 80 % — champ ANS renommé", () => {
+    const fill = (l: string) => /remplissage siret/.test(l);
+    const nominal = assessParsedRows(realStats());
+    expect(nominal.info.find((l) => /siret ANS renseigné/.test(l))).toMatch(
+      /91542 rows \(87\.40%\)/,
+    );
+    expect(nominal.warnings.some(fill)).toBe(false);
+    const gone = assessParsedRows(realStats({ siretPresent: 0 }));
+    expect(gone.warnings.find(fill)).toMatch(/0\.00% sous le plancher 80\.00%/);
+    expect(gone.fatal).toEqual([]);
+  });
+
+  it("scoreBAN non numérique : info sous 1 %, warning au-dessus, jamais fatal", () => {
+    const score = (l: string) => /scoreBAN non numérique/.test(l);
+    expect(assessParsedRows(realStats({ scoreBanUnparsable: 5 })).info.some(score)).toBe(true);
+    const many = assessParsedRows(realStats({ scoreBanUnparsable: 5_000 }));
+    expect(many.warnings.find(score)).toMatch(/virgule décimale/);
+    expect(many.fatal).toEqual([]);
+  });
+
+  it("débordement de colonne : 1 téléphone (cas réel) = info ; > 0,1 % = warn ; > 1 % sur un champ = fatal", () => {
     const one = assessParsedRows(realStats({ overflowCounts: new Map([["telephone", 1]]) }));
     expect(one.fatal).toEqual([]);
-    expect(one.warnings.some((l) => /au-delà de leur colonne : telephone=1$/.test(l))).toBe(true);
+    expect(one.warnings.some((l) => /au-delà de leur colonne/.test(l))).toBe(false);
+    expect(one.info.some((l) => /au-delà de leur colonne : telephone=1$/.test(l))).toBe(true);
+    const some = assessParsedRows(realStats({ overflowCounts: new Map([["telephone", 200]]) }));
+    expect(some.fatal).toEqual([]);
+    expect(some.warnings.some((l) => /au-delà de leur colonne : telephone=200$/.test(l))).toBe(
+      true,
+    );
     const many = assessParsedRows(realStats({ overflowCounts: new Map([["num_voie", 1_100]]) }));
     expect(many.fatal[0]).toMatch(/Column overflow on num_voie: 1100 rows/);
   });

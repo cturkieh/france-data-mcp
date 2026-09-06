@@ -14,7 +14,9 @@
  * du flux (`__fixtures__/finess-ans-ege.json`), sans monter une ingestion.
  */
 
+import { SIRET_PATTERN } from "../../src/sante/db-helpers.js";
 import { SMT_CATEGORIE_LABELS } from "../../src/sante/finess-categories-labels.js";
+import { type FinessGeomSource, GEOM_SOURCES } from "../../src/sante/finess-geom-source.js";
 import { deptFromCodeInsee, isValidCodeInsee } from "../../src/territoire/dept-codes.js";
 
 /**
@@ -143,7 +145,7 @@ export interface AnsPmej {
   ege?: AnsEge[] | null;
 }
 
-export interface FinessStagingRow {
+interface FinessStagingBase {
   num_finess: string;
   raison_sociale: string;
   categorie_code: string | null;
@@ -159,51 +161,38 @@ export interface FinessStagingRow {
   email: string | null;
   date_ouverture: string | null;
   date_maj: string | null;
-  /** EWKT — PostGIS caste vers `geometry(Point, 4326)` à l'insert. */
-  geom: string | null;
-  coordx_lambert93: number | null;
-  coordy_lambert93: number | null;
-  /** Champs ANS sans colonne dédiée (phase 2) + provenance du point. */
-  raw: FinessRawExtras;
+  /** SIRET natif ANS (`informationsGeneralesEGE.siret`), 14 chiffres ou `null`. */
+  siret: string | null;
+  /** Clé d'interopérabilité BAN fournie par l'ANS (`cleInInteropBAN`), telle quelle. */
+  cle_ban: string | null;
+  /** Score BAN fourni par l'ANS (`scoreBAN`), nombre fini ou `null`. */
+  score_ban: number | null;
 }
 
 /**
- * Provenance du point `geom` d'une ligne FINESS, stockée dans
- * `raw->>'geom_source'`. SOURCE UNIQUE des valeurs : `ANS` est posé ici,
- * `PREVIOUS_INGEST` par la RPC `ingest_apply_finess_geom_previous`
- * (migration 20260905T210000) — la parité du littéral SQL est testée dans
- * `finess-column-rules-parity.test.ts`. Vocabulaire propre à FINESS
- * (`ans` | `previous_ingest` | `ban_address`) — seule `ban_address` est
- * commune avec RPPS/Ameli, avec la même sémantique ; `finess_join` et
- * `commune_centroid` n'existent que côté RPPS/Ameli (ne jamais les écrire ici :
- * un centroïde dans finess.geom serait recopié par le RPPS en tier précis).
+ * Le point et sa provenance vont ENSEMBLE — invariant de la contrainte SQL
+ * `geom ⇔ geom_source` (migration 20260906T160000), porté par le type comme
+ * `ResolvedCoordinates` porte `layout ⟺ point` : `{ geom: null, geom_source:
+ * "ans" }` ne compile pas, il n'attend pas 2 h du matin pour échouer en
+ * COPY. Le Lambert 93 suit le point (jamais posé sans lui).
  */
-export const GEOM_SOURCES = {
-  ANS: "ans",
-  PREVIOUS_INGEST: "previous_ingest",
-  /**
-   * Posé UNIQUEMENT par `ingest_apply_finess_ban_join` (SQL, migration
-   * 20260906T120000) et propagé par le repli — jamais par le parseur. Même
-   * sémantique que le `ban_address` de RPPS/Ameli (point BAN rue/lieu-dit/
-   * bâtiment). Le vocabulaire est FERMÉ : `finess-column-rules-parity.test.ts`
-   * impose que tout littéral écrit en SQL soit une de ces constantes.
-   */
-  BAN_ADDRESS: "ban_address",
-} as const;
-export type FinessGeomSource = (typeof GEOM_SOURCES)[keyof typeof GEOM_SOURCES];
+export type FinessGeomFields =
+  | {
+      /** EWKT — PostGIS caste vers `geometry(Point, 4326)` à l'insert. */
+      geom: string;
+      /** `ans` au parseur ; `previous_ingest` / `ban_address` sont posés par les RPC du cron. */
+      geom_source: FinessGeomSource;
+      coordx_lambert93: number | null;
+      coordy_lambert93: number | null;
+    }
+  | { geom: null; geom_source: null; coordx_lambert93: null; coordy_lambert93: null };
 
-/**
- * Contenu de la colonne `raw` (jsonb) : clés CONNUES, chacune lue par un
- * consommateur nommé (`raw->>'geom_source'` dans les migrations, `siret` et
- * `cle_ban` par la phase 2). Un `Record<string, string>` laissait passer une
- * faute de frappe de clé sans typecheck, sans test, sans erreur au run.
- */
-export interface FinessRawExtras {
-  siret?: string;
-  cle_ban?: string;
-  score_ban?: string;
-  geom_source?: FinessGeomSource;
-}
+export type FinessStagingRow = FinessStagingBase & FinessGeomFields;
+
+// Vocabulaire des provenances : SOURCE UNIQUE dans la lib (`src/sante/
+// finess-geom-source.ts`, la lib en dépend pour `geo_precision`). Ré-exporté
+// ici pour les tests de parité du dossier ingestion.
+export { GEOM_SOURCES, type FinessGeomSource } from "../../src/sante/finess-geom-source.js";
 
 /**
  * Quelle paire portait le WGS84 — détail de parsing (statistiques, diagnostic
@@ -229,6 +218,19 @@ export interface ParsedEgeKept {
   coordLayout: CoordLayout | null;
   /** Point ANS refusé parce que sa clé BAN désigne une COMMUNE (centroïde). */
   municipalityCentroidRejected: boolean;
+  /**
+   * `informationsGeneralesEGE.siret` présent mais pas 14 chiffres → colonne
+   * `siret` à `null` ; porte la VALEUR rejetée (un warning « 2 000 lignes
+   * hors format » sans un seul exemple du nouveau format ne dirait rien),
+   * `null` sinon. 0 sur 104 734 le 2026-09-06.
+   */
+  siretMalformed: string | null;
+  /**
+   * `scoreBAN` présent mais non numérique (virgule décimale, texte) → colonne
+   * `score_ban` à `null`. Compté comme `siretMalformed` : un changement de
+   * format amont viderait la colonne en silence sinon. 0 mesuré.
+   */
+  scoreBanUnparsable: boolean;
   /** Champs mis à `null` parce qu'ils violaient leur colonne (cf. `COLUMN_RULES`). */
   overflows: readonly OverflowField[];
   /**
@@ -483,19 +485,43 @@ export function mapEgeToRow(ege: AnsEge): ParsedEge {
   // reprend la main pour les établissements déjà connus, NULL sinon.
   const municipalityCentroid = cleBan !== null && !cleBan.includes("_");
   const point = municipalityCentroid ? null : resolved.point;
-  const geom = point !== null ? `SRID=4326;POINT(${point.lon} ${point.lat})` : null;
 
   const contact = pickContact(ege);
   const raisonSociale = nonEmpty(infos.nomEgeLong) ?? nonEmpty(infos.nomEgeCourt) ?? "";
   const categorieCode = nonEmpty(ege.categorieentiteGeographiqueExercice);
 
-  const raw: FinessRawExtras = {};
-  const siret = nonEmpty(infos.siret);
-  const scoreBan = nonEmpty(coords.scoreBAN);
-  if (siret !== null) raw.siret = siret;
-  if (cleBan !== null) raw.cle_ban = cleBan;
-  if (scoreBan !== null) raw.score_ban = scoreBan;
-  if (point !== null) raw.geom_source = GEOM_SOURCES.ANS;
+  // SIRET natif ANS : 14 chiffres ou rien. Même regex que le boundary MCP
+  // (`SIRET_PATTERN`, db-helpers) — un SIRET qui n'y passerait pas ne pourrait
+  // de toute façon pas être servi ni résolu ; il est compté (`siretMalformed`),
+  // jamais tronqué. C'est LA garde de la colonne `siret CHAR(14)` : la borne
+  // DDL est impliquée par la regex (`finess-column-rules-parity.test.ts`,
+  // `VALIDATED_ELSEWHERE`), pas de règle `COLUMN_RULES` doublon.
+  // Présent mais pas une chaîne (nombre, tableau, objet : `nonEmpty` rend null)
+  // = malformé AUSSI — sinon un changement de TYPE côté ANS viderait la colonne
+  // sans compteur (le plancher `MIN_SIRET_FILL` reste le filet contre la
+  // disparition pure et simple de la clé).
+  const siretPresent = infos.siret !== undefined && infos.siret !== null;
+  const siretRaw = nonEmpty(infos.siret);
+  const siretMalformed =
+    siretPresent && (siretRaw === null || !SIRET_PATTERN.test(siretRaw))
+      ? String(siretRaw ?? JSON.stringify(infos.siret))
+      : null;
+  const siret = siretMalformed === null ? siretRaw : null;
+  const scoreBanRaw = nonEmpty(coords.scoreBAN);
+  const scoreBan = toNumber(scoreBanRaw);
+  // `geom ⇔ geom_source` : une seule branche, typée (cf. `FinessGeomFields`).
+  const geomFields: FinessGeomFields =
+    point !== null
+      ? {
+          geom: `SRID=4326;POINT(${point.lon} ${point.lat})`,
+          geom_source: GEOM_SOURCES.ANS,
+          // Lambert 93 conservé pour rétro-compatibilité des consommateurs
+          // existants — la géolocalisation vient désormais du WGS84 natif,
+          // plus d'une reprojection server-side.
+          coordx_lambert93: resolved.lambert93?.x ?? null,
+          coordy_lambert93: resolved.lambert93?.y ?? null,
+        }
+      : { geom: null, geom_source: null, coordx_lambert93: null, coordy_lambert93: null };
   const categorieCodeKept = keep("categorie_code", categorieCode);
 
   return {
@@ -519,17 +545,16 @@ export function mapEgeToRow(ege: AnsEge): ParsedEge {
       email: contact.email,
       date_ouverture: nonEmpty(infos.dateOuverture),
       date_maj: nonEmpty(ege.dateDerniereMaj),
-      geom,
-      // Lambert 93 conservé pour rétro-compatibilité des consommateurs
-      // existants — la géolocalisation vient désormais du WGS84 natif, plus
-      // d'une reprojection server-side.
-      coordx_lambert93: point !== null ? (resolved.lambert93?.x ?? null) : null,
-      coordy_lambert93: point !== null ? (resolved.lambert93?.y ?? null) : null,
-      raw,
+      siret,
+      cle_ban: cleBan,
+      score_ban: scoreBan,
+      ...geomFields,
     },
     // `layout ⟺ point` reste vrai après le refus d'un centroïde.
     coordLayout: point !== null ? resolved.layout : null,
     municipalityCentroidRejected: municipalityCentroid && resolved.point !== null,
+    siretMalformed,
+    scoreBanUnparsable: scoreBanRaw !== null && scoreBan === null,
     overflows,
     coordsPresentButUnusable: resolved.point === null && resolved.present,
   };

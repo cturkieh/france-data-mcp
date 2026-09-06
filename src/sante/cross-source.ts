@@ -167,6 +167,7 @@ export interface VerifierSiteActifResult {
    * - `"rpps"` : pivot RPPS classique V0.7 (pas de fallback)
    * - `"address_fallback"` : RPPS vide ou tous-sentinelle → fallback DINUM /near_point
    * - `"mixed"` : RPPS a fourni des SIRET ET le fallback a complété
+   * - `"finess_ans"` : SIRET déclaré par l'ANS dans FINESS, confirmé DINUM, sans déclaration RPPS (V0.30.0)
    */
   method: ResolutionMethod;
   /**
@@ -322,8 +323,17 @@ function buildVerifierExplication(
  */
 function buildMethodPrefix(resolution: Awaited<ReturnType<typeof resolveSiretsForFiness>>): string {
   if (resolution.method === "rpps" && resolution.fallback_reason === null) return "";
+  if (resolution.method === "finess_ans") {
+    return "[Resolver : SIRET déclaré par l'ANS dans FINESS (siret_ans), confirmé côté SIRENE/DINUM — aucun PS RPPS ne l'avait déclaré] ";
+  }
   if (resolution.method === "address_fallback") {
-    return `[Resolver V2 : SIRET résolu via fallback géographique DINUM /near_point — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
+    // `no_rpps` couvre depuis la V0.30.0 « ni PS RPPS ni ANS » : le nom de la
+    // valeur (contrat public) est conservé, le texte dit la couverture réelle.
+    const cause =
+      resolution.fallback_reason === "no_rpps"
+        ? " (aucun SIRET déclaré, ni par un PS RPPS ni par l'ANS dans FINESS)"
+        : "";
+    return `[Resolver V2 : SIRET résolu via fallback géographique DINUM /near_point${cause} — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
   }
   if (resolution.method === "mixed") {
     return `[Resolver V2 : RPPS partiel + fallback géo complémentaire — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;

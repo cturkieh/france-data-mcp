@@ -62,7 +62,9 @@ describe("pose BAN FINESS — parité du prédicat et politique de précision", 
     const sqlTypes = [...inList.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
     expect(sqlTypes).toEqual([...ACCEPTED_PRECISION_TYPES].sort());
     expect(sqlTypes).not.toContain("municipality");
-    expect(body).toContain("'geom_source', 'ban_address'");
+    // Provenance écrite en COLONNE (migration 20260906T160000), plus dans raw.
+    expect(body).toContain("geom_source = 'ban_address'");
+    expect(body).not.toMatch(/jsonb_build_object\(\s*'geom_source'/);
     // Le count des POSABLES (dénominateur de la sentinelle) partage la jointure
     // et le filtre de précision de la pose — sinon posé < posable à tort.
     const posable = bodies.finess_count_ban_posable;

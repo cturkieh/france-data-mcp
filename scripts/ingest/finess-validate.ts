@@ -39,6 +39,14 @@ export const MAX_ROWS = 200_000;
  * mesure après mesure, jamais par extrapolation.
  */
 export const MIN_GEOM_COVERAGE = 0.95;
+/**
+ * Plancher RELATIF de remplissage de `siret` : 0,874 mesuré le 2026-09-06
+ * (les EGE sans SIRET ANS sont légitimes — 12,6 %). Sous 0,80, le champ a
+ * changé de forme ou de nom côté ANS → warning (le run passe en `partial`,
+ * la vigie alerte), jamais fatal : le SIRET n'est pas load-bearing pour le
+ * service, le resolver a d'autres sources.
+ */
+export const MIN_SIRET_FILL = 0.8;
 
 /**
  * Part des établissements géolocalisés en prod dont la staging n'a PAS de
@@ -81,6 +89,15 @@ export const STRUCTURAL_FAIL_THRESHOLD = 0.01;
  * plausible) : warn > 2 %, throw > 5 %. Cf. `resolveCoordinates`.
  */
 export const COORDS_UNUSABLE_WARN_RATE = 0.02;
+/**
+ * Anomalies de parsing (structurelles, de contenu, débordements) : INFO en
+ * dessous de ce taux, WARNING (→ run `partial`, vigie) au-dessus, fatal
+ * au-delà de `STRUCTURAL_FAIL_THRESHOLD`. Le palier info existe parce qu'un
+ * warning met désormais le run en `partial` : 32 EGE sans code de catégorie
+ * (0,03 %, chronique) ou 1 téléphone à deux numéros ne doivent pas ouvrir
+ * une issue à chaque cron — une dérive de format, si.
+ */
+export const ANOMALY_WARN_RATE = 0.001;
 export const COORDS_UNUSABLE_FAIL_RATE = 0.05;
 
 /**
@@ -124,6 +141,19 @@ export interface IngestStreamStats {
   emptyRaisonSociale: number;
   /** Points ANS refusés car centroïde commune (clé BAN sans `_`) — 186 en prod le 2026-09-05. */
   municipalityRejected: number;
+  /**
+   * Lignes insérées AVEC un `siret` (14 chiffres) — 91 542 / 104 734 le
+   * 2026-09-06 (87,4 %). Plancher relatif `MIN_SIRET_FILL` : un champ ANS
+   * renommé ou encapsulé viderait la colonne en `success` sinon (le resolver
+   * SIRET perdrait son amorçage sur 59 % des EGE sans un signal).
+   */
+  siretPresent: number;
+  /** SIRET ANS présents mais pas 14 chiffres → colonne `siret` null — 0 en prod le 2026-09-06. */
+  siretMalformed: number;
+  /** Première valeur rejetée (exemple du format inattendu dans le warning). */
+  siretMalformedSample: string | null;
+  /** `scoreBAN` présent mais non numérique → `score_ban` null — 0 en prod le 2026-09-06. */
+  scoreBanUnparsable: number;
   /** Codes catégorie tombés en famille "autre" (catalogue FINESS_CATEGORIES à étendre). */
   unknownCategorieCounts: Map<string, number>;
   /** Codes catégorie sans libellé dans la nomenclature figée. */
@@ -211,9 +241,9 @@ export function assessParsedRows(stats: IngestStreamStats, now: number = Date.no
     s.no_finess_id + s.bad_finess_id + s.no_adresse_geographique + s.no_commune + s.bad_commune;
   const structuralRate = structural / (stats.inserted + structural);
   if (structural > 0) {
-    a.warnings.push(
-      `[finess] structural parsing anomalies (${fmt(structuralRate)} of inserted): ${s.no_finess_id} missing numFinessEge, ${s.bad_finess_id} malformed numFinessEge, ${s.no_adresse_geographique} without adresse 03, ${s.no_commune} missing cogCommune, ${s.bad_commune} malformed cogCommune`,
-    );
+    const line = `[finess] structural parsing anomalies (${fmt(structuralRate)} of inserted): ${s.no_finess_id} missing numFinessEge, ${s.bad_finess_id} malformed numFinessEge, ${s.no_adresse_geographique} without adresse 03, ${s.no_commune} missing cogCommune, ${s.bad_commune} malformed cogCommune`;
+    if (structuralRate > ANOMALY_WARN_RATE) a.warnings.push(line);
+    else a.info.push(line);
     if (structuralRate > STRUCTURAL_FAIL_THRESHOLD) {
       a.fatal.push(
         `Structural parsing anomaly rate ${fmt(structuralRate)} above ${fmt(STRUCTURAL_FAIL_THRESHOLD)} — likely ANS schema change (schema-structures-v1.json)`,
@@ -226,9 +256,9 @@ export function assessParsedRows(stats: IngestStreamStats, now: number = Date.no
   const content = stats.nullCategorieCode + stats.emptyRaisonSociale;
   if (content > 0) {
     const contentRate = content / stats.inserted;
-    a.warnings.push(
-      `[finess] content anomalies (${fmt(contentRate)} of inserted): ${stats.nullCategorieCode} without categorie_code, ${stats.emptyRaisonSociale} with empty raison_sociale`,
-    );
+    const line = `[finess] content anomalies (${fmt(contentRate)} of inserted): ${stats.nullCategorieCode} without categorie_code, ${stats.emptyRaisonSociale} with empty raison_sociale`;
+    if (contentRate > ANOMALY_WARN_RATE) a.warnings.push(line);
+    else a.info.push(line);
     if (contentRate > STRUCTURAL_FAIL_THRESHOLD) {
       a.fatal.push(
         `Content anomaly rate ${fmt(contentRate)} above ${fmt(STRUCTURAL_FAIL_THRESHOLD)} — categorie/raison_sociale no longer parsed (ANS wrapped the field ?), refusing to swap`,
@@ -256,6 +286,38 @@ export function assessParsedRows(stats: IngestStreamStats, now: number = Date.no
   a.info.push(
     `[finess] geom à l'insert : wgs84_first=${stats.geomByLayout.wgs84_first} lambert_first=${stats.geomByLayout.lambert_first} none=${geomNone} (dont centroïdes commune BAN refusés : ${stats.municipalityRejected})`,
   );
+  // SIRET ANS — deux signaux, jamais fatals (pas load-bearing pour le service) :
+  //  (1) remplissage sous le plancher relatif (champ renommé/encapsulé → colonne
+  //      vide en silence sinon) ; (2) hors format (colonne nullée, ligne
+  //      conservée) : info tant que marginal, warning au-delà de
+  //      STRUCTURAL_FAIL_THRESHOLD, avec un EXEMPLE de la valeur rejetée.
+  const siretFill = stats.siretPresent / stats.inserted;
+  a.info.push(`[finess] siret ANS renseigné : ${stats.siretPresent} rows (${fmt(siretFill)})`);
+  if (siretFill < MIN_SIRET_FILL) {
+    a.warnings.push(
+      `[finess] ⚠️ remplissage siret ${fmt(siretFill)} sous le plancher ${fmt(MIN_SIRET_FILL)} (baseline 87,4 % le 2026-09-06) — informationsGeneralesEGE.siret renommé/encapsulé côté ANS ? Le resolver SIRET perd son amorçage`,
+    );
+  }
+  if (stats.siretMalformed > 0) {
+    const siretRate = stats.siretMalformed / stats.inserted;
+    const line = `[finess] SIRET ANS hors format (colonne siret → null) : ${stats.siretMalformed} rows (${fmt(siretRate)}), ex. ${JSON.stringify(stats.siretMalformedSample)}`;
+    if (siretRate > STRUCTURAL_FAIL_THRESHOLD) {
+      a.warnings.push(`${line} — dérive de format amont sur informationsGeneralesEGE.siret ?`);
+    } else {
+      a.info.push(line);
+    }
+  }
+  // scoreBAN non numérique (virgule décimale ?) : même politique que le SIRET
+  // hors format — la colonne se viderait en silence sinon.
+  if (stats.scoreBanUnparsable > 0) {
+    const rate = stats.scoreBanUnparsable / stats.inserted;
+    const line = `[finess] scoreBAN non numérique (colonne score_ban → null) : ${stats.scoreBanUnparsable} rows (${fmt(rate)})`;
+    if (rate > STRUCTURAL_FAIL_THRESHOLD) {
+      a.warnings.push(`${line} — format numérique amont changé (virgule décimale ?)`);
+    } else {
+      a.info.push(line);
+    }
+  }
 
   // Nomenclature — codes tombés en famille "autre" (catalogue à étendre) et
   // codes sans libellé (relancer refresh-finess-categories.mjs).
@@ -296,9 +358,13 @@ export function assessParsedRows(stats: IngestStreamStats, now: number = Date.no
   // Attendu : ~0. Au-delà de 1 % sur un champ, ce n'est plus une valeur sale
   // mais un changement de format upstream → on refuse le swap.
   if (stats.overflowCounts.size > 0) {
-    a.warnings.push(
-      `[finess] ⚠️ champs mis à null car au-delà de leur colonne : ${topCounts(stats.overflowCounts)}`,
-    );
+    // Un warning met le run en `partial` (vigie) : réservé à un débordement
+    // qui n'est plus anecdotique (> 0,1 % sur un champ). Une poignée de
+    // valeurs sales (le téléphone à deux numéros du premier dry-run) = info.
+    const maxRate = Math.max(...[...stats.overflowCounts.values()]) / stats.inserted;
+    const line = `[finess] champs mis à null car au-delà de leur colonne : ${topCounts(stats.overflowCounts)}`;
+    if (maxRate > ANOMALY_WARN_RATE) a.warnings.push(`⚠️ ${line}`);
+    else a.info.push(line);
     for (const [field, count] of stats.overflowCounts) {
       const rate = count / stats.inserted;
       if (rate > STRUCTURAL_FAIL_THRESHOLD) {

@@ -17,6 +17,7 @@ import {
   ameliRadiusMetadata,
   refineAmeliGeoPrecisionLabel,
 } from "../core/query-metadata.js";
+import { createWarnOnce } from "../core/warn-once.js";
 import { getAnonClient, getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidDept } from "../territoire/dept-codes.js";
 import {
@@ -381,12 +382,10 @@ interface RawAmeliRow {
  *
  * Module-level flag réinitialisable par `_resetAmeliGeoPrecisionWarning` (test).
  */
-let _ameliGeoPrecisionMissingWarned = false;
+const geoPrecisionMissingWarn = createWarnOnce();
 
-/** Test-only — reset le flag du warn 1-shot fallback geo_precision. */
-export function _resetAmeliGeoPrecisionMissingWarning(): void {
-  _ameliGeoPrecisionMissingWarned = false;
-}
+/** Test-only — réarme le warn 1-shot fallback geo_precision (`core/warn-once`). */
+export const _resetAmeliGeoPrecisionMissingWarning = geoPrecisionMissingWarn.reset;
 
 /**
  * Mappe `RawAmeliRow.geom_source` vers le type public `PerResultGeoPrecision`.
@@ -398,9 +397,8 @@ function ameliGeoPrecisionFromSource(
   source: RawAmeliRow["geom_source"],
 ): "adresse" | "centroide_commune" {
   if (source === "ban_address") return "adresse";
-  if (source === undefined && !_ameliGeoPrecisionMissingWarned) {
-    _ameliGeoPrecisionMissingWarned = true;
-    console.warn(
+  if (source === undefined) {
+    geoPrecisionMissingWarn.warn(
       "[france-data-mcp][ameli-db] RPC returned a row without `geom_source` — RPC pre-20260521T103000 OR contract drift; all coords fall back to centroide_commune until fixed",
     );
   }

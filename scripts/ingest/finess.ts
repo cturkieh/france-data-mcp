@@ -163,7 +163,7 @@ async function main(): Promise<void> {
     // 4a. VALIDATION DU PARSING — volume, anomalies structurelles,
     // coordonnées inexploitables, nomenclature, débordements de colonne.
     // Avant toute RPC : inutile de travailler une staging déjà invalide.
-    applyAssessment(assessParsedRows(stats));
+    applyAssessment(assessParsedRows(stats), log);
 
     // 4b. REPLI `previous_ingest` — reprend le point de la prod actuelle pour
     // les num_finess déjà connus sans coordonnées ANS (migration
@@ -245,7 +245,7 @@ async function main(): Promise<void> {
 
     // 4d. VALIDATION DE LA DIFF — couverture géo, établissements disparus,
     // non-régression de la géolocalisation.
-    applyAssessment(assessStagingDiff(stats, diff));
+    applyAssessment(assessStagingDiff(stats, diff), log);
 
     if (DRY_RUN) {
       console.log(
@@ -295,10 +295,22 @@ async function main(): Promise<void> {
   }
 }
 
-/** Logue info + warnings, puis refuse le swap si au moins un fatal. */
-function applyAssessment(a: Assessment): void {
+/**
+ * Logue les infos ; les warnings sont PERSISTÉS (`ingest_log.error_message`)
+ * et marquent le run `partial` — un `console.warn` seul n'atteint personne :
+ * la vigie post-cron (`notify-ingest-anomaly`) lit `status`, et le log
+ * Actions expire à 90 jours (revue silent-failure 2026-09-06). Le swap a
+ * lieu quand même (la donnée servie reste juste) ; l'issue idempotente de la
+ * vigie porte le texte. Refuse le swap si au moins un fatal.
+ */
+function applyAssessment(a: Assessment, log: IngestLogEntry): void {
   for (const line of a.info) console.log(line);
-  for (const line of a.warnings) console.warn(line);
+  for (const line of a.warnings) {
+    console.warn(line);
+    console.log(`::warning::${line}`);
+    appendLogMessage(log, line);
+    log.status = "partial";
+  }
   if (a.fatal.length > 0) throw new IngestError("validate", a.fatal.join(" | "));
 }
 
@@ -318,12 +330,17 @@ async function fetchStagingDiff(supabase: SupabaseClient): Promise<StagingDiff> 
     parseRpcCount(d[k], `ingest_finess_staging_diff.${k}`);
   const sources: Record<string, number> = {};
   const rawSources = d.staging_geom_source;
-  if (typeof rawSources === "object" && rawSources !== null) {
-    // Une valeur non numérique = régression de la RPC : fail-loud plutôt
-    // qu'un breakdown amputé qui se lirait comme un breakdown complet.
-    for (const [k, v] of Object.entries(rawSources)) {
-      sources[k] = parseRpcCount(v, `ingest_finess_staging_diff.staging_geom_source.${k}`);
-    }
+  // Clé absente ou non-objet = régression de la RPC (une def antérieure à
+  // 20260905T210000, ou un rename) : fail-loud, jamais un `{}` qui se lirait
+  // comme « aucune provenance ». Idem pour une valeur non numérique.
+  if (typeof rawSources !== "object" || rawSources === null || Array.isArray(rawSources)) {
+    throw new IngestError(
+      "validate",
+      `ingest_finess_staging_diff.staging_geom_source absent ou non-objet (${JSON.stringify(rawSources)}) — RPC antérieure ou drift`,
+    );
+  }
+  for (const [k, v] of Object.entries(rawSources)) {
+    sources[k] = parseRpcCount(v, `ingest_finess_staging_diff.staging_geom_source.${k}`);
   }
   return {
     staging_rows: num("staging_rows"),
@@ -393,6 +410,10 @@ async function streamAnsToStaging(
     nullCategorieCode: 0,
     emptyRaisonSociale: 0,
     municipalityRejected: 0,
+    siretPresent: 0,
+    siretMalformed: 0,
+    siretMalformedSample: null,
+    scoreBanUnparsable: 0,
     unknownCategorieCounts: new Map(),
     missingLabelCounts: new Map(),
     overflowCounts: new Map(),
@@ -425,6 +446,12 @@ async function streamAnsToStaging(
         batch.push(parsed.row);
         if (parsed.coordLayout !== null) stats.geomByLayout[parsed.coordLayout]++;
         if (parsed.municipalityCentroidRejected) stats.municipalityRejected++;
+        if (parsed.row.siret !== null) stats.siretPresent++;
+        if (parsed.siretMalformed !== null) {
+          stats.siretMalformed++;
+          stats.siretMalformedSample ??= parsed.siretMalformed;
+        }
+        if (parsed.scoreBanUnparsable) stats.scoreBanUnparsable++;
         if (parsed.coordsPresentButUnusable) stats.coordsUnusable++;
         for (const field of parsed.overflows) {
           stats.overflowCounts.set(field, (stats.overflowCounts.get(field) ?? 0) + 1);
