@@ -75,9 +75,11 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   comme le runner) sur 5 codes de sortie : la tolérance du canari FINESS
   n'avale ni l'exit 3 (`apiFailures`) ni l'exit 1 (fatal), qui rendraient un
   drain cassé VERT. **Prouvé en conditions réelles le 2026-09-06** : les trois
-  appelants lancés en canari (`max=5`) → 3 runs verts, step d'alerte présent et
-  skippé ; drain Ameli complet → issue de test #78 (`pending-geocode,ameli`)
-  **fermée automatiquement** (`state_reason: completed`) avec son commentaire.
+  appelants lancés en canari (`max=5`) → 3 runs verts, steps de fermeture et
+  d'alerte présents et skippés ; drain Ameli complet (run 34036070910) → issue
+  de test #79 (`pending-geocode,ameli`) **fermée automatiquement**
+  (`state_reason: completed`), commentaire posé et step de contrôle affichant
+  « Fermeture pending-geocode : closed ».
 
 ## [0.29.0] — 2026-09-06 — FINESS phase 2 : géocodage BAN du résiduel (+2 720 points, couverture 94,97 % → 97,57 %), libellés de catégorie source unique SMT/ANS, vigie post-cron « run vert mais donnée malade » (issue + email), planchers relatifs Ameli/RPPS/IRIS
 
