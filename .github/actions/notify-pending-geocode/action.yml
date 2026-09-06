@@ -91,8 +91,13 @@ runs:
       uses: ./.github/actions/upsert-ops-issue
       with:
         # Idempotence : le résidu BAN est récurrent, une seule issue de
-        # surveillance suffit (les runs suivants la commentent).
-        labels: pending-geocode,${{ inputs.source }}
+        # surveillance suffit (les runs suivants la commentent). Les labels
+        # viennent du SCRIPT (registre informatif `pending-geocode,<source>` vs
+        # DÉGRADÉ `pending-geocode-measure,<source>`) : le drain BAN ne referme
+        # que le premier — un drain réussi ne dit rien de l'état de la RPC de
+        # mesure, et le filtre `labels` de l'API étant un ET, un simple label
+        # de plus n'aurait pas suffi à l'en protéger.
+        labels: ${{ steps.pending_geocode.outputs.issue_labels }}
         title: ${{ steps.pending_geocode.outputs.issue_title }}
         body: ${{ steps.pending_geocode.outputs.issue_body }}
         comment: ${{ steps.pending_geocode.outputs.issue_comment }}

@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BanGeocodeBatchOutcome, GeocodedCacheRow } from "../src/core/index.js";
 import { normalizeAddressKey } from "../src/core/index.js";
@@ -30,7 +33,15 @@ vi.mock("../src/core/index.js", async (importOriginal) => {
 });
 
 // @ts-expect-error import .mjs sans déclaration de types
-const { runBanBackfill, SOURCES, assertSourcesValid } = await import("./ban-backfill.mjs");
+const banBackfill = await import("./ban-backfill.mjs");
+const {
+  runBanBackfill,
+  SOURCES,
+  assertSourcesValid,
+  banBackfillOutputs,
+  writeGithubOutput,
+  parseMaxArg,
+} = banBackfill;
 
 function banOutcome(
   results: Array<
@@ -1151,5 +1162,112 @@ describe("assertSourcesValid : garde structurel SOURCES (anti mis-pagination S-1
         x: { ...base, cursorParam: "p_after", cursorField: "address_key", cursorInit: null },
       }),
     ).not.toThrow();
+  });
+});
+
+describe("outputs $GITHUB_OUTPUT — le drain rend ses compteurs lisibles par le STEP suivant", () => {
+  // Consommés par `ban-backfill.yml` : `still_pending` GARDE la fermeture auto
+  // de l'issue `pending-geocode` ; `processed`/`accepted`/`finished_at`
+  // composent son commentaire.
+  const CLEAN_RUN = {
+    geocoded: 1234,
+    accepted: 1234,
+    rejected: 0,
+    unresolved: 0,
+    contractBreached: 0,
+    remaining: 0,
+  };
+
+  it("mappe les compteurs du run et FORMATE la date en UTC (Actions n'a aucune fonction de date)", () => {
+    expect(banBackfillOutputs(CLEAN_RUN, new Date("2026-09-06T12:34:56.789Z"))).toEqual({
+      processed: "1234",
+      accepted: "1234",
+      remaining: "0",
+      still_pending: "0",
+      finished_at: "2026-09-06 12:34 UTC",
+    });
+  });
+
+  // LE test de la fermeture auto : un drain qui a tout REJETÉ sort en exit 0
+  // avec remaining=0. Fermer là-dessus posait un « ✅ file vidée » MENSONGER
+  // sur la vigie — les adresses rejetées repartent à attempt < 3, donc restent
+  // comptées par la mesure qui a OUVERT l'issue.
+  it("drain qui rejette tout : remaining=0 MAIS still_pending > 0 (la file n'est PAS vidée)", () => {
+    const out = banBackfillOutputs({
+      geocoded: 8000,
+      accepted: 0,
+      rejected: 5000,
+      unresolved: 2990,
+      contractBreached: 10,
+      remaining: 0,
+    });
+    expect(out.remaining).toBe("0");
+    expect(out.still_pending).toBe("8000");
+  });
+
+  it("compteurs absents → `unknown`, JAMAIS 0 (un défaut permissif autoriserait la fermeture)", () => {
+    expect(banBackfillOutputs({}, new Date("2026-09-06T00:00:00Z"))).toMatchObject({
+      processed: "unknown",
+      accepted: "unknown",
+      remaining: "unknown",
+      still_pending: "unknown",
+    });
+  });
+
+  it("un SEUL compteur manquant suffit à rendre still_pending `unknown` (fail-closed)", () => {
+    expect(banBackfillOutputs({ ...CLEAN_RUN, unresolved: undefined }).still_pending).toBe(
+      "unknown",
+    );
+  });
+
+  it("canari : le backlog différé compte dans still_pending (jamais de fermeture sur un canari)", () => {
+    expect(banBackfillOutputs({ ...CLEAN_RUN, remaining: 1897 }).still_pending).toBe("1897");
+  });
+
+  it("écrit un heredoc à délimiteur aléatoire, relisible par GitHub Actions", () => {
+    const file = join(mkdtempSync(join(tmpdir(), "ban-backfill-out-")), "out.txt");
+    writeFileSync(file, "");
+    const prev = process.env.GITHUB_OUTPUT;
+    process.env.GITHUB_OUTPUT = file;
+    try {
+      writeGithubOutput({ processed: "12", remaining: "0" });
+    } finally {
+      // `Reflect.deleteProperty` et pas `delete` (règle biome noDelete).
+      if (prev === undefined) Reflect.deleteProperty(process.env, "GITHUB_OUTPUT");
+      else process.env.GITHUB_OUTPUT = prev;
+    }
+    const written = readFileSync(file, "utf8");
+    expect(written).toMatch(/^processed<<__BAN_[0-9a-f-]+__\n12\n__BAN_[0-9a-f-]+__\n/);
+    expect(written).toMatch(/remaining<<__BAN_[0-9a-f-]+__\n0\n/);
+  });
+
+  it("--max invalide → throw (jamais un canari dégradé en DRAINAGE COMPLET silencieux)", () => {
+    // Le bloc bash ne teste que `[ -n "$MAX" ]` : une faute de frappe dans le
+    // champ `max` du workflow_dispatch annonçait « Canari : abc adresses max »
+    // puis lançait un drain non borné vers la BAN.
+    for (const argv of [["--max", "abc"], ["--max", "0"], ["--max", "-5"], ["--max="], ["--max"]]) {
+      expect(() => parseMaxArg(argv), `--max ${JSON.stringify(argv)} doit throw`).toThrow(
+        /--max invalide/,
+      );
+    }
+  });
+
+  it("--max absent → undefined (drain complet, cas nominal) ; valeur valide → entier", () => {
+    expect(parseMaxArg(["--source", "ameli"])).toBeUndefined();
+    expect(parseMaxArg(["--max", "1000"])).toBe(1000);
+    expect(parseMaxArg(["--max=250"])).toBe(250);
+  });
+
+  it("hors GitHub Actions (variable absente) : warn LOUD, aucun throw (le drain, lui, a réussi)", () => {
+    const prev = process.env.GITHUB_OUTPUT;
+    Reflect.deleteProperty(process.env, "GITHUB_OUTPUT");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => writeGithubOutput({ processed: "1" })).not.toThrow();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("GITHUB_OUTPUT absent"));
+    } finally {
+      warn.mockRestore();
+      if (prev !== undefined) process.env.GITHUB_OUTPUT = prev;
+    }
   });
 });

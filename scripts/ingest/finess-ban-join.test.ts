@@ -143,7 +143,16 @@ describe("ban-backfill.mjs — source `finess` câblée sur ces RPC, curseur tex
     );
     expect(wf).toContain('workflows: ["Ingest FINESS"]');
     expect(wf).toContain("group: ingest-finess");
-    expect(wf).toMatch(/ban-backfill\.mjs --source finess/);
+    // Depuis la factorisation du 2026-09-06, l'appelant ne porte plus que le
+    // déclencheur et la source ; le corps (invocation du script) vit dans le
+    // workflow réutilisable — la chaîne complète est vérifiée ici bout à bout.
+    expect(wf).toContain("uses: ./.github/workflows/ban-backfill.yml");
+    expect(wf).toMatch(/^\s+source: finess$/m);
+    const reusable = readFileSync(
+      join(ingestDir, "../../.github/workflows/ban-backfill.yml"),
+      "utf8",
+    );
+    expect(reusable).toMatch(/ban-backfill\.mjs --source "\$SOURCE"/);
   });
 });
 

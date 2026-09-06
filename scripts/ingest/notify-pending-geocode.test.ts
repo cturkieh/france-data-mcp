@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  MEASURE_UNAVAILABLE_LABEL,
+  PENDING_GEOCODE_LABEL,
   composePendingMessage,
   decidePendingNotification,
   parseSourceArg,
@@ -175,10 +177,34 @@ describe("wording de l'alerte (reframe : drain BAN automatisé) — composé en 
     expect(degraded.issueComment).toContain("INDISPONIBLE");
   });
 
-  it("le YAML ne compose plus aucun texte : il transporte les outputs du script", () => {
+  it("le YAML ne compose plus aucun texte NI les labels : il transporte les outputs du script", () => {
     expect(actionYml).not.toContain("<<__OPS_EOF__");
-    for (const key of ["subject", "text", "issue_title", "issue_body", "issue_comment"]) {
+    for (const key of [
+      "subject",
+      "text",
+      "issue_title",
+      "issue_body",
+      "issue_comment",
+      "issue_labels",
+    ]) {
       expect(actionYml).toContain(`steps.pending_geocode.outputs.${key}`);
     }
+    // Les labels ne doivent PLUS être écrits en dur dans le YAML : c'est la
+    // décision (informatif vs dégradé) qui choisit le registre.
+    expect(actionYml).not.toContain("labels: pending-geocode,${{ inputs.source }}");
+  });
+
+  it("DEUX registres de labels : le drain BAN ne peut refermer QUE l'informatif", () => {
+    // Un drain réussi ne dit RIEN de l'état de la RPC de mesure : fermer
+    // l'alerte dégradée sur ce signal, c'est perdre la seule alerte
+    // actionnable du canal (revue 2026-09-06). Le filtre `labels` de l'API
+    // étant un ET, il ne suffit PAS d'ajouter un label au registre dégradé :
+    // son label PRIMAIRE doit différer.
+    expect(normal.issueLabels).toEqual([PENDING_GEOCODE_LABEL, "ameli"]);
+    expect(degraded.issueLabels).toEqual([MEASURE_UNAVAILABLE_LABEL, "rpps"]);
+    expect(MEASURE_UNAVAILABLE_LABEL).not.toBe(PENDING_GEOCODE_LABEL);
+    // Le filtre de fermeture du drain (`pending-geocode,<source>`) ne doit
+    // matcher AUCUN label du registre dégradé.
+    expect(degraded.issueLabels).not.toContain(PENDING_GEOCODE_LABEL);
   });
 });
