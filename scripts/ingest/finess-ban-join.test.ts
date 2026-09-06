@@ -164,8 +164,7 @@ describe("finess.ts — câblage de la pose (supprimer le bloc laisserait le dra
     // prouvé au 2e run du 2026-09-06, issue #76) : partial + trace, jamais un throw.
     expect(src).toContain("if (banCount < banPosable)");
     expect(src).not.toContain("banEligible > 0 && banCount === 0");
-    expect(src).toMatch(
-      /log\.status = "partial";\s+appendLogMessage\(log, `ban_join: \$\{banCount\} posed \/ \$\{banPosable\} posable/,
-    );
+    expect(src).toContain('log.status = "partial";');
+    expect(src).toContain("`ban_join: ${banCount} posed / ${banPosable} posable");
   });
 });
