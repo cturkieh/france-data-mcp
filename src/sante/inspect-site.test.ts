@@ -99,6 +99,7 @@ function fakeFinessFound(): Extract<
     },
     coords: { lat: 50.67, lon: 3.13 },
     distance_km: null,
+    siret_ans: null,
     telephone: "03 20 05 15 00",
     email: null,
   };

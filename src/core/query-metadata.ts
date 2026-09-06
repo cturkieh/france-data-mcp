@@ -3,9 +3,9 @@
  *
  * Pourquoi : le caller MCP (Claude.ai, Cursor, agent LLM) ne peut pas deviner
  * la nature du calcul de distance ni la précision géographique en lisant un
- * `distance_km: 2.67`. Or les sources varient : FINESS expose des coords
- * Lambert93 reprojetées en WGS84 (précision adresse), Ameli ne fournit que
- * le centroïde commune (~3 km moyenne). Sans cette transparence, un caller
+ * `distance_km: 2.67`. Or les sources varient : FINESS expose le point de
+ * l'établissement (WGS84 ANS ou BAN, précision adresse), Ameli/RPPS mêlent
+ * points BAN et centroïdes commune (~3 km moyenne). Sans cette transparence, un caller
  * peut prendre des décisions logistiques fausses (ex: "le LBM est à 2.67 km
  * vol d'oiseau" — mais la distance routière fait facilement +20-30%).
  *
@@ -14,11 +14,17 @@
  * stratégie de fallback API DINUM.
  */
 
+import { createWarnOnce } from "./warn-once.js";
+
 /**
  * Précision géographique des coordonnées exposées dans les résultats.
  *
- * - `lambert93_natif_finess` : coords FINESS DREES (Lambert 93 reprojeté
- *   WGS84 à l'ingestion). Précision adresse ~10 m côté DREES.
+ * - `point_etablissement_finess` : point de l'établissement FINESS — WGS84
+ *   natif du flux ANS (quotidien, cron le 1ᵉʳ et le 15), sinon point BAN de
+ *   l'adresse (rue/lieu-dit/bâtiment, accepté par précision) ou hérité du run
+ *   précédent ; jamais un centroïde commune. Lire `geo_precision` PAR
+ *   établissement (`adresse`, présent dès que `coords` l'est). Remplace
+ *   `lambert93_natif_finess` (CSV DREES, mort le 2026-07-20) depuis la V0.30.0.
  * - `centroide_commune_ameli` : @deprecated Chantier C — coords Ameli au
  *   centroïde commune (~3 km). Remplacé par `centroide_commune_ameli_mixte`
  *   depuis le 2026-05-21 (77 % des PS Ameli en `geom_source='ban_address'`
@@ -28,7 +34,7 @@
  *   dans un nouveau call site.
  */
 export type GeoPrecision =
-  | "lambert93_natif_finess"
+  | "point_etablissement_finess"
   | "centroide_commune_ameli"
   /**
    * Chantier C 2026-05-21 — étiquette par défaut Ameli post-géocodage BAN.
@@ -125,8 +131,8 @@ const SOURCE_NOTE: Record<GeoPrecision, string> = {
     "Coordonnées Ameli — variante effective Chantier C 2026-05-21 : TOUS les résultats retournés sur cette requête sont en précision adresse (`ban_address`). `distance_km` est exacte au m près pour chaque PS, classement individuel fiable. Source : Annuaire santé Ameli, Assurance Maladie (mention obligatoire L.1461-2 CSP). NB : la donnée source reste hybride — d'autres PS au centroïde commune existent peut-être dans la zone mais étaient hors rayon ou filtrés.",
   centroide_commune_ameli_centroide_uniquement:
     "Coordonnées Ameli — variante effective Chantier C 2026-05-21 : TOUS les résultats retournés sur cette requête sont au centroïde commune (~3 km). `distance_km` n'est PAS discriminante intra-commune (tous les PS d'une même commune ont la même distance au centre du rayon). Source : Annuaire santé Ameli, Assurance Maladie (mention obligatoire L.1461-2 CSP). Pour un classement fiable, élargir radius_km ≥ ~3 km pour capter aussi les PS en précision adresse (~77 % du référentiel post-géocodage BAN).",
-  lambert93_natif_finess:
-    "FINESS DREES (sync bimestrielle) — référentiel peut avoir 1-2 mois de retard sur le terrain pour les structures émergentes (CPTS récentes, MSP en agrément). Cross-check ARS / Service Public si nécessaire.",
+  point_etablissement_finess:
+    "Coordonnées FINESS = point de l'établissement (source ANS, flux quotidien ingéré le 1ᵉʳ et le 15 : WGS84 natif ANS, sinon point BAN de l'adresse en précision rue/lieu-dit/bâtiment, ou point hérité du run précédent — jamais un centroïde commune). `geo_precision` PAR établissement vaut `adresse` dès que `coords` est présent ; un établissement sans `coords` n'a pas de point connu (invisible des recherches par rayon). `siret_ans` = SIRET déclaré par l'ANS, fait brut non vérifié SIRENE (pour la vérification : reconcilier_finess_sirene / verifier_site_actif). Structures très récentes (CPTS, MSP en agrément) : cross-check ARS / Service Public.",
   /** @deprecated V0.12.0 — Plus aucune RPC RPPS ne produit cet alias ; toutes ont migré vers `centroide_commune_ans_mixte` (précision hybride par-résultat). Conservé pour rétrocompat de tout client qui aurait caché la string `geo_precision` côté query_metadata (Claude.ai, Cursor, agents loggant). Ne pas réintroduire dans un nouveau call site. */
   centroide_commune_ans:
     "Coordonnées RPPS/ANS = centroïde commune (~3 km moyenne). Source : Annuaire Santé ANS — Licence Ouverte v2.0. Pour une précision adresse, croiser num_finess avec etablissement_by_finess.",
@@ -179,11 +185,11 @@ export const CENTROIDE_COMMUNE_RESOLUTION_KM = 3;
  *   centroïde effectif, exactement le cas où le warning sub-commune
  *   s'applique aggravé : aucun précis à élarger via `precise_only=true`).
  * - `centroide_commune_ans` reste `true` pour rétrocompat (deprecated, plus produit).
- * - `lambert93_natif_finess` / `structure_finess` = `false` (précision adresse,
+ * - `point_etablissement_finess` / `structure_finess` = `false` (précision adresse,
  *   pas de piège centroïde).
  */
 const CENTROID_PRECISIONS = {
-  lambert93_natif_finess: false,
+  point_etablissement_finess: false,
   centroide_commune_ameli: true, // deprecated Chantier C, plus produit (cf. SOURCE_NOTE)
   // Chantier C 2026-05-21 : précision MIXTE (~77 % adresse, ~23 % centroïde)
   // → la branche précise reste fiable, note générique sub-commune trompeuse
@@ -289,13 +295,13 @@ export type AmeliGeoPrecisionRow = GeoPrecisionRow;
  * dans `sante/ameli-db.ts` + convention CLAUDE.md « Tests `_resetXForTesting()`
  * pour tout module avec état partagé ».
  */
-let _refineAmeliDriftWarned = false;
-let _refineAmeliFinessUnexpectedWarned = false;
+const refineAmeliDriftWarn = createWarnOnce();
+const refineAmeliFinessUnexpectedWarn = createWarnOnce();
 
-/** Test-only — reset les flags 1-shot des warns de raffinage Ameli. */
+/** Test-only — réarme les warns 1-shot du raffinage Ameli (`core/warn-once`). */
 export function _resetRefineAmeliWarnings(): void {
-  _refineAmeliDriftWarned = false;
-  _refineAmeliFinessUnexpectedWarned = false;
+  refineAmeliDriftWarn.reset();
+  refineAmeliFinessUnexpectedWarn.reset();
 }
 
 /**
@@ -353,12 +359,9 @@ export function refineAmeliGeoPrecisionLabel(
       // warn loud 1-shot pour audit prod (simplify H-1 quality).
       precisCount++;
       countedRows++;
-      if (!_refineAmeliFinessUnexpectedWarned) {
-        _refineAmeliFinessUnexpectedWarned = true;
-        console.warn(
-          `[france-data-mcp] refineAmeliGeoPrecisionLabel: row.geo_precision="etablissement_finess" inattendu côté Ameli (pas de FINESS join — drift contract RPC suspectée). Compté en précis par défense, audit la RPC ameli_in_radius / ameli_by_specialite_dept.`,
-        );
-      }
+      refineAmeliFinessUnexpectedWarn.warn(
+        `[france-data-mcp] refineAmeliGeoPrecisionLabel: row.geo_precision="etablissement_finess" inattendu côté Ameli (pas de FINESS join — drift contract RPC suspectée). Compté en précis par défense, audit la RPC ameli_in_radius / ameli_by_specialite_dept.`,
+      );
     } else if (p === "centroide_commune") {
       centroideCount++;
       countedRows++;
@@ -366,12 +369,9 @@ export function refineAmeliGeoPrecisionLabel(
       // Valeur typée NON canonique (e.g. "iris", "foo") : VRAI drift contract.
       // Warn loud 1-shot module-level (simplify H-2 quality : anti-spam si
       // caller boucle). On garde l'étiquette mixte par sécurité.
-      if (!_refineAmeliDriftWarned) {
-        _refineAmeliDriftWarned = true;
-        console.warn(
-          `[france-data-mcp] refineAmeliGeoPrecisionLabel: row.geo_precision avec valeur non-canonique (=${JSON.stringify(p)}) — étiquette mixte préservée par sécurité, drift contract RPC suspectée.`,
-        );
-      }
+      refineAmeliDriftWarn.warn(
+        `[france-data-mcp] refineAmeliGeoPrecisionLabel: row.geo_precision avec valeur non-canonique (=${JSON.stringify(p)}) — étiquette mixte préservée par sécurité, drift contract RPC suspectée.`,
+      );
       return baseMeta;
     }
   }
@@ -404,10 +404,10 @@ export function refineAmeliGeoPrecisionLabel(
 }
 
 export const finessRadiusMetadata = (): QueryMetadata =>
-  buildMetadata("lambert93_natif_finess", true);
+  buildMetadata("point_etablissement_finess", true);
 
 export const finessByCategorieMetadata = (): QueryMetadata =>
-  buildMetadata("lambert93_natif_finess", false);
+  buildMetadata("point_etablissement_finess", false);
 
 /**
  * Metadata pour `rpps_in_radius` : depuis V0.12.0 la précision est MIXTE par

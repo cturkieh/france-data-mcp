@@ -12,6 +12,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { SIRET_PATTERN } from "../../src/sante/db-helpers.js";
 import { COLUMN_RULES, GEOM_SOURCES, type OverflowField } from "./finess-ans-parse.js";
 import { allMigrationsSql, latestFunctionBody } from "./migration-sql.js";
 
@@ -44,9 +45,12 @@ function stagingTextColumns(): Map<string, DdlTextColumn> {
  * (une valeur hors format y écarte l'EGE au lieu de nuller le champ) :
  *  - `num_finess` CHAR(9) : PK, regex `NUM_FINESS_EGE` → skip `bad_finess_id` ;
  *  - `code_insee` CHAR(5) / `code_departement` CHAR(3) : `isValidCodeInsee` +
- *    `deptFromCodeInsee` (`territoire/dept-codes.ts`) → skip `bad_commune`.
+ *    `deptFromCodeInsee` (`territoire/dept-codes.ts`) → skip `bad_commune` ;
+ *  - `siret` CHAR(14) : `SIRET_PATTERN` (14 chiffres, `db-helpers`) → `null` +
+ *    compteur `siretMalformed` (la borne DDL est impliquée par la regex ; la
+ *    parité regex TS ↔ SQL est assertée ci-dessous).
  */
-const VALIDATED_ELSEWHERE = new Set(["num_finess", "code_insee", "code_departement"]);
+const VALIDATED_ELSEWHERE = new Set(["num_finess", "code_insee", "code_departement", "siret"]);
 
 describe("COLUMN_RULES ↔ DDL finess_staging", () => {
   const ddl = stagingTextColumns();
@@ -79,34 +83,67 @@ describe("COLUMN_RULES ↔ DDL finess_staging", () => {
     }
   });
 
-  it("vocabulaire `geom_source` FERMÉ : tout littéral écrit en SQL est une constante TS, et réciproquement (hors `ans`, posé par le parseur)", () => {
-    // `raw->>'geom_source'` a trois producteurs : le parseur TS (`ANS`), le repli
-    // `ingest_apply_finess_geom_previous` (`previous_ingest`, ou propagation d'un
-    // `ban_address` hérité) et la pose `ingest_apply_finess_ban_join`
-    // (`ban_address`). Égalité stricte des ensembles : un 4e producteur SQL avec
-    // un libellé nouveau, OU une constante TS que rien n'écrit, fait rougir.
+  it("vocabulaire `geom_source` FERMÉ : le CHECK de la staging = les constantes TS, geom ⇔ geom_source, et le repli PROPAGE un point BAN hérité", () => {
+    // Depuis 20260906T160000 le garde RÉEL du vocabulaire est la contrainte
+    // CHECK (une valeur fantôme fait échouer l'INSERT/UPDATE) : plus besoin de
+    // deviner les producteurs en scannant le texte SQL (revue altitude
+    // 2026-09-06 — une liste blanche de fonctions mentait sur sa couverture
+    // et un `CASE` sans rapport la faisait rougir). Reste ce que le CHECK ne
+    // donne pas : sa parité avec `GEOM_SOURCES` TS (un libellé TS absent du
+    // CHECK ferait échouer l'INSERT du parseur ; un libellé CHECK absent du TS
+    // serait un fantôme côté lib), et la propagation par le repli.
     const sqlSrc = allMigrationsSql();
-    const written = new Set<string>();
-    for (const m of sqlSrc.matchAll(
-      /jsonb_build_object\(\s*'geom_source'\s*,([\s\S]{0,400}?)\)\s*(?:from|\|\||\)|,)/g,
-    )) {
-      // `f.raw->>'geom_source'` dans le CASE du repli n'est pas une VALEUR.
-      for (const lit of (m[1] ?? "").matchAll(/'([a-z_]+)'/g)) {
-        if (lit[1] !== "geom_source") written.add(lit[1] ?? "");
-      }
-    }
-    const ts = new Set<string>(Object.values(GEOM_SOURCES));
-    ts.delete(GEOM_SOURCES.ANS);
-    expect([...written].sort()).toEqual([...ts].sort());
-    // Le repli PROPAGE un point BAN hérité (sinon la pose serait réétiquetée au cron suivant).
+    const staging = latestFunctionBody(sqlSrc, "ingest_create_finess_staging", {
+      stripComments: true,
+      compact: true,
+    });
+    const check = /check \(geom_source in \(([^)]*)\)\)/.exec(staging)?.[1];
+    expect(
+      check,
+      "CHECK du vocabulaire geom_source absent de ingest_create_finess_staging",
+    ).toBeDefined();
+    const checkValues = [...(check ?? "").matchAll(/'([a-z_]+)'/g)].map((m) => m[1] ?? "").sort();
+    expect(checkValues).toEqual([...Object.values(GEOM_SOURCES)].sort());
+    expect(staging, "contrainte geom ⇔ geom_source absente de la staging").toMatch(
+      /check \(\(geom is null\) = \(geom_source is null\)\)/,
+    );
+
+    // Le repli PROPAGE un point BAN hérité (sinon la pose serait réétiquetée au
+    // cron suivant et la feature deviendrait invisible en SQL) — sur la
+    // colonne, plus dans `raw`.
     const previous = latestFunctionBody(sqlSrc, "public.ingest_apply_finess_geom_previous", {
       stripComments: true,
       compact: true,
     });
-    expect(previous).not.toBe("");
+    expect(previous, "dernière def du repli introuvable").not.toBe("");
+    // SANS `else` (20260906T180000) : une provenance hors des cas énumérés
+    // donne NULL sur un point → contrainte violée → échec LOUD du cron, jamais
+    // une dégradation muette en `previous_ingest`.
     expect(previous).toMatch(
-      /case when f\.raw->>'geom_source' = 'ban_address' then 'ban_address' else 'previous_ingest' end/,
+      /case when f\.geom_source = 'ban_address' then 'ban_address' when f\.geom_source in \('ans', 'previous_ingest'\) then 'previous_ingest' end/,
     );
+    expect(previous).not.toMatch(/\belse\b/);
+    expect(previous, "le repli ne doit plus écrire la provenance dans raw").not.toMatch(
+      /jsonb_build_object\(\s*'geom_source'/,
+    );
+  });
+
+  it("format SIRET : la regex TS (`SIRET_PATTERN`) et celle du peuplement SQL (migration 20260906T160000) sont identiques", () => {
+    // Le SIRET est validé à trois endroits : le parseur (TS), le peuplement
+    // one-shot depuis `raw` (SQL) et, implicitement, la borne CHAR(14). Sans
+    // parité, un assouplissement d'un côté (SIREN à 9 chiffres toléré, par
+    // ex.) laisserait l'autre nuller en silence. Même discipline que le
+    // vocabulaire `geom_source` ci-dessus.
+    const sqlSrc = allMigrationsSql();
+    const populate =
+      /set siret\s*=\s*case when raw->>'siret' ~ '([^']+)' then raw->>'siret' end/.exec(
+        sqlSrc.replace(/\s+/g, " "),
+      )?.[1];
+    expect(populate, "peuplement SQL de finess.siret introuvable").toBeDefined();
+    expect(populate).toBe(SIRET_PATTERN.source);
+    expect(SIRET_PATTERN.test("x".repeat(14)), "la regex implique la borne CHAR(14)").toBe(false);
+    expect(SIRET_PATTERN.test("1".repeat(14))).toBe(true);
+    expect(SIRET_PATTERN.test("1".repeat(15))).toBe(false);
   });
 
   it("toute colonne texte bornée de la DDL est couverte par une règle ou validée ailleurs", () => {

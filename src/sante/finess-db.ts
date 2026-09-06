@@ -1,10 +1,12 @@
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { metersToKm } from "../core/numbers.js";
 import {
+  type PerResultGeoPrecision,
   type QueryMetadata,
   finessByCategorieMetadata,
   finessRadiusMetadata,
 } from "../core/query-metadata.js";
+import { createWarnOnce } from "../core/warn-once.js";
 import { getAnonClient, getUntypedAnonClient } from "../storage/supabase.js";
 import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.js";
 import {
@@ -24,6 +26,7 @@ import {
   type FinessFamilleQuery,
   finessFamille,
 } from "./finess-categories.js";
+import { GEOM_SOURCES, isFinessGeomSource } from "./finess-geom-source.js";
 
 export type { FinessFamilleQuery } from "./finess-categories.js";
 
@@ -40,6 +43,24 @@ export interface FinessResult {
   };
   coords: { lat: number; lon: number } | null;
   distance_km: number | null;
+  /**
+   * Précision du point, présent UNIQUEMENT quand `coords` l'est (même contrat
+   * qu'Ameli/RPPS). Toujours `adresse` côté FINESS : point WGS84 natif ANS,
+   * point BAN accepté par précision (rue/lieu-dit/bâtiment) ou hérité de l'un
+   * des deux — jamais un centroïde commune (doctrine 20260905T210000 : le cron
+   * RPPS recopie ce point en tier précis). Dérivé de `finess.geom_source`
+   * (migration 20260906T160000) ; l'origine fine reste interne.
+   */
+  geo_precision?: Extract<PerResultGeoPrecision, "adresse">;
+  /**
+   * SIRET déclaré par l'ANS pour cet établissement (`informationsGeneralesEGE
+   * .siret`, 14 chiffres) — FAIT BRUT, jamais vérifié contre SIRENE ici (un
+   * SIRET ANS peut être fermé). Présent sur ~87 % des EGE (2026-09-06). Le
+   * resolver SIRET (`siret-resolver.ts`) le prend comme candidat et le
+   * confronte à DINUM ; `reconcilier_finess_sirene` / `verifier_site_actif`
+   * exposent le verdict.
+   */
+  siret_ans: string | null;
   telephone: string | null;
   email: string | null;
 }
@@ -64,9 +85,8 @@ export interface FinessQueryResult {
   results: FinessResult[];
   /**
    * Métadonnées sur la précision géo et le type de distance. Surface au
-   * caller MCP que les coords proviennent du Lambert93 DREES (~adresse) et
-   * que la distance est haversine (pas routière). Inclut un rappel sur la
-   * latence DREES (~1-2 mois) pour les structures émergentes.
+   * caller MCP que les coords sont le point de l'établissement (ANS/BAN,
+   * précision adresse) et que la distance est haversine (pas routière).
    *
    * Optionnel : tous les RPCs de prod la peuplent (cf. `getFinessInRadius`/
    * `getFinessByCategorie`) ; cas d'absence réservé aux mocks tests.
@@ -198,6 +218,12 @@ export async function getFinessInRadius(input: InRadiusInput): Promise<FinessQue
  */
 export async function getFinessByCategorie(input: ByCategorieInput): Promise<FinessQueryResult> {
   const limit = clampLimit(input.limit);
+  // Depuis 20260906T170000 la RPC caste ses paramètres en CHAR(n) (index
+  // utilisable) — un cast TRONQUE en silence une valeur trop longue
+  // (`751011` → `75101`, 1er arrondissement). Le DB layer est le boundary
+  // public : mêmes gardes que `countFiness` / `countFinessByCommune`.
+  if (input.departement !== undefined) assertValidDept(input.departement);
+  if (input.code_insee !== undefined) assertValidCodeInsee(input.code_insee);
 
   // Untyped client : les types Supabase générés exigent `string` pour
   // `p_departement`/`p_code_insee` alors que la RPC accepte `null` (= "pas de
@@ -219,10 +245,9 @@ export async function getFinessByCategorie(input: ByCategorieInput): Promise<Fin
 /**
  * Fetch a single FINESS establishment by its 9-digit FINESS number.
  *
- * Retourne un `LookupResult` discriminé par `found`. Si le numéro n'existe
- * pas dans le dump FINESS DREES (numéro mal formé, fermeture récente non
- * encore propagée, frais d'établissement émergent — la base DREES a 1-2 mois
- * de retard sur le terrain), la fonction renvoie un objet `{ found: false,
+ * Retourne un `LookupResult` discriminé par `found`. Si le numéro n'est pas
+ * un établissement EN SERVICE du flux ANS (numéro mal formé, fermé, trop
+ * récent), la fonction renvoie un objet `{ found: false,
  * lookupStatus: "not_found", message }` au lieu d'un `null` silencieux.
  * Pattern aligné sur `getEntrepriseBySiren` et `getCommuneByCode`
  * (cf. `src/core/lookup-result.ts`).
@@ -250,7 +275,7 @@ export async function getFinessByNumFiness(numFiness: string): Promise<LookupRes
   if (!first) {
     return lookupNotFound(
       numFiness,
-      `Numéro FINESS "${numFiness}" introuvable dans la base DREES (dernière sync bimestrielle). Causes possibles : numéro inexistant, structure très récente non encore propagée par DREES (latence ~1-2 mois), erreur de saisie. Pour structures émergentes (CPTS, MSP récentes), cross-check avec ARS régionale ou Service Public.`,
+      `Numéro FINESS "${numFiness}" introuvable parmi les établissements EN SERVICE du flux FINESS ANS (quotidien, ingéré le 1ᵉʳ et le 15). Causes possibles : numéro inexistant, établissement fermé (les fermés ne sont pas servis), structure très récente pas encore dans le flux, erreur de saisie. Pour structures émergentes (CPTS, MSP récentes), cross-check avec ARS régionale ou Service Public.`,
     );
   }
   return lookupFound(toFinessResult(first));
@@ -264,11 +289,28 @@ function buildFinessQueryResult(
   limit: number,
   metadata: QueryMetadata,
 ): FinessQueryResult {
+  // Dégradation VISIBLE au contrat, pas seulement au log : si la RPC ne
+  // renvoie pas la colonne de provenance, `geo_precision: "adresse"` n'est
+  // garanti que par la contrainte SQL, et le caller doit le savoir (Ameli
+  // dégrade son étiquette ; ici l'étiquette reste juste, la note dit pourquoi).
+  const lacking = Array.isArray(data)
+    ? (data as RawFinessRow[]).filter(lacksProvenanceColumn).length
+    : 0;
+  const meta =
+    lacking > 0
+      ? {
+          ...metadata,
+          notes: [
+            ...metadata.notes,
+            `${lacking} établissement(s) servi(s) sans colonne de provenance du point (RPC antérieure à 20260906T160000 ou drift) — geo_precision "adresse" garanti par la contrainte de la table, pas par la ligne.`,
+          ],
+        }
+      : metadata;
   return buildListQueryResult<RawFinessRow, FinessResult, QueryMetadata>(
     rpc,
     data,
     limit,
-    metadata,
+    meta,
     toFinessResult,
   );
 }
@@ -287,6 +329,52 @@ interface RawFinessRow {
   email: string | null;
   geom: { type: "Point"; coordinates: [number, number] } | null;
   distance_meters?: number; // present only on RPC result
+  /** CHAR(14) ou null — RPC ≥ 20260906T160000 ; `undefined` = RPC antérieure. */
+  siret?: string | null;
+  /** Vocabulaire `GEOM_SOURCES` ou null (sans point) — RPC ≥ 20260906T160000 ; `undefined` = RPC antérieure. */
+  geom_source?: string | null;
+}
+
+const provenanceMissingWarn = createWarnOnce();
+
+/** Test-only — réarme le warn 1-shot « point sans provenance » (`core/warn-once`). */
+export const _resetFinessGeoPrecisionMissingWarning = provenanceMissingWarn.reset;
+
+/** Ligne géolocalisée dont la RPC n'a pas renvoyé la colonne `geom_source` (clé ABSENTE). */
+function lacksProvenanceColumn(row: RawFinessRow): boolean {
+  return row.geom !== null && row.geom_source === undefined;
+}
+
+/**
+ * Garde de contrat sur la provenance d'un point SERVI (appelée seulement
+ * quand `coords` est présent). Trois issues, alignées sur les jumelles :
+ *  - valeur du vocabulaire fermé (`GEOM_SOURCES`) : rien à faire, le point
+ *    est à l'adresse par construction (contrainte CHECK + doctrine « jamais
+ *    de centroïde dans finess.geom ») → `geo_precision: "adresse"` au site
+ *    d'appel ;
+ *  - clé ABSENTE (`undefined`) : RPC antérieure à 20260906T160000 (fenêtre de
+ *    déploiement) — warn 1-shot + note dans `query_metadata` (le caller voit
+ *    la dégradation, pas seulement le log), on sert `adresse` (c'est ce que
+ *    la contrainte garantit pour tout point en base) ;
+ *  - `null` AVEC un point, ou valeur INCONNUE : états impossibles par la
+ *    contrainte `geom ⇔ geom_source` / le CHECK → throw, comme
+ *    `rpps-db.ts:assertGeoPrecision`. Les servir en `adresse` serait mentir
+ *    vers le haut (un futur `commune_centroid` passé par une migration sans
+ *    mise à jour de la lib doit casser LOUD).
+ */
+function assertFinessPointProvenance(row: RawFinessRow): void {
+  const source = row.geom_source;
+  if (source === undefined) {
+    provenanceMissingWarn.warn(
+      `[france-data-mcp][finess-db] RPC returned geolocated rows without a geom_source column (first: num_finess=${row.num_finess}) — RPC pre-20260906T160000 OR contract drift; geo_precision still reported as "adresse" (guaranteed by the finess CHECK), noted in query_metadata`,
+    );
+    return;
+  }
+  if (source === null || !isFinessGeomSource(source)) {
+    throw new Error(
+      `[france-data-mcp] finess RPC contract violation — geom_source=${JSON.stringify(source)} sur un point servi (num_finess=${row.num_finess}) ; attendu une valeur de {${Object.values(GEOM_SOURCES).join(", ")}} (contrainte geom ⇔ geom_source + CHECK). Migration drift ?`,
+    );
+  }
 }
 
 function toFinessResult(row: RawFinessRow): FinessResult {
@@ -296,6 +384,9 @@ function toFinessResult(row: RawFinessRow): FinessResult {
   const lat = row.geom?.coordinates[1];
   const lon = row.geom?.coordinates[0];
   const coords = typeof lat === "number" && typeof lon === "number" ? { lat, lon } : null;
+  // Un point servi porte toujours la précision `adresse` (doctrine « jamais de
+  // centroïde dans finess.geom ») ; la garde vérifie que la base le dit aussi.
+  if (coords) assertFinessPointProvenance(row);
   return {
     num_finess: row.num_finess,
     raison_sociale: row.raison_sociale,
@@ -313,6 +404,8 @@ function toFinessResult(row: RawFinessRow): FinessResult {
     },
     coords,
     distance_km: metersToKm(row.distance_meters),
+    ...(coords ? { geo_precision: "adresse" as const } : {}),
+    siret_ans: trimOrNull(row.siret),
     telephone: trimOrNull(row.telephone),
     email: row.email,
   };

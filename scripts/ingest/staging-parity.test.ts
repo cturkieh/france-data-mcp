@@ -236,6 +236,35 @@ describe("staging-create est un superset des index prod (annuaire_ameli)", () =>
   });
 });
 
+describe("staging-create est un superset des index prod (finess)", () => {
+  it("chaque liste de colonnes d'index prod finess existe à l'identique dans ingest_create_finess_staging()", () => {
+    // Trou comblé le 2026-09-06 (plan finess-phase-2-cloture §2.3) : la table
+    // `finess` (105 K lignes, swap le 1er et le 15) n'avait AUCUN garde de
+    // parité d'index — `finess-column-rules-parity` ne couvre que les bornes
+    // de colonnes texte. Même classe de bug que annuaire_ameli/rpps : un index
+    // ajouté sur `finess` par migration (ex. `finess_siret_idx`, partiel) et
+    // non répliqué dans la staging-create est PERDU au swap suivant, en
+    // silence. Set prod VIVANT (DROP honoré : `finess_dept_idx` sur
+    // `left(code_insee, 2)` a été droppé par 20260508000013).
+    const stagingBody = latestFunctionBody("ingest_create_finess_staging");
+    expect(stagingBody.length).toBeGreaterThan(0);
+
+    const prodCols = liveIndexColumnLists(allMigrationsSql(), "finess");
+    const stagingCols = indexColumnLists(stagingBody, "finess_staging");
+
+    // geom gist + geog gist + categorie + dept + insee + 2 composites ⇒ 7
+    // (l'index siret de 20260906T160000 a été retiré par T170000, DROP honoré).
+    expect(prodCols.size).toBeGreaterThanOrEqual(7);
+    expect(stagingCols.size).toBeGreaterThanOrEqual(prodCols.size);
+
+    const missing = [...prodCols].filter((c) => !stagingCols.has(c));
+    expect(
+      missing,
+      `Index prod sur finess absents (par liste de colonnes clé) de ingest_create_finess_staging() — seront PERDUS au prochain swap (1er/15) : ${JSON.stringify(missing)}`,
+    ).toEqual([]);
+  });
+});
+
 describe("staging-create est un superset des index prod (rpps)", () => {
   it("chaque liste de colonnes d'index prod rpps existe à l'identique dans ingest_create_rpps_staging()", () => {
     // Généralisation V0.10.2 du garde-fou à la table RPPS (2,23 M lignes).

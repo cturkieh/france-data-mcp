@@ -30,6 +30,7 @@ import {
 import * as dinum from "./dinum.js";
 import * as finessDb from "./finess-db.js";
 import * as inseeSirene from "./insee-sirene.js";
+import { resolveSiretsForFiness } from "./siret-resolver.js";
 
 // SIREN Biogroup Nord + SIRETs du cas reproductible (Fix V0.7.1).
 const SIREN_BIOGROUP = "507815942";
@@ -61,6 +62,7 @@ function fakeFinessLookupFound(
     },
     coords: { lat: 50.67, lon: 3.13 },
     distance_km: null,
+    siret_ans: null,
     telephone: "03 20 05 15 00",
     email: null,
     ...overrides,
@@ -2806,5 +2808,97 @@ describe("reconcilierFinessSirene (P2.3 — optimisation INSEE via DINUM-enriche
     // INSEE appelé : le candidat RPPS-only doit passer par la branche inseeRequired
     expect(inseeSpySiret).toHaveBeenCalledTimes(1);
     expect(inseeSpySiret).toHaveBeenCalledWith(SIRET_A);
+  });
+});
+
+describe("resolveSiretsForFiness — SIRET déclaré par l'ANS dans FINESS (siret_ans, V0.30.0)", () => {
+  it("sans SIRET RPPS, le SIRET ANS amorce la cascade : DINUM le confirme actif à l'adresse → best_match, method=finess_ans", async () => {
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_A.slice(0, 9),
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_A,
+            adresse: "27 BD BIZET 59290 WASQUEHAL",
+            actif: true,
+            dateCreation: "2020-01-01",
+          },
+        ],
+      }),
+    );
+    const finess = fakeFinessLookupFound({ siret_ans: SIRET_A });
+    const r = await resolveSiretsForFiness(VALID_FINESS, finess);
+    expect(r.sirens_explored).toEqual([SIRET_A.slice(0, 9)]);
+    expect(r.best_match?.siret).toBe(SIRET_A);
+    expect(r.best_match?.actif).toBe(true);
+    expect(r.best_match?.sources).toEqual(["finess_ans", "dinum_address_match"]);
+    expect(r.method).toBe("finess_ans");
+    expect(r.fallback_reason).toBeNull();
+    // Aucun repli géo : la cascade nominale a suffi.
+    expect(dinum.searchEntreprises).not.toHaveBeenCalled();
+  });
+
+  it("SIRET ANS identique au SIRET RPPS : dédoublonné, deux sources, method reste rpps (sémantique V0.7 intacte)", async () => {
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_A.slice(0, 9),
+        etablissements: [{ siret: SIRET_A, adresse: "27 BD BIZET 59290 WASQUEHAL", actif: true }],
+      }),
+    );
+    const r = await resolveSiretsForFiness(
+      VALID_FINESS,
+      fakeFinessLookupFound({ siret_ans: SIRET_A }),
+    );
+    expect(r.candidates.filter((c) => c.siret === SIRET_A)).toHaveLength(1);
+    expect(r.best_match?.sources).toEqual(["rpps", "finess_ans", "dinum_address_match"]);
+    expect(r.method).toBe("rpps");
+    expect(r.sirens_explored).toEqual([SIRET_A.slice(0, 9)]);
+  });
+
+  it("SIRET ANS FERMÉ côté DINUM : best_match fermé → repli géo L1 déclenché (best_match_ferme), jamais promu actif", async () => {
+    mockNot.mockResolvedValue({ data: [], error: null });
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockResolvedValue(
+      fakeEntrepriseDinum({
+        siren: SIRET_FERME.slice(0, 9),
+        actif: true,
+        etablissements: [
+          {
+            siret: SIRET_FERME,
+            adresse: "27 BD BIZET 59290 WASQUEHAL",
+            actif: false,
+            dateCreation: "2010-01-01",
+          },
+        ],
+      }),
+    );
+    const r = await resolveSiretsForFiness(
+      VALID_FINESS,
+      fakeFinessLookupFound({ siret_ans: SIRET_FERME }),
+    );
+    // Le repli géo (stub near_point vide) a été tenté parce que le best_match
+    // amorcé par l'ANS est fermé — même chemin qu'un SIRET RPPS périmé.
+    expect(dinum.searchEntreprises).toHaveBeenCalled();
+    expect(r.fallback_reason).toBe("best_match_ferme");
+    expect(r.best_match?.siret).toBe(SIRET_FERME);
+    expect(r.best_match?.actif).toBe(false);
+    expect(r.best_match?.sources).toContain("finess_ans");
+    // Repli tenté (même vain) ≠ cascade nominale : jamais `finess_ans` ici,
+    // sinon le préfixe caller dirait « confirmé côté SIRENE » sur un site fermé.
+    expect(r.method).toBe("rpps");
+  });
+
+  it("siret_ans null : amorçage vide → fallback_reason no_rpps, aucun SIREN exploré (comportement V0.13 inchangé)", async () => {
+    mockNot.mockResolvedValue({ data: [], error: null });
+    const r = await resolveSiretsForFiness(
+      VALID_FINESS,
+      fakeFinessLookupFound({ siret_ans: null }),
+    );
+    expect(r.sirens_explored).toEqual([]);
+    expect(r.candidates).toEqual([]);
+    expect(r.fallback_reason).toBe("no_rpps");
+    expect(r.method).not.toBe("finess_ans");
   });
 });

@@ -45,6 +45,7 @@ function makeFiness(id: string, label: string, lon = 4.7192, lat = 49.7672): Fin
     },
     coords: { lat, lon },
     distance_km: 0.5,
+    siret_ans: null,
     telephone: null,
     email: null,
   };
@@ -443,6 +444,7 @@ function makeIfsiSameAddress(id: string, label: string): FinessResult {
     },
     coords: { lat: 48.8932, lon: 2.2872 },
     distance_km: 0.0,
+    siret_ans: null,
     telephone: null,
     email: null,
   };
@@ -462,6 +464,7 @@ function makeLaboSameAddress(id: string, label: string): FinessResult {
     },
     coords: { lat: 48.8932, lon: 2.2872 },
     distance_km: 0.0,
+    siret_ans: null,
     telephone: null,
     email: null,
   };

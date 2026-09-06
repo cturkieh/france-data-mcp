@@ -42,6 +42,7 @@ import {
   diceCoefficient,
   normalizeForCompare,
 } from "./address-match.js";
+import { SIRET_PATTERN } from "./db-helpers.js";
 import { type Etablissement, getEntrepriseBySiren, searchEntreprises } from "./dinum.js";
 import type { FinessResult } from "./finess-db.js";
 import { lookupSiretsBySirenViaInsee } from "./insee-sirene.js";
@@ -57,8 +58,31 @@ import { isNafCompatibleWithFamille, nafsForFamille } from "./naf-finess-mapping
  * - `dinum_address_match` : SIRET listé par DINUM dans les `etablissements`
  *   du SIREN parent, dont l'adresse SIRENE matche (Dice ≥ 0.6) celle déclarée
  *   par FINESS. Permet de capter les SIRET fermés invisibles côté RPPS.
+ * - `finess_ans` : SIRET déclaré par l'ANS dans le flux FINESS lui-même
+ *   (`FinessResult.siret_ans`, colonne `finess.siret`, V0.30.0). Entre dans la
+ *   cascade au même rang que `rpps` (SIREN exploré, DINUM confronte chaque
+ *   établissement, « actif prime ») : un SIRET ANS périmé est traité comme
+ *   l'est un SIRET RPPS périmé. Mesuré le 2026-09-06 : 59 % des EGE porteurs
+ *   d'un SIRET ANS n'ont AUCUN SIRET côté RPPS — là où la cascade n'avait que
+ *   le repli géographique.
  */
-export type SiretCandidateSource = "rpps" | "dinum_address_match";
+export type SiretCandidateSource = "rpps" | "dinum_address_match" | "finess_ans";
+
+/**
+ * SIRET d'amorçage de la cascade (V0.30.0). Deux vues d'un même ensemble,
+ * portées par UN objet pour qu'elles ne puissent pas être permutées (revue
+ * type-design 2026-09-06 : deux `string[]` adjacents de sémantiques opposées
+ * compilaient intervertis, et un SIRET ANS aurait gagné un tie-break réservé
+ * au signal professionnel) :
+ * - `rpps` : déclarés par ≥ 1 PS côté RPPS — le signal « un professionnel
+ *   l'a déclaré » qui départage deux candidats (`by_rpps_signal`) ;
+ * - `all` : RPPS ∪ ANS, dédoublonné — décide `mixed` vs `address_fallback`
+ *   et la raison `no_rpps`. `rpps ⊆ all`.
+ */
+export interface SeedSirets {
+  readonly rpps: readonly string[];
+  readonly all: readonly string[];
+}
 
 /**
  * Diagnostic d'un lookup DINUM qui n'a pas pu enrichir un SIREN.
@@ -90,19 +114,27 @@ export type DinumLookupError = {
  * - `address_fallback` : RPPS n'a fourni aucun SIRET exploitable (vide ou tous
  *   sentinelle/malformés). Le resolver est passé en fallback géographique
  *   (DINUM `/near_point`) filtré par NAF compatible avec la famille FINESS.
- * - `mixed` : RPPS a fourni des SIRET ET le fallback a été déclenché aussi
- *   (parce qu'aucun candidat RPPS ne matchait l'adresse FINESS, et que DINUM
- *   a répondu sans erreur). Les candidats finaux mélangent les 2 sources.
+ * - `mixed` : des SIRET déclarés existaient (RPPS, ou l'ANS depuis la V0.30.0)
+ *   ET le fallback a été déclenché aussi (parce qu'aucun candidat ne matchait
+ *   l'adresse FINESS, et que DINUM a répondu sans erreur). Les candidats
+ *   finaux mélangent les sources.
+ * - `finess_ans` (V0.30.0) : le `best_match` est le SIRET déclaré par l'ANS
+ *   dans FINESS (`siret_ans`), confirmé par la cascade DINUM, et AUCUN PS RPPS
+ *   ne l'avait déclaré — la cascade a fonctionné comme `rpps`, seule la
+ *   source d'amorçage diffère (traçabilité : le caller sait que la déclaration
+ *   vient de l'établissement lui-même, pas d'un professionnel).
  */
-export type ResolutionMethod = "rpps" | "address_fallback" | "mixed";
+export type ResolutionMethod = "rpps" | "address_fallback" | "mixed" | "finess_ans";
 
 /**
  * Pourquoi le fallback géographique a été déclenché. `null` si la méthode est
  * `"rpps"` (cas nominal, pas de fallback). Sert au caller LLM à comprendre
  * la nature du fallback (et au futur audit prod).
  *
- * - `no_rpps` : aucun SIRET trouvé côté RPPS (table vide pour ce num_finess
- *   ou tous SIRET filtrés par les sentinelles `finess_unmatched` / malformés).
+ * - `no_rpps` : aucun SIRET d'amorçage — ni côté RPPS (table vide pour ce
+ *   num_finess ou tous SIRET filtrés par les sentinelles `finess_unmatched` /
+ *   malformés) ni côté ANS (`siret_ans` null, V0.30.0). Valeur conservée telle
+ *   quelle (contrat public) bien qu'elle couvre désormais les deux sources.
  * - `no_best_match_with_clean_dinum` : RPPS a fourni des SIRET, DINUM a
  *   répondu sans erreur, mais aucun candidat n'atteint le seuil d'adresse
  *   (`score_adresse >= 0.6`). Cas typique : PS a déclaré le siège HQ d'un
@@ -135,7 +167,7 @@ export type FallbackReason =
  * Décrit ce qui est arrivé quand le fallback géo a ramené > 1 candidat (ou,
  * pour `not_applicable`, qu'il n'a même pas été déclenché).
  *
- * - `not_applicable` : pas de fallback déclenché (method === `"rpps"`) OU
+ * - `not_applicable` : pas de fallback déclenché (method `"rpps"` ou `"finess_ans"`) OU
  *   fallback déclenché mais 0 candidat retenu après gate NAF. Le caller ne
  *   doit pas interpréter ce statut comme une qualité de match.
  * - `single_after_gate` : 1 seul candidat après gate d'activité ET gate
@@ -169,8 +201,12 @@ export type DisambiguationStatus =
 
 export interface SiretCandidate {
   siret: string;
-  /** Toutes les sources qui ont mentionné ce SIRET (dédupliquées). */
-  sources: SiretCandidateSource[];
+  /**
+   * Toutes les sources qui ont mentionné ce SIRET (dédupliquées), dans
+   * l'ordre de découverte. Non vide par construction : un candidat n'existe
+   * que parce qu'une source l'a cité (tuple non vide, V0.30.0).
+   */
+  sources: [SiretCandidateSource, ...SiretCandidateSource[]];
   /**
    * Score Sørensen-Dice 0..1 entre l'adresse FINESS et l'adresse SIRENE/DINUM
    * de cet établissement. `null` si pas d'adresse exploitable côté DINUM
@@ -294,11 +330,11 @@ export interface SiretResolution {
   method: ResolutionMethod;
   /**
    * Pourquoi le fallback a été déclenché (ou skippé). `null` si pas de
-   * fallback envisagé (`method === "rpps"` et best_match trouvé directement).
+   * fallback envisagé (`method` `"rpps"` ou `"finess_ans"`, best_match trouvé directement).
    * Cf. `FallbackReason` pour les 3 cas distingués.
    *
    * Notamment : `"no_naf_mapping_for_famille"` peut être renseigné AVEC un
-   * `method === "rpps"` — c'est le skip silencieux du fallback pour
+   * `method` `"rpps"`/`"finess_ans"` — c'est le skip silencieux du fallback pour
    * `DELIBERATELY_NO_NAF` / famille `autre`. Ce cas garantit le garde-fou
    * Franco-Britannique : pas de fallback ≠ pas d'amélioration possible.
    */
@@ -440,15 +476,33 @@ export async function resolveSiretsForFiness(
   finess: FinessResult,
 ): Promise<SiretResolution> {
   const rppsSirets = await getDistinctSiretsForFinessFromRpps(numFiness);
-  // V0.13 Resolver V2 : pas d'early return ici. Si RPPS est vide, la cascade
-  // DINUM (boucle vide → no-op) est court-circuitée naturellement, et le
-  // bloc fallback géographique en aval prend le relais — préservant le
+  // V0.30.0 — le SIRET déclaré par l'ANS dans FINESS amorce la cascade au même
+  // rang que les SIRET RPPS (dédoublonné : souvent identique quand les deux
+  // existent — même producteur ANS). Il est confronté à DINUM comme les
+  // autres ; « actif prime » et le repli géo (L1) traitent un SIRET périmé.
+  const ansSiret =
+    finess.siret_ans !== null && SIRET_PATTERN.test(finess.siret_ans) ? finess.siret_ans : null;
+  if (finess.siret_ans !== null && ansSiret === null) {
+    // Inatteignable tant que le parseur, le peuplement SQL et CHAR(14) tiennent
+    // — ceinture-bretelles LOUD, jamais un SIRET présent en base ignoré en silence.
+    console.warn(
+      `[france-data-mcp][siret-resolver] siret_ans=${JSON.stringify(finess.siret_ans)} hors format ignoré (num_finess=${numFiness}) — dérive de la garde amont ?`,
+    );
+  }
+  const seeds: SeedSirets = {
+    rpps: rppsSirets,
+    all: [...new Set([...rppsSirets, ...(ansSiret !== null ? [ansSiret] : [])])],
+  };
+  const seedSirets = seeds.all;
+  // V0.13 Resolver V2 : pas d'early return ici. Si l'amorçage est vide, la
+  // cascade DINUM (boucle vide → no-op) est court-circuitée naturellement, et
+  // le bloc fallback géographique en aval prend le relais — préservant le
   // chemin causal `fallback_reason: "no_rpps"` exposé au caller LLM.
 
-  // Dérive les SIREN distincts depuis les SIRET RPPS (9 premiers chars).
-  // Set pour dédupliquer : un SIREN peut avoir plusieurs SIRET RPPS-déclarés.
-  // Vide si rppsSirets vide → pas d'appel DINUM dans la branche V0.7.
-  const sirensDistincts = [...new Set(rppsSirets.map((s) => s.slice(0, 9)))];
+  // Dérive les SIREN distincts depuis les SIRET d'amorçage (9 premiers chars).
+  // Set pour dédupliquer : un SIREN peut avoir plusieurs SIRET déclarés.
+  // Vide si seedSirets vide → pas d'appel DINUM dans la branche V0.7.
+  const sirensDistincts = [...new Set(seedSirets.map((s) => s.slice(0, 9)))];
 
   // Parallélise les lookups DINUM — coût borné (1-3 SIREN en pratique). DINUM
   // gère son propre rate limit interne, et chaque lookup est caché côté serveur
@@ -473,10 +527,16 @@ export async function resolveSiretsForFiness(
     sirensDistincts.map((s) => [s, null]),
   );
 
-  for (const siret of rppsSirets) {
+  for (const siret of seedSirets) {
+    // Tuple non vide : tout SIRET d'amorçage vient de RPPS ou EST le SIRET ANS.
+    const sources: SiretCandidate["sources"] = rppsSirets.includes(siret)
+      ? siret === ansSiret
+        ? ["rpps", "finess_ans"]
+        : ["rpps"]
+      : ["finess_ans"];
     candidates.set(siret, {
       siret,
-      sources: ["rpps"],
+      sources,
       score_adresse: null,
       distance_finess_m: null,
       score_nom: null,
@@ -659,7 +719,7 @@ export async function resolveSiretsForFiness(
     const outcome = await tryAddressFallback({
       finess,
       triggeredByClosedBestMatch: bestMatch !== null,
-      rppsSirets,
+      seeds,
       finessAddrNorm,
       finessNomNorm,
       candidates,
@@ -672,6 +732,22 @@ export async function resolveSiretsForFiness(
     nafFilterUsed = outcome.naf_filter_used;
     disambiguationStatus = outcome.disambiguation_status;
     if (outcome.best_match) bestMatch = outcome.best_match;
+  }
+
+  // Traçabilité V0.30.0 : cascade nominale (pas de fallback) dont le best_match
+  // n'a été amorcé QUE par la déclaration ANS → `finess_ans`. Si un PS RPPS
+  // l'avait aussi déclaré, `rpps` reste la méthode (sémantique V0.7 intacte).
+  // `fallbackReason === null` : `tryAddressFallback` rend aussi `method: "rpps"`
+  // sur ses sorties anticipées (pas de coords, pas de NAF, 0 candidat) — un
+  // repli tenté, même vain, n'est pas une cascade nominale (revue 2026-09-06).
+  if (
+    method === "rpps" &&
+    fallbackReason === null &&
+    bestMatch !== null &&
+    bestMatch.sources.includes("finess_ans") &&
+    !bestMatch.sources.includes("rpps")
+  ) {
+    method = "finess_ans";
   }
 
   // Re-tri final : nécessaire car le fallback peut avoir muté `candidates`
@@ -899,7 +975,8 @@ async function tryAddressFallback(args: {
    * "best_match_ferme"` plutôt que `"no_best_match_with_clean_dinum"`.
    */
   triggeredByClosedBestMatch: boolean;
-  rppsSirets: string[];
+  /** Amorçage de la cascade (cf. `SeedSirets`) — un seul objet, impossible à permuter. */
+  seeds: SeedSirets;
   finessAddrNorm: string;
   finessNomNorm: string;
   candidates: Map<string, SiretCandidate>;
@@ -910,7 +987,7 @@ async function tryAddressFallback(args: {
   const {
     finess,
     triggeredByClosedBestMatch,
-    rppsSirets,
+    seeds,
     finessAddrNorm,
     finessNomNorm,
     candidates,
@@ -951,7 +1028,7 @@ async function tryAddressFallback(args: {
   // fermé, sinon la sémantique V0.13 (no_rpps / no_best_match_with_clean_dinum).
   const baseFallbackReason: FallbackReason = triggeredByClosedBestMatch
     ? "best_match_ferme"
-    : rppsSirets.length === 0
+    : seeds.all.length === 0
       ? "no_rpps"
       : "no_best_match_with_clean_dinum";
 
@@ -1158,10 +1235,10 @@ async function tryAddressFallback(args: {
   //   3. Active succession même SIREN : départage une réorganisation interne.
   //   4. Signal RPPS : 1 seul candidat RPPS-déclaré.
   //   5. Sinon → ambiguous (best_match=null).
-  const disamb = disambiguateFallbackCandidates(fallbackCandidates, rppsSirets);
+  const disamb = disambiguateFallbackCandidates(fallbackCandidates, seeds.rpps);
 
   return {
-    method: rppsSirets.length > 0 ? "mixed" : "address_fallback",
+    method: seeds.all.length > 0 ? "mixed" : "address_fallback",
     fallback_reason: baseFallbackReason,
     naf_filter_used: nafs,
     disambiguation_status: disamb.status,
@@ -1246,7 +1323,7 @@ function sameSiteBand(candidates: SiretCandidate[]): SiretCandidate[] {
  */
 function disambiguateFallbackCandidates(
   candidates: SiretCandidate[],
-  rppsSirets: string[],
+  rppsSirets: readonly string[],
 ): { status: DisambiguationStatus; best_match: SiretCandidate | null } {
   // Étape 0 — Gate adresse grossier (V0.13.1 prod-prouvé sur FINESS 920028487).
   // Au sein du rayon /near_point, DINUM peut ramener plusieurs sites ; ceux au

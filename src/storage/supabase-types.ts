@@ -198,6 +198,10 @@ export type Database = {
         Row: {
           categorie_code: string | null
           categorie_libelle: string | null
+          cle_ban: string | null
+          geom_source: string | null
+          score_ban: number | null
+          siret: string | null
           code_departement: string
           code_insee: string
           code_postal: string | null
@@ -221,6 +225,10 @@ export type Database = {
         Insert: {
           categorie_code?: string | null
           categorie_libelle?: string | null
+          cle_ban?: string | null
+          geom_source?: string | null
+          score_ban?: number | null
+          siret?: string | null
           code_departement: string
           code_insee: string
           code_postal?: string | null
@@ -244,6 +252,10 @@ export type Database = {
         Update: {
           categorie_code?: string | null
           categorie_libelle?: string | null
+          cle_ban?: string | null
+          geom_source?: string | null
+          score_ban?: number | null
+          siret?: string | null
           code_departement?: string
           code_insee?: string
           code_postal?: string | null
@@ -748,8 +760,10 @@ export type Database = {
           code_insee: string
           code_postal: string
           distance_meters: number
+          geom_source: string | null
           email: string
           geom: Json
+          siret: string | null
           num_finess: string
           raison_sociale: string
           telephone: string
@@ -766,8 +780,10 @@ export type Database = {
           code_insee: string
           code_postal: string
           distance_meters: number
+          geom_source: string | null
           email: string
           geom: Json
+          siret: string | null
           num_finess: string
           raison_sociale: string
           telephone: string
@@ -790,8 +806,10 @@ export type Database = {
           code_insee: string
           code_postal: string
           distance_meters: number
+          geom_source: string | null
           email: string
           geom: Json
+          siret: string | null
           num_finess: string
           raison_sociale: string
           telephone: string
@@ -899,10 +917,6 @@ export type Database = {
       }
       geomfromewkt: { Args: { "": string }; Returns: unknown }
       gettransactionid: { Args: never; Returns: unknown }
-      ingest_apply_finess_geom_batch: {
-        Args: { p_limit: number }
-        Returns: number
-      }
       ingest_atomic_swap: { Args: { p_prod_table: string }; Returns: undefined }
       ingest_create_annuaire_ameli_staging: { Args: never; Returns: undefined }
       ingest_create_finess_staging: { Args: never; Returns: undefined }

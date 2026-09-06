@@ -109,7 +109,7 @@
   ADD geom_source TEXT <span class="a">CHECK (geom_source IN ('ans','previous_ingest','ban_address'))</span>,
   ADD CONSTRAINT finess_geom_source_iff_geom <span class="a">CHECK ((geom IS NULL) = (geom_source IS NULL))</span>;
 <span class="h">UPDATE finess</span> SET siret/cle_ban/score_ban/geom_source <span class="o">FROM raw</span>  -- one-shot, ~105 K lignes
-<span class="h">CREATE INDEX</span> finess_siret_idx ON finess (siret) WHERE siret IS NOT NULL;
+<span class="n">(index finess_siret_idx prévu puis RETIRÉ en revue : 0 consommateur, 0 scan)</span>
 <span class="h">ingest_create_finess_staging()</span>  → recréée en <span class="o">superset strict</span> (4 colonnes + index + contrainte)
 <span class="h">RPC d'ingestion</span> (repli, pose BAN, diff) → écrivent/lisent <span class="o">la colonne</span>, plus jsonb dans raw
 <span class="h">RPC de lecture</span> ×3 → DROP + recréation avec <span class="o">siret, geom_source</span> dans RETURNS TABLE</div>
@@ -120,8 +120,8 @@
 <li><code>FinessStagingRow</code> gagne <code>siret</code> (validé <code>^\d{14}$</code>, sinon null + compteur), <code>cle_ban</code>, <code>score_ban</code>, <code>geom_source</code>. <code>raw</code> = payload ANS brut.</li>
 <li>Tests : règle de colonne <code>siret</code> ; vocabulaire fermé vérifié sur la colonne ; <strong>trou comblé</strong> : bloc <code>finess</code> dans <code>staging-parity.test.ts</code>.</li>
 <li><code>FinessResult</code> gagne <code>geo_precision</code> (posé seulement si <code>coords</code>, comme Ameli ; les trois provenances → <code>adresse</code> ; warn 1-shot de drift) et <code>siret_ans</code> (fait brut).</li>
-<li>Étiquette globale <code>lambert93_natif_finess</code>, mensongère depuis l'ANS → <code>point_etablissement_finess</code> ; notes réécrites ; changement de contrat au CHANGELOG (raison du 0.30.0). <code>countPrecis()</code> du panorama appliqué aux FINESS.</li>
-<li>Resolver : le SIRET ANS entre <strong>en source 1, à côté des SIRET RPPS</strong>. La cascade valide déjà chaque candidat contre DINUM et fait primer l'actif : un SIRET ANS périmé est traité comme l'est un SIRET RPPS périmé. <code>method = siret_ans</code> quand il porte le <code>best_match</code>. Aucune recalibration des seuils.</li>
+<li>Étiquette globale <code>lambert93_natif_finess</code>, mensongère depuis l'ANS → <code>point_etablissement_finess</code> ; notes réécrites ; changement de contrat au CHANGELOG (raison du 0.30.0). Pas de <code>precis_count</code> FINESS au panorama (il vaudrait <code>count</code> par construction).</li>
+<li>Resolver : le SIRET ANS entre <strong>en source 1, à côté des SIRET RPPS</strong>. La cascade valide déjà chaque candidat contre DINUM et fait primer l'actif : un SIRET ANS périmé est traité comme l'est un SIRET RPPS périmé. <code>method = finess_ans</code> quand il porte le <code>best_match</code>. Aucune recalibration des seuils.</li>
 </ul>
 <div class="callout warn"><span class="lbl">Mesure avant merge</span>~300 EGE tirés au sort parmi ceux <strong>sans</strong> SIRET RPPS, DINUM live : part des SIRET ANS actifs, part où le repli géographique trouvait autre chose et lequel est actif. Renoncement si &gt; 10 % de SIRET ANS fermés <em>et</em> repli plus juste : le SIRET ANS reste un fait brut hors cascade.</div>
 </div>
@@ -132,7 +132,7 @@
 <div class="step"><span class="n">1</span><div><strong>Unit</strong> : parité staging finess, règles + vocabulaire réécrits, contrat <code>FinessResult</code>, mapping + warn, resolver avec candidat ANS (DINUM mocké), parseur.</div></div>
 <div class="step"><span class="n">2</span><div><strong>Migration prod</strong> via MCP ; vérification : lignes sans <code>geom_source</code> = lignes sans <code>geom</code> = 2 549, distribution = tableau ci-dessus, <code>EXPLAIN</code> de <code>finess_in_radius</code> inchangé (KNN GiST).</div></div>
 <div class="step"><span class="n">3</span><div><strong>Dry-run sans swap</strong> : diff propre, 0 point déplacé, <code>staging_geom_source</code> cohérent, <code>siret_malformed</code> reporté.</div></div>
-<div class="step"><span class="n">4</span><div><strong>Run réel forcé</strong> puis appels MCP prod : <code>etablissement_by_finess</code> sur un EGE ANS, un BAN, un sans point ; rayon avec <code>geo_precision</code> ; <code>reconcilier_finess_sirene</code> sur un EGE sans SIRET RPPS → <code>method = siret_ans</code>.</div></div>
+<div class="step"><span class="n">4</span><div><strong>Run réel forcé</strong> puis appels MCP prod : <code>etablissement_by_finess</code> sur un EGE ANS, un BAN, un sans point ; rayon avec <code>geo_precision</code> ; <code>reconcilier_finess_sirene</code> sur un EGE sans SIRET RPPS → <code>method = finess_ans</code>.</div></div>
 <div class="step"><span class="n">5</span><div><strong>Non-régression géo</strong> : 0 point déplacé, couverture ≥ 97,5 %.</div></div>
 </div></section>
 
