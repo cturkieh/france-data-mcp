@@ -74,8 +74,26 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   via workflow_dispatch « Ingest FINESS » avec force). Le contrat
   `etablissement_finess` de `geo_precision` dit désormais la vérité (point
   ANS, BAN ou hérité — jamais un centroïde).
+### Fixed
+
+- **Sentinelle de la pose BAN FINESS : dénominateur corrigé** (post-mortem du
+  second run forcé du 2026-09-06, run #34023827629, issue #76). Elle comparait
+  « 0 posé » aux ÉLIGIBLES ; or au second run tout le posable l'était déjà
+  (propagé par le repli) et les 1 902 éligibles restants étaient des rejets BAN
+  → run marqué `partial` à tort, vigie déclenchée pour rien (la chaîne d'alerte
+  a donc été prouvée de bout en bout en conditions réelles : issue + email).
+  Nouveau dénominateur = `finess_count_ban_posable` (migration
+  `20260906T140000`, même jointure et même filtre de précision que la pose,
+  parité testée) : `posé < posable` → `partial` + trace ; `posable = 0` →
+  « 0 posé » attendu, info. Vérifié en prod : 0 posable / 1 902 éligibles.
+
 ### Changed
 
+- **`MIN_GEOM_COVERAGE` 0,93 → 0,95** sur la baseline du premier run réel avec
+  pose BAN (2026-09-06, run #34023554047 : 97,57 %, 2 720 points posés, swap
+  fait). À 0,93 la perte TOTALE de la pose (retour à 94,97 %) passait en
+  `success` ; le seuil est désormais baseline − 2,5 points. Fixtures de test
+  alignées sur l'état post-pose ; seuil sur mesure, jamais par extrapolation.
 - **Libellés de catégorie FINESS : source unique SMT/ANS** (backlog FINESS
   phase 2, item 7 — décision produit). La lib (`FINESS_CATEGORIES`,
   `libelleCategorieFiness`) dérive désormais ses libellés du même module que

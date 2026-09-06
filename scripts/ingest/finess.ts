@@ -24,7 +24,6 @@ import {
   appendLogMessage,
   atomicSwapTables,
   downloadCsv,
-  evaluateBanJoinOutcome,
   getLastSuccessChecksum,
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
@@ -191,18 +190,22 @@ async function main(): Promise<void> {
     // le drain `ban-backfill.mjs --source finess` (workflow_run post-cron)
     // remplit le cache. Précision rue/bâtiment seulement — jamais de
     // centroïde commune dans finess.geom. Un seul UPDATE (≤ ~5 K lignes).
-    // Le count d'éligibles AVANT la pose sert de dénominateur à la sentinelle.
-    const { data: banEligibleData, error: banEligibleErr } = await supabase.rpc(
-      "finess_count_ban_eligible_rows",
+    // Dénominateur de la sentinelle = ce que la pose FERAIT (éligibles dont la
+    // clé est en cache, acceptée, précise), compté AVANT la pose. PAS les
+    // éligibles : au 2e run forcé du 2026-09-06 tout le posable l'était déjà
+    // (propagé par le repli), les 1 902 éligibles restants étaient des rejets
+    // BAN → « 0 posé » légitime, marqué partial à tort (issue #76).
+    const { data: banPosableData, error: banPosableErr } = await supabase.rpc(
+      "finess_count_ban_posable",
       { p_source_table: "finess_staging" },
     );
-    if (banEligibleErr) {
+    if (banPosableErr) {
       throw new IngestError(
         "validate",
-        `finess_count_ban_eligible_rows failed: ${banEligibleErr.message}${missingRpcHint(banEligibleErr.message)}`,
+        `finess_count_ban_posable failed: ${banPosableErr.message}${missingRpcHint(banPosableErr.message)}`,
       );
     }
-    const banEligible = parseRpcCount(banEligibleData, "finess_count_ban_eligible_rows");
+    const banPosable = parseRpcCount(banPosableData, "finess_count_ban_posable");
     const { data: banApplied, error: banErr } = await supabase.rpc("ingest_apply_finess_ban_join");
     if (banErr) {
       throw new IngestError(
@@ -212,32 +215,26 @@ async function main(): Promise<void> {
     }
     const banCount = parseRpcCount(banApplied, "ingest_apply_finess_ban_join");
     console.log(
-      `[finess] pose BAN (cache) : ${banCount} points posés sur ${banEligible} éligibles sans point`,
+      `[finess] pose BAN (cache) : ${banCount} points posés sur ${banPosable} posables (résiduel sans point dont la clé est en cache, acceptée, précise)`,
     );
-    // « 0 posé » n'est légitime dans AUCUN run : le cache est partagé avec
-    // RPPS/Ameli (168 clés du résiduel y étaient AVANT le premier drain FINESS,
-    // migration 20260906T120000). 0 = dérive de parité de clé ou cache wipé →
-    // `partial` + trace en base (le log Actions expire à 90 j), jamais un throw
-    // (la table reste servable, le repli previous_ingest a fait son travail).
-    if (banEligible > 0 && banCount === 0) {
-      const { count: cacheAccepted, error: cacheErr } = await supabase
-        .from("geocoded_addresses")
-        .select("address_key", { count: "exact", head: true })
-        .eq("accepted", true);
-      const outcome = evaluateBanJoinOutcome({
-        source: "finess",
-        banApplied: banCount,
-        banEligible,
-        cacheAccepted: cacheAccepted ?? 0,
-        cacheErrMessage: cacheErr?.message,
-        fallbackNote: "rows stay without a point (no commune centroid in finess.geom)",
-      });
-      if (outcome.warn) {
-        console.warn(outcome.warn);
-        console.log(`::warning::${outcome.warn}`);
-      }
-      if (outcome.partial) log.status = "partial";
-      if (outcome.logMessage) appendLogMessage(log, outcome.logMessage);
+    // Pose muette ou partielle : posé < posable = la même jointure a compté des
+    // lignes que l'UPDATE n'a pas touchées (RPC muette, dérive entre les deux
+    // fonctions) → `partial` + trace en base (le log Actions expire à 90 j),
+    // jamais un throw (la table reste servable). posable = 0 → « 0 posé » est
+    // l'état NORMAL d'un résiduel convergé (rejets BAN, jamais drainé).
+    if (banCount < banPosable) {
+      const msg = `[france-data-mcp][finess][ban_join] ⚠️ ${banCount} posed over ${banPosable} posable (eligible rows whose key IS accepted & precise in geocoded_addresses) — the pose and the count share the same join: RPC drift or mute UPDATE (S-1: investigate). Non-blocking; rows stay without a point.`;
+      console.warn(msg);
+      console.log(`::warning::${msg}`);
+      log.status = "partial";
+      appendLogMessage(
+        log,
+        `ban_join: ${banCount} posed / ${banPosable} posable — mute or partial pose, investigate`,
+      );
+    } else if (banPosable === 0) {
+      console.log(
+        "[finess] pose BAN : rien de posable (le résiduel sans point est entièrement rejeté par la BAN ou pas encore drainé) — 0 posé attendu",
+      );
     }
 
     // 4c. DIFF STAGING ↔ PROD — une seule RPC porte la couverture géo, les

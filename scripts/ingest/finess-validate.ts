@@ -26,17 +26,19 @@ export const MIN_ROWS = 50_000;
 export const MAX_ROWS = 200_000;
 
 /**
- * Couverture géo minimale APRÈS repli `previous_ingest`. Baseline MESURÉE au
- * dry-run du 2026-09-05 : **94,97 %** (99 463 / 104 734) — le flux ANS seul
- * est à 74,9 %, le repli reprend 21 036 points de la prod. Les 5 271 sans
- * point sont TOUS des établissements nouveaux (3 797 métropole + 1 474 DOM),
- * jamais présents en prod : ce n'est pas une régression, c'est de l'inventaire
- * pas encore géocodé (phase 2 BAN). La NON-RÉGRESSION est gardée à part par
- * `LOST_GEOM_MAX_RATE` ; ce seuil global ne sert qu'à attraper une chute de
- * disponibilité des coordonnées ANS (→ ~80 % si elles disparaissaient).
- * Relevé de 0,8 (ère CSV) à 0,93 = baseline − 2 points.
+ * Couverture géo minimale APRÈS repli `previous_ingest` ET pose BAN. Baseline
+ * MESURÉE au premier run réel avec pose (2026-09-06, run #34023554047) :
+ * **97,57 %** (102 185 / 104 734) — flux ANS seul 74,9 %, repli 21 222 points
+ * de la prod, pose BAN 2 720. Les 2 549 sans point = 1 902 rejetés par la BAN
+ * + 647 sans voie (jamais géocodables sans centroïde, refusé). Le seuil est la
+ * baseline − 2,5 points : il attrape une chute des coordonnées ANS ET la perte
+ * TOTALE de la pose BAN (retour à 94,97 %, sous 0,95) — à 0,93 cette perte
+ * passait en `success` (revue du lot C). La NON-RÉGRESSION ligne à ligne reste
+ * gardée par `LOST_GEOM_MAX_RATE` / `MOVED_MAX_RATE`. Historique : 0,8 (ère
+ * CSV) → 0,93 (migration ANS, baseline 94,97 %) → 0,95 (pose BAN). Seuil sur
+ * mesure après mesure, jamais par extrapolation.
  */
-export const MIN_GEOM_COVERAGE = 0.93;
+export const MIN_GEOM_COVERAGE = 0.95;
 
 /**
  * Part des établissements géolocalisés en prod dont la staging n'a PAS de

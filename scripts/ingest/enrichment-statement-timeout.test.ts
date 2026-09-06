@@ -281,6 +281,7 @@ describe("pose BAN FINESS (20260906T120000) — statement_timeout fonction ≤ 5
   for (const fn of [
     "ingest_apply_finess_ban_join",
     "finess_count_ban_eligible_rows",
+    "finess_count_ban_posable",
     "finess_eligible_rows_after_id",
   ]) {
     it(`${fn}`, () => {

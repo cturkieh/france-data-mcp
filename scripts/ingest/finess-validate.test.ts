@@ -54,6 +54,12 @@ function realStats(overrides: Partial<IngestStreamStats> = {}): IngestStreamStat
   };
 }
 
+/**
+ * Côté PROD : chiffres du jour de migration (2026-09-05, table DREES 93 403
+ * lignes) — ils dimensionnent `removed`/`lost_geom`/`moved`. Côté STAGING :
+ * chiffres du premier run réel AVEC pose BAN (2026-09-06, run #34023554047),
+ * baseline de `MIN_GEOM_COVERAGE`.
+ */
 function realDiff(overrides: Partial<StagingDiff> = {}): StagingDiff {
   return {
     staging_rows: 104_734,
@@ -63,9 +69,9 @@ function realDiff(overrides: Partial<StagingDiff> = {}): StagingDiff {
     removed: 6_119,
     lost_geom: 0,
     moved_gt_500m: 5_395,
-    staging_geom_null: 5_271,
+    staging_geom_null: 2_549,
     staging_no_voie: 647,
-    staging_geom_source: { ans: 78_427, previous_ingest: 21_036, none: 5_271 },
+    staging_geom_source: { ans: 78_243, previous_ingest: 21_222, ban_address: 2_720, none: 2_549 },
     ...overrides,
   };
 }
@@ -162,16 +168,31 @@ describe("assessParsedRows — chiffres réels", () => {
 });
 
 describe("assessStagingDiff — chiffres réels et dérives", () => {
-  it("le run réel passe : couverture 94,97 % ≥ 0,93, retirés 6,55 % ≤ 10 %, lost_geom 0", () => {
+  it("le run réel passe : couverture 97,57 % ≥ 0,95, retirés 6,55 % ≤ 10 %, lost_geom 0, pose BAN visible", () => {
     const a = assessStagingDiff(realStats(), realDiff());
     expect(a.fatal).toEqual([]);
-    expect(a.info[0]).toBe("[finess] couverture géo : 99463/104734 (94.97%)");
+    expect(a.warnings).toEqual([]);
+    expect(a.info[0]).toBe("[finess] couverture géo : 102185/104734 (97.57%)");
+    expect(a.info[1]).toBe(
+      "[finess] provenance du point : ans=78243, previous_ingest=21222, ban_address=2720, none=2549",
+    );
   });
 
-  it("la baseline mesurée reste au-dessus du seuil avec 2 points de marge, pas moins", () => {
-    // 99 463 / 104 734 = 0,9497 ; le seuil 0,93 est la baseline − 2 points.
-    expect(MIN_GEOM_COVERAGE).toBeLessThan(0.9497);
-    expect(MIN_GEOM_COVERAGE).toBeGreaterThan(0.92);
+  it("perte TOTALE de la pose BAN (retour à 94,97 %) → fatal + warn « pose BAN muette » — à 0,93 elle passait en success", () => {
+    const a = assessStagingDiff(
+      realStats(),
+      realDiff({
+        staging_geom_null: 5_269,
+        staging_geom_source: { ans: 78_243, previous_ingest: 21_222, none: 5_269 },
+      }),
+    );
+    expect(a.fatal[0]).toMatch(/Only 99465\/104734 rows have a geom \(94\.97% < 95\.00%\)/);
+    expect(a.warnings.some((w) => /pose BAN muette/.test(w))).toBe(true);
+  });
+
+  it("le seuil est la baseline mesurée − 2,5 points : sous 97,57 %, au-dessus de 94,97 % (perte de la pose BAN attrapée)", () => {
+    expect(MIN_GEOM_COVERAGE).toBeLessThan(0.9757);
+    expect(MIN_GEOM_COVERAGE).toBeGreaterThan(0.9497);
     // 6,18 % de déplacés le jour de migration, 0 ensuite : 20 % tolère une
     // vague de re-géocodage BAN, pas une inversion (→ ~100 %).
     expect(MOVED_MAX_RATE).toBeGreaterThan(0.0618);
