@@ -131,9 +131,9 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.29.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.30.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
-> Dernière version (V0.29.0) : FINESS alimenté par le flux ANS quotidien (le CSV DREES s'était tari), 97,6 % des établissements géolocalisés, vigie post-cron qui ouvre une issue et envoie un email quand un run vert sert une donnée malade. Surface inchangée (13 référentiels / 36 outils).
+> Dernière version (V0.30.0) : FINESS alimenté par le flux ANS quotidien, 97,6 % des établissements géolocalisés avec `geo_precision` par résultat et le SIRET déclaré par l'ANS, vigie post-cron qui ouvre une issue et envoie un email quand un run vert sert une donnée malade. Surface inchangée (13 référentiels / 36 outils).
 
 ---
 

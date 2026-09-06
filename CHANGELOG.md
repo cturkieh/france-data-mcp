@@ -4,7 +4,9 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.30.0] — 2026-09-06 — FINESS phase 2 clôturée : colonnes dédiées + `geo_precision` par résultat + SIRET ANS dans le resolver, drain BAN factorisé avec fermeture automatique des issues, lookups FINESS ×3 000 plus rapides
+
+> Surface MCP : 13 référentiels / 36 outils ; `FinessResult` gagne `geo_precision` et `siret_ans` ; l'étiquette `lambert93_natif_finess` devient `point_etablissement_finess` (contrat de métadonnées, d'où la version mineure). Trois migrations appliquées en prod (`20260906T160000`, `T170000`, `T180000`). **Run FINESS forcé post-merge (run #34037843003, 2 min) : success, 0 point déplacé, provenances identiques (78 243 / 21 222 / 2 720 / 2 549 sans point), `raw` vide sur 104 734 lignes, couverture 97,57 %, aucun warning.** Preuves MCP prod : `etablissement_by_finess` sert `geo_precision: "adresse"` + `siret_ans`, un établissement sans point n'a pas de `geo_precision`, `verifier_site_actif` sur un EGE sans SIRET RPPS ressort `method: finess_ans` avec un SIRET actif confirmé DINUM. PR #80 et #81, revues `/review-fix` complètes.
 
 ### Changed
 
@@ -80,8 +82,23 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   déclaration ANS serait périmée MAIS encore active côté SIRENE sortirait
   `actif` sur l'ancien SIRET (même comportement qu'un SIRET RPPS périmé et
   actif). La mesure §2.5 du plan (300 EGE sans SIRET RPPS, DINUM live) est
-  reportée ci-dessous dès qu'elle est exécutée. `method = finess_ans` n'est
-  posé que sur une cascade nominale sans repli tenté.
+  reportée ici : **299 EGE mesurés, SIRET ANS actif côté DINUM 159 (53 %),
+  fermé 9 (3 %, sous le seuil de renoncement de 10 %), inconnu de DINUM 131
+  (sans clé INSEE : SIREN multi-sites tronqués) ; 66 établissements passent de
+  « aucun match » à un SIRET actif, `method = finess_ans` sur 142.** La mesure
+  a aussi révélé une régression corrigée avant release : la graine ANS
+  explorait un SIREN, DINUM échouait ou tronquait, et la garde « DINUM en
+  erreur → pas de repli » (conçue pour la cascade RPPS) supprimait le repli
+  géographique que l'établissement avait sans SIRET RPPS — **22 matchs actifs
+  perdus**. Désormais seule une erreur DINUM sur un SIREN déclaré par RPPS
+  bloque le repli (garde exacte, revue) ; un amorçage ANS seul, ou une erreur
+  sur le seul SIREN ANS, garde son repli, sous la raison dédiée
+  `no_best_match_with_dinum_errors`. **Re-mesuré après correctif (même
+  échantillon, DINUM live plus dégradé ce passage : 173 SIREN inconnus contre
+  131) : 0 match actif perdu, 42 gagnés, 247 résolutions identiques.** Les
+  absolus varient avec la disponibilité DINUM d'un passage à l'autre ; la
+  classe de régression, elle, est à zéro. `method = finess_ans` n'est posé que
+  sur une cascade nominale sans repli tenté.
   Parseur : SIRET ANS hors 14 chiffres → colonne `null` + compteur
   `siretMalformed` avec l'exemple rejeté (info sous 1 %, warning au-delà,
   jamais fatal ; 0 mesuré), **plancher relatif de remplissage `MIN_SIRET_FILL`

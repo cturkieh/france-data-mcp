@@ -2890,6 +2890,47 @@ describe("resolveSiretsForFiness — SIRET déclaré par l'ANS dans FINESS (sire
     expect(r.method).toBe("rpps");
   });
 
+  it("ANS seul + DINUM en erreur sur ce SIREN : le repli géo tourne quand même (mesure 2026-09-06 : 22 matchs perdus sinon), raison dédiée", async () => {
+    mockNot.mockResolvedValue({ data: [], error: null });
+    // Stub par défaut du harnais : DINUM `not_found` → dinum_errors non vide.
+    const r = await resolveSiretsForFiness(
+      VALID_FINESS,
+      fakeFinessLookupFound({ siret_ans: SIRET_A }),
+    );
+    expect(r.dinum_errors.length).toBeGreaterThan(0);
+    expect(dinum.searchEntreprises).toHaveBeenCalled();
+    expect(r.fallback_reason).toBe("no_best_match_with_dinum_errors");
+    expect(r.method).not.toBe("finess_ans");
+  });
+
+  it("RPPS + DINUM en erreur : la garde historique tient, pas de repli (on n'invente pas de candidats quand DINUM est en panne)", async () => {
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+    const r = await resolveSiretsForFiness(
+      VALID_FINESS,
+      fakeFinessLookupFound({ siret_ans: null }),
+    );
+    expect(r.dinum_errors.length).toBeGreaterThan(0);
+    expect(dinum.searchEntreprises).not.toHaveBeenCalled();
+    expect(r.fallback_reason).toBeNull();
+  });
+
+  it("RPPS sain + erreur DINUM sur le SEUL SIREN ANS (distinct) : le repli n'est pas retiré", async () => {
+    mockNot.mockResolvedValue({ data: [{ siret: SIRET_A }], error: null });
+    const sirenA = SIRET_A.slice(0, 9);
+    vi.spyOn(dinum, "getEntrepriseBySiren").mockImplementation(async (siren: string) =>
+      siren === sirenA
+        ? fakeEntrepriseDinum({ siren: sirenA, etablissements: [] })
+        : { found: false, key: siren, lookupStatus: "not_found", message: "mock not_found" },
+    );
+    const r = await resolveSiretsForFiness(
+      VALID_FINESS,
+      fakeFinessLookupFound({ siret_ans: SIRET_SIEGE }),
+    );
+    expect(r.dinum_errors.map((e) => e.siren)).toEqual([SIRET_SIEGE.slice(0, 9)]);
+    expect(dinum.searchEntreprises).toHaveBeenCalled();
+    expect(r.fallback_reason).toBe("no_best_match_with_dinum_errors");
+  });
+
   it("siret_ans null : amorçage vide → fallback_reason no_rpps, aucun SIREN exploré (comportement V0.13 inchangé)", async () => {
     mockNot.mockResolvedValue({ data: [], error: null });
     const r = await resolveSiretsForFiness(

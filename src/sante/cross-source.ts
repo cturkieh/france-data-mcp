@@ -317,6 +317,18 @@ function buildVerifierExplication(
   return `${methodPrefix}Indéterminé : ${resolution.candidates.length} SIRET candidat(s) côté RPPS mais aucun ne matche l'adresse FINESS (score adresse < 0.6). SIREN exploré(s) : ${sirenCandidates}. Groupe : ${verdictGroupe}.${dinumDiagSuffix} Cross-check manuel via etablissement_by_siret sur les candidats.`;
 }
 
+/** Cause du repli, en clair pour le caller LLM (les valeurs sont un contrat public, le texte dit la couverture réelle). */
+function fallbackCause(
+  reason: Awaited<ReturnType<typeof resolveSiretsForFiness>>["fallback_reason"],
+): string {
+  if (reason === "no_rpps")
+    return " (aucun SIRET déclaré, ni par un PS RPPS ni par l'ANS dans FINESS)";
+  if (reason === "no_best_match_with_dinum_errors") {
+    return " (SIRET déclaré par l'ANS seul, DINUM en erreur ou partiel sur ce SIREN — cf. dinum_errors)";
+  }
+  return "";
+}
+
 /**
  * Préfixe LLM-friendly décrivant la méthode utilisée pour résoudre le SIRET.
  * Vide si method === "rpps" sans fallback (cas nominal V0.7) — pas de bruit.
@@ -329,14 +341,11 @@ function buildMethodPrefix(resolution: Awaited<ReturnType<typeof resolveSiretsFo
   if (resolution.method === "address_fallback") {
     // `no_rpps` couvre depuis la V0.30.0 « ni PS RPPS ni ANS » : le nom de la
     // valeur (contrat public) est conservé, le texte dit la couverture réelle.
-    const cause =
-      resolution.fallback_reason === "no_rpps"
-        ? " (aucun SIRET déclaré, ni par un PS RPPS ni par l'ANS dans FINESS)"
-        : "";
-    return `[Resolver V2 : SIRET résolu via fallback géographique DINUM /near_point${cause} — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
+    return `[Resolver V2 : SIRET résolu via fallback géographique DINUM /near_point${fallbackCause(resolution.fallback_reason)} — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
   }
   if (resolution.method === "mixed") {
-    return `[Resolver V2 : RPPS partiel + fallback géo complémentaire — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
+    // « RPPS partiel » mentirait depuis la V0.30.0 : l'amorçage peut être l'ANS seul.
+    return `[Resolver V2 : SIRET déclaré (RPPS et/ou ANS) sans match d'adresse${fallbackCause(resolution.fallback_reason)} + fallback géo complémentaire — NAF ${resolution.naf_filter_used.join("/")}, ${resolution.disambiguation_status}] `;
   }
   // method === "rpps" mais fallback_reason renseigné (skip silencieux ou
   // tenté sans amélioration). Audit utile pour le caller.

@@ -116,8 +116,9 @@ export type DinumLookupError = {
  *   (DINUM `/near_point`) filtré par NAF compatible avec la famille FINESS.
  * - `mixed` : des SIRET déclarés existaient (RPPS, ou l'ANS depuis la V0.30.0)
  *   ET le fallback a été déclenché aussi (parce qu'aucun candidat ne matchait
- *   l'adresse FINESS, et que DINUM a répondu sans erreur). Les candidats
- *   finaux mélangent les sources.
+ *   l'adresse FINESS ; DINUM sans erreur sur les SIREN RPPS — une erreur sur le
+ *   seul SIREN ANS n'empêche pas le repli, cf. `no_best_match_with_dinum_errors`).
+ *   Les candidats finaux mélangent les sources.
  * - `finess_ans` (V0.30.0) : le `best_match` est le SIRET déclaré par l'ANS
  *   dans FINESS (`siret_ans`), confirmé par la cascade DINUM, et AUCUN PS RPPS
  *   ne l'avait déclaré — la cascade a fonctionné comme `rpps`, seule la
@@ -157,6 +158,14 @@ export type ResolutionMethod = "rpps" | "address_fallback" | "mixed" | "finess_a
 export type FallbackReason =
   | "no_rpps"
   | "no_best_match_with_clean_dinum"
+  /**
+   * V0.30.0 — amorçage par l'ANS SEUL (aucun SIRET RPPS), DINUM en erreur ou
+   * partiel sur ce SIREN, et le repli géographique a quand même été tenté
+   * (l'établissement l'aurait eu sans la graine ANS). `dinum_errors` dit
+   * quoi ; le caller peut retry pour lever le doute sur le SIRET déclaré.
+   * `best_match_ferme` la supplante quand le repli vient d'un best_match fermé.
+   */
+  | "no_best_match_with_dinum_errors"
   | "no_naf_mapping_for_famille"
   | "no_finess_coords"
   | "best_match_ferme"
@@ -702,11 +711,19 @@ export async function resolveSiretsForFiness(
   //   (1) best_match === null (rien de bon côté RPPS+DINUM cascade), OU
   //       best_match.actif === false (L1 V0.16 — best_match fermé : on cherche
   //       un repreneur actif co-localisé, cf. fix succession M&A) ;
-  //   (2) dinum_errors.length === 0 (DINUM a répondu sans erreur — on est sûr
-  //       que l'absence est réelle, pas une panne transitoire).
+  //   (2) aucune erreur DINUM sur un SIREN déclaré par RPPS (DINUM a répondu
+  //       sans erreur — on est sûr que l'absence est réelle, pas une panne
+  //       transitoire ; V0.30.0 : une erreur sur le seul SIREN ANS ne bloque pas).
   //
   // Sinon : pas de fallback. Préserve la sémantique "on n'invente pas de
   // candidats quand DINUM est en panne" — laissera le caller retry.
+  //
+  // V0.30.0 — cette garde ne vaut que pour la cascade RPPS. Un établissement
+  // SANS SIRET RPPS avait le repli sans condition (aucun SIREN exploré, donc
+  // jamais d'erreur DINUM) : la graine ANS ne doit pas le lui RETIRER quand
+  // DINUM échoue ou est partiel sur son SIREN. Mesuré le 2026-09-06 (300 EGE
+  // sans SIRET RPPS, DINUM live) : sans cette clause, 22 matchs actifs
+  // trouvés par le repli disparaissaient (best_match null), pour 66 gagnés.
   //
   // Sirens explorés mutable car le fallback peut en ajouter (SIREN nouveau).
   const sirensExploredMutable = [...sirensDistincts];
@@ -715,7 +732,14 @@ export async function resolveSiretsForFiness(
   let nafFilterUsed: string[] = [];
   let disambiguationStatus: DisambiguationStatus = "not_applicable";
 
-  if ((bestMatch === null || bestMatch.actif === false) && dinumErrors.length === 0) {
+  // Garde EXACTE : seule une erreur DINUM sur un SIREN déclaré par RPPS bloque
+  // (une erreur sur le seul SIREN ANS, jamais exploré avant la V0.30.0, ne doit
+  // pas retirer le repli — même régression, population RPPS ∪ ANS). À ce point
+  // `dinumErrors` ne porte que des SIREN de la cascade (les sentinelles
+  // `near_point:<naf>` sont poussées plus tard, dans `tryAddressFallback`).
+  const rppsSirens = new Set(rppsSirets.map((s) => s.slice(0, 9)));
+  const dinumBlocksFallback = dinumErrors.some((e) => rppsSirens.has(e.siren));
+  if ((bestMatch === null || bestMatch.actif === false) && !dinumBlocksFallback) {
     const outcome = await tryAddressFallback({
       finess,
       triggeredByClosedBestMatch: bestMatch !== null,
@@ -944,8 +968,10 @@ interface FallbackOutcome {
  * DINUM `/near_point` filtrée par NAF compatible avec la famille FINESS source.
  *
  * **Préconditions** : appelé UNIQUEMENT par `resolveSiretsForFiness` quand
- * `best_match === null` et `dinum_errors.length === 0` (cf. cadrage Q1). Cette
- * fonction NE vérifie PAS ces conditions — c'est la responsabilité du caller.
+ * `best_match === null` (ou fermé, L1) et qu'aucune erreur DINUM ne porte sur un
+ * SIREN déclaré par RPPS (cf. cadrage Q1 ; V0.30.0 : une erreur sur le seul
+ * SIREN ANS n'est pas bloquante). Cette fonction NE vérifie PAS ces conditions —
+ * c'est la responsabilité du caller.
  *
  * **Sortie** :
  *   - skip silencieux (famille `autre` / `DELIBERATELY_NO_NAF` / coords null)
@@ -1030,7 +1056,9 @@ async function tryAddressFallback(args: {
     ? "best_match_ferme"
     : seeds.all.length === 0
       ? "no_rpps"
-      : "no_best_match_with_clean_dinum";
+      : dinumErrors.length > 0
+        ? "no_best_match_with_dinum_errors"
+        : "no_best_match_with_clean_dinum";
 
   // Recherche /near_point parallèle, 1 appel DINUM par NAF. `onlyActive: false`
   // pour capturer aussi les SIRET fermés (cas déménagement à détecter).
