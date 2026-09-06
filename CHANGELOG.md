@@ -4,6 +4,69 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+### Added
+
+- **Vigie post-cron « run vert mais donnée malade »** (backlog FINESS phase 2,
+  item 8) — `scripts/ingest/notify-ingest-anomaly.ts` + composite
+  `.github/actions/notify-ingest-anomaly`, câblée `if: success()` +
+  `continue-on-error` sur les 5 workflows `ingest-*`. Deux anomalies qu'un cron
+  en code 0 ne signalait à personne : un run **`partial`** (canary manquant,
+  matview non reconstruite — le canary FINESS a échoué quatre mois en `success`)
+  et une **source tarie** (skips `same_checksum` en `success` au-delà de la
+  cadence : le CSV DREES mort le 20 juillet, vu en septembre). Règle d'âge =
+  **les mêmes fonctions** que `data_freshness` (`REAL_INGEST_STATUSES`,
+  `lastDataChangeIndex`, `ageInDays`, `INGEST_CADENCE`, factorisées dans
+  `src/storage/ingest-log.ts`) : le témoin exposé au caller MCP et l'alerte ne
+  peuvent pas diverger. Issue GitHub idempotente (labels `ingest-anomaly,<source>`)
+  puis **email Resend à l'ouverture seulement** — une source gelée le reste des
+  semaines, un mail par cron serait la fatigue d'alerte que la vigie combat.
+  Wording composé dans le script, jamais côté YAML. Best-effort de bout en bout,
+  lecture DB en échec = log LOUD sans alerte. Garde-fou
+  `workflows-alerting.test.ts` (5 crons, `source` = valeur réelle de
+  `ingest_log.source`, `ameli_ps` et non `ameli`). Premier passage à blanc
+  contre la prod le 2026-09-06 : Ameli et CDS byte-identiques depuis le
+  2026-08-17 (2 skips, 19 jours > 14) — la vigie alertera au cron du 7 septembre.
+- **Composite `upsert-ops-issue`** — émetteur UNIQUE d'issue idempotente
+  (pendant de `send-ops-email`), `outcome` tri-état `created | commented |
+  failed` (défaut pessimiste) et issue de REPLI sur appelant fautif, jamais un
+  abandon ; consommée par `notify-ingest-anomaly` (email si `outcome !=
+  'commented'` : un canal issue en panne n'éteint plus l'email) et
+  `notify-pending-geocode` (wording email + issue déplacé en TS testé,
+  `composePendingMessage` — plus aucun texte composé en YAML : un heredoc bash
+  multi-ligne y avait cassé le parse de la composite pendant la revue, invisible
+  du garde-fou textuel → **test de parse de tout `.github/**/*.yml`**, devDep
+  `yaml`). `writeGithubOutput` (heredoc, **délimiteur aléatoire par appel** :
+  les valeurs transportent désormais du texte libre venu de la base) monté dans
+  `shared.ts`. La vigie crie (`::error::`/`::warning::`) ses angles morts :
+  aucune ligne `ingest_log` sur un cron réussi, ligne de tête venue d'un autre
+  run, lecture impossible, crash hors script (`|| echo "::error::"`).
+
+### Changed
+
+- **Plancher de lignes RELATIF à la dernière ingestion réelle pour Ameli, RPPS
+  et CDS** (backlog FINESS phase 2, item 5) — `assertStagingRowBand` +
+  `getLastRealIngestRowCount` (`shared.ts`), bande par défaut `[0,9 ; 1,3]`
+  appliquée APRÈS les bornes absolues. Le plancher absolu tolérait une perte
+  silencieuse de 85 K PS Ameli (400 K pour ~465 K réels), 230 K lignes RPPS
+  (2,0 M pour 2,28 M) et CDS n'en avait aucun calibré (2 000 pour ~3 560).
+  Référence discriminée `known | none | unavailable` (`row_count` du dernier
+  `success`/`partial` sans `skip_reason`, `parseRpcCount`) : `none` (première
+  ingestion) = warn simple ; `unavailable` (`ingest_log` illisible, contrat
+  cassé) = garde DÉSACTIVÉ sur ce run, annoté `::warning::` sur la page du run,
+  jamais un faux refus. IRIS l'applique au bloc
+  contours (le seul dont `ingest_log` porte le volume), avant le swap. FINESS
+  garde son diff staging ↔ prod (`REMOVED_MAX_RATE`), mécanisme plus fin déjà
+  en place. Client `ingest_log` mémoïsé (4 appelants par cron désormais).
+- **IRIS : signature d'archive en pré-validation** (backlog FINESS phase 2,
+  item 6) — les 4 téléchargements passent par `preValidateFile` avec
+  `SEVENZIP_MAGIC` (contours IGN) / `ZIP_MAGIC` (RP, FILOSOFI INSEE) au lieu du
+  seul `assertMinSize` : une page de maintenance de 2 Mo servie en 200 est
+  rejetée en `pre_validate` avec le nom du fichier, plus un diagnostic 7z
+  illisible dans `extractArchive`. `PreValidateConfig.label` préfixe désormais
+  tous les messages (taille, en-tête, signature).
+
 ## [0.28.0] — 2026-09-06 — FINESS : la source DREES s'était tarie, remplacée par le flux ANS quotidien (+2 816 DOM, +6 064 géolocalisés, 6 119 fermés évacués), fraîcheur honnête (`data_age_days`), canary en `partial`, politique de validation testée
 
 > Surface MCP : 13 référentiels / 36 outils inchangés ; `data_freshness` expose trois champs de plus (`last_data_change_at`, `data_age_days`, `expected_max_age_days`). Deux migrations appliquées en prod (`20260905T210000`, `20260905T213000`), deux runs réels le 2026-09-05, PR #69 revue `/review-fix` complet.

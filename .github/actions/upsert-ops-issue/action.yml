@@ -1,0 +1,111 @@
+# Composite action — émetteur UNIQUE d'issue ops IDEMPOTENTE (pendant de
+# `send-ops-email` pour le canal issue).
+#
+# Consommée par `notify-pending-geocode` (résidu BAN) et `notify-ingest-anomaly`
+# (run partial / source tarie). Un seul endroit porte la règle d'idempotence
+# (issue OUVERTE portant TOUS les labels → commentaire ; sinon création) —
+# avant, le bloc `github-script` était recopié par composite (dérive garantie
+# au premier correctif de pagination ou de rate-limit).
+#
+# BEST-EFFORT PAR CONTRAT, même doctrine que `send-ops-email` : un appelant
+# fautif (titre vide = composition amont perdue en route) vaut `::error::` ET
+# une issue de repli pointant sur le run — jamais un abandon, le step n'a été
+# atteint que parce que l'appelant a DÉJÀ décidé d'alerter. L'API issues en
+# panne → `core.warning`, jamais d'échec de step (un cron réussi ne doit pas
+# re-rougir). Expose `outcome` ∈ created | commented | failed pour que
+# l'appelant module ses AUTRES canaux : l'email « source tarie » ne part que
+# si l'issue est OUVERTE ou si ce canal a ÉCHOUÉ — jamais sur un commentaire.
+name: Upsert ops issue
+description: >
+  Ouvre une issue GitHub, ou commente l'issue ouverte portant déjà les mêmes
+  labels (idempotence). Best-effort : warning au lieu d'échec.
+
+inputs:
+  labels:
+    description: "Labels de l'issue, séparés par des virgules. Clé d'idempotence (AND sur tous)."
+    required: true
+  title:
+    description: "Titre à la création."
+    required: true
+  body:
+    description: "Corps à la création (Markdown)."
+    required: true
+  comment:
+    description: "Corps du commentaire quand une issue ouverte existe déjà."
+    required: true
+  github-token:
+    description: "Token pour créer/commenter l'issue."
+    required: true
+  run-url:
+    description: "URL du run (repli quand le corps est vide)."
+    required: false
+    default: ""
+
+outputs:
+  outcome:
+    description: "`created` (issue OUVERTE par cet appel), `commented` (issue existante commentée) ou `failed` (API en échec, ou step mort → vide)."
+    value: ${{ steps.upsert.outputs.outcome }}
+
+runs:
+  using: composite
+  steps:
+    - name: Upsert issue (idempotent, best-effort)
+      id: upsert
+      uses: actions/github-script@v9
+      env:
+        LABELS: ${{ inputs.labels }}
+        TITLE: ${{ inputs.title }}
+        BODY: ${{ inputs.body }}
+        COMMENT: ${{ inputs.comment }}
+        RUN_URL: ${{ inputs.run-url }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          // Défaut PESSIMISTE : tout chemin qui ne pose pas explicitement
+          // created/commented est un échec (y compris une exception hors try).
+          core.setOutput('outcome', 'failed');
+          const runUrl = process.env.RUN_URL || '(run inconnu)';
+          let labels = process.env.LABELS.split(',').map((l) => l.trim()).filter(Boolean);
+          let title = process.env.TITLE;
+          let body = process.env.BODY;
+          let comment = process.env.COMMENT;
+          // `required: true` n'est PAS appliqué par GitHub sur une composite.
+          // Repli plutôt qu'abandon : l'appelant a déjà décidé qu'il fallait alerter.
+          if (labels.length === 0 || !title) {
+            core.error(`upsert-ops-issue : labels ou title VIDE (composition amont perdue) — issue de repli créée. Run : ${runUrl}`);
+            if (labels.length === 0) labels = ['ops-alert'];
+            title = title || `[ops] alerte sans titre — composition amont en échec (voir le run)`;
+          }
+          body = body || `Corps manquant (composition amont en échec). Run : ${runUrl}`;
+          comment = comment || `🔄 Nouvelle occurrence (corps manquant, composition amont en échec). Run : ${runUrl}`;
+          try {
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: labels.join(','),
+              per_page: 1,
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body: comment,
+              });
+              core.setOutput('outcome', 'commented');
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels,
+              });
+              core.setOutput('outcome', 'created');
+            }
+          } catch (err) {
+            // Best-effort : une panne de l'API issues ne casse pas un cron réussi
+            // (outcome reste `failed` → l'appelant peut basculer sur l'email).
+            core.warning(`Création/màj de l'issue [${labels.join(',')}] échouée (best-effort) : ${err.message}`);
+          }

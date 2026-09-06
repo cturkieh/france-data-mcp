@@ -8,7 +8,9 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { DEFAULT_USER_AGENT } from "../../src/core/http.js";
+import { parseRpcCount } from "../../src/core/parse-rpc-count.js";
 import { withTimeout } from "../../src/core/with-timeout.js";
+import { type IngestSource, REAL_INGEST_STATUSES } from "../../src/storage/ingest-log.js";
 import { getServiceClient, requireEnv } from "../../src/storage/supabase.js";
 
 export type IngestPhase = "download" | "pre_validate" | "copy" | "validate" | "swap";
@@ -54,6 +56,10 @@ export class IngestError extends Error {
 
 /** Signature d'un fichier gzip : deux premiers octets (RFC 1952). */
 export const GZIP_MAGIC: MagicBytes = [0x1f, 0x8b];
+/** Signature d'une archive 7-Zip (6 octets) — contours IRIS IGN. */
+export const SEVENZIP_MAGIC: MagicBytes = [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c];
+/** Signature d'une archive ZIP, en-tête de fichier local `PK\x03\x04` — zips RP / FILOSOFI INSEE. */
+export const ZIP_MAGIC: MagicBytes = [0x50, 0x4b, 0x03, 0x04];
 
 /**
  * Tuple NON vide : `[]` rendrait la comparaison `head.subarray(0, 0).equals(Buffer.alloc(0))`
@@ -68,8 +74,21 @@ export type MagicBytes = readonly [number, ...number[]];
  * Une page HTML de maintenance servie en 200 n'a ni les colonnes ni la
  * signature — elle est rejetée avant de créer la staging.
  */
-export type PreValidateConfig = { minSizeBytes: number } & (
-  | { expectedHeaderColumns: string[]; delimiter: string; magicBytes?: undefined }
+export type PreValidateConfig = {
+  /** Entier > 0 — `0`, négatif ou `NaN` éteindraient le contrôle en silence (`size < NaN` = false). */
+  minSizeBytes: number;
+  /**
+   * Libellé humain du fichier dans les messages d'erreur (défaut : nom du
+   * fichier). Utile quand un cron télécharge plusieurs fichiers (IRIS : 4) —
+   * « File size … below minimum » sans nom ne dit pas lequel a tronqué.
+   */
+  label?: string;
+} & ( // Tuple NON vide, même raison que `MagicBytes` : `[]` rendrait `missing` toujours vide.
+  | {
+      expectedHeaderColumns: readonly [string, ...string[]];
+      delimiter: string;
+      magicBytes?: undefined;
+    }
   | { magicBytes: MagicBytes; expectedHeaderColumns?: undefined; delimiter?: undefined }
 );
 
@@ -142,11 +161,18 @@ export async function downloadCsv(url: string, destFilename: string): Promise<Do
 }
 
 export async function preValidateFile(filePath: string, config: PreValidateConfig): Promise<void> {
+  const label = config.label || path.basename(filePath);
+  if (!Number.isInteger(config.minSizeBytes) || config.minSizeBytes <= 0) {
+    throw new IngestError(
+      "pre_validate",
+      `${label}: minSizeBytes invalide (${String(config.minSizeBytes)}) — le contrôle de taille serait éteint en silence`,
+    );
+  }
   const stat = await fsp.stat(filePath);
   if (stat.size < config.minSizeBytes) {
     throw new IngestError(
       "pre_validate",
-      `File size ${stat.size} below minimum ${config.minSizeBytes} (suspected truncated download)`,
+      `${label}: file size ${stat.size} below minimum ${config.minSizeBytes} (suspected truncated download)`,
     );
   }
 
@@ -162,7 +188,7 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
       if (!head.subarray(0, expected.length).equals(expected)) {
         throw new IngestError(
           "pre_validate",
-          `File signature ${head.subarray(0, expected.length).toString("hex")} does not match expected ${expected.toString("hex")} — upstream served something else (maintenance page ?)`,
+          `${label}: file signature ${head.subarray(0, expected.length).toString("hex")} does not match expected ${expected.toString("hex")} — upstream served something else (maintenance page ?)`,
         );
       }
       return;
@@ -173,7 +199,7 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
     if (missing.length > 0) {
       throw new IngestError(
         "pre_validate",
-        `Missing expected header columns: [${missing.join(", ")}]. Got: [${headers.slice(0, 10).join(", ")}...]`,
+        `${label}: missing expected header columns: [${missing.join(", ")}]. Got: [${headers.slice(0, 10).join(", ")}...]`,
       );
     }
   } finally {
@@ -181,8 +207,8 @@ export async function preValidateFile(filePath: string, config: PreValidateConfi
   }
 }
 
-/** Sources supportées dans `ingest_log.source` (utile pour `getLastSuccessChecksum`). */
-export type IngestSource = "finess" | "ameli_ps" | "rpps" | "cds" | "iris";
+/** Sources supportées dans `ingest_log.source` — type UNIQUE, dérivé de `INGEST_SOURCES` (lib). */
+export type { IngestSource } from "../../src/storage/ingest-log.js";
 
 /**
  * Préfixe utilisé dans les logs stderr structurés des callers ingest
@@ -255,10 +281,19 @@ export interface IngestLogEntry {
  * un client untyped pour ce point d'écriture précis — même pattern que
  * `getUntypedServiceClient` pour les staging tables.
  */
+let ingestLogClient: SupabaseClient | null = null;
+/** Test-only : oublie le client mémoïsé (un test qui stubbe l'env après un 1er appel récupérerait un client périmé). */
+export function _resetIngestLogClientForTesting(): void {
+  ingestLogClient = null;
+}
 function getIngestLogClient(): SupabaseClient {
+  // Mémoïsé comme `src/storage/supabase.ts` : chaque `createClient` démarre un
+  // ticker auth de 30 s pour la durée du run — 4 appelants par cron désormais.
+  if (ingestLogClient) return ingestLogClient;
   const url = requireEnv("SUPABASE_URL");
   const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
-  return createClient(url, key, { auth: { persistSession: false } });
+  ingestLogClient = createClient(url, key, { auth: { persistSession: false } });
+  return ingestLogClient;
 }
 
 /**
@@ -443,6 +478,173 @@ export async function getLastSuccessChecksum(source: IngestSource): Promise<stri
 }
 
 /**
+ * Référence de volume pour `assertStagingRowBand` — discriminée, parce que
+ * « pas de résultat » ≠ « erreur » (doctrine projet) : `none` est normal une
+ * fois dans la vie d'une source ; `unavailable` veut dire que le garde
+ * anti-troncature est DÉSACTIVÉ sur ce run (hoquet PostgREST, contrat de
+ * colonne cassé) et doit être crié.
+ */
+export type RowCountReference =
+  | { kind: "known"; rows: number }
+  | { kind: "none" }
+  | { kind: "unavailable"; reason: string };
+
+/**
+ * Volume de la dernière ingestion RÉELLE de la source (`success` ou `partial`
+ * SANS `skip_reason`, `row_count` non null) — la référence prod pour
+ * `assertStagingRowBand`. Distinct de `getLastSuccessChecksum`, qui accepte
+ * les court-circuits `same_checksum` (leur `row_count` est null).
+ *
+ * Best-effort : ne throw jamais (le plancher absolu de la source reste seul
+ * juge, l'ingestion continue) mais rend `unavailable` avec la raison. La
+ * colonne est `INTEGER` (nombre en JSON) ; `parseRpcCount` est la défense
+ * uniforme des compteurs du repo, qui couvrira aussi un futur passage en BIGINT.
+ */
+export async function getLastRealIngestRowCount(
+  source: IngestSource,
+  client?: Pick<SupabaseClient, "from">,
+): Promise<RowCountReference> {
+  const supabase = client ?? getIngestLogClient();
+  const { data, error } = await supabase
+    .from("ingest_log")
+    .select("row_count")
+    .eq("source", source)
+    .in("status", [...REAL_INGEST_STATUSES])
+    .is("skip_reason", null)
+    .not("row_count", "is", null)
+    .order("started_at", { ascending: false })
+    .limit(1);
+  if (error) {
+    const reason = `lecture ingest_log échouée: ${error.message}`;
+    console.error(`[france-data-mcp] getLastRealIngestRowCount(${source}) ${reason}`);
+    return { kind: "unavailable", reason };
+  }
+  const raw = (data?.[0] as { row_count?: unknown } | undefined)?.row_count;
+  if (raw == null) return { kind: "none" };
+  try {
+    // Garde unique des compteurs du repo : une référence corrompue (`"1e5"`,
+    // `"N/A"`) désactive la bande (crié en aval) au lieu de la biaiser.
+    return { kind: "known", rows: parseRpcCount(raw, `ingest_log.row_count(${source})`) };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.error(`[france-data-mcp] getLastRealIngestRowCount(${source}): ${reason}`);
+    return { kind: "unavailable", reason };
+  }
+}
+
+/**
+ * Bande de volume staging / dernière ingestion réelle, commune aux sources :
+ * un référentiel d'établissements ou de professionnels ne perd pas 10 % d'un
+ * run à l'autre (RPPS +0,7 %/mois, Ameli ±2 %/semaine, CDS stable) et n'en
+ * gagne pas 30 %. En dessous = fichier amont tronqué ; au-dessus = changement
+ * de format (dénormalisation, doublons). Backlog FINESS phase 2 item 5 :
+ * `MIN_ROWS = 400 000` laissait passer −85 K PS Ameli. Une source qui aurait
+ * un churn réel plus fort mérite SA bande, jamais un élargissement de celle-ci.
+ */
+export const ROW_BAND_MIN_RATIO = 0.9;
+export const ROW_BAND_MAX_RATIO = 1.3;
+
+/**
+ * Garde de volume RELATIVE à la prod, à appeler APRÈS les bornes absolues
+ * (`MIN_ROWS`/`MAX_ROWS`) : celles-ci attrapent le pipeline vide, celle-ci la
+ * troncature silencieuse qu'un plancher absolu calibré large ne voit pas.
+ * Throw `IngestError("validate")` hors bande. Sans référence (`null` ou ≤ 0 :
+ * première ingestion réelle, `ingest_log` illisible) → `console.warn`
+ * grep-able et continue — jamais un faux refus au premier run.
+ */
+export function assertStagingRowBand(
+  stagingRows: number,
+  reference: RowCountReference,
+  tag: IngestStderrPrefix,
+): void {
+  if (reference.kind === "none") {
+    console.warn(
+      `[${tag}] aucune ingestion réelle antérieure — bande relative sans objet (première ingestion), plancher absolu seul`,
+    );
+    return;
+  }
+  if (reference.kind === "unavailable") {
+    // Garde anti-troncature DÉSACTIVÉ sur ce run : annotation GitHub (visible
+    // sur la page du run, pas seulement dans le log) — le silence structurel
+    // (contrat de colonne cassé → `unavailable` à chaque run) serait sinon
+    // une ligne stdout par cron que personne ne lit.
+    const msg = `[${tag}] référence de volume INDISPONIBLE (${reference.reason}) — bande relative NON vérifiée sur ce run, plancher absolu seul`;
+    console.warn(msg);
+    console.log(`::warning::${msg}`);
+    return;
+  }
+  const referenceRows = reference.rows;
+  if (!(referenceRows > 0)) {
+    console.warn(
+      `[${tag}] référence de volume nulle (${referenceRows}) — bande relative sans objet`,
+    );
+    return;
+  }
+  const ratio = stagingRows / referenceRows;
+  const pct = `${(ratio * 100).toFixed(1)}%`;
+  if (ratio < ROW_BAND_MIN_RATIO) {
+    throw new IngestError(
+      "validate",
+      `Row count ${stagingRows} is ${pct} of the last real ingestion (${referenceRows}) — below ${ROW_BAND_MIN_RATIO} band, suspected truncated upstream file, refusing to swap`,
+    );
+  }
+  if (ratio > ROW_BAND_MAX_RATIO) {
+    throw new IngestError(
+      "validate",
+      `Row count ${stagingRows} is ${pct} of the last real ingestion (${referenceRows}) — above ${ROW_BAND_MAX_RATIO} band, suspected upstream format change, refusing to swap`,
+    );
+  }
+  console.log(
+    `[${tag}] volume vs dernière ingestion réelle : ${stagingRows}/${referenceRows} (${pct}) dans la bande [${ROW_BAND_MIN_RATIO}, ${ROW_BAND_MAX_RATIO}]`,
+  );
+}
+
+/**
+ * Écrit des outputs de step dans `$GITHUB_OUTPUT` au format heredoc
+ * (`clé<<délimiteur … délimiteur`) : sûr pour une valeur multi-ligne (corps
+ * d'issue), là où le format `clé=valeur` échoue en « Invalid format » au premier
+ * saut de ligne. No-op hors Actions (`GITHUB_OUTPUT` absent → warn). Best-effort :
+ * un échec d'écriture est logué LOUD mais ne throw pas — la panne ne doit pas
+ * masquer la décision déjà calculée par le notifieur appelant.
+ */
+export function writeGithubOutput(prefix: string, entries: Record<string, string>): void {
+  const out = process.env.GITHUB_OUTPUT;
+  if (!out) {
+    console.warn(
+      `[${prefix}] GITHUB_OUTPUT absent — outputs non écrits (run hors GitHub Actions ?)`,
+    );
+    return;
+  }
+  // Délimiteur ALÉATOIRE par appel (recommandation GitHub, même geste que
+  // `@actions/core`) : les valeurs transportent désormais du texte libre venu
+  // de la base (`error_message`, canary) — un délimiteur fixe qu'une valeur
+  // contiendrait fermerait le heredoc et ferait relire la suite comme de
+  // nouveaux outputs (injection de `should_notify`).
+  const delim = `__OPS_${crypto.randomUUID()}__`;
+  const clash = Object.entries(entries).find(([, v]) => v.includes(delim));
+  if (clash) {
+    const msg = `[${prefix}] valeur d'output « ${clash[0]} » contenant le délimiteur heredoc — outputs NON écrits`;
+    console.error(msg);
+    console.log(`::error::${msg}`);
+    return;
+  }
+  const payload = Object.entries(entries)
+    .map(([k, v]) => `${k}<<${delim}\n${v}\n${delim}\n`)
+    .join("");
+  try {
+    fs.appendFileSync(out, payload);
+  } catch (err) {
+    // Le canal de sortie est mort : l'annotation est le seul média de repli.
+    const msg = `[${prefix}] écriture $GITHUB_OUTPUT échouée — l'alerte downstream sera skippée: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(msg);
+    console.log(`::error::${msg}`);
+  }
+}
+
+/** Aplatit une ligne destinée à une commande workflow `::warning::`/`::error::` (seule la 1re ligne est lue, la suite serait ré-évaluée comme commande). */
+export const oneLine = (s: string): string => s.replace(/\r?\n/g, " ");
+
+/**
  * Court-circuite l'ingestion quand le CSV téléchargé est byte-identique au
  * dernier run `success` pour cette source. Renseigne `log` (skip_reason +
  * status success), écrit l'entrée dans `ingest_log`, log un message console.
@@ -555,6 +757,14 @@ export async function runAndRecordCanary(
  * passer `getUntypedServiceClient(...)` car `check_ingest_canary` n'est pas
  * dans la `Database` typée tant que `pnpm db:types` n'a pas été regénéré.
  */
+/**
+ * Sentinelle écrite dans `ingest_log.canary_failures` quand la VÉRIFICATION
+ * canary est indisponible (RPC en erreur) — à distinguer d'une clé canary
+ * manquante. Constante partagée avec la vigie (`notify-ingest-anomaly.ts`) qui
+ * la relit : jamais de littéral `"__rpc_error__"` ailleurs.
+ */
+export const CANARY_RPC_ERROR = "__rpc_error__";
+
 export async function runCanaryCheck(
   supabase: Pick<SupabaseClient, "rpc">,
   source: IngestSource,
@@ -564,7 +774,7 @@ export async function runCanaryCheck(
     console.error(
       `[france-data-mcp] check_ingest_canary(${source}) RPC failed: ${error.message} — non-blocking, swap already committed`,
     );
-    return ["__rpc_error__"];
+    return [CANARY_RPC_ERROR];
   }
   // Le RPC retourne TEXT[] (jamais NULL grâce au COALESCE côté SQL) — mais
   // on défend quand même contre une régression PostgREST qui renverrait

@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { githubDir, ingestDir } from "./migration-sql.js";
 
 // Garde-fous d'alerting des workflows GitHub Actions (`.github/`).
@@ -51,6 +52,7 @@ const alerting = workflowFiles.filter((f) => !NO_ALERT_BY_DESIGN.has(f));
 
 const NOTIFY_FAILURE = "./.github/actions/notify-ingest-failure";
 const SEND_EMAIL = "./.github/actions/send-ops-email";
+const UPSERT_ISSUE = "./.github/actions/upsert-ops-issue";
 const ALERT_STEP = "Alert on failure or cancelled run";
 
 const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -111,6 +113,18 @@ function stepHeads(src: string): string[] {
   const body = stepsIdx < 0 ? src : src.slice(stepsIdx);
   return [...body.matchAll(/^[ \t]+- (\S.*)$/gm)].map((m) => (m[1] ?? "").trim());
 }
+
+describe("tout .github/**/*.yml PARSE (le garde-fou textuel ne voit pas un YAML mort)", () => {
+  // Revue 2026-09-06 : une composite dont le `run: |` contenait une chaîne bash
+  // multi-ligne en colonne 0 ne parsait plus — le runner aurait refusé de la
+  // charger, `continue-on-error` aurait avalé l'échec, cron vert, zéro alerte.
+  // Les assertions `toContain` sur le texte passaient toutes.
+  for (const [file, src] of [...workflows, ...actions]) {
+    it(`${file} : YAML valide`, () => {
+      expect(() => parseYaml(src)).not.toThrow();
+    });
+  }
+});
 
 describe("workflows d'alerte + composites — aucun `failure()` sans `cancelled()` (timeout GitHub = cancelled)", () => {
   const files: Array<[string, string]> = [
@@ -211,6 +225,133 @@ describe("ingest-rpps.yml — budget de temps (post-mortem 2026-08/09)", () => {
   });
 });
 
+describe("vigie « run vert mais donnée malade » — notify-ingest-anomaly sur chaque cron d'ingestion", () => {
+  // Backlog FINESS phase 2 item 8 : un run `partial` (canary/matview) ou une
+  // source TARIE (skips same_checksum au-delà de la cadence) sort en code 0 →
+  // invisible du step d'échec. Chaque `ingest-*.yml` DOIT porter la vigie,
+  // gardée par success() (jamais « anomalie » sur un run tué) et
+  // continue-on-error (jamais re-rouger un cron réussi).
+  const NOTIFY_ANOMALY = "./.github/actions/notify-ingest-anomaly";
+  const ANOMALY_STEP = "Notify ingest anomaly";
+  const ingestWorkflows = workflowFiles.filter((f) => /^ingest-.*\.ya?ml$/.test(f));
+  const EXPECTED_SOURCE: Record<string, string> = {
+    "ingest-finess.yml": "finess",
+    "ingest-ameli.yml": "ameli_ps",
+    "ingest-rpps.yml": "rpps",
+    "ingest-cds.yml": "cds",
+    "ingest-iris.yml": "iris",
+  };
+
+  it("les 5 crons d'ingestion sont couverts", () => {
+    expect(ingestWorkflows).toEqual(Object.keys(EXPECTED_SOURCE).sort());
+  });
+
+  for (const file of ingestWorkflows) {
+    it(`${file} : step « ${ANOMALY_STEP} » → composite, if: success(), continue-on-error, source = valeur ingest_log`, () => {
+      const src = mustGet(workflows, file);
+      const block = stepBlock(src, ANOMALY_STEP);
+      expect(block, `${file} : step de vigie introuvable`).not.toBeNull();
+      expect(block).toContain(`uses: ${NOTIFY_ANOMALY}`);
+      expect(stepIfCondition(src, ANOMALY_STEP)).toBe("success()");
+      expect(block).toMatch(/^\s+continue-on-error: true$/m);
+      // ⚠️ Ameli logue `ameli_ps` : un slug `ameli` ne matcherait aucune ligne
+      // → vigie muette à vie (faux négatif silencieux).
+      expect(block).toMatch(new RegExp(`^\\s+source: ${EXPECTED_SOURCE[file]}$`, "m"));
+    });
+  }
+
+  it("composite : issue d'abord (émetteur unique), email sous always() sauf sur simple COMMENTAIRE (anti fatigue, jamais muet)", () => {
+    const action = mustGet(actions, "notify-ingest-anomaly");
+    expect(action).toContain(`uses: ${UPSERT_ISSUE}`);
+    expect(action).toContain(`uses: ${SEND_EMAIL}`);
+    expect(stepIfCondition(action, "Issue — anomalie d'ingestion")).toBe(
+      "steps.anomaly.outputs.should_notify == 'true'",
+    );
+    // `!= 'commented'` et PAS `== 'created'` : une issue en échec (API en panne,
+    // step mort → output vide) doit laisser l'email prendre le relais — sinon
+    // les deux canaux tombent ensemble.
+    const emailIf = stepIfCondition(action, "Email — anomalie d'ingestion");
+    expect(emailIf).toMatch(/^always\(\) &&/);
+    expect(emailIf).toContain("steps.issue.outputs.outcome != 'commented'");
+    expect(emailIf).not.toContain("== 'created'");
+    // Le wording ET la clé d'idempotence viennent du script (TS testé).
+    for (const key of [
+      "should_notify",
+      "subject",
+      "text",
+      "issue_title",
+      "issue_body",
+      "issue_labels",
+    ]) {
+      expect(action, `output ${key} non consommé`).toContain(`steps.anomaly.outputs.${key}`);
+    }
+    expect(action).not.toContain("<<__OPS_EOF__");
+    // Crash HORS du script (tsx, OOM) → annotation, pas un step rouge avalé.
+    expect(action).toMatch(/run: pnpm notify:ingest-anomaly "\$SOURCE" \|\| echo "::error::/);
+  });
+
+  it("package.json expose notify:ingest-anomaly, consommé par la composite", () => {
+    const pkg = JSON.parse(readFileSync(join(githubDir, "../package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts["notify:ingest-anomaly"]).toBe(
+      "tsx scripts/ingest/notify-ingest-anomaly.ts",
+    );
+    expect(mustGet(actions, "notify-ingest-anomaly")).toContain(
+      'run: pnpm notify:ingest-anomaly "$SOURCE"',
+    );
+  });
+});
+
+describe("composite upsert-ops-issue — émetteur UNIQUE d'issue idempotente", () => {
+  const upsert = mustGet(actions, "upsert-ops-issue");
+
+  it("est le SEUL endroit de .github/ qui liste/commente une issue (idempotence en un point)", () => {
+    expect(upsert).toContain("github.rest.issues.listForRepo");
+    expect(upsert).toContain("github.rest.issues.createComment");
+    for (const [file, src] of [...workflows, ...actions]) {
+      if (file === "upsert-ops-issue") continue;
+      expect(
+        src,
+        `${file} : idempotence d'issue inline — passer par ${UPSERT_ISSUE}`,
+      ).not.toContain("listForRepo");
+    }
+  });
+
+  it("outcome tri-état : `failed` par défaut AVANT le try, `commented` / `created` dans les branches", () => {
+    expect(upsert).toMatch(/outputs:\s+outcome:/);
+    expect(upsert.indexOf("core.setOutput('outcome', 'failed')")).toBeLessThan(
+      upsert.indexOf("try {"),
+    );
+    expect(upsert).toMatch(
+      /createComment\(\{[\s\S]*?\}\);\s+core\.setOutput\('outcome', 'commented'\)/,
+    );
+    expect(upsert).toMatch(
+      /issues\.create\(\{[\s\S]*?\}\);\s+core\.setOutput\('outcome', 'created'\)/,
+    );
+    expect(upsert).toMatch(/catch \(err\)[\s\S]*core\.warning/);
+  });
+
+  it("appelant fautif (titre/labels vides) → ::error:: + issue de REPLI, jamais un abandon (doctrine send-ops-email)", () => {
+    expect(upsert).toMatch(/if \(labels\.length === 0 \|\| !title\) \{[\s\S]*?core\.error\(/);
+    expect(upsert).toContain("labels = ['ops-alert']");
+    expect(upsert).toMatch(/title = title \|\| `\[ops\] alerte sans titre/);
+    expect(upsert).not.toMatch(/aucune issue créée/);
+  });
+
+  it("notify-pending-geocode le consomme aussi : issue sous always() &&, outputs du script (aucun texte composé en YAML)", () => {
+    const pending = mustGet(actions, "notify-pending-geocode");
+    expect(pending).toContain(`uses: ${UPSERT_ISSUE}`);
+    expect(stepIfCondition(pending, "Issue — adresses à géocoder")).toMatch(/^always\(\) &&/);
+    expect(stepBlock(pending, "Compose email — adresses à géocoder")).toBeNull();
+    for (const key of ["subject", "text", "issue_title", "issue_body", "issue_comment"]) {
+      expect(pending).toContain(`steps.pending_geocode.outputs.${key}`);
+    }
+    expect(pending).not.toContain("<<__OPS_EOF__");
+    expect(pending).toMatch(/run: pnpm notify:pending-geocode "\$SOURCE" \|\| echo "::error::/);
+  });
+});
+
 describe("composites — aucune expression sur un contexte indisponible (job, secrets)", () => {
   // PROUVÉ PROD (run #33960886473, 2026-09-05) : le runner évalue `${{ }}`
   // PARTOUT dans action.yml — `description` d'un input et `script` compris —
@@ -285,11 +426,10 @@ describe("composite send-ops-email — émetteur Resend UNIQUE et best-effort", 
     expect(sender).toMatch(/\*\)[^\n]*::warning::/);
   });
 
-  it("notify-pending-geocode consomme l'émetteur unique, outputs en heredoc, issue sous always()", () => {
+  it("notify-pending-geocode consomme l'émetteur unique email, issue sous always()", () => {
     const pending = mustGet(actions, "notify-pending-geocode");
     expect(pending).toContain(`uses: ${SEND_EMAIL}`);
-    expect(pending).toContain("steps.compose.outputs.subject");
-    expect(pending).toMatch(/echo "subject<<__OPS_EOF__"/);
+    expect(pending).toContain("steps.pending_geocode.outputs.subject");
     expect(stepIfCondition(pending, "Issue — adresses à géocoder")).toMatch(/^always\(\) &&/);
   });
 });

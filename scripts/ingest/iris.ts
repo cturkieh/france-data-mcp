@@ -10,9 +10,14 @@ import { parse } from "csv-parse";
 import {
   IngestError,
   type IngestLogEntry,
+  type RowCountReference,
+  SEVENZIP_MAGIC,
+  ZIP_MAGIC,
+  assertStagingRowBand,
   atomicSwapTables,
   computeSha256Buffer,
   downloadCsv,
+  getLastRealIngestRowCount,
   getLastSuccessChecksum,
   getNonEmpty,
   getUntypedServiceClient,
@@ -125,12 +130,13 @@ async function main(): Promise<void> {
   const swappedBlocks: string[] = [];
   try {
     // 1. DOWNLOAD des 4 sources + dernier checksum success, en parallèle.
-    const [contours, pop, familles, revenu, lastSha] = await Promise.all([
+    const [contours, pop, familles, revenu, lastSha, referenceRows] = await Promise.all([
       downloadCsv(IRIS_CONTOURS_URL, "contours-iris.7z"),
       downloadCsv(IRIS_POP_URL, "iris-pop.zip"),
       downloadCsv(IRIS_FAMILLES_URL, "iris-familles.zip"),
       downloadCsv(IRIS_REVENU_URL, "iris-revenu.zip"),
       getLastSuccessChecksum("iris"),
+      getLastRealIngestRowCount("iris"),
     ]);
 
     // Checksum COMBINÉ ordonné (contours|pop|familles|revenu) : court-circuit ssi
@@ -143,17 +149,45 @@ async function main(): Promise<void> {
 
     if (await shortCircuitIfSameChecksum(log, lastSha, combinedSha, "iris", force)) return;
 
-    // Pré-validation taille (sources binaires / zippées).
-    assertMinSize(contours.sizeBytes, MIN_CONTOURS_BYTES, "contours .7z");
-    assertMinSize(pop.sizeBytes, MIN_RP_ZIP_BYTES, "RP population .zip");
-    assertMinSize(familles.sizeBytes, MIN_RP_ZIP_BYTES, "RP familles .zip");
-    assertMinSize(revenu.sizeBytes, MIN_FILO_ZIP_BYTES, "FILOSOFI revenu .zip");
+    // Pré-validation taille + SIGNATURE d'archive (backlog phase 2 item 6) :
+    // une page de maintenance INSEE/IGN de 2 Mo servie en 200 passait la seule
+    // taille et mourait plus loin dans `extractArchive` avec un diagnostic 7z
+    // illisible. Les octets magiques la rejettent ici, phase `pre_validate`.
+    // En séquence, volontairement : le premier fichier fautif est déterministe
+    // dans les logs (un Promise.all brouillerait l'ordre pour quelques ms).
+    const archives = [
+      {
+        file: contours,
+        minSizeBytes: MIN_CONTOURS_BYTES,
+        magicBytes: SEVENZIP_MAGIC,
+        label: "contours .7z",
+      },
+      {
+        file: pop,
+        minSizeBytes: MIN_RP_ZIP_BYTES,
+        magicBytes: ZIP_MAGIC,
+        label: "RP population .zip",
+      },
+      {
+        file: familles,
+        minSizeBytes: MIN_RP_ZIP_BYTES,
+        magicBytes: ZIP_MAGIC,
+        label: "RP familles .zip",
+      },
+      {
+        file: revenu,
+        minSizeBytes: MIN_FILO_ZIP_BYTES,
+        magicBytes: ZIP_MAGIC,
+        label: "FILOSOFI revenu .zip",
+      },
+    ] as const;
+    for (const { file, ...config } of archives) await preValidateFile(file.filePath, config);
 
     workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "iris-ingest-"));
     const supabase = getUntypedServiceClient("iris");
 
     // ── BLOC 1 — contours → iris ─────────────────────────────────────────────
-    const contoursCount = await ingestContours(contours.filePath, workDir, supabase);
+    const contoursCount = await ingestContours(contours.filePath, workDir, supabase, referenceRows);
     swappedBlocks.push("iris");
     log.row_count = contoursCount;
 
@@ -240,21 +274,14 @@ async function main(): Promise<void> {
   }
 }
 
-function assertMinSize(actual: number, min: number, label: string): void {
-  if (actual < min) {
-    throw new IngestError(
-      "pre_validate",
-      `${label} size ${actual} below minimum ${min} (suspected truncated download)`,
-    );
-  }
-}
-
 // ── BLOC 1 : contours ──────────────────────────────────────────────────────
 
 async function ingestContours(
   archivePath: string,
   workDir: string,
   supabase: SupabaseClient,
+  /** `row_count` de la dernière ingestion réelle (= contours), discriminé (`known`/`none`/`unavailable`). */
+  referenceRows: RowCountReference,
 ): Promise<number> {
   const dir = path.join(workDir, "contours");
   await extractArchive(archivePath, dir);
@@ -273,6 +300,10 @@ async function ingestContours(
 
   const stats = await streamContoursToStaging(csvPath, supabase);
   assertRowBand(stats.inserted, "contours", MIN_ROWS, MAX_ROWS);
+  // Bande RELATIVE sur le SEUL bloc dont `ingest_log` porte le volume
+  // (`row_count` = contours) ; les blocs 2-4 n'ont pas de référence par bloc
+  // et gardent leurs bornes absolues calibrées sur le millésime 2024.
+  assertStagingRowBand(stats.inserted, referenceRows, "iris");
 
   // Anomalies de parse — DEUX causes à seuils/diagnostics SÉPARÉS (ne jamais
   // fusionner : un faux « column shift » sur une géométrie vide égarerait l'ops).
@@ -460,9 +491,10 @@ type IrisRevenuRow = { code_iris: string } & Record<keyof typeof FILO_COLUMNS, n
 type StatsParsed<T> = { row: T; skip?: never } | { row?: never; skip: "bad_code" };
 
 /** Header attendu par bloc = IRIS + TOUTES les colonnes lues (source = COLUMN_MAP). */
-const POP_EXPECTED_HEADERS = ["IRIS", ...Object.values(POP_COLUMNS)];
-const FAMILLES_EXPECTED_HEADERS = ["IRIS", ...Object.values(FAMILLES_COLUMNS)];
-const FILO_EXPECTED_HEADERS = ["IRIS", ...Object.values(FILO_COLUMNS)];
+// Tuples NON vides (contrat `preValidateFile`) : `IRIS` en tête garantit ≥ 1 colonne.
+const POP_EXPECTED_HEADERS = ["IRIS", ...Object.values(POP_COLUMNS)] as const;
+const FAMILLES_EXPECTED_HEADERS = ["IRIS", ...Object.values(FAMILLES_COLUMNS)] as const;
+const FILO_EXPECTED_HEADERS = ["IRIS", ...Object.values(FILO_COLUMNS)] as const;
 
 function parseNumericColumns<F extends string>(
   record: Record<string, string>,
@@ -521,7 +553,7 @@ interface StatsCsvConfig<T> {
   stagingRpc: string;
   stagingTable: string;
   prodTable: string;
-  expectedHeaders: string[];
+  expectedHeaders: readonly [string, ...string[]];
   minRows: number;
   maxRows: number;
   map: (record: Record<string, string>) => StatsParsed<T>;

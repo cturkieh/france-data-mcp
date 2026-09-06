@@ -90,6 +90,25 @@ jobs:
           FORCE_REINGEST: ${{ inputs.force && '1' || '0' }}
         run: pnpm ingest:iris
 
+      # Vigie « run vert mais donnée malade » : run `partial` (canary/matview)
+      # ou source TARIE (skips same_checksum au-delà de la cadence attendue).
+      # `success()` : ne s'évalue que sur un cron réussi (le failed/cancelled a
+      # son step) ; `continue-on-error` : une notif KO ne re-rouge jamais un
+      # cron déjà réussi (swap fait). Cf. `.github/actions/notify-ingest-anomaly`.
+      - name: Notify ingest anomaly
+        if: success()
+        continue-on-error: true
+        uses: ./.github/actions/notify-ingest-anomaly
+        with:
+          source: iris
+          supabase-url: ${{ secrets.SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
       # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
       # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
       - name: Alert on failure or cancelled run

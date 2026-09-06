@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { decidePendingNotification, parseSourceArg } from "./notify-pending-geocode.js";
+import {
+  composePendingMessage,
+  decidePendingNotification,
+  parseSourceArg,
+} from "./notify-pending-geocode.js";
 
 describe("decidePendingNotification", () => {
   it("alerte sur une vraie ingestion avec des adresses en attente", () => {
@@ -116,12 +120,22 @@ describe("parseSourceArg", () => {
   });
 });
 
-describe("wording de l'alerte (reframe : drain BAN automatisé)", () => {
-  // Garde-fou de CONTENU sur le texte rendu (l'action composite n'est pas
-  // unit-testable autrement). Depuis l'auto-trigger `workflow_run` (PR #53/#54),
-  // le re-géocodage tourne tout seul : l'alerte ne doit PLUS réclamer une action
-  // manuelle — ce serait une consigne fausse. Re-introduire ce wording rallume
-  // le bruit trompeur fermé ici (cf. issue #52).
+describe("wording de l'alerte (reframe : drain BAN automatisé) — composé en TS, plus dans le YAML", () => {
+  // Garde-fou de CONTENU sur le texte rendu. Depuis l'auto-trigger `workflow_run`
+  // (PR #53/#54), le re-géocodage tourne tout seul : l'alerte ne doit PLUS
+  // réclamer une action manuelle — ce serait une consigne fausse. Re-introduire
+  // ce wording rallume le bruit trompeur fermé ici (cf. issue #52).
+  const normal = composePendingMessage(
+    "ameli",
+    { shouldNotify: true, pending: 1234, reason: "x" },
+    "https://run/1",
+  );
+  const degraded = composePendingMessage(
+    "rpps",
+    { shouldNotify: true, pending: 0, measurementUnavailable: true, reason: "x" },
+    "https://run/2",
+  );
+  const all = [normal, degraded].flatMap((m) => Object.values(m)).join("\n");
   const actionYml = readFileSync(
     resolve(
       dirname(fileURLToPath(import.meta.url)),
@@ -130,17 +144,41 @@ describe("wording de l'alerte (reframe : drain BAN automatisé)", () => {
     "utf8",
   );
 
-  it("n'instruit PLUS de lancer le backfill à la main", () => {
-    expect(actionYml).not.toContain("lancer manuellement");
-    expect(actionYml).not.toContain("node scripts/ban-backfill.mjs");
-    expect(actionYml).not.toContain("En attendant l'automatisation");
-    expect(actionYml).not.toContain("backlog P1");
-    expect(actionYml).not.toContain("à géocoder manuellement");
+  it("n'instruit PLUS de lancer le backfill à la main (texte rendu ET YAML)", () => {
+    for (const src of [all, actionYml]) {
+      expect(src).not.toContain("lancer manuellement");
+      expect(src).not.toContain("node scripts/ban-backfill.mjs");
+      expect(src).not.toContain("En attendant l'automatisation");
+      expect(src).not.toContain("backlog P1");
+      expect(src).not.toContain("à géocoder manuellement");
+    }
   });
 
-  it("cadre le résidu normal comme géocodé automatiquement (drain workflow_run)", () => {
-    expect(actionYml.toLowerCase()).toContain("automatiquement");
-    expect(actionYml).toContain("workflow_run");
-    expect(actionYml).toContain("Aucune action");
+  it("cadre le résidu normal comme géocodé automatiquement (drain workflow_run), libellé source lisible", () => {
+    expect(normal.subject).toBe(
+      "[france-data-mcp] Ameli : 1234 adresses en attente de géocodage auto",
+    );
+    expect(normal.text.toLowerCase()).toContain("automatiquement");
+    expect(normal.text).toContain("Aucune action");
+    expect(normal.issueBody).toContain("workflow_run");
+    expect(normal.issueBody).toContain("ban-backfill-ameli.yml");
+    expect(normal.issueComment).toContain("**1234**");
+    expect(normal.issueTitle).toBe(
+      "[pending-geocode] Ameli : adresses en attente de géocodage automatique",
+    );
+  });
+
+  it("mesure indisponible : message DÉGRADÉ, jamais « 0 adresses »", () => {
+    expect(degraded.subject).toContain("⚠️ mesure des adresses à géocoder indisponible");
+    expect(degraded.text).toContain("Comptage INCONNU");
+    expect(degraded.text).not.toContain("0 adresses");
+    expect(degraded.issueComment).toContain("INDISPONIBLE");
+  });
+
+  it("le YAML ne compose plus aucun texte : il transporte les outputs du script", () => {
+    expect(actionYml).not.toContain("<<__OPS_EOF__");
+    for (const key of ["subject", "text", "issue_title", "issue_body", "issue_comment"]) {
+      expect(actionYml).toContain(`steps.pending_geocode.outputs.${key}`);
+    }
   });
 });

@@ -1,6 +1,6 @@
 import "./load-env.js";
-import { appendFileSync } from "node:fs";
-import { getUntypedServiceClient, runIfMain } from "./shared.js";
+import { INGEST_SOURCE_LABEL, type IngestSource } from "../../src/storage/ingest-log.js";
+import { getUntypedServiceClient, oneLine, runIfMain, writeGithubOutput } from "./shared.js";
 
 /**
  * Alerte ops : signale quand un cron d'ingestion (RPPS / Ameli) vient de poser
@@ -30,7 +30,7 @@ type Source = (typeof SOURCES)[number];
  * + le step "Open issue on failure" du workflow) : interroger `"ameli"` ne
  * matcherait AUCUNE ligne → faux négatif silencieux (jamais d'alerte).
  */
-const DB_SOURCE: Record<Source, string> = { rpps: "rpps", ameli: "ameli_ps" };
+const DB_SOURCE: Record<Source, IngestSource> = { rpps: "rpps", ameli: "ameli_ps" };
 
 /** Sous-ensemble de `IngestLogEntry` (cf. `shared.ts`) lu pour la décision. */
 export interface IngestLogTail {
@@ -119,6 +119,53 @@ export function decidePendingNotification(row: IngestLogTail | null): NotifyDeci
   };
 }
 
+export interface PendingMessage {
+  subject: string;
+  text: string;
+  issueTitle: string;
+  issueBody: string;
+  /** Commentaire posé sur l'issue déjà ouverte (idempotence, `upsert-ops-issue`). */
+  issueComment: string;
+}
+
+/**
+ * Wording unique (email + issue), composé ici et TESTÉ — plus dans un step bash
+ * du YAML (un heredoc multi-ligne y a déjà cassé le parse de la composite, ce
+ * que le test de câblage textuel ne voyait pas). Deux registres : mesure amont
+ * indisponible = message DÉGRADÉ (surtout pas « 0 adresses », trompeur) ;
+ * résidu normal = INFORMATIF (le drain BAN auto géocode, aucune action manuelle).
+ */
+export function composePendingMessage(
+  source: Source,
+  decision: NotifyDecision,
+  runUrl: string,
+): PendingMessage {
+  const label = INGEST_SOURCE_LABEL[DB_SOURCE[source]];
+  if (decision.measurementUnavailable) {
+    const body = `Le cron ${label} a RÉUSSI mais la **mesure** du nombre d'adresses à géocoder (BAN) a échoué (RPC de mesure). Comptage INCONNU — vérifier la RPC de mesure et que le drain BAN auto a bien tourné.`;
+    return {
+      subject: `[france-data-mcp] ${label} : ⚠️ mesure des adresses à géocoder indisponible`,
+      text: `${body.replaceAll("**", "")} Run : ${runUrl}`,
+      issueTitle: `[pending-geocode] ${label} : ⚠️ mesure des adresses à géocoder indisponible`,
+      issueBody: `${body}\n\nRun : ${runUrl}`,
+      issueComment: `⚠️ Mesure des adresses ${label} à géocoder INDISPONIBLE (RPC de mesure échouée) — comptage inconnu, vérifier le cron.\n\nRun : ${runUrl}`,
+    };
+  }
+  const n = decision.pending;
+  return {
+    subject: `[france-data-mcp] ${label} : ${n} adresses en attente de géocodage auto`,
+    text: `Le cron ${label} a ingéré de nouvelles données. ${n} adresses distinctes seront géocodées AUTOMATIQUEMENT au prochain drain BAN (déclenché tout seul après ce cron). Aucune action requise. Si ce compte ne baisse pas sur plusieurs cycles, le drain auto est peut-être cassé : vérifier les workflows « Backfill BAN ». Run : ${runUrl}`,
+    issueTitle: `[pending-geocode] ${label} : adresses en attente de géocodage automatique`,
+    issueBody: [
+      `Le cron ${label} a ingéré de nouvelles données. **${n}** adresses distinctes seront géocodées **automatiquement** au prochain drain BAN (déclenché en \`workflow_run\` après ce cron — cf. \`ban-backfill-${source}.yml\`).`,
+      "✅ Aucune action manuelle requise.",
+      "Cette issue est une **trace de surveillance** : si le compte ne baisse pas sur plusieurs cycles, le drain auto est peut-être cassé — vérifier les workflows « Backfill BAN ».",
+      `Run : ${runUrl}`,
+    ].join("\n\n"),
+    issueComment: `🔄 Mise à jour : **${n}** adresses ${label} en attente de géocodage automatique (drain BAN auto à suivre).\n\nRun : ${runUrl}`,
+  };
+}
+
 async function readLatestIngestLog(source: Source): Promise<IngestLogTail | null> {
   const supabase = getUntypedServiceClient(`notify-${source}`);
   const { data, error } = await supabase
@@ -132,32 +179,6 @@ async function readLatestIngestLog(source: Source): Promise<IngestLogTail | null
     throw new Error(`lecture ingest_log (source=${source}) échouée: ${error.message}`);
   }
   return (data as IngestLogTail | null) ?? null;
-}
-
-/**
- * Écrit les paires clé=valeur dans `$GITHUB_OUTPUT` (no-op hors Actions).
- * Best-effort : un échec d'écriture est logué LOUD mais ne throw pas — la
- * panne ne doit pas masquer la décision déjà calculée (cf. M2).
- */
-function writeGithubOutput(entries: Record<string, string>): void {
-  const out = process.env.GITHUB_OUTPUT;
-  if (!out) {
-    console.warn(
-      "[notify-pending-geocode] GITHUB_OUTPUT absent — outputs non écrits (run hors GitHub Actions ?)",
-    );
-    return;
-  }
-  const payload = `${Object.entries(entries)
-    .map(([k, v]) => `${k}=${v}`)
-    .join("\n")}\n`;
-  try {
-    appendFileSync(out, payload);
-  } catch (err) {
-    console.error(
-      "[notify-pending-geocode] écriture $GITHUB_OUTPUT échouée — l'alerte downstream sera skippée:",
-      err,
-    );
-  }
 }
 
 /** Orchestration I/O best-effort — ne throw jamais (cron déjà réussi). */
@@ -180,18 +201,35 @@ export async function runNotifyCheck(source: Source): Promise<NotifyDecision> {
   const line =
     `[notify-pending-geocode][${source}] ${decision.reason} ` +
     `(pending=${decision.pending}, notify=${decision.shouldNotify})`;
-  // Mesure indisponible sur un run réussi = anomalie → LOUD, pas un log info.
+  // Mesure indisponible sur un run réussi = anomalie → annotation GitHub
+  // (page du run) AVANT l'écriture des outputs : si celle-ci échoue, la trace
+  // dégradée survit.
   if (decision.measurementUnavailable) {
     console.error(line);
+    console.log(`::warning::${oneLine(line)}`);
   } else {
     console.log(line);
   }
-  writeGithubOutput({
+  const outputs: Record<string, string> = {
     pending: String(decision.pending),
     should_notify: String(decision.shouldNotify),
     measurement_unavailable: String(decision.measurementUnavailable === true),
-    source_label: source.toUpperCase(),
-  });
+  };
+  if (decision.shouldNotify) {
+    const msg = composePendingMessage(
+      source,
+      decision,
+      process.env.GITHUB_RUN_URL ?? "(hors GitHub Actions)",
+    );
+    Object.assign(outputs, {
+      subject: msg.subject,
+      text: msg.text,
+      issue_title: msg.issueTitle,
+      issue_body: msg.issueBody,
+      issue_comment: msg.issueComment,
+    });
+  }
+  writeGithubOutput("notify-pending-geocode", outputs);
   return decision;
 }
 

@@ -5,7 +5,16 @@ vi.mock("./supabase.js", () => ({
   getUntypedAnonClient: () => ({ from: mockFrom }),
 }));
 
-import { __resetIngestLogCacheForTesting, getDataFreshness } from "./ingest-log.js";
+import {
+  REAL_INGEST_STATUSES,
+  __resetIngestLogCacheForTesting,
+  ageInDays,
+  getDataFreshness,
+  isFailedRun,
+  isServedRun,
+  lastDataChange,
+  runEndedAt,
+} from "./ingest-log.js";
 
 beforeEach(() => {
   __resetIngestLogCacheForTesting();
@@ -204,5 +213,35 @@ describe("last_data_change_at / data_age_days — post-mortem FINESS 2026-09-05"
     expect(finess?.last_success_at).not.toBeNull();
     expect(finess?.last_data_change_at).toBeNull();
     expect(finess?.data_age_days).toBeNull();
+  });
+});
+
+describe("règle « ingestion réelle » partagée (data_freshness ↔ vigie notify-ingest-anomaly)", () => {
+  it("ageInDays : jours entiers ; absent OU illisible → null (jamais Math.floor(NaN))", () => {
+    const now = Date.parse("2026-09-06T05:00:00Z");
+    expect(ageInDays("2026-09-04T06:00:00Z", now)).toBe(1);
+    expect(ageInDays(null, now)).toBeNull();
+    expect(ageInDays(undefined, now)).toBeNull();
+    expect(ageInDays("pas-une-date", now)).toBeNull();
+  });
+
+  it("lastDataChange : dernier run servi (success|partial) SANS skip_reason + skips depuis ; trie en interne", () => {
+    const rows = [
+      { started_at: "2026-09-01", status: "success", skip_reason: "same_checksum" },
+      { started_at: "2026-08-25", status: "failed", skip_reason: null },
+      { started_at: "2026-08-18", status: "partial", skip_reason: null },
+      { started_at: "2026-08-11", status: "success", skip_reason: null },
+    ];
+    expect(lastDataChange(rows)).toEqual({ row: rows[2], skipsSince: 1 });
+    // Ordre CROISSANT en entrée → même réponse (l'invariant « plus récent
+    // d'abord » ne vit plus en JSDoc : un appelant mal trié obtiendrait sinon
+    // la PLUS ANCIENNE ingestion, data_age_days faux ET alerte fantôme).
+    expect(lastDataChange([...rows].reverse())).toEqual({ row: rows[2], skipsSince: 1 });
+    expect(lastDataChange(rows.slice(0, 2))).toEqual({ row: null, skipsSince: 1 });
+    expect(REAL_INGEST_STATUSES).toEqual(["success", "partial"]);
+    expect(isServedRun({ started_at: "x", status: "failed" })).toBe(false);
+    expect(isFailedRun({ started_at: "x", status: "failed" })).toBe(true);
+    expect(runEndedAt({ started_at: "s", finished_at: null })).toBe("s");
+    expect(runEndedAt({ started_at: "s", finished_at: "f" })).toBe("f");
   });
 });

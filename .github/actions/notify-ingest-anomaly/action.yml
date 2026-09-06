@@ -1,0 +1,102 @@
+# Composite action — vigie « run vert mais donnée malade » (issue + email).
+#
+# Deux anomalies qu'un cron en code 0 ne signale à personne (prouvées prod,
+# post-mortem FINESS 2026-09-05) : un run `partial` (swap fait, canary ou
+# matview en échec — invisible quatre mois) et une source TARIE (skips
+# `same_checksum` en `success` au-delà de la cadence attendue — le CSV DREES
+# mort le 2026-07-20, vu en septembre). La décision ET le wording vivent dans
+# `scripts/ingest/notify-ingest-anomaly.ts` (règle d'âge = celle de
+# `data_freshness`, mêmes fonctions) ; ce YAML ne fait que transporter les
+# outputs vers les deux émetteurs uniques (`upsert-ops-issue`, `send-ops-email`).
+#
+# Ordre issue → email, à dessein : une source gelée le reste plusieurs crons.
+# L'issue est idempotente (clé = source + types d'anomalie, donc une escalade
+# `stale` → `partial+stale` en ouvre une nouvelle) ; l'email part à l'OUVERTURE
+# ou si le canal issue a ÉCHOUÉ (`outcome != 'commented'`) — jamais sur un
+# simple commentaire. Un mail par cron serait la fatigue d'alerte que la vigie
+# existe pour éviter ; un canal issue en panne qui éteindrait aussi l'email
+# serait le silence complet qu'elle existe pour tuer.
+#
+# Best-effort de bout en bout : tourne APRÈS une ingestion déjà réussie, ne
+# doit JAMAIS re-marquer le cron en échec. Le script ne throw pas (exit 0) et
+# un crash HORS du script (tsx, OOM) est annoté `::error::` par le `||` ; les
+# deux émetteurs avalent leurs échecs en warning. Le call-site ajoute
+# `continue-on-error: true` (pas de `continue-on-error` par-step dans une
+# composite — limitation GitHub).
+name: Notify ingest anomaly
+description: >
+  Alerte (issue GitHub idempotente + email Resend à l'ouverture) quand un cron
+  d'ingestion RÉUSSI est `partial` ou quand sa source n'a pas changé depuis
+  plus longtemps que sa cadence attendue.
+
+inputs:
+  source:
+    description: "Valeur `ingest_log.source` du script : finess | ameli_ps | rpps | cds | iris."
+    required: true
+  supabase-url:
+    description: "URL du projet Supabase."
+    required: true
+  supabase-service-role-key:
+    description: "Clé service_role (lecture ingest_log)."
+    required: true
+  resend-api-key:
+    description: "Clé API Resend. Vide → email skippé avec ::warning:: (l'issue reste créée)."
+    required: false
+    default: ""
+  email-to:
+    description: "Destinataire de l'alerte mail."
+    required: false
+    default: "cturkieh@gmail.com"
+  email-from:
+    description: "Expéditeur (domaine vérifié Resend, sinon onboarding@resend.dev)."
+    required: false
+    default: "France Data MCP <onboarding@resend.dev>"
+  github-token:
+    description: "Token pour créer/commenter l'issue."
+    required: true
+  run-url:
+    description: "URL du run GitHub Actions (traçabilité)."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check ingest anomaly
+      id: anomaly
+      shell: bash
+      env:
+        SUPABASE_URL: ${{ inputs.supabase-url }}
+        SUPABASE_SERVICE_ROLE_KEY: ${{ inputs.supabase-service-role-key }}
+        GITHUB_RUN_URL: ${{ inputs.run-url }}
+        # Input passé via env (jamais interpolé dans le shell = anti-injection).
+        SOURCE: ${{ inputs.source }}
+      # Le filet TS couvre les exceptions DANS le script ; un crash avant
+      # (tsx, OOM) laisserait `should_notify` vide et le step rouge avalé par
+      # `continue-on-error` → on annote pour que la page du run le dise.
+      run: pnpm notify:ingest-anomaly "$SOURCE" || echo "::error::vigie notify-ingest-anomaly ($SOURCE) CRASHÉE avant d'écrire sa décision — aucune alerte pour ce run"
+
+    - name: Issue — anomalie d'ingestion
+      id: issue
+      if: steps.anomaly.outputs.should_notify == 'true'
+      uses: ./.github/actions/upsert-ops-issue
+      with:
+        labels: ${{ steps.anomaly.outputs.issue_labels }}
+        title: ${{ steps.anomaly.outputs.issue_title }}
+        body: ${{ steps.anomaly.outputs.issue_body }}
+        comment: "🔄 Anomalie toujours présente.\n\n${{ steps.anomaly.outputs.issue_body }}"
+        github-token: ${{ inputs.github-token }}
+        run-url: ${{ inputs.run-url }}
+
+    # `always() &&` : un échec du step issue ne doit PAS supprimer l'email.
+    # `outcome != 'commented'` : seul un commentaire (issue déjà ouverte, alerte
+    # déjà portée) supprime le mail ; `created`, `failed` ou vide (step mort)
+    # → l'email prend le relais.
+    - name: Email — anomalie d'ingestion
+      if: always() && steps.anomaly.outputs.should_notify == 'true' && steps.issue.outputs.outcome != 'commented'
+      uses: ./.github/actions/send-ops-email
+      with:
+        resend-api-key: ${{ inputs.resend-api-key }}
+        email-to: ${{ inputs.email-to }}
+        email-from: ${{ inputs.email-from }}
+        subject: ${{ steps.anomaly.outputs.subject }}
+        text: ${{ steps.anomaly.outputs.text }}
