@@ -89,6 +89,11 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Changed
 
+- **`MIN_GEOM_COVERAGE` 0,93 → 0,95** sur la baseline du premier run réel avec
+  pose BAN (2026-09-06, run #34023554047 : 97,57 %, 2 720 points posés, swap
+  fait). À 0,93 la perte TOTALE de la pose (retour à 94,97 %) passait en
+  `success` ; le seuil est désormais baseline − 2,5 points. Fixtures de test
+  alignées sur l'état post-pose ; seuil sur mesure, jamais par extrapolation.
 - **Libellés de catégorie FINESS : source unique SMT/ANS** (backlog FINESS
   phase 2, item 7 — décision produit). La lib (`FINESS_CATEGORIES`,
   `libelleCategorieFiness`) dérive désormais ses libellés du même module que
