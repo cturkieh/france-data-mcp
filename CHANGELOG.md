@@ -4,6 +4,44 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+### Fixed
+
+- **Vigie « run vert mais donnée malade » : fermeture automatique des issues
+  `ingest-anomaly`** (post-mortem 2026-09-07 : les issues #82 Ameli et #83 CDS
+  « source tarie » — publication CNAM gelée depuis le 2026-08-17, vérifié sur
+  data.gouv — n'avaient AUCUN chemin de fermeture, seul le drain BAN fermait
+  les siennes ; le corps de l'issue disait « se ferme à la main »). Le script
+  `notify-ingest-anomaly` distingue désormais une décision **prouvée saine**
+  (`healthy: true` : une ligne lue, âge dans la cadence, pas de `partial`) de
+  l'absence de preuve (aucune ligne, lecture impossible → `healthy: false`,
+  jamais de fermeture sur une vigie aveugle) et expose `should_close` +
+  `close_labels` + `close_comment` ; la composite ferme via l'émetteur unique
+  `upsert-ops-issue` (action `close`) avec la clé `ingest-anomaly,<source>`
+  SANS type — un run sain résout `stale`, `partial` et l'escalade
+  `partial+stale` d'un coup (sous-ensemble strict des labels d'ouverture,
+  testé). `should_close` et `should_notify` sont exclusifs par construction
+  (union discriminée à littéraux, pas de `boolean`). **« Sain » est une preuve
+  positive** (revue altitude, test rouge d'abord) : un court-circuit
+  `same_checksum` écrit `success` sans re-tester swap, matview ni canary, donc
+  un skip après un run `partial`, ou une tête `failed`, n'est PAS sain et ne
+  ferme rien — sinon la vigie aurait refermé son propre signal `partial` au
+  premier skip avec un « ✅ résolu » mensonger. Contrôle aval du step de
+  fermeture (`id: close` + `::warning::` si `outcome` ∉ closed|absent), même
+  garde que le drain BAN (run #33960886473). Deux trous fermés par la revue
+  silent-failure (tests rouges d'abord) : un run **forcé** (`FORCE_REINGEST`)
+  sur un fichier amont identique compte comme ingestion réelle (règle
+  `data_freshness` intacte) mais n'est PAS sain (sha comparé à l'ingestion
+  réelle précédente — le forçage FINESS post-merge du 2026-09-06 aurait fermé
+  une issue « source tarie ») ; une ligne de tête venue d'un **autre run**
+  (audit de ce run perdu) alerte encore mais ne ferme jamais. Un run « sans
+  anomalie mais non prouvé sain » sort en `::warning::` (état qui peut durer
+  des mois sur une source gelée).
+  Aucun changement de wording des alertes ; le corps de l'issue annonce la
+  fermeture automatique. Preuve attendue : les issues #82/#83 se fermeront
+  seules au premier cron Ameli/CDS servant un fichier CNAM renouvelé.
+
 ## [0.30.0] — 2026-09-06 — FINESS phase 2 clôturée : colonnes dédiées + `geo_precision` par résultat + SIRET ANS dans le resolver, drain BAN factorisé avec fermeture automatique des issues, lookups FINESS ×3 000 plus rapides
 
 > Surface MCP : 13 référentiels / 36 outils ; `FinessResult` gagne `geo_precision` et `siret_ans` ; l'étiquette `lambert93_natif_finess` devient `point_etablissement_finess` (contrat de métadonnées, d'où la version mineure). Trois migrations appliquées en prod (`20260906T160000`, `T170000`, `T180000`). **Run FINESS forcé post-merge (run #34037843003, 2 min) : success, 0 point déplacé, provenances identiques (78 243 / 21 222 / 2 720 / 2 549 sans point), `raw` vide sur 104 734 lignes, couverture 97,57 %, aucun warning.** Preuves MCP prod : `etablissement_by_finess` sert `geo_precision: "adresse"` + `siret_ans`, un établissement sans point n'a pas de `geo_precision`, `verifier_site_actif` sur un EGE sans SIRET RPPS ressort `method: finess_ans` avec un SIRET actif confirmé DINUM. PR #80 et #81, revues `/review-fix` complètes.

@@ -9,6 +9,10 @@
 # `data_freshness`, mêmes fonctions) ; ce YAML ne fait que transporter les
 # outputs vers les deux émetteurs uniques (`upsert-ops-issue`, `send-ops-email`).
 #
+# Arbitrage assumé de la fermeture auto : une anomalie résolue qui RÉCIDIVE
+# rouvre une issue et renvoie un mail — nouveau signal, pas la fatigue d'une
+# alerte continue (le cas prouvé, canary FINESS 05→09/2026, était continu).
+#
 # Ordre issue → email, à dessein : une source gelée le reste plusieurs crons.
 # L'issue est idempotente (clé = source + types d'anomalie, donc une escalade
 # `stale` → `partial+stale` en ouvre une nouvelle) ; l'email part à l'OUVERTURE
@@ -16,6 +20,14 @@
 # simple commentaire. Un mail par cron serait la fatigue d'alerte que la vigie
 # existe pour éviter ; un canal issue en panne qui éteindrait aussi l'email
 # serait le silence complet qu'elle existe pour tuer.
+#
+# FERMETURE (2026-09-07) : un run PROUVÉ sain (`should_close`, posé par le
+# script uniquement quand : ligne de CE run lue, donnée dans la cadence, tête
+# servie, dernier run réel non `partial`, et pas un run FORCÉ sur un fichier
+# identique masquant une source tarie) ferme les issues `ingest-anomaly,<source>` ouvertes via `upsert-ops-issue`
+# (action: close) — même émetteur unique, même sémantique de labels que le drain
+# BAN pour `pending-geocode`. Sans ce sens, #82 (Ameli) et #83 (CDS) « source
+# tarie » restaient ouvertes à vie une fois la publication CNAM relancée.
 #
 # Best-effort de bout en bout : tourne APRÈS une ingestion déjà réussie, ne
 # doit JAMAIS re-marquer le cron en échec. Le script ne throw pas (exit 0) et
@@ -27,7 +39,7 @@ name: Notify ingest anomaly
 description: >
   Alerte (issue GitHub idempotente + email Resend à l'ouverture) quand un cron
   d'ingestion RÉUSSI est `partial` ou quand sa source n'a pas changé depuis
-  plus longtemps que sa cadence attendue.
+  plus longtemps que sa cadence attendue ; ferme ces issues au premier run sain.
 
 inputs:
   source:
@@ -100,3 +112,38 @@ runs:
         email-from: ${{ inputs.email-from }}
         subject: ${{ steps.anomaly.outputs.subject }}
         text: ${{ steps.anomaly.outputs.text }}
+
+    # Sens inverse : run PROUVÉ sain → fermeture des issues encore ouvertes
+    # (clé SANS type, cf. `anomalyIssueLabels` dans le script). Cas nominal :
+    # `absent` (rien d'ouvert), silencieux.
+    # `always()` : tout step amont ajouté un jour et capable d'échouer skipperait
+    # sinon la fermeture — et le Warn avec elle (même garde que lui).
+    - name: Close — anomalie résolue
+      id: close
+      if: always() && steps.anomaly.outputs.should_close == 'true'
+      uses: ./.github/actions/upsert-ops-issue
+      with:
+        action: close
+        labels: ${{ steps.anomaly.outputs.close_labels }}
+        comment: ${{ steps.anomaly.outputs.close_comment }}
+        github-token: ${{ inputs.github-token }}
+        run-url: ${{ inputs.run-url }}
+
+    # Même contrôle aval que le drain BAN (panne prouvée du run #33960886473) :
+    # le `continue-on-error` du call-site avale un échec de CHARGEMENT de
+    # l'action locale, et la composite ne throw jamais — sans ce step, une
+    # fermeture jamais faite serait TOTALEMENT silencieuse.
+    # Gardé sur `should_close` (même signal que le step Close) et non sur
+    # `steps.close.conclusion != 'skipped'` : la valeur pour un step SKIPPÉ dans
+    # une composite n'est pas prouvée — un Warn à chaque run sain serait du bruit.
+    - name: Warn if anomaly issue closure did not happen
+      if: always() && steps.anomaly.outputs.should_close == 'true'
+      shell: bash
+      env:
+        STEP_OUTCOME: ${{ steps.close.outcome }}
+        ISSUE_OUTCOME: ${{ steps.close.outputs.outcome }}
+      run: |
+        case "$ISSUE_OUTCOME" in
+          closed|absent) echo "Fermeture ingest-anomaly : $ISSUE_OUTCOME" ;;
+          *) echo "::warning::Fermeture ingest-anomaly NON confirmée (step=$STEP_OUTCOME, outcome='$ISSUE_OUTCOME') — l'issue reste ouverte, reprise au prochain run sain. Un outcome VIDE signifie que la composite a échoué au CHARGEMENT." ;;
+        esac

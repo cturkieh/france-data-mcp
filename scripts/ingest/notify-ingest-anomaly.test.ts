@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 import { INGEST_CADENCE, INGEST_SOURCES } from "../../src/storage/ingest-log.js";
 import {
   type AnomalyLogRow,
+  type HealthyDecision,
+  INGEST_ANOMALY_LABEL,
   type NotifiableDecision,
+  anomalyOutputs,
   composeAnomalyMessage,
+  composeResolutionMessage,
   decideAnomalyNotification,
+  headIsForeign,
   parseSourceArg,
 } from "./notify-ingest-anomaly.js";
 import { CANARY_RPC_ERROR } from "./shared.js";
@@ -26,11 +31,17 @@ const notifiable = (d: ReturnType<typeof decideAnomalyNotification>): Notifiable
   if (!d.shouldNotify) throw new Error("décision saine");
   return d;
 };
+const healthy = (d: ReturnType<typeof decideAnomalyNotification>): HealthyDecision => {
+  if (!d.healthy) throw new Error("décision non prouvée saine");
+  return d;
+};
 
 describe("decideAnomalyNotification — run sain", () => {
   it("dernière ingestion réelle dans la cadence → pas d'alerte", () => {
     const d = decideAnomalyNotification("ameli_ps", [row({ started_at: daysAgo(2) })], NOW);
     expect(d.shouldNotify).toBe(false);
+    // PROUVÉ sain (une ligne lue, dans la cadence) → autorise la fermeture auto.
+    expect(d.healthy).toBe(true);
     expect(d.anomalies).toEqual([]);
     expect(d.dataAgeDays).toBe(2);
     expect(d.expectedMaxAgeDays).toBe(INGEST_CADENCE.ameli_ps.maxAgeDays);
@@ -51,7 +62,10 @@ describe("decideAnomalyNotification — run sain", () => {
   });
 
   it("aucune ligne → pas d'alerte ; ordre d'entrée indifférent (trié en interne)", () => {
-    expect(decideAnomalyNotification("rpps", [], NOW).shouldNotify).toBe(false);
+    const empty = decideAnomalyNotification("rpps", [], NOW);
+    expect(empty.shouldNotify).toBe(false);
+    // Aucune preuve ≠ sain : une vigie aveugle ne doit JAMAIS fermer une issue ouverte.
+    expect(empty.healthy).toBe(false);
     const rows = [row({ started_at: daysAgo(60) }), row({ started_at: daysAgo(1) })]; // croissant
     expect(decideAnomalyNotification("rpps", rows, NOW).dataAgeDays).toBe(1);
   });
@@ -84,6 +98,7 @@ describe("decideAnomalyNotification — source tarie (post-mortem DREES 2026)", 
     ];
     const d = decideAnomalyNotification("finess", rows, NOW);
     expect(kinds(d)).toEqual(["stale"]);
+    expect(d.healthy).toBe(false); // à notifier ⇒ jamais « prouvé sain » (pas de fermeture)
     expect(d.dataAgeDays).toBe(114);
     expect(d.skipsSinceLastRealIngest).toBe(7);
     expect(detail(d)).toMatch(/114 jours/);
@@ -217,6 +232,193 @@ describe("decideAnomalyNotification — run partial", () => {
     );
     expect(kinds(d)).toEqual(["partial", "stale"]);
     expect(d.anomalies.map((a) => a.detail.slice(0, 11))).toEqual(["Run PARTIAL", "Source tari"]);
+  });
+});
+
+describe("decideAnomalyNotification — `healthy` est une PREUVE positive, pas l'absence d'alerte (revue altitude 2026-09-07)", () => {
+  it("partial au dernier run RÉEL + skip same_checksum en tête → pas d'alerte (rien re-testé) mais PAS sain : l'issue partial reste ouverte", () => {
+    // Un court-circuit écrit `success` + skip_reason sans re-vérifier swap,
+    // matview ni canary : fermer l'issue `partial` sur ce run serait un
+    // « ✅ résolu » mensonger — la classe de bug que la vigie existe pour tuer.
+    const d = decideAnomalyNotification(
+      "ameli_ps",
+      [
+        row({ started_at: daysAgo(0), skip_reason: "same_checksum" }),
+        row({ started_at: daysAgo(7), status: "partial", canary_failures: ["130786049"] }),
+      ],
+      NOW,
+    );
+    expect(d.shouldNotify).toBe(false);
+    expect(d.healthy).toBe(false);
+    expect(d.reason).toMatch(/non prouvé sain/i);
+  });
+
+  it("failed en tête sur une donnée fraîche → pas d'alerte (step d'échec dédié) mais PAS sain", () => {
+    const d = decideAnomalyNotification(
+      "rpps",
+      [row({ started_at: daysAgo(0), status: "failed" }), row({ started_at: daysAgo(3) })],
+      NOW,
+    );
+    expect(d.shouldNotify).toBe(false);
+    expect(d.healthy).toBe(false);
+  });
+
+  it("run FORCÉ (FORCE_REINGEST) sur un fichier amont IDENTIQUE → compte comme ingestion réelle (règle data_freshness) mais PAS sain : l'issue stale reste ouverte", () => {
+    // `shortCircuitIfSameChecksum(force=true)` ré-ingère le même fichier avec
+    // skip_reason NULL : l'âge retombe à 0 sans que la source ait rien publié.
+    const d = decideAnomalyNotification(
+      "finess",
+      [
+        row({ started_at: daysAgo(0), forced: true, csv_sha256: "abc" }),
+        ...[16, 31].map((n) => row({ started_at: daysAgo(n), skip_reason: "same_checksum" })),
+        row({ started_at: daysAgo(46), csv_sha256: "abc" }),
+      ],
+      NOW,
+    );
+    expect(d.shouldNotify).toBe(false);
+    expect(d.healthy).toBe(false);
+    expect(d.reason).toMatch(/forcée.*identique/i);
+  });
+
+  it("run FORCÉ sur un fichier identique mais fraîchement republié (3 forçages FINESS du 2026-09-06) → prouvé sain, pas de bruit", () => {
+    const d = decideAnomalyNotification(
+      "finess",
+      [
+        row({ started_at: daysAgo(0), forced: true, csv_sha256: "29e2" }),
+        row({ started_at: daysAgo(0), forced: true, csv_sha256: "29e2" }),
+        row({ started_at: daysAgo(1), forced: true, csv_sha256: "4ed9" }),
+      ],
+      NOW,
+    );
+    expect(d.healthy).toBe(true);
+  });
+
+  it("run FORCÉ sur un fichier amont DIFFÉRENT (republication) → prouvé sain", () => {
+    const d = decideAnomalyNotification(
+      "finess",
+      [
+        row({ started_at: daysAgo(0), forced: true, csv_sha256: "new" }),
+        row({ started_at: daysAgo(46), csv_sha256: "abc" }),
+      ],
+      NOW,
+    );
+    expect(d.healthy).toBe(true);
+  });
+
+  it("ligne de tête venue d'un AUTRE run (audit de ce run perdu) → la preuve n'est pas la nôtre : pas de fermeture", () => {
+    const rows = [row({ started_at: daysAgo(0), github_run_url: "https://run/prev" })];
+    expect(headIsForeign(rows, "https://run/prev")).toBe(false);
+    expect(headIsForeign(rows, "https://run/mine")).toBe(true);
+    // Hors Actions (pas d'URL) ou ligne sans URL : indécidable → pas étranger.
+    expect(headIsForeign(rows, undefined)).toBe(false);
+    expect(headIsForeign([row({ started_at: daysAgo(0) })], "https://run/mine")).toBe(false);
+    expect(headIsForeign([], "https://run/mine")).toBe(false);
+  });
+
+  it("ingestion réelle fraîche en tête après un partial ancien → prouvé sain : la fermeture est légitime", () => {
+    const d = decideAnomalyNotification(
+      "ameli_ps",
+      [row({ started_at: daysAgo(0) }), row({ started_at: daysAgo(7), status: "partial" })],
+      NOW,
+    );
+    expect(d.shouldNotify).toBe(false);
+    expect(d.healthy).toBe(true);
+  });
+});
+
+describe("anomalyOutputs — contrat $GITHUB_OUTPUT lu par la composite (côté PRODUCTEUR)", () => {
+  const RUN = "https://run/9";
+  const stale = decideAnomalyNotification("cds", [row({ started_at: daysAgo(21) })], NOW);
+  const sane = decideAnomalyNotification("cds", [row({ started_at: daysAgo(2) })], NOW);
+  const blind = decideAnomalyNotification("cds", [], NOW);
+  const unproven = decideAnomalyNotification(
+    "cds",
+    [
+      row({ started_at: daysAgo(0), skip_reason: "same_checksum" }),
+      row({ started_at: daysAgo(7), status: "partial" }),
+    ],
+    NOW,
+  );
+
+  it("les trois classes de décision → trois formes ; should_notify et should_close JAMAIS vrais ensemble", () => {
+    for (const d of [stale, sane, blind, unproven]) {
+      // Le type rend déjà le double `true` non représentable (TS2367 si comparé
+      // directement) ; on le re-vérifie au runtime, hors typage, par précaution.
+      const o: Record<string, string> = anomalyOutputs("cds", d, RUN);
+      expect(o.should_notify === "true" && o.should_close === "true").toBe(false);
+    }
+    expect(anomalyOutputs("cds", stale, RUN)).toMatchObject({
+      should_notify: "true",
+      should_close: "false",
+    });
+    expect(anomalyOutputs("cds", sane, RUN)).toMatchObject({
+      should_notify: "false",
+      should_close: "true",
+    });
+    expect(anomalyOutputs("cds", blind, RUN)).toEqual({
+      should_notify: "false",
+      should_close: "false",
+    });
+    expect(anomalyOutputs("cds", unproven, RUN)).toEqual({
+      should_notify: "false",
+      should_close: "false",
+    });
+    // Preuve ÉTRANGÈRE : alerter oui, fermer jamais.
+    expect(anomalyOutputs("cds", sane, RUN, true)).toEqual({
+      should_notify: "false",
+      should_close: "false",
+    });
+    expect(anomalyOutputs("cds", stale, RUN, true)).toMatchObject({ should_notify: "true" });
+  });
+
+  it("clés écrites = clés lues par la composite (un renommage côté TS rendrait la fermeture muette)", () => {
+    const notify = anomalyOutputs("cds", stale, RUN);
+    const close = anomalyOutputs("cds", sane, RUN);
+    expect(Object.keys(notify).sort()).toEqual([
+      "issue_body",
+      "issue_labels",
+      "issue_title",
+      "should_close",
+      "should_notify",
+      "subject",
+      "text",
+    ]);
+    expect(Object.keys(close).sort()).toEqual([
+      "close_comment",
+      "close_labels",
+      "should_close",
+      "should_notify",
+    ]);
+    if (close.should_close !== "true") throw new Error("attendu should_close");
+    expect(close.close_labels).toBe(`${INGEST_ANOMALY_LABEL},cds`);
+    expect(close.close_comment).toContain(RUN);
+  });
+});
+
+describe("composeResolutionMessage — fermeture automatique au premier run sain (#82/#83, 2026-09-07)", () => {
+  it("clé de fermeture = ingest-anomaly,<slug> SANS type : un run sain résout stale, partial et l'escalade partial+stale", () => {
+    const d = healthy(
+      decideAnomalyNotification("ameli_ps", [row({ started_at: daysAgo(2) })], NOW),
+    );
+    const done = composeResolutionMessage("ameli_ps", d, "https://run/1");
+    expect(done.closeLabels).toBe(`${INGEST_ANOMALY_LABEL},ameli`);
+    // Sous-ensemble strict des labels posés à l'ouverture (sémantique ET de l'API GitHub).
+    const opened = composeAnomalyMessage(
+      "ameli_ps",
+      notifiable(decideAnomalyNotification("ameli_ps", [row({ started_at: daysAgo(30) })], NOW)),
+      "https://run/0",
+    );
+    for (const l of done.closeLabels.split(",")) expect(opened.issueLabels.split(",")).toContain(l);
+    // Pour TOUTES les sources : un slug hors [a-z0-9-] (espace, virgule) ferait un
+    // filtre qui ne matche rien → `absent` nominal → issue ouverte à vie en silence.
+    for (const source of INGEST_SOURCES) {
+      const labels = composeResolutionMessage(source, d, "https://run/1").closeLabels.split(",");
+      expect(labels).toHaveLength(2);
+      for (const l of labels) expect(l).toMatch(/^[a-z0-9-]+$/);
+    }
+    expect(done.closeComment).toContain("ameli_ps");
+    expect(done.closeComment).toContain("run sain");
+    expect(done.closeComment).toContain("https://run/1");
   });
 });
 
