@@ -546,17 +546,69 @@ describe("vigie « run vert mais donnée malade » — notify-ingest-anomaly sur
     // Le wording ET la clé d'idempotence viennent du script (TS testé).
     for (const key of [
       "should_notify",
+      "should_close",
       "subject",
       "text",
       "issue_title",
       "issue_body",
       "issue_labels",
+      "close_labels",
+      "close_comment",
     ]) {
       expect(action, `output ${key} non consommé`).toContain(`steps.anomaly.outputs.${key}`);
     }
     expect(action).not.toContain("<<__OPS_EOF__");
     // Crash HORS du script (tsx, OOM) → annotation, pas un step rouge avalé.
     expect(action).toMatch(/run: pnpm notify:ingest-anomaly "\$SOURCE" \|\| echo "::error::/);
+  });
+
+  it("parité PRODUCTEUR ↔ CONSOMMATEUR : toute clé `steps.anomaly.outputs.<k>` lue par le YAML est écrite par le script", () => {
+    // Un renommage côté TS laisserait le YAML vert et `should_close` vide →
+    // step Close skippé, step Warn skippé : silence total (doctrine
+    // `close-ops-issue.cjs` : jamais vérifiable par la seule assertion textuelle).
+    const action = mustGet(actions, "notify-ingest-anomaly");
+    const script = readFileSync(
+      join(githubDir, "../scripts/ingest/notify-ingest-anomaly.ts"),
+      "utf8",
+    );
+    const read = new Set([...action.matchAll(/steps\.anomaly\.outputs\.(\w+)/g)].map((m) => m[1]));
+    expect(read.size).toBeGreaterThanOrEqual(9);
+    for (const key of read) {
+      expect(script, `clé ${key} lue par le YAML, jamais écrite par le script`).toMatch(
+        new RegExp(`^\\s+(readonly )?${key}:`, "m"),
+      );
+    }
+  });
+
+  it("composite : sens inverse — run PROUVÉ sain → fermeture via l'émetteur unique (action: close), clé venue du script", () => {
+    // #82 (Ameli) et #83 (CDS) « source tarie » n'avaient aucun chemin de
+    // fermeture (seul le drain BAN fermait les siennes, `pending-geocode`).
+    const action = mustGet(actions, "notify-ingest-anomaly");
+    const CLOSE_ANOMALY_STEP = "Close — anomalie résolue";
+    const block = stepBlock(action, CLOSE_ANOMALY_STEP);
+    expect(block, "step de fermeture introuvable").not.toBeNull();
+    expect(block).toContain(`uses: ${UPSERT_ISSUE}`);
+    expect(block).toMatch(/^\s+action: close$/m);
+    // Labels JAMAIS composés en YAML : ils viennent du script TS testé.
+    expect(block).toMatch(/^\s+labels: \$\{\{ steps\.anomaly\.outputs\.close_labels \}\}$/m);
+    expect(block).toContain("steps.anomaly.outputs.close_comment");
+    expect(stepIfCondition(action, CLOSE_ANOMALY_STEP)).toBe(
+      "always() && steps.anomaly.outputs.should_close == 'true'",
+    );
+    // Même contrôle aval que le drain (run #33960886473) : une fermeture non
+    // faite (API en panne, action locale non chargée) est ANNONCÉE, jamais muette.
+    expect(block).toMatch(/^\s+id: close$/m);
+    const WARN_STEP = "Warn if anomaly issue closure did not happen";
+    const warn = stepBlock(action, WARN_STEP);
+    expect(warn, "step de contrôle de la fermeture introuvable").not.toBeNull();
+    // Gardé sur `should_close` (et `always()`), PAS sur `steps.close.conclusion
+    // != 'skipped'` : la valeur d'un step composite skippé n'est pas prouvée,
+    // un Warn à chaque run sain serait un « NON confirmée » mensonger.
+    const warnIf = stepIfCondition(action, WARN_STEP) ?? "";
+    expect(warnIf).toMatch(/^always\(\) &&/);
+    expect(warnIf).toContain("steps.anomaly.outputs.should_close == 'true'");
+    expect(warn).toContain("steps.close.outputs.outcome");
+    expect(warn).toContain("::warning::");
   });
 
   it("package.json expose notify:ingest-anomaly, consommé par la composite", () => {

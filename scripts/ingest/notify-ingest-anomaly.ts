@@ -6,7 +6,7 @@ import {
   INGEST_SOURCE_LABEL,
   type IngestSource,
   ageInDays,
-  isFailedRun,
+  isServedRun,
   lastDataChange,
   runEndedAt,
   sortNewestFirst,
@@ -46,6 +46,14 @@ import {
  * des semaines : un mail par cron serait la fatigue d'alerte que la vigie
  * existe pour éviter).
  *
+ * SENS INVERSE (2026-09-07, issues #82/#83 restées sans chemin de fermeture) :
+ * un run PROUVÉ sain (`healthy: true`) expose `should_close` + la clé
+ * `ingest-anomaly,<slug>` SANS type → la composite ferme via `upsert-ops-issue`.
+ * « Sain » est une preuve positive (tête servie, dernier run réel non `partial`),
+ * pas l'absence d'alerte : un skip `same_checksum` ne re-teste rien. Arbitrage
+ * assumé : une anomalie résolue qui RÉCIDIVE rouvre une issue et renvoie un
+ * mail — c'est un nouveau signal, pas la fatigue d'une alerte continue.
+ *
  * **Best-effort par design** : tourne APRÈS un cron réussi. Une lecture DB
  * qui échoue ne doit JAMAIS re-marquer le cron en échec → annotation
  * `::error::` (visible sur la page du run, pas seulement dans le log),
@@ -60,6 +68,10 @@ export interface AnomalyLogRow extends FreshnessRowLike {
   canary_failures?: (string | null)[] | null;
   error_message?: string | null;
   github_run_url?: string | null;
+  /** Run `FORCE_REINGEST` : ré-ingestion complète même à fichier identique (skip_reason NULL). */
+  forced?: boolean | null;
+  /** Empreinte du fichier amont — permet de voir qu'un run forcé n'a rien de neuf. */
+  csv_sha256?: string | null;
 }
 
 /** Une anomalie = son type ET son wording, appariés par construction. */
@@ -78,17 +90,37 @@ interface DecisionBase {
   readonly skipsSinceLastRealIngest: number;
 }
 
-/** Discriminée : une décision « à notifier » porte AU MOINS une anomalie, une décision saine aucune. */
+/** Décision sans alerte : aucune anomalie. */
+type SilentDecision = DecisionBase & {
+  readonly shouldNotify: false;
+  readonly anomalies: readonly [];
+};
+
+/**
+ * Discriminée sur DEUX axes. `shouldNotify` : à notifier (au moins une
+ * anomalie) ou non. `healthy` distingue, PARMI les décisions sans alerte, le run
+ * PROUVÉ sain (une ligne lue, âge dans la cadence, pas de `partial`) de
+ * l'absence de preuve (aucune ligne, lecture impossible) : seule la première
+ * autorise la FERMETURE des issues `ingest-anomaly` ouvertes — fermer sur une
+ * vigie aveugle serait un faux « résolu ». Littéraux (pas `boolean`) pour que
+ * `if (decision.healthy)` narrow seul, sans copie ni intersection.
+ */
 export type AnomalyDecision =
-  | (DecisionBase & { readonly shouldNotify: false; readonly anomalies: readonly [] })
+  | (SilentDecision & { readonly healthy: true })
+  | (SilentDecision & { readonly healthy: false })
   | (DecisionBase & {
       readonly shouldNotify: true;
+      readonly healthy: false;
       readonly anomalies: readonly [Anomaly, ...Anomaly[]];
     });
 export type NotifiableDecision = Extract<AnomalyDecision, { shouldNotify: true }>;
+export type HealthyDecision = Extract<AnomalyDecision, { healthy: true }>;
+type UnprovenDecision = Extract<AnomalyDecision, { shouldNotify: false; healthy: false }>;
 
-const noAnomaly = (source: IngestSource, reason: string): AnomalyDecision => ({
+/** Aucune preuve (aucune ligne, lecture impossible) : ni alerte ni fermeture. */
+const unprovenDecision = (source: IngestSource, reason: string): UnprovenDecision => ({
   shouldNotify: false,
+  healthy: false,
   anomalies: [],
   reason,
   dataAgeDays: null,
@@ -109,12 +141,12 @@ export function decideAnomalyNotification(
   const expectedMaxAgeDays = INGEST_CADENCE[source].maxAgeDays;
   const sorted = sortNewestFirst(rows);
   const latest = sorted[0];
-  if (!latest) return noAnomaly(source, "aucune ligne ingest_log trouvée");
+  if (!latest) return unprovenDecision(source, "aucune ligne ingest_log trouvée");
 
   const anomalies: Anomaly[] = [];
 
   // 1. `partial` sur le run le plus récent.
-  if (!isFailedRun(latest) && latest.status === "partial") {
+  if (isServedRun(latest) && latest.status === "partial") {
     const rawCanary = latest.canary_failures;
     const canary = Array.isArray(rawCanary)
       ? rawCanary.filter((v): v is string => typeof v === "string")
@@ -169,10 +201,49 @@ export function decideAnomalyNotification(
   };
   const [first, ...rest] = anomalies;
   if (first === undefined) {
+    // « Sain » est une PREUVE positive, pas l'absence d'alerte : un court-circuit
+    // `same_checksum` écrit `success` sans re-tester swap, matview ni canary, et
+    // la branche `partial` ci-dessus ne lit que la tête. Sans ce garde, un skip
+    // après un run `partial` fermerait l'issue `partial` avec un « ✅ résolu »
+    // mensonger (revue altitude 2026-09-07). Idem une tête `failed` : le step
+    // d'échec dédié alerte, mais rien n'est prouvé sain.
+    // Liste BLANCHE (`isServedRun`, statuts sous lesquels la prod a swappé) et
+    // non liste noire `failed` : `ingest_log.status` est un VARCHAR sans CHECK,
+    // un statut inconnu en tête ne doit jamais valoir « prouvé sain ».
+    // Un run FORCÉ ré-ingère le MÊME fichier avec skip_reason NULL : il compte
+    // comme ingestion réelle (règle `data_freshness`, intacte) mais ne prouve
+    // pas que la source a republié — comparer son sha à l'ingestion réelle
+    // précédente (revue silent-failure 2026-09-07 ; le forçage FINESS post-merge
+    // du 2026-09-06 aurait fermé une issue « source tarie » avec un « ✅ »).
+    const previousReal = lastChange
+      ? sorted
+          .slice(sorted.indexOf(lastChange) + 1)
+          .find((r) => isServedRun(r) && r.skip_reason == null)
+      : undefined;
+    // …et seulement si cette ingestion précédente est ELLE-MÊME hors cadence :
+    // un forçage sur une source fraîchement republiée (3 runs FINESS forcés
+    // d'affilée le 2026-09-06) ne masque rien et reste sain.
+    const previousRealAge = previousReal ? ageInDays(runEndedAt(previousReal), now) : null;
+    const forcedOnSameFile =
+      lastChange?.forced === true &&
+      lastChange.csv_sha256 != null &&
+      lastChange.csv_sha256 === previousReal?.csv_sha256 &&
+      (previousRealAge === null || previousRealAge > expectedMaxAgeDays);
+    const unproven = !isServedRun(latest)
+      ? `tête de statut non servi (${latest.status ?? "absent"})`
+      : lastChange?.status === "partial"
+        ? "dernier run réel `partial`, non re-testé depuis"
+        : forcedOnSameFile
+          ? "dernière ingestion réelle FORCÉE sur un fichier amont identique — la source n'a rien republié"
+          : null;
+    const age = `age=${dataAgeDays ?? "?"}j ≤ ${expectedMaxAgeDays}j, status=${latest.status ?? "?"}`;
     return {
       ...base,
-      reason: `run sain (age=${dataAgeDays ?? "?"}j ≤ ${expectedMaxAgeDays}j, status=${latest.status ?? "?"})`,
+      reason: unproven
+        ? `run sans anomalie mais NON prouvé sain (${unproven}) — pas de fermeture (${age})`
+        : `run sain (${age})`,
       shouldNotify: false,
+      healthy: unproven === null,
       anomalies: [],
     };
   }
@@ -180,9 +251,19 @@ export function decideAnomalyNotification(
     ...base,
     reason: `anomalie(s) ${anomalies.map((a) => a.kind).join("+")} sur un run réussi`,
     shouldNotify: true,
+    healthy: false,
     anomalies: [first, ...rest],
   };
 }
+
+/** Label PRIMAIRE des issues de la vigie — clé d'idempotence à l'ouverture ET filtre de fermeture (patron `PENDING_GEOCODE_LABEL`). */
+export const INGEST_ANOMALY_LABEL = "ingest-anomaly";
+
+/** Racine des labels d'une source : `[ingest-anomaly, <slug>]`. L'ouverture y AJOUTE les types ; la fermeture s'arrête là (sémantique ET de l'API : couvre `stale`, `partial` et l'escalade `partial+stale`). */
+const anomalyIssueLabels = (source: IngestSource): string[] => [
+  INGEST_ANOMALY_LABEL,
+  INGEST_SOURCE_LABEL[source].toLowerCase(),
+];
 
 /** Drapeau par type — `Record` : ajouter un `AnomalyKind` sans son libellé ne compile pas. */
 const ANOMALY_FLAG: Record<AnomalyKind, string> = {
@@ -191,12 +272,12 @@ const ANOMALY_FLAG: Record<AnomalyKind, string> = {
 };
 
 export interface AnomalyMessage {
-  subject: string;
-  text: string;
-  issueTitle: string;
-  issueBody: string;
+  readonly subject: string;
+  readonly text: string;
+  readonly issueTitle: string;
+  readonly issueBody: string;
   /** Clé d'idempotence de l'issue : `ingest-anomaly,<slug>,<kind>…` (slug = libellé minuscule, comme les labels des autres alertes). */
-  issueLabels: string;
+  readonly issueLabels: string;
 }
 
 /** Wording unique (email + issue) — n'accepte qu'une décision à notifier (un sujet vide est non représentable). */
@@ -212,14 +293,40 @@ export function composeAnomalyMessage(
   return {
     subject: `[france-data-mcp] ${label} : ${flags}`,
     text: `Le cron ${label} (ingest_log.source='${source}') a RÉUSSI mais présente une anomalie :\n${lines}\n\nRun : ${runUrl}`,
-    issueTitle: `[ingest-anomaly] ${label} : ${flags}`,
+    issueTitle: `[${INGEST_ANOMALY_LABEL}] ${label} : ${flags}`,
     issueBody: [
       `Le cron **${label}** (\`ingest_log.source = '${source}'\`) a réussi (code 0) mais la donnée servie présente une anomalie que le step d'échec ne voit pas :`,
       lines,
-      "Cette issue est **idempotente** : un nouveau run avec la même anomalie la commente au lieu d'en ouvrir une autre (l'email n'est envoyé qu'à l'ouverture). Elle se ferme à la main une fois la cause traitée (publication amont relancée, canary corrigé).",
+      "Cette issue est **idempotente** : un nouveau run avec la même anomalie la commente au lieu d'en ouvrir une autre (l'email n'est envoyé qu'à l'ouverture). Elle se **ferme automatiquement** au premier run PROUVÉ sain de la source (donnée dans la cadence ET dernier run réel sans `partial` — un court-circuit « fichier identique » ou un run forcé sur le même fichier ne prouvent rien). La fermer à la main ne fait que masquer une anomalie encore présente — sauf si la cause a été corrigée HORS du cron (matview rebâtie à la main, source retirée).",
       `Run : ${runUrl}`,
     ].join("\n\n"),
-    issueLabels: ["ingest-anomaly", label.toLowerCase(), ...kinds].join(","),
+    issueLabels: [...anomalyIssueLabels(source), ...kinds].join(","),
+  };
+}
+
+export interface ResolutionMessage {
+  /** Clé de fermeture = `anomalyIssueLabels` SANS type (cf. sa doc). */
+  readonly closeLabels: string;
+  readonly closeComment: string;
+}
+
+/**
+ * Wording de la FERMETURE automatique (pendant de `composeAnomalyMessage`) —
+ * n'accepte qu'une décision PROUVÉE saine : le type `HealthyDecision` rend la
+ * fermeture sur une vigie aveugle (aucune ligne, lecture impossible) non
+ * représentable. Preuve prod : les issues #82 (Ameli) et #83 (CDS) « source
+ * tarie » du 2026-09-07 n'avaient aucun chemin de fermeture — seul le drain
+ * BAN fermait les siennes (`pending-geocode`).
+ */
+export function composeResolutionMessage(
+  source: IngestSource,
+  decision: HealthyDecision,
+  runUrl: string,
+): ResolutionMessage {
+  const label = INGEST_SOURCE_LABEL[source];
+  return {
+    closeLabels: anomalyIssueLabels(source).join(","),
+    closeComment: `✅ Cron ${label} (\`ingest_log.source = '${source}'\`) : ${decision.reason} — l'anomalie n'est plus présente, fermeture automatique. Run : ${runUrl}`,
   };
 }
 
@@ -231,7 +338,7 @@ async function readIngestLogTail(source: IngestSource): Promise<AnomalyLogRow[]>
   const { data, error } = await supabase
     .from("ingest_log")
     .select(
-      "started_at, finished_at, status, skip_reason, canary_failures, error_message, github_run_url",
+      "started_at, finished_at, status, skip_reason, canary_failures, error_message, github_run_url, forced, csv_sha256",
     )
     .eq("source", source)
     .order("started_at", { ascending: false })
@@ -243,6 +350,69 @@ async function readIngestLogTail(source: IngestSource): Promise<AnomalyLogRow[]>
 }
 
 const PREFIX = "notify-ingest-anomaly";
+
+/**
+ * Contrat des outputs `$GITHUB_OUTPUT` lus par la composite. `type` (pas
+ * `interface`) pour rester affectable à `Record<string, string>`. Les trois
+ * membres suivent les trois classes de décision : `should_notify` et
+ * `should_close` vrais ENSEMBLE est non représentable (sinon la composite
+ * ouvrirait, mailerait puis refermerait dans le même run — alerte auto-annulée).
+ */
+export type AnomalyOutputs =
+  | { readonly should_notify: "false"; readonly should_close: "false" }
+  | {
+      readonly should_notify: "false";
+      readonly should_close: "true";
+      readonly close_labels: string;
+      readonly close_comment: string;
+    }
+  | {
+      readonly should_notify: "true";
+      readonly should_close: "false";
+      readonly subject: string;
+      readonly text: string;
+      readonly issue_title: string;
+      readonly issue_body: string;
+      readonly issue_labels: string;
+    };
+
+/** Outputs « ni alerte ni fermeture » (lecture impossible, aucune ligne, preuve absente). */
+const SILENT_OUTPUTS: AnomalyOutputs = { should_notify: "false", should_close: "false" };
+
+/**
+ * Traduction PURE décision → outputs (testable sans DB ni env) — pendant de
+ * `decideAnomalyNotification`. `foreignProof` : la ligne de tête vient d'un
+ * AUTRE run (audit de ce run perdu, `writeIngestLogSuccessSafe`) — alerter
+ * reste acceptable (l'anomalie est réelle), FERMER ne l'est pas (un run
+ * `partial` dont la ligne est perdue refermerait l'issue de la veille).
+ */
+export function anomalyOutputs(
+  source: IngestSource,
+  decision: AnomalyDecision,
+  runUrl: string,
+  foreignProof = false,
+): AnomalyOutputs {
+  if (decision.shouldNotify) {
+    const msg = composeAnomalyMessage(source, decision, runUrl);
+    return {
+      should_notify: "true",
+      should_close: "false",
+      subject: msg.subject,
+      text: msg.text,
+      issue_title: msg.issueTitle,
+      issue_body: msg.issueBody,
+      issue_labels: msg.issueLabels,
+    };
+  }
+  if (!decision.healthy || foreignProof) return SILENT_OUTPUTS;
+  const done = composeResolutionMessage(source, decision, runUrl);
+  return {
+    should_notify: "false",
+    should_close: "true",
+    close_labels: done.closeLabels,
+    close_comment: done.closeComment,
+  };
+}
 
 /** Annotation GitHub (page du run) + stderr : « LOUD » ne veut rien dire dans un log de 50 000 lignes. */
 function shout(level: "error" | "warning", msg: string): void {
@@ -257,22 +427,35 @@ function shout(level: "error" | "warning", msg: string): void {
  * de tête venue d'un AUTRE run (ligne de ce run perdue par
  * `writeIngestLogSuccessSafe`, dispatch concurrent). Criées, jamais en info.
  */
-function checkBlindSpots(source: IngestSource, rows: readonly AnomalyLogRow[]): void {
+/**
+ * PUR : la ligne de tête porte-t-elle l'URL d'un AUTRE run que le nôtre ?
+ * Indécidable (hors Actions, ligne sans URL, aucune ligne) ⇒ `false`.
+ */
+export function headIsForeign(
+  rows: readonly AnomalyLogRow[],
+  mineRunUrl: string | undefined,
+): boolean {
+  const head = sortNewestFirst(rows)[0]?.github_run_url;
+  return Boolean(mineRunUrl && head && head !== mineRunUrl);
+}
+
+/** @returns `true` si la ligne de tête n'est PAS celle de ce run (preuve étrangère). */
+function checkBlindSpots(source: IngestSource, rows: readonly AnomalyLogRow[]): boolean {
   if (rows.length === 0) {
     shout(
       "error",
       `[${PREFIX}][${source}] AUCUNE ligne ingest_log alors que le cron vient de réussir — vigie AVEUGLE (slug de source faux ? audit perdu ?)`,
     );
-    return;
+    return false;
   }
-  const mine = process.env.GITHUB_RUN_URL;
-  const head = sortNewestFirst(rows)[0]?.github_run_url;
-  if (mine && head && head !== mine) {
+  const foreign = headIsForeign(rows, process.env.GITHUB_RUN_URL);
+  if (foreign) {
     shout(
       "warning",
-      `[${PREFIX}][${source}] la ligne ingest_log la plus récente vient d'un AUTRE run (${head}) — décision prise sur une ligne qui n'est pas celle de ce run`,
+      `[${PREFIX}][${source}] la ligne ingest_log la plus récente vient d'un AUTRE run (${sortNewestFirst(rows)[0]?.github_run_url}) — décision prise sur une ligne qui n'est pas celle de ce run`,
     );
   }
+  return foreign;
 }
 
 /** Orchestration I/O best-effort — ne throw jamais (cron déjà réussi). */
@@ -288,35 +471,33 @@ export async function runAnomalyCheck(source: IngestSource): Promise<AnomalyDeci
       "error",
       `[${PREFIX}][${source}] lecture ingest_log impossible (best-effort, pas d'alerte ce run) : ${err instanceof Error ? err.message : String(err)}`,
     );
-    writeGithubOutput(PREFIX, { should_notify: "false" });
-    return noAnomaly(source, "lecture ingest_log impossible");
+    writeGithubOutput(PREFIX, SILENT_OUTPUTS);
+    return unprovenDecision(source, "lecture ingest_log impossible");
   }
-  checkBlindSpots(source, rows);
+  const foreign = checkBlindSpots(source, rows);
   // Hors du try de lecture : un bug de décision doit sortir « échec inattendu »
   // (filet top-level), pas « lecture ingest_log impossible » (diagnostic faux).
   const decision = decideAnomalyNotification(source, rows);
+  const runUrl = process.env.GITHUB_RUN_URL ?? "(hors GitHub Actions)";
   const kinds = decision.anomalies.map((a) => a.kind).join("+") || "none";
   const line = `[${PREFIX}][${source}] ${decision.reason} (kinds=${kinds}, age=${decision.dataAgeDays ?? "?"}j, skips=${decision.skipsSinceLastRealIngest}, notify=${decision.shouldNotify})`;
-  if (!decision.shouldNotify) {
+  if (decision.shouldNotify) {
+    console.error(line);
+    for (const a of decision.anomalies) console.log(`::warning::${oneLine(a.detail)}`);
+  } else if (!decision.healthy && rows.length > 0) {
+    // Anomalie possiblement TOUJOURS là (partial non re-testé, forçage à vide)
+    // sans issue ni mail : annotation, sinon cet état peut durer des mois muet.
+    shout("warning", line);
+  } else {
     console.log(line);
-    writeGithubOutput(PREFIX, { should_notify: "false" });
-    return decision;
   }
-  console.error(line);
-  for (const a of decision.anomalies) console.log(`::warning::${oneLine(a.detail)}`);
-  const msg = composeAnomalyMessage(
-    source,
-    decision,
-    process.env.GITHUB_RUN_URL ?? "(hors GitHub Actions)",
-  );
-  writeGithubOutput(PREFIX, {
-    should_notify: "true",
-    subject: msg.subject,
-    text: msg.text,
-    issue_title: msg.issueTitle,
-    issue_body: msg.issueBody,
-    issue_labels: msg.issueLabels,
-  });
+  if (foreign && decision.healthy) {
+    shout(
+      "warning",
+      `[${PREFIX}][${source}] run sain mais preuve venue d'un autre run — fermeture des issues RETENUE`,
+    );
+  }
+  writeGithubOutput(PREFIX, anomalyOutputs(source, decision, runUrl, foreign));
   return decision;
 }
 
@@ -339,7 +520,7 @@ await runIfMain(import.meta.url, async () => {
   } catch (err) {
     shout(
       "error",
-      `[${PREFIX}] échec inattendu (best-effort, pas d'alerte) : ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      `[${PREFIX}] échec inattendu (best-effort : ni alerte ni fermeture ce run) : ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
     );
   }
 });
