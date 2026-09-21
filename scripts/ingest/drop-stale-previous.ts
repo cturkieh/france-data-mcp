@@ -19,6 +19,7 @@ import {
   DROP_STALE_PREVIOUS_MAX_DAYS,
   type DropStalePreviousOutcome,
   IngestError,
+  type IngestSource,
   dropStalePrevious,
 } from "./shared.js";
 
@@ -48,7 +49,7 @@ import {
  * seuil d'âge (7 j depuis le dernier `ingest_log` success) déclenche le DROP au
  * prochain run de maintenance. Les 4 partagent `source: "iris"` à dessein.
  */
-const SOURCES: Array<{ prodTable: string; source: string }> = [
+const SOURCES: Array<{ prodTable: string; source: IngestSource }> = [
   { prodTable: "finess", source: "finess" },
   { prodTable: "annuaire_ameli", source: "ameli_ps" },
   { prodTable: "rpps", source: "rpps" },
@@ -57,6 +58,7 @@ const SOURCES: Array<{ prodTable: string; source: string }> = [
   { prodTable: "iris_population", source: "iris" },
   { prodTable: "iris_familles", source: "iris" },
   { prodTable: "iris_revenu", source: "iris" },
+  { prodTable: "sitadel_logements", source: "sitadel" },
 ];
 
 function parseMaxAgeDaysFromArgv(): number {

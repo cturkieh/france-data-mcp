@@ -1,21 +1,20 @@
 /**
- * Service permis de construire Sit@del — API DiDo SDES (live, par commune).
+ * Service permis de construire Sit@del — lu EN BASE (`sitadel_logements`).
  *
- * Source : SDES/DiDo — fichier CSV par commune, URL canonique :
- *   https://data.statistiques.developpement-durable.gouv.fr/dido/api/v1/datafiles/
- *   577a8a66-4157-4787-b00a-031b61afea61/csv?withColumnName=true&CODE_INSEE=eq:<INSEE>
+ * Source : SDES/DiDo, séries mensuelles communales « Logements autorisés et
+ * commencés », recopiées une fois par mois par `scripts/ingest/sitadel.ts`
+ * (agrégat commune × année, type « Tous Logements » uniquement — les sous-types
+ * « Individuel pur », « Collectif »… double-compteraient).
  *
- * Pas d'ingestion, pas de table DB. Appel live, résultat agrégé à la volée.
- *
- * Séparateur `;`, chaque valeur double-quotée.
- * En-tête : "ANNEE";"MOIS";"CODE_INSEE";"TYPE_LGT";"LOG_AUT";"LOG_COM";"SDP_AUT";"SDP_COM"
- *
- * ⚠️ TYPE_LGT contient des sous-types ("Individuel pur", "Collectif", …).
- *    On ne conserve QUE les rows "Tous Logements" (total) pour éviter le double-comptage.
+ * Pourquoi plus d'appel live : l'API DiDo met ~37 s par commune MÊME filtrée
+ * (mesuré 2026-09-21), soit 42 des ~45 s de `dynamique_immobiliere`. PAS de
+ * repli live quand la commune manque : il ramènerait les 37 s et couplerait
+ * l'outil à la disponibilité de DiDo — on rend `indisponible:no_data`.
+ * Cf. docs/plans/sitadel-ingestion.md.
  */
 
-import { parseCsv } from "../core/csv.js";
-import { DEFAULT_USER_AGENT } from "../core/http.js";
+import { getUntypedAnonClient } from "../storage/supabase.js";
+import { parentCommuneInsee } from "../territoire/commune-index.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,13 +33,20 @@ export type PermitsResult = {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DIDO_BASE_URL =
-  "https://data.statistiques.developpement-durable.gouv.fr/dido/api/v1/datafiles/577a8a66-4157-4787-b00a-031b61afea61/csv";
+/** Valeur DiDo `TYPE_LGT` du total — partagée avec le script d'ingestion. */
+export const SITADEL_TYPE_LGT_TOTAL = "Tous Logements";
 
-const TYPE_LGT_TOTAL = "Tous Logements";
+/**
+ * Années conservées en base EN PLUS de l'année courante (fenêtre du cron). La
+ * lecture sert par défaut les 5 dernières années publiées ; la 6e est la marge
+ * d'un caller `years: 6`. Source unique écrivain (cron) ↔ lecteur.
+ */
+export const SITADEL_YEARS_BACK = 5;
 
 /** Ratio habitants/logement retenu pour l'estimation. */
 const HABITANTS_PAR_LOGEMENT = 2.2;
+
+const LOG_TAG = "[france-data-mcp] sitadel permitsForCommune";
 
 // ---------------------------------------------------------------------------
 // Service
@@ -49,13 +55,17 @@ const HABITANTS_PAR_LOGEMENT = 2.2;
 /**
  * Retourne les statistiques de permis de construire pour une commune.
  *
- * @param insee  Code INSEE commune (courant, recalé géographie actuelle).
- * @param opts.years        Fenêtre temporelle en années (défaut 5).
- * @param opts.currentYear  Année courante (défaut : année UTC actuelle).
+ * @param insee  Code INSEE commune (courant, recalé géographie actuelle). Un
+ *               arrondissement Paris/Lyon/Marseille est replié sur sa commune :
+ *               Sit@del ne connaît que 75056 / 69123 / 13055.
+ * @param opts.years        Nombre d'années servies (défaut 5) : les plus récentes
+ *                          PUBLIÉES, pas un intervalle calé sur l'horloge.
+ * @param opts.currentYear  Borne haute (défaut : année UTC actuelle).
  *
  * Comportement :
- * - 0 rows "Tous Logements" dans la fenêtre → couverture "indisponible:no_data" avec zéros.
- * - Erreur réseau/HTTP → console.warn + re-throw (caller composite gère la dégradation).
+ * - 0 ligne dans la fenêtre → couverture "indisponible:no_data" avec zéros.
+ * - Commune connue à 0 logement → couverture "ok" (0 est une donnée).
+ * - Erreur DB → console.warn + re-throw (caller composite gère la dégradation).
  */
 export async function permitsForCommune(
   insee: string,
@@ -63,98 +73,83 @@ export async function permitsForCommune(
 ): Promise<PermitsResult> {
   const years = opts?.years ?? 5;
   const currentYear = opts?.currentYear ?? new Date().getUTCFullYear();
-  const firstYear = currentYear - years + 1;
+  const commune = parentCommuneInsee(insee);
+  if (years > SITADEL_YEARS_BACK + 1) {
+    console.warn(
+      `${LOG_TAG}(${commune}): fenêtre demandée ${years} ans > ${SITADEL_YEARS_BACK + 1} ans stockés — résultat tronqué aux années en base`,
+    );
+  }
 
-  const url = `${DIDO_BASE_URL}?withColumnName=true&CODE_INSEE=eq:${insee}`;
+  // Les `years` dernières années PUBLIÉES, pas `[horloge − years ; horloge]` : en
+  // janvier-février l'année civile n'existe pas encore chez le SDES, une fenêtre
+  // calée sur l'horloge servirait 4 années au lieu de 5 (−20 % sur le total
+  // scoré) en `ok`, sans signal. `currentYear` reste une borne HAUTE.
+  const { data, error } = await getUntypedAnonClient()
+    .from("sitadel_logements")
+    .select("annee, log_aut, log_com")
+    .eq("code_insee", commune)
+    .lte("annee", currentYear)
+    .order("annee", { ascending: false })
+    .limit(years);
 
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      headers: {
-        "User-Agent": DEFAULT_USER_AGENT,
-        Accept: "text/csv,*/*",
-      },
-    });
-  } catch (err) {
-    const msg = `[france-data-mcp] sitadel permitsForCommune(${insee}): network error: ${(err as Error).message}`;
+  if (error) {
+    const msg = `${LOG_TAG}(${commune}): DB error [code=${error.code ?? "none"}]: ${error.message}`;
     console.warn(msg);
     throw new Error(msg);
   }
 
-  if (!response.ok) {
-    const msg = `[france-data-mcp] sitadel permitsForCommune(${insee}): HTTP ${response.status}`;
-    console.warn(msg);
-    throw new Error(msg);
-  }
-
-  const text = await response.text();
-  return parsePermitsCsv(text, firstYear);
+  return buildPermitsResult((data ?? []) as SitadelRow[], commune);
 }
 
 // ---------------------------------------------------------------------------
-// Parsing
+// Agrégation
 // ---------------------------------------------------------------------------
 
-/**
- * Parse le CSV DiDo et agrège les logements autorisés/commencés.
- * Conserve uniquement les rows TYPE_LGT === "Tous Logements" dans la fenêtre.
- */
-function parsePermitsCsv(csvText: string, firstYear: number): PermitsResult {
-  const rows = parseCsv(csvText, { delimiter: ";" });
+type SitadelRow = { annee: unknown; log_aut: unknown; log_com: unknown };
 
+/**
+ * Colonnes INTEGER → PostgREST rend des numbers, mais on coerce quand même au
+ * boundary DB (doctrine projet : un type SQL qui dérive en NUMERIC/BIGINT
+ * arriverait en string et `+=` concaténerait). `null` testé À PART :
+ * `Number(null)` vaut 0, un zéro fini qui passerait pour « 0 logement ».
+ * Des lignes en base dont AUCUNE n'est lisible = corruption → throw, jamais
+ * `no_data` (« pas de résultat » ≠ « erreur »).
+ */
+function buildPermitsResult(rows: SitadelRow[], commune: string): PermitsResult {
   const par_annee: Record<string, { aut: number; com: number }> = {};
 
   for (const row of rows) {
-    const typeLgt = row.TYPE_LGT ?? "";
-    if (typeLgt !== TYPE_LGT_TOTAL) continue;
-
-    const anneeRaw = row.ANNEE ?? "";
-    const annee = Number(anneeRaw);
-    if (!Number.isFinite(annee) || annee < firstYear) continue;
-
-    const aut = Number(row.LOG_AUT ?? "0");
-    const com = Number(row.LOG_COM ?? "0");
-
-    const key = anneeRaw;
-    const existing = par_annee[key];
-    if (existing) {
-      existing.aut += Number.isFinite(aut) ? aut : 0;
-      existing.com += Number.isFinite(com) ? com : 0;
-    } else {
-      par_annee[key] = {
-        aut: Number.isFinite(aut) ? aut : 0,
-        com: Number.isFinite(com) ? com : 0,
-      };
+    const annee = Number(row.annee);
+    const aut = Number(row.log_aut);
+    const com = Number(row.log_com);
+    if (
+      row.annee == null ||
+      row.log_aut == null ||
+      row.log_com == null ||
+      !Number.isInteger(annee) ||
+      !Number.isFinite(aut) ||
+      !Number.isFinite(com)
+    ) {
+      console.warn(`${LOG_TAG}(${commune}): ligne illisible ignorée ${JSON.stringify(row)}`);
+      continue;
     }
+    par_annee[String(annee)] = { aut, com };
   }
 
   const annees = Object.keys(par_annee).sort();
-
-  if (annees.length === 0) {
-    return {
-      couverture: "indisponible:no_data",
-      logements_autorises_recent: 0,
-      logements_commences_recent: 0,
-      par_annee: {},
-      habitants_attendus: 0,
-      annees: [],
-    };
+  if (rows.length > 0 && annees.length === 0) {
+    const msg = `${LOG_TAG}(${commune}): ${rows.length} lignes en base, AUCUNE lisible — corruption, pas une absence de donnée`;
+    console.warn(msg);
+    throw new Error(msg);
   }
+  const entries = Object.values(par_annee);
+  const totalAut = entries.reduce((sum, e) => sum + e.aut, 0);
 
-  let totalAut = 0;
-  let totalCom = 0;
-  for (const key of annees) {
-    const entry = par_annee[key];
-    if (entry) {
-      totalAut += entry.aut;
-      totalCom += entry.com;
-    }
-  }
-
+  // Aucune année → tous les totaux valent 0 par construction.
   return {
-    couverture: "ok",
+    couverture: annees.length > 0 ? "ok" : "indisponible:no_data",
     logements_autorises_recent: totalAut,
-    logements_commences_recent: totalCom,
+    logements_commences_recent: entries.reduce((sum, e) => sum + e.com, 0),
     par_annee,
     habitants_attendus: Math.round(totalAut * HABITANTS_PAR_LOGEMENT),
     annees,

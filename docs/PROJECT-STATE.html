@@ -100,7 +100,7 @@
       <h3>Immobilier <span class="tag immo">DVF · Sit@del · PLU</span></h3>
       <div class="zone simple"><div class="zlabel">En simple</div><p>« Ce secteur se construit-il ? À quel prix le foncier s'y vend-il ? »</p></div>
       <div class="zone"><div class="zlabel">Ce qu'on a livré</div><p><code>dynamique_immobiliere</code> (permis Sit@del + zones AU du PLU + terrains DVF en 1 appel) et <code>cout_foncier</code> (€/m² médian DVF).</p></div>
-      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>DVF DGFiP (cache paresseux RLS anon-lit/service-écrit), Sit@del SDES (API DiDo, live), zones AU apicarto IGN (live).</p></div>
+      <div class="zone"><div class="zlabel">Comment c'est fait</div><p>DVF DGFiP (cache paresseux RLS anon-lit/service-écrit), Sit@del SDES (table <code>sitadel_logements</code> ingérée chaque mois — l'appel live prenait ~37 s, plan <code>docs/plans/sitadel-ingestion.md</code>), zones AU apicarto IGN (live).</p></div>
     </div>
 
     <div class="card">

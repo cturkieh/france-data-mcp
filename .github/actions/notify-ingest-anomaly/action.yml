@@ -43,7 +43,7 @@ description: >
 
 inputs:
   source:
-    description: "Valeur `ingest_log.source` du script : finess | ameli_ps | rpps | cds | iris."
+    description: "Valeur `ingest_log.source` du script : finess | ameli_ps | rpps | cds | iris | sitadel."
     required: true
   supabase-url:
     description: "URL du projet Supabase."

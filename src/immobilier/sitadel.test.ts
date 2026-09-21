@@ -1,214 +1,177 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// ---------------------------------------------------------------------------
+// Mock Supabase : .from().select().eq().lte().order().limit() → { data, error }
+// ---------------------------------------------------------------------------
+
+const mockFrom = vi.fn();
+vi.mock("../storage/supabase.js", () => ({
+  getUntypedAnonClient: () => ({ from: mockFrom }),
+}));
+
 import { permitsForCommune } from "./sitadel.js";
 
-// ---------------------------------------------------------------------------
-// Mock helpers
-// ---------------------------------------------------------------------------
+type Row = { annee: unknown; log_aut: unknown; log_com: unknown };
+type DbError = { message: string; code?: string };
 
-const fetchMock = vi.fn<typeof fetch>();
-
-function csvOk(csvText: string): Response {
-  return new Response(csvText, {
-    status: 200,
-    headers: { "content-type": "text/csv" },
-  });
-}
-
-// Build a CSV body with header + rows.
-// Separator: ;  all values double-quoted (as the real DiDo API).
-function buildCsv(rows: Array<Record<string, string>>): string {
-  const headers = [
-    "ANNEE",
-    "MOIS",
-    "CODE_INSEE",
-    "TYPE_LGT",
-    "LOG_AUT",
-    "LOG_COM",
-    "SDP_AUT",
-    "SDP_COM",
-  ];
-  const quote = (v: string) => `"${v}"`;
-  const headerLine = headers.map(quote).join(";");
-  const dataLines = rows.map((r) => headers.map((h) => quote(r[h] ?? "0")).join(";"));
-  return [headerLine, ...dataLines].join("\n");
+function mockQuery(result: { data: Row[] | null; error: DbError | null }) {
+  const limit = vi.fn().mockResolvedValue(result);
+  const order = vi.fn().mockReturnValue({ limit });
+  const lte = vi.fn().mockReturnValue({ order });
+  const eq = vi.fn().mockReturnValue({ lte });
+  const select = vi.fn().mockReturnValue({ eq });
+  mockFrom.mockReturnValue({ select });
+  return { select, eq, lte, order, limit };
 }
 
 beforeEach(() => {
-  vi.stubGlobal("fetch", fetchMock);
-  fetchMock.mockReset();
+  mockFrom.mockReset();
   vi.spyOn(console, "warn").mockImplementation(() => {});
-  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe("permitsForCommune", () => {
-  it("(a) sums only 'Tous Logements', ignores sub-types, respects year window, computes habitants_attendus", async () => {
-    // currentYear = 2026, years = 3 → window = [2024, 2025, 2026]
-    // Rows 2023 (in range year window only if years=4+) → should be excluded
-    const csv = buildCsv([
-      // "Tous Logements" in window — should be counted
-      {
-        ANNEE: "2024",
-        MOIS: "01",
-        CODE_INSEE: "50041",
-        TYPE_LGT: "Tous Logements",
-        LOG_AUT: "100",
-        LOG_COM: "80",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-      {
-        ANNEE: "2025",
-        MOIS: "01",
-        CODE_INSEE: "50041",
-        TYPE_LGT: "Tous Logements",
-        LOG_AUT: "120",
-        LOG_COM: "90",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-      {
-        ANNEE: "2026",
-        MOIS: "01",
-        CODE_INSEE: "50041",
-        TYPE_LGT: "Tous Logements",
-        LOG_AUT: "50",
-        LOG_COM: "30",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-      // Sub-type — must be ignored
-      {
-        ANNEE: "2024",
-        MOIS: "01",
-        CODE_INSEE: "50041",
-        TYPE_LGT: "Individuel pur",
-        LOG_AUT: "999",
-        LOG_COM: "999",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-      {
-        ANNEE: "2025",
-        MOIS: "01",
-        CODE_INSEE: "50041",
-        TYPE_LGT: "Collectif",
-        LOG_AUT: "999",
-        LOG_COM: "999",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-      // "Tous Logements" outside window (2023) — must be ignored
-      {
-        ANNEE: "2023",
-        MOIS: "01",
-        CODE_INSEE: "50041",
-        TYPE_LGT: "Tous Logements",
-        LOG_AUT: "999",
-        LOG_COM: "999",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-    ]);
+  it("(a) somme la fenêtre, calcule habitants_attendus, trie les années", async () => {
+    // Chiffres RÉELS Villejuif 94076 (parité live prouvée 2026-09-21).
+    mockQuery({
+      data: [
+        { annee: 2026, log_aut: 68, log_com: 126 },
+        { annee: 2024, log_aut: 557, log_com: 411 },
+        { annee: 2025, log_aut: 328, log_com: 306 },
+      ],
+      error: null,
+    });
 
-    fetchMock.mockResolvedValue(csvOk(csv));
-
-    const result = await permitsForCommune("50041", { years: 3, currentYear: 2026 });
+    const result = await permitsForCommune("94076", { years: 3, currentYear: 2026 });
 
     expect(result.couverture).toBe("ok");
-    // 100 + 120 + 50 = 270
-    expect(result.logements_autorises_recent).toBe(270);
-    // 80 + 90 + 30 = 200
-    expect(result.logements_commences_recent).toBe(200);
-    // round(270 * 2.2) = round(594) = 594
-    expect(result.habitants_attendus).toBe(594);
     expect(result.annees).toEqual(["2024", "2025", "2026"]);
-    expect(result.par_annee["2024"]).toEqual({ aut: 100, com: 80 });
-    expect(result.par_annee["2025"]).toEqual({ aut: 120, com: 90 });
-    expect(result.par_annee["2026"]).toEqual({ aut: 50, com: 30 });
-    // Sub-types and out-of-window year must NOT appear
-    expect(result.par_annee["2023"]).toBeUndefined();
+    expect(result.logements_autorises_recent).toBe(953);
+    expect(result.logements_commences_recent).toBe(843);
+    expect(result.par_annee["2024"]).toEqual({ aut: 557, com: 411 });
+    expect(result.habitants_attendus).toBe(Math.round(953 * 2.2));
   });
 
-  it("(b) empty / no matching rows → couverture 'indisponible:no_data' with zeros", async () => {
-    // Body with only sub-type rows (no "Tous Logements")
-    const csv = buildCsv([
-      {
-        ANNEE: "2025",
-        MOIS: "01",
-        CODE_INSEE: "12345",
-        TYPE_LGT: "Individuel pur",
-        LOG_AUT: "50",
-        LOG_COM: "30",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-    ]);
-    fetchMock.mockResolvedValue(csvOk(csv));
+  it("sert les N dernières années PUBLIÉES (ordre décroissant + limit), pas une fenêtre d'horloge", async () => {
+    const { select, eq, lte, order, limit } = mockQuery({ data: [], error: null });
 
-    const result = await permitsForCommune("12345", { years: 5, currentYear: 2026 });
+    // 10 janvier 2027 : 2027 n'existe pas encore chez le SDES. Une borne basse
+    // `2027 − 5 + 1 = 2023` ne servirait que 4 années (2023-2026).
+    await permitsForCommune("94076", { years: 5, currentYear: 2027 });
 
-    expect(result.couverture).toBe("indisponible:no_data");
+    expect(mockFrom).toHaveBeenCalledWith("sitadel_logements");
+    expect(select).toHaveBeenCalledWith("annee, log_aut, log_com");
+    expect(eq).toHaveBeenCalledWith("code_insee", "94076");
+    expect(lte).toHaveBeenCalledWith("annee", 2027);
+    expect(order).toHaveBeenCalledWith("annee", { ascending: false });
+    expect(limit).toHaveBeenCalledWith(5);
+  });
+
+  it.each([
+    ["75115", "75056"],
+    ["69383", "69123"],
+    ["13208", "13055"],
+  ])(
+    "replie l'arrondissement %s sur la commune %s (Sit@del ignore les arrondissements)",
+    async (arr, commune) => {
+      const { eq } = mockQuery({ data: [], error: null });
+      await permitsForCommune(arr);
+      expect(eq).toHaveBeenCalledWith("code_insee", commune);
+    },
+  );
+
+  it("(b) aucune ligne → 'indisponible:no_data' avec zéros", async () => {
+    mockQuery({ data: [], error: null });
+
+    const result = await permitsForCommune("99999");
+
+    expect(result).toEqual({
+      couverture: "indisponible:no_data",
+      logements_autorises_recent: 0,
+      logements_commences_recent: 0,
+      par_annee: {},
+      habitants_attendus: 0,
+      annees: [],
+    });
+  });
+
+  it("(b2) commune connue à 0 logement → couverture 'ok' (0 est une donnée, pas une absence)", async () => {
+    mockQuery({ data: [{ annee: 2025, log_aut: 0, log_com: 0 }], error: null });
+
+    const result = await permitsForCommune("55189", { currentYear: 2026 });
+
+    expect(result.couverture).toBe("ok");
     expect(result.logements_autorises_recent).toBe(0);
-    expect(result.logements_commences_recent).toBe(0);
-    expect(result.habitants_attendus).toBe(0);
-    expect(result.annees).toEqual([]);
-    expect(result.par_annee).toEqual({});
+    expect(result.annees).toEqual(["2025"]);
   });
 
-  it("(b2) completely empty body → couverture 'indisponible:no_data'", async () => {
-    // Header only, no data rows
-    fetchMock.mockResolvedValue(
-      csvOk('"ANNEE";"MOIS";"CODE_INSEE";"TYPE_LGT";"LOG_AUT";"LOG_COM";"SDP_AUT";"SDP_COM"'),
+  it("(c) erreur DB → warn + throw (jamais confondue avec 'pas de donnée')", async () => {
+    mockQuery({ data: null, error: { message: "relation does not exist", code: "42P01" } });
+
+    await expect(permitsForCommune("94076")).rejects.toThrow(/DB error \[code=42P01\]/);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("[france-data-mcp] sitadel"));
+  });
+
+  it("réalisme PostgREST : des valeurs en STRING s'additionnent, ne se concatènent pas", async () => {
+    mockQuery({
+      data: [
+        { annee: "2025", log_aut: "100", log_com: "40" },
+        { annee: "2026", log_aut: "23", log_com: "7" },
+      ],
+      error: null,
+    });
+
+    const result = await permitsForCommune("94076", { currentYear: 2026 });
+
+    expect(result.logements_autorises_recent).toBe(123);
+    expect(result.logements_commences_recent).toBe(47);
+  });
+
+  it("null n'est PAS 0 : une valeur nulle est une ligne illisible (Number(null) vaut 0)", async () => {
+    mockQuery({
+      data: [
+        { annee: 2025, log_aut: null, log_com: 3 },
+        { annee: 2026, log_aut: 5, log_com: 2 },
+      ],
+      error: null,
+    });
+
+    const result = await permitsForCommune("94076", { currentYear: 2026 });
+
+    expect(result.annees).toEqual(["2026"]);
+    expect(result.logements_autorises_recent).toBe(5);
+  });
+
+  it("des lignes en base mais AUCUNE lisible → throw (corruption), jamais 'no_data'", async () => {
+    mockQuery({ data: [{ annee: 2025, log_aut: "N/A", log_com: null }], error: null });
+
+    await expect(permitsForCommune("94076", { currentYear: 2026 })).rejects.toThrow(
+      /AUCUNE lisible — corruption/,
     );
-
-    const result = await permitsForCommune("00000", { years: 5, currentYear: 2026 });
-
-    expect(result.couverture).toBe("indisponible:no_data");
-    expect(result.logements_autorises_recent).toBe(0);
   });
 
-  it("(c) fetch rejects → permitsForCommune rejects (error propagates)", async () => {
-    fetchMock.mockRejectedValue(new TypeError("network failure"));
-
-    await expect(permitsForCommune("50041")).rejects.toThrow(/network failure/);
-    expect(console.warn).toHaveBeenCalled();
+  it("fenêtre demandée plus large que le stock → warn (troncature jamais muette)", async () => {
+    mockQuery({ data: [], error: null });
+    await permitsForCommune("94076", { years: 10, currentYear: 2026 });
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("fenêtre demandée 10 ans"));
   });
 
-  it("(c2) HTTP error → permitsForCommune rejects", async () => {
-    fetchMock.mockResolvedValue(new Response("Internal Server Error", { status: 500 }));
+  it("ligne illisible → ignorée + warn, les autres sont servies", async () => {
+    mockQuery({
+      data: [
+        { annee: 2025, log_aut: "N/A", log_com: 1 },
+        { annee: 2026, log_aut: 5, log_com: 2 },
+      ],
+      error: null,
+    });
 
-    await expect(permitsForCommune("50041")).rejects.toThrow(/HTTP 500/);
-    expect(console.warn).toHaveBeenCalled();
-  });
+    const result = await permitsForCommune("94076", { currentYear: 2026 });
 
-  it("calls the correct DiDo URL with CODE_INSEE filter", async () => {
-    const csv = buildCsv([
-      {
-        ANNEE: "2025",
-        MOIS: "01",
-        CODE_INSEE: "75056",
-        TYPE_LGT: "Tous Logements",
-        LOG_AUT: "10",
-        LOG_COM: "8",
-        SDP_AUT: "0",
-        SDP_COM: "0",
-      },
-    ]);
-    fetchMock.mockResolvedValue(csvOk(csv));
-
-    await permitsForCommune("75056", { years: 5, currentYear: 2026 });
-
-    const calledUrl = fetchMock.mock.calls[0]?.[0] as string;
-    expect(calledUrl).toContain("577a8a66-4157-4787-b00a-031b61afea61");
-    expect(calledUrl).toContain("CODE_INSEE=eq:75056");
+    expect(result.annees).toEqual(["2026"]);
+    expect(result.logements_autorises_recent).toBe(5);
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("ligne illisible"));
   });
 });

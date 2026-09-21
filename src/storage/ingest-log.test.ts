@@ -48,6 +48,7 @@ describe("getDataFreshness", () => {
       "finess",
       "iris",
       "rpps",
+      "sitadel",
     ]);
     for (const r of result) {
       expect(r.last_success_at).toBeNull();

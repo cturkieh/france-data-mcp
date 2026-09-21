@@ -22,7 +22,7 @@
 
 import { HttpError, fetchJson } from "../core/http.js";
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
-import { parentCommuneInsee, plmDept } from "./commune-index.js";
+import { COMMUNE_INSEE_PATTERN, parentCommuneInsee, plmDept } from "./commune-index.js";
 import { isValidDept } from "./dept-codes.js";
 
 const MELODI_BASE_URL = "https://api.insee.fr/melodi";
@@ -76,8 +76,6 @@ type MelodiResponse = {
   identifier: string;
   paging?: { first?: string; next?: string; previous?: string };
 };
-
-const COMMUNE_CODE_RE = /^[0-9][0-9AB][0-9]{3}$/u;
 
 /**
  * Cache in-memory au niveau module. Un container Vercel warm peut servir
@@ -193,7 +191,7 @@ export async function getPopulationByCommune(
   codeInsee: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<LookupResult<PopulationData>> {
-  if (typeof codeInsee !== "string" || !COMMUNE_CODE_RE.test(codeInsee)) {
+  if (typeof codeInsee !== "string" || !COMMUNE_INSEE_PATTERN.test(codeInsee)) {
     throw new RangeError(
       `Code INSEE de commune invalide: "${codeInsee}" (attendu : 5 caractères, ex "75056" ou "2A004")`,
     );

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Retrouver un établissement par son nom (plan)</title>
+<style>
+  :root{
+    --marine:#0b2e4f; --marine2:#14385f; --bleu:#1d6fd6; --bleu-pale:#e8f1fc;
+    --bg:#eef2f6; --card:#ffffff; --ink:#1a2a3a; --muted:#5b6b7d;
+    --rouge:#c0271a; --rouge-pale:#fbe9e7; --vert:#16794c; --vert-pale:#e6f4ec;
+    --ambre:#b06f00; --ambre-pale:#fdf3e0; --bord:#dce4ec;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px;}
+  header{background:linear-gradient(135deg,var(--marine),var(--marine2));color:#fff;padding:48px 24px 40px;margin-bottom:36px;}
+  .header-inner{max-width:1080px;margin:0 auto;padding:0 24px;}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8fb9e6;font-weight:700;margin-bottom:10px;}
+  h1{font-size:32px;line-height:1.2;font-weight:800;margin-bottom:18px;max-width:860px;}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;}
+  .chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:600;color:#dce9f7;}
+  .chip.go{background:var(--vert);border-color:var(--vert);color:#fff;}
+  .chip.wait{background:var(--ambre);border-color:var(--ambre);color:#fff;}
+  .tldr{margin-top:18px;font-size:16px;line-height:1.55;color:#cfdaea;max-width:820px;}
+  .tldr strong{color:#fff;}
+  section{margin-bottom:34px;}
+  h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--bleu);font-weight:800;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  h2 .num{background:var(--bleu);color:#fff;width:24px;height:24px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;letter-spacing:0;flex-shrink:0;}
+  h3{font-size:16px;font-weight:700;margin:18px 0 8px;color:var(--marine);}
+  p{margin-bottom:10px;}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;padding:22px 24px;box-shadow:0 1px 3px rgba(11,46,79,.05);}
+  .card + .card{margin-top:14px;}
+  .grid{display:grid;gap:14px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  @media(max-width:720px){.g2{grid-template-columns:1fr;}}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0;}
+  th{background:var(--bleu-pale);color:var(--marine);text-align:left;padding:9px 12px;font-weight:700;font-size:12.5px;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid #cfe0f3;}
+  td{padding:9px 12px;border-bottom:1px solid var(--bord);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  code{background:#eef2f6;border:1px solid var(--bord);border-radius:4px;padding:1px 5px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;color:var(--marine);}
+  header code{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.24);color:#dce9f7;}
+  .badge{display:inline-block;padding:2px 9px;border-radius:5px;font-size:12px;font-weight:700;white-space:nowrap;}
+  .b-ok{background:var(--vert-pale);color:var(--vert);}
+  .b-no{background:var(--rouge-pale);color:var(--rouge);}
+  .b-mid{background:var(--ambre-pale);color:var(--ambre);}
+  .b-info{background:var(--bleu-pale);color:var(--bleu);}
+  .callout{border-left:4px solid var(--bleu);background:var(--bleu-pale);padding:16px 20px;border-radius:0 10px 10px 0;}
+  .callout.warn{border-color:var(--ambre);background:var(--ambre-pale);}
+  .callout.danger{border-color:var(--rouge);background:var(--rouge-pale);}
+  .callout.good{border-color:var(--vert);background:var(--vert-pale);}
+  .callout .lbl{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.07em;display:block;margin-bottom:5px;color:var(--bleu);}
+  .callout.warn .lbl{color:var(--ambre);}
+  .callout.danger .lbl{color:var(--rouge);}
+  .callout.good .lbl{color:var(--vert);}
+  .diagram{background:#0e2138;color:#cfe0f3;border-radius:10px;padding:18px 20px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;overflow-x:auto;white-space:pre;}
+  .diagram .h{color:#ffd07a;font-weight:700;} .diagram .o{color:#9fffb8;} .diagram .n{color:#ff9a8c;} .diagram .a{color:#7ab7ff;}
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0;}
+  .stat{flex:1;min-width:150px;background:var(--card);border:1px solid var(--bord);border-radius:10px;padding:14px 16px;}
+  .stat .v{font-size:24px;font-weight:800;color:var(--marine);}
+  .stat .l{font-size:12px;color:var(--muted);margin-top:2px;}
+  ul{margin:6px 0 10px 20px;} li{margin-bottom:5px;}
+  ol{margin:6px 0 10px 20px;}
+  .step{display:flex;gap:12px;align-items:flex-start;margin-bottom:10px;}
+  .step .n{background:var(--bleu);color:#fff;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;}
+  .muted{color:var(--muted);}
+</style>
+</head>
+<body>
+<header><div class="header-inner">
+  <div class="kicker">Plan pré-implémentation · instruit et mesuré le 2026-09-21</div>
+  <h1>Retrouver un établissement de santé par son nom — <span style="font-family:'SF Mono',Menlo,Consolas,monospace;font-size:26px;color:#9fd0ff;">finess_search_by_name</span></h1>
+  <div class="meta">
+    <span class="chip wait">Lectures seules en prod · rien n'est codé</span>
+    <span class="chip">Chantier suivant Sit@del</span>
+    <span class="chip">4 lots</span>
+  </div>
+  <p class="tldr"><strong>Le problème, en clair.</strong> Question posée à l'outil : « dois-je implanter un centre de collecte à l'Institut Gustave Roussy ? ». Le lieu part au géocodeur d'adresses (BAN, servie par l'IGN). La BAN est un annuaire de <strong>rues</strong> : elle ne connaît aucun établissement. Elle accroche le mot « Gustave » et propose des rues.</p>
+  <p class="tldr muted" style="color:#9fb4cd;font-size:13.5px;">Jumeau texte : <code>finess-recherche-par-nom.md</code>.</p>
+</div></header>
+<div class="wrap">
+
+<section><h2><span class="num">0</span>Le problème, en clair</h2>
+<div class="card">
+<table><tr><th>Texte envoyé à la BAN (rejoué le 2026-09-21)</th><th>Réponse</th><th>Confiance</th></tr>
+<tr><td>« Institut Gustave Roussy, Villejuif »</td><td>Rue Gustave <strong>Flaubert</strong>, Villejuif</td><td><span class="badge b-no">0,40</span></td></tr>
+<tr><td>« institut gustave roussy »</td><td>Rue Gustave Roussy, <strong>Perpignan</strong></td><td><span class="badge b-no">0,52</span></td></tr>
+<tr><td>la question entière</td><td>aucun résultat</td><td>—</td></tr>
+<tr><td>« 114 rue Édouard Vaillant 94800 Villejuif »</td><td>adresse exacte</td><td><span class="badge b-ok">0,97</span></td></tr>
+</table>
+<p>Aucune donnée fausse n'a été servie (le contrôle de cohérence commune de geo-intel, en place depuis le 2026-09-09, refuse un score bas).</p>
+<div class="callout danger"><span class="lbl">Le trou qui reste</span>Un <strong>nom de lieu sans adresse</strong> + une conversation qui a dérivé vers une autre commune. Le sinistre que ce contrôle doit empêcher est le rapport « Villejuif » du 2026-07-07 rempli avec La Courneuve.</div>
+</div></section>
+
+<section><h2><span class="num">1</span>Correction d'une prémisse</h2><div class="card">
+<p>« On a déjà l'outil côté MCP » est <strong>faux</strong> (vérifié dans le code et la liste des tools) : FINESS se cherche par numéro, par catégorie ou par rayon — jamais par nom. Seul le RPPS a <code>rpps_search_by_name</code>.</p>
+<p><code>finess.raison_sociale</code> n'a aucun index de recherche textuelle. L'extension <code>pg_trgm</code> est déjà installée en prod.</p>
+</div></section>
+
+<section><h2><span class="num">2</span>Mesures (prod, 104 726 établissements)</h2>
+<div class="card">
+<p>14 noms tapés « comme un humain », similarité trigramme par mots (<code>word_similarity</code>), sans aucun réglage :</p>
+<table><tr><th>Résultat</th><th>Cas</th></tr>
+<tr><td><span class="badge b-ok">10 / 14 justes du premier coup</span></td><td>IGR, Curie, Foch, Léon Bérard, Pitié-Salpêtrière, CHU de Nantes, Timone, Pellegrin, Hôpital privé d'Antony, Hôpital Américain</td></tr>
+<tr><td><span class="badge b-mid">Rattrapés</span> en séparant <strong>nom</strong> et <strong>territoire</strong></td><td>Clinique Pasteur Toulouse (la ville dans le texte polluait), Paul Brousse → 100 %</td></tr>
+<tr><td><span class="badge b-mid">Bruit d'homonymes</span></td><td>« Necker » : pharmacies Necker avant l'hôpital → trier par catégorie d'établissement</td></tr>
+<tr><td><span class="badge b-no">Échec</span></td><td>« Georges Pompidou » : FINESS écrit <code>HOP EUROPEEN G POMPIDOU</code> (abréviations administratives)</td></tr>
+</table>
+<h3>Deux faits structurants</h3>
+<div class="stat-row">
+<div class="stat"><div class="v">4 fiches</div><div class="l">L'IGR a 4 fiches FINESS — la règle « résultat unique » échoue sur le cas d'école</div></div>
+<div class="stat"><div class="v">1,02 s</div><div class="l">par recherche sans index (seq scan, <code>EXPLAIN ANALYZE</code>)</div></div>
+</div>
+<ol>
+<li><strong>L'IGR a 4 fiches FINESS</strong> (CLCC, site EFS, service de santé au travail à Villejuif ; un site à Chevilly-Larue). Une règle « résultat unique » échoue sur le cas d'école. La bonne règle : <strong>tous les candidats au-dessus du seuil sont dans la même commune → la commune est prouvée.</strong> C'est exactement ce dont le contrôle anti-« La Courneuve » a besoin ; le point précis est un bonus (ici deux adresses du même campus).</li>
+<li><strong>1,02 s par recherche sans index</strong> (seq scan, <code>EXPLAIN ANALYZE</code>). Acceptable pour mesurer, pas pour servir → index GIN trigramme.</li>
+</ol>
+</div></section>
+
+<section><h2><span class="num">3</span>Qui fait quoi : Claude extrait, FINESS vérifie</h2>
+<div class="card">
+<p>La question est posée à Claude, qui appelle les tools : il <strong>sait</strong> que l'IGR est à Villejuif. Le défaut est que le champ d'entrée s'appelle « adresse » et qu'il y glisse un nom d'établissement. Mais lui faire confiance seul est fragile : sur une clinique peu connue il peut inventer une adresse plausible.</p>
+<table><tr><th>Maillon</th><th>Rôle</th></tr>
+<tr><td>Claude (geo-intel)</td><td>sépare <code>etablissement</code>, <code>commune</code>, <code>adresse</code> — champs distincts, décrits dans le schéma du tool</td></tr>
+<tr><td><code>finess_search_by_name</code> <span class="muted">(ce chantier)</span></td><td>vérifie le nom contre le référentiel, rend candidats + verdict de commune</td></tr>
+<tr><td>BAN</td><td>reste le géocodeur des <strong>adresses</strong> ; n'est plus interrogée avec un nom</td></tr>
+<tr><td>Contrôle de cohérence commune (geo-intel)</td><td>reste le filet final — FINESS ne couvre <strong>que la santé</strong> (« Centre commercial X », « Gare de Y » : trou inchangé)</td></tr>
+</table>
+</div></section>
+
+<section><h2><span class="num">4</span>Conception</h2>
+<div class="card">
+<div class="diagram"><span class="h">RPC finess_search_by_name</span>(p_query, p_code_insee, p_code_departement, p_limit)
+  score : <span class="o">word_similarity(p_query, lower(raison_sociale))</span>
+  filtre territoire <span class="a">optionnel (hint, via applyCommuneResolver au boundary)</span>
+  tri   : similarité → rang de catégorie <span class="a">(hôpitaux/cliniques/CLCC avant pharmacies et annexes)</span> → longueur du libellé
+  <span class="h">SET statement_timeout</span> fonction · sortie <span class="o">ST_AsGeoJSON(geom)::jsonb</span>
+<span class="h">Index GIN gin_trgm_ops</span> sur lower(raison_sociale)
+  recopié <span class="o">VERBATIM</span> dans ingest_create_finess_staging  <span class="n">(sinon perdu en silence au prochain swap)</span></div>
+<ul>
+<li><strong>RPC <code>finess_search_by_name(p_query, p_code_insee, p_code_departement, p_limit)</code></strong> : <code>word_similarity(p_query, lower(raison_sociale))</code>, filtre territoire optionnel (hint, passé par <code>applyCommuneResolver</code> côté boundary), tri similarité puis rang de catégorie (hôpitaux/cliniques/CLCC avant pharmacies et annexes), puis longueur du libellé. <code>SET statement_timeout</code> fonction ; sortie <code>ST_AsGeoJSON(geom)::jsonb</code>.</li>
+<li><strong>Index GIN <code>gin_trgm_ops</code> sur <code>lower(raison_sociale)</code></strong>, recopié VERBATIM dans <code>ingest_create_finess_staging</code> (parité prod ↔ staging, <code>staging-parity.test.ts</code>) — sinon perdu en silence au prochain swap.</li>
+<li><strong>Normalisation côté TS</strong> (<code>core/</code>, primitives texte existantes) : accents, casse, retrait des mots génériques (<code>hopital</code>, <code>clinique</code>, <code>centre</code>, <code>chu</code>) et du nom de commune du texte cherché.</li>
+<li><strong>Table d'abréviations FINESS</strong> (<code>HOP</code>, <code>CTRE</code>, <code>CH</code>, <code>G</code> initiale…) : à dimensionner sur mesure, pas a priori (§5).</li>
+<li><strong>Sortie</strong> : <code>LookupResult</code> — <code>candidates[]</code> (num_finess, raison_sociale, catégorie, commune, point, <code>geo_precision</code>, score) + <code>commune_prouvee</code> (<code>code_insee</code> si tous les candidats retenus concordent, sinon <code>null</code> + raison <code>ambiguous_communes</code>).</li>
+</ul>
+<div class="callout"><span class="lbl">Règle de sortie</span>Jamais de « meilleur candidat » servi seul quand les communes divergent : <strong>non résolu plutôt que faux</strong>.</div>
+</div></section>
+
+<section><h2><span class="num">5</span>Avant de coder : la mesure qui fixe les seuils</h2><div class="card">
+<div class="callout warn"><span class="lbl">Mesure préalable</span>Rejouer la recherche sur les <strong>noms réellement tapés</strong> dans les rapports geo-intel (export à fournir) — pas sur mes 14 exemples. Par classes : juste / ambigu / introuvable / faux. Le seuil de similarité et la liste d'abréviations sortent de cette mesure (doctrine projet : seuils sur mesure, jamais sur extrapolation).</div>
+</div></section>
+
+<section><h2><span class="num">6</span>Preuves attendues</h2><div class="card">
+<table><tr><th>Preuve</th><th>Attendu</th></tr>
+<tr><td>« Institut Gustave Roussy » (+ Villejuif en hint)</td><td><code>commune_prouvee = 94076</code>, candidats IGR</td></tr>
+<tr><td>« Institut Gustave Roussy » sans hint</td><td>94076 <strong>et</strong> 94021 au-dessus du seuil → à arbitrer par la mesure §5 (seuil à 1,00 vs 0,63)</td></tr>
+<tr><td>Nom ambigu (« Clinique Pasteur » sans territoire)</td><td><code>commune_prouvee = null</code>, jamais un mauvais établissement</td></tr>
+<tr><td><code>EXPLAIN ANALYZE</code> après index</td><td>Bitmap Index Scan trigramme, &lt; 50 ms</td></tr>
+<tr><td>Swap FINESS suivant</td><td>l'index survit (<code>staging-parity.test.ts</code>)</td></tr>
+</table></div></section>
+
+<section><h2><span class="num">7</span>Lots</h2><div class="card">
+<div class="step"><span class="n">1</span><div>Migration index + RPC, test de parité staging, mesure <code>EXPLAIN</code>.</div></div>
+<div class="step"><span class="n">2</span><div>Lib <code>src/sante/</code> + tool MCP + validators boundary + tests (dont strings PostgREST).</div></div>
+<div class="step"><span class="n">3</span><div>Mesure sur noms réels → seuils + abréviations.</div></div>
+<div class="step"><span class="n">4</span><div>Côté geo-intel : champs séparés + appel du tool avant la BAN.</div></div>
+</div></section>
+</div>
+</body>
+</html>
