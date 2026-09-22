@@ -82,9 +82,9 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.30.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+✅ **v0.31.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
-> Latest release (v0.30.0): FINESS fed by the daily ANS feed, 97.6% of facilities geolocated with per-result `geo_precision` and the ANS-declared SIRET, post-cron watchdog that opens an issue and emails when a green run serves unhealthy data. Surface unchanged (13 reference datasets / 36 tools).
+> Latest release (v0.31.0): `etablissement_finess_by_nom` — a healthcare facility by its name ("Institut Gustave Roussy" → records, exact point, proven commune, never a lone first hit); Sit@del building permits read from the database (10.9 s instead of 45 s) with the current partial year served apart from the 5 full years, and the Paris/Lyon/Marseille "0 housing units" fix. 13 reference datasets / 37 tools.
 
 ---
 

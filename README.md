@@ -131,9 +131,9 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.30.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.31.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
-> Dernière version (V0.30.0) : FINESS alimenté par le flux ANS quotidien, 97,6 % des établissements géolocalisés avec `geo_precision` par résultat et le SIRET déclaré par l'ANS, vigie post-cron qui ouvre une issue et envoie un email quand un run vert sert une donnée malade. Surface inchangée (13 référentiels / 36 outils).
+> Dernière version (V0.31.0) : `etablissement_finess_by_nom` — un établissement de santé par son nom (« Institut Gustave Roussy » → fiches, point exact, commune prouvée, jamais un premier résultat servi seul) ; permis de construire Sit@del lus en base (10,9 s au lieu de 45 s) avec l'année en cours servie à part des 5 années pleines et le « 0 logement » de Paris/Lyon/Marseille corrigé. 13 référentiels / 37 outils.
 
 ---
 

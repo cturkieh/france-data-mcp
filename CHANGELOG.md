@@ -6,6 +6,10 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+_Rien pour l'instant._
+
+## [0.31.0] — 2026-09-22 — `etablissement_finess_by_nom` (un établissement de santé par son nom, commune prouvée), permis Sit@del lus en base avec l'année en cours servie à part, fix « 0 logement » Paris/Lyon/Marseille
+
 ### Added
 
 - **`etablissement_finess_by_nom` — un établissement de santé par son NOM**
