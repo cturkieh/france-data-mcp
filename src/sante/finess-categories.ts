@@ -219,6 +219,29 @@ export function finessFamille(code: string | null | undefined): FinessFamille {
   return FAMILY_BY_CODE.get(trimmed) ?? "autre";
 }
 
+/**
+ * Familles par priorité pour départager des HOMONYMES à similarité de nom
+ * égale (`etablissement_finess_by_nom`) : l'hôpital avant sa pharmacie, son
+ * CMP, son site EFS ou l'IFSI qui portent le même nom (« Necker » : 5 fiches
+ * à 1,00 dans le 15e). Vit à côté de la taxonomie : une famille ajoutée ici
+ * sans rang tombe APRÈS toutes celles listées, jamais entre deux.
+ */
+export const FINESS_FAMILLE_PRIORITE_NOM: readonly FinessFamille[] = [
+  "mco",
+  "ssr",
+  "psychiatrie",
+  "sld",
+  "had",
+  "dialyse",
+  "ambulatoire",
+  "imagerie",
+  "labo",
+  "msp_cpts",
+  "ehpad",
+  "pharmacie",
+  "prevention_sante",
+];
+
 // ──────────────────────────────────────────────────────────────────────────
 // Stable convenience exports — used by lib consumers, kept for back-compat.
 // ──────────────────────────────────────────────────────────────────────────

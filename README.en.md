@@ -54,11 +54,11 @@ Brings together the most useful French government data sources under a uniform t
 
 ---
 
-## Tools (36)
+## Tools (37)
 
 - **Territory (4)**: `autocomplete_commune`, `get_commune_by_code`, `geocode_adresse`, `reverse_geocode`
 - **Companies (3)**: `entreprises_in_radius`, `entreprise_by_siren` (+ INSEE SIRENE V3.11 fallback), `etablissement_by_siret`
-- **FINESS healthcare facilities (3)**: `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
+- **FINESS healthcare facilities (4)**: `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`, `etablissement_finess_by_nom` (search by name: "Institut Gustave Roussy" → records, exact point, proven commune)
 - **Ameli licensed practitioners (2)**: `professionnels_in_radius`, `professionnels_par_specialite_dept`
 - **RPPS / ANS — all active practitioners (5)**: `professionnels_rpps_in_radius`, `professionnels_rpps_par_dept`, `rpps_dans_etablissement`, `rpps_search_by_name` (fuzzy trigram), `professionnel_by_rpps` (+ live FHIR ANS fallback)
 - **Health Centers — CNAM directory (2)**: `centres_sante_in_radius`, `centres_sante_by_finess` — non-profit ambulatory care structures (L.6323-1 CSP, ~3 K). Exposes **Vitale card**, **APCV** and **specialties practised on site** (CNAM Annex A); weekly sync

@@ -1326,7 +1326,7 @@ describe("reconcilier_finess_sirene (MCP tool — V0.6.2)", () => {
 });
 
 describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
-  it("expose un outputSchema sur les tools object-root (29 tools attendus)", () => {
+  it("expose un outputSchema sur les tools object-root (30 tools attendus)", () => {
     const withOutput = TOOLS.filter((t) => t.outputSchema !== undefined);
     // Phase A 0.21.0 — fusions :
     //  - 3 listers (2 avec outputSchema, 1 sans) → 1 `lister_nomenclature` AVEC
@@ -1335,8 +1335,9 @@ describe("outputSchema declarations (V0.7.5 MCP spec 2025-06-18 §6.3)", () => {
     //  - 2 `densite_*` (sans outputSchema) → 1 `densite_sante` (sans) → Δ 0.
     // 28 (0.20.x) - 1 - 1 = 26. Phase B 0.22.0 — +1 `profil_iris` (LookupResult) = 27.
     // Phase immobilier — +2 (dynamique_immobiliere + cout_foncier) = 29.
+    // V0.31 — +1 (etablissement_finess_by_nom) = 30.
     // Reste sans outputSchema : densite_sante (objet riche imbriqué).
-    expect(withOutput).toHaveLength(29);
+    expect(withOutput).toHaveLength(30);
   });
 
   it("omet volontairement l'outputSchema pour les tools array-root ou nullable", () => {
@@ -1711,15 +1712,69 @@ describe("FINESS — note de source partagée (V0.30.0, remplace la note troncat
     "etablissement_by_finess",
     "etablissements_finess_in_radius",
     "etablissements_finess_by_categorie",
+    "etablissement_finess_by_nom",
   ]) {
     it(`${name} cite la source ANS, geo_precision et siret_ans, et plus la DREES`, () => {
       const tool = findTool(name);
       expect(tool?.description).toMatch(/FINESS \/ ANS/);
       expect(tool?.description).toMatch(/geo_precision: "adresse"/);
       expect(tool?.description).toMatch(/siret_ans/);
-      expect(tool?.description).not.toMatch(/DREES|abrég|tronqu/i);
+      expect(tool?.description).not.toMatch(/DREES|abrég|tronqué à/i);
     });
   }
+});
+
+describe("etablissement_finess_by_nom — boundary (nom requis, XOR commune, hints passés à la lib)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("existe, read-only, `nom` requis, et sa description dit d'appeler AVANT le géocodage", () => {
+    const tool = findTool("etablissement_finess_by_nom");
+    expect(tool).toBeDefined();
+    expect(tool?.inputSchema.required).toEqual(["nom"]);
+    expect(tool?.annotations?.readOnlyHint).toBe(true);
+    expect(tool?.description).toMatch(/AVANT tout géocodage/);
+    expect(tool?.description).toMatch(/commune_prouvee/);
+  });
+
+  it("nom absent ou vide → RangeError sans appel lib", async () => {
+    const spy = vi.spyOn(finessDb, "searchFinessByName");
+    const tool = findTool("etablissement_finess_by_nom");
+    await expect(tool?.handler({})).rejects.toThrow(/nom \(string\) requis/);
+    await expect(tool?.handler({ nom: "   " })).rejects.toThrow(/nom \(string\) requis/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("nom_commune + code_insee → RangeError redondance (applyCommuneResolver), sans appel lib", async () => {
+    const spy = vi.spyOn(finessDb, "searchFinessByName");
+    const tool = findTool("etablissement_finess_by_nom");
+    await expect(
+      tool?.handler({ nom: "gustave roussy", nom_commune: "Villejuif", code_insee: "94076" }),
+    ).rejects.toThrow(/redondants/i);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("code_insee + limit voyagent jusqu'à la lib ; la réponse est servie telle quelle", async () => {
+    const payload = {
+      query_normalisee: "gustave roussy",
+      statut: "ambigu" as const,
+      candidats: [],
+      commune_prouvee: { code_insee: "94076", ville: "VILLEJUIF" },
+      raison_commune: "candidats_meme_commune" as const,
+      communes_candidates: ["94076"],
+      meilleure_similarite: 1,
+      tronque: false,
+      lignes_rejetees: 0,
+    };
+    const spy = vi.spyOn(finessDb, "searchFinessByName").mockResolvedValueOnce(payload);
+    const tool = findTool("etablissement_finess_by_nom");
+
+    const result = await tool?.handler({ nom: "Gustave Roussy", code_insee: "94076", limit: 20 });
+
+    expect(spy).toHaveBeenCalledWith({ nom: "Gustave Roussy", code_insee: "94076", limit: 20 });
+    expect(result).toMatchObject(payload);
+  });
 });
 
 describe("rpps_search_by_name — désambiguïsation homonymes (régression B8)", () => {

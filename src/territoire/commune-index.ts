@@ -102,6 +102,13 @@ export function normalizeCp(cp: string): string | null {
  */
 export const COMMUNE_INSEE_PATTERN = /^[0-9][0-9AB][0-9]{3}$/u;
 
+/** Plage INSEE des arrondissements municipaux par commune-mère (bornes incluses). */
+const PLM_ARRONDISSEMENTS: Record<string, readonly [string, string]> = {
+  "75056": ["75101", "75120"],
+  "69123": ["69381", "69389"],
+  "13055": ["13201", "13216"],
+};
+
 /**
  * Replie un code INSEE d'arrondissement municipal sur le code de sa commune
  * parente. FINESS (et RPPS) portent l'INSEE arrondissement pour Paris / Lyon
@@ -115,10 +122,21 @@ export const COMMUNE_INSEE_PATTERN = /^[0-9][0-9AB][0-9]{3}$/u;
  * Tout autre code est rendu inchangé.
  */
 export function parentCommuneInsee(codeInsee: string): string {
-  if (codeInsee >= "75101" && codeInsee <= "75120") return "75056";
-  if (codeInsee >= "69381" && codeInsee <= "69389") return "69123";
-  if (codeInsee >= "13201" && codeInsee <= "13216") return "13055";
+  for (const [parent, [min, max]] of Object.entries(PLM_ARRONDISSEMENTS)) {
+    if (codeInsee >= min && codeInsee <= max) return parent;
+  }
   return codeInsee;
+}
+
+/**
+ * Bornes `[min, max]` des codes INSEE portés par les lignes FINESS/RPPS d'une
+ * commune : la plage de ses arrondissements pour une commune-mère PLM (75056
+ * ne matche aucune ligne, elles portent 75101-75120), sinon le code lui-même.
+ * Exprimable en SQL par `BETWEEN` (index utilisable) — à préférer à un
+ * post-filtre TS après `LIMIT`, qui perd du rappel sur Lyon/Marseille.
+ */
+export function communeInseeRange(codeInsee: string): readonly [string, string] {
+  return PLM_ARRONDISSEMENTS[codeInsee] ?? [codeInsee, codeInsee];
 }
 
 /** Codes INSEE des communes-mères Paris / Lyon / Marseille → leur département. */

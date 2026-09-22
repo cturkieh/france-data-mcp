@@ -41,6 +41,7 @@ import {
   getFinessByCategorie,
   getFinessByNumFiness,
   getFinessInRadius,
+  searchFinessByName,
 } from "../src/sante/finess-db.js";
 import {
   type HostedActivityResult,
@@ -1605,6 +1606,102 @@ export const TOOLS: McpTool[] = [
       // metadata métier — l'injecter ferait du bruit pour le caller).
       if (!result.found) return result;
       return withFreshness(result, args.include_freshness, ["finess"]);
+    },
+  },
+  {
+    name: "etablissement_finess_by_nom",
+    description: `Cherche un établissement de santé par son NOM (« Institut Gustave Roussy », « Hôpital Foch », « Clinique Pasteur ») et rend ses fiches FINESS avec coordonnées exactes. À APPELER AVANT tout géocodage dès que le lieu cité est un hôpital, une clinique, un centre, un institut, un EHPAD… : l'annuaire d'adresses (BAN / \`geocode_adresse\`) ne connaît que des rues et renverrait une « rue Gustave » n'importe où en France. Passer le nom PROPRE de l'établissement (le sigle « IGR » n'est pas dans FINESS) et, si connue, la commune (\`nom_commune\` ou \`code_insee\` — Paris/Lyon/Marseille acceptés en ville entière) ou le \`departement\`.\n\nSortie : \`statut\` = \`unique\` (une fiche) | \`ambigu\` (plusieurs : homonymes OU plusieurs fiches d'un même campus — l'IGR en a 4 : CLCC, site EFS, service de santé au travail, site de Chevilly-Larue) | \`aucun\`. \`candidats[]\` (≥ seuil de similarité 0,8, triés : similarité, puis hôpitaux/cliniques avant pharmacies/CMP/EFS homonymes, puis libellé le plus court) avec \`coords\`, \`geo_precision\`, \`categorie.famille\`, \`similarite\`. \`commune_prouvee\` = la commune (commune-mère pour Paris/Lyon/Marseille) quand TOUS les candidats y sont — c'est le fait à utiliser pour ancrer une analyse territoriale ; \`null\` avec \`raison_commune: 'communes_divergentes'\` sinon (« Clinique Pasteur » sans commune = 16 fiches dans 9 villes → demander la commune, ne JAMAIS prendre le premier). Le point à utiliser = premier candidat avec \`coords\` non null (2,4 % des fiches n'ont pas de point). \`meilleure_similarite\` sous 0,8 sur \`aucun\` : le nom FINESS diffère (abréviations administratives : « HOP EUROPEEN G POMPIDOU ») → relancer avec la partie distinctive (« Pompidou ») + la commune ; \`meilleure_similarite: null\` = AUCUNE ligne dans le territoire demandé → vérifier la commune/le département avant de conclure que le nom n'existe pas. \`tronque: true\` (autant de lignes que \`limit\`) → la commune n'est PAS prouvée (\`raison_commune: 'tronque'\`) : monter \`limit\` ou préciser le territoire. \`lignes_rejetees\` > 0 = lignes RPC illisibles écartées. ${FINESS_SOURCE_ANS_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        nom: {
+          type: "string",
+          description:
+            "Nom de l'établissement tel qu'on le dit (3 caractères min). Accents, casse et ponctuation indifférents. Sans le nom de la commune (le mettre dans `nom_commune`).",
+        },
+        nom_commune: {
+          type: "string",
+          description:
+            'Nom officiel de la commune où se trouve l\'établissement (résolu via geo.api.gouv.fr). Ex : "Villejuif", "Paris". Combinable avec `departement` comme hint de désambiguïsation. XOR avec `code_insee`.',
+        },
+        code_insee: {
+          type: "string",
+          description:
+            "Code INSEE de la commune (5 caractères). Paris/Lyon/Marseille : 75056 / 69123 / 13055 acceptés (ville entière) comme un arrondissement. XOR avec `nom_commune` et `departement`.",
+        },
+        departement: {
+          type: "string",
+          description:
+            "Code département (ex : '94', '2A', '971'). Seul = filtre département ; avec `nom_commune` = hint de désambiguïsation.",
+        },
+        limit: {
+          type: "number",
+          description:
+            "Candidats bruts lus avant seuil et tri (1-200, défaut 50). Monter si le nom est très partagé (« Saint Antoine » : 42 fiches).",
+          minimum: 1,
+          maximum: 200,
+          default: 50,
+        },
+        include_freshness: INCLUDE_FRESHNESS_SCHEMA,
+      },
+      required: ["nom"],
+    },
+    outputSchema: {
+      type: "object",
+      description: "Résultat de recherche par nom : statut, candidats triés, preuve de commune.",
+      properties: {
+        query_normalisee: { type: "string" },
+        statut: { type: "string", enum: ["unique", "ambigu", "aucun"] },
+        candidats: { type: "array" },
+        commune_prouvee: {
+          type: ["object", "null"],
+          description:
+            "{ code_insee, ville } quand tous les candidats sont dans la même commune (commune-mère PLM), sinon null.",
+        },
+        raison_commune: {
+          type: "string",
+          enum: [
+            "un_seul_candidat",
+            "candidats_meme_commune",
+            "communes_divergentes",
+            "tronque",
+            "aucun_candidat",
+          ],
+        },
+        communes_candidates: { type: "array", items: { type: "string" } },
+        meilleure_similarite: { type: ["number", "null"] },
+        tronque: { type: "boolean" },
+        lignes_rejetees: { type: "number" },
+      },
+      required: ["statut", "candidats", "commune_prouvee", "raison_commune", "tronque"],
+    },
+    annotations: READ_ONLY_IDEMPOTENT_ANNOTATIONS,
+    handler: async (args) => {
+      const nom = asString(args.nom);
+      if (!nom || nom.trim().length === 0) {
+        throw new RangeError("nom (string) requis : nom de l'établissement de santé recherché.");
+      }
+      const departement = asString(args.departement);
+      const codeInsee = asString(args.code_insee);
+      const nomCommune = asString(args.nom_commune);
+      const limit = coerceNumber(args.limit, "limit");
+
+      // Même boundary que les autres tools FINESS : XOR strict + résolution
+      // `nom_commune` ; France entière acceptée (aucun param zone).
+      const resolved = await applyCommuneResolver({
+        nomCommune,
+        codeInsee,
+        departement,
+        acceptsDepartementAsScope: true,
+        requireScope: false,
+      });
+
+      const input: Parameters<typeof searchFinessByName>[0] = { nom };
+      if (resolved.departement) input.departement = resolved.departement;
+      if (resolved.codeInsee) input.code_insee = resolved.codeInsee;
+      if (limit !== undefined) input.limit = limit;
+
+      return withFreshness(await searchFinessByName(input), args.include_freshness, ["finess"]);
     },
   },
   {

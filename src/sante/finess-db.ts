@@ -1,5 +1,5 @@
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
-import { metersToKm } from "../core/numbers.js";
+import { metersToKm, round2 } from "../core/numbers.js";
 import {
   type PerResultGeoPrecision,
   type QueryMetadata,
@@ -8,6 +8,7 @@ import {
 } from "../core/query-metadata.js";
 import { createWarnOnce } from "../core/warn-once.js";
 import { getAnonClient, getUntypedAnonClient } from "../storage/supabase.js";
+import { communeInseeRange } from "../territoire/commune-index.js";
 import { assertValidCodeInsee, assertValidDept } from "../territoire/dept-codes.js";
 import {
   assertValidNumFiness,
@@ -27,6 +28,12 @@ import {
   finessFamille,
 } from "./finess-categories.js";
 import { GEOM_SOURCES, isFinessGeomSource } from "./finess-geom-source.js";
+import {
+  type FinessNameCandidate,
+  type FinessNameSearchResult,
+  normalizeFinessName,
+  resolveFinessNameCandidates,
+} from "./finess-name-search.js";
 
 export type { FinessFamilleQuery } from "./finess-categories.js";
 
@@ -279,6 +286,96 @@ export async function getFinessByNumFiness(numFiness: string): Promise<LookupRes
     );
   }
   return lookupFound(toFinessResult(first));
+}
+
+export interface SearchFinessByNameInput {
+  /** Nom d'établissement tel que tapé (« Institut Gustave Roussy », « IGR » ne marche pas : FINESS n'a pas les sigles). */
+  nom: string;
+  /** Hint commune (code INSEE 5 caractères). Paris/Lyon/Marseille = commune-mère acceptée. */
+  code_insee?: string;
+  /** Hint département. XOR avec `code_insee` — validé ICI (la lib est publiée npm, le boundary MCP ne suffit pas). */
+  departement?: string;
+  /** Candidats bruts demandés à la RPC (entier 1-200, défaut 50) — AVANT seuil et rang. */
+  limit?: number;
+}
+
+/** Rappel par défaut : « Saint Antoine » a 42 fiches ≥ 0,8 ; 50 garde l'hôpital même derrière ses homonymes. */
+const FINESS_NAME_SEARCH_DEFAULT_LIMIT = 50;
+const FINESS_NAME_SEARCH_MAX_LIMIT = 200;
+
+/**
+ * Cherche un établissement par son NOM (RPC `finess_search_by_name`,
+ * migration 20260922T100000 : `word_similarity` + GIN trigramme sur la raison
+ * sociale normalisée). Seuil, rang de famille et preuve de commune sont
+ * appliqués par `resolveFinessNameCandidates` (pure, testée à part).
+ *
+ * Erreur RPC → throw (jamais confondue avec « aucun candidat »).
+ */
+export async function searchFinessByName(
+  input: SearchFinessByNameInput,
+): Promise<FinessNameSearchResult> {
+  const query = normalizeFinessName(input.nom);
+  // XOR : les deux hints partent en AND dans la RPC → 0 ligne servie comme un
+  // « aucun » indiscernable d'un vrai introuvable, et la branche PLM écraserait
+  // le département de l'appelant en silence.
+  if (input.departement !== undefined && input.code_insee !== undefined) {
+    throw new RangeError(
+      "searchFinessByName : passer SOIT `code_insee` SOIT `departement`, pas les deux.",
+    );
+  }
+  if (input.departement !== undefined) assertValidDept(input.departement);
+  if (input.code_insee !== undefined) assertValidCodeInsee(input.code_insee);
+  const limit = input.limit ?? FINESS_NAME_SEARCH_DEFAULT_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1 || limit > FINESS_NAME_SEARCH_MAX_LIMIT) {
+    throw new RangeError(
+      `[france-data-mcp] limit must be an integer between 1 and ${FINESS_NAME_SEARCH_MAX_LIMIT}, got ${limit}`,
+    );
+  }
+
+  // Paris/Lyon/Marseille : la commune-mère (75056) ne matche aucun
+  // `finess.code_insee` (arrondissements) → plage `BETWEEN` portée par la RPC,
+  // AVANT son LIMIT (un post-filtre TS perdrait du rappel sur Lyon/Marseille).
+  const [p_insee_min, p_insee_max] =
+    input.code_insee !== undefined ? communeInseeRange(input.code_insee) : [null, null];
+
+  const supabase = getUntypedAnonClient();
+  const { data, error } = await supabase.rpc("finess_search_by_name", {
+    p_query: query,
+    p_insee_min,
+    p_insee_max,
+    p_departement: input.departement ?? null,
+    p_limit: limit,
+  });
+  if (error) {
+    throw new Error(formatRpcError("finess_search_by_name", error));
+  }
+  const rows = expectRpcRows<RawFinessRow & { similarite: unknown }>("finess_search_by_name", data);
+  const candidates: FinessNameCandidate[] = [];
+  let lignesRejetees = 0;
+  for (const row of rows) {
+    // REAL → number côté PostgREST, mais on coerce au boundary (doctrine : une
+    // colonne qui dériverait en NUMERIC arriverait en string). Non fini →
+    // ligne rejetée + warn, jamais un NaN qui passerait sous le seuil en silence.
+    const similarite = Number(row.similarite);
+    if (row.similarite == null || !Number.isFinite(similarite)) {
+      console.warn(
+        `[france-data-mcp] finess_search_by_name: similarite illisible ignorée (num_finess=${row.num_finess}, valeur=${JSON.stringify(row.similarite)})`,
+      );
+      lignesRejetees++;
+      continue;
+    }
+    // Arrondi UNE fois ici : même représentation dans `candidats[]` et
+    // `meilleure_similarite`, et les égalités (0,996 vs 1,0) se tranchent au rang.
+    candidates.push({ ...toFinessResult(row), similarite: round2(similarite) });
+  }
+  // Des lignes en base dont AUCUNE n'est lisible = contrat RPC cassé → throw,
+  // jamais un « aucun candidat » (« pas de résultat » ≠ « erreur »).
+  if (rows.length > 0 && candidates.length === 0) {
+    throw new Error(
+      `[france-data-mcp] finess_search_by_name: ${rows.length} ligne(s) rendue(s), AUCUNE lisible (similarite non numérique) — drift du contrat RPC, pas une absence de résultat`,
+    );
+  }
+  return resolveFinessNameCandidates(query, candidates, { limit, lignesRejetees });
 }
 
 // --- internals -------------------------------------------------------------
