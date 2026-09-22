@@ -1,7 +1,11 @@
 import "./load-env.js";
 import * as fs from "node:fs";
 import { parse } from "csv-parse";
-import { SITADEL_TYPE_LGT_TOTAL, SITADEL_YEARS_BACK } from "../../src/immobilier/sitadel.js";
+import {
+  MOIS_PAR_AN,
+  SITADEL_TYPE_LGT_TOTAL,
+  SITADEL_YEARS_BACK,
+} from "../../src/immobilier/sitadel.js";
 import { COMMUNE_INSEE_PATTERN } from "../../src/territoire/commune-index.js";
 import {
   IngestError,
@@ -308,7 +312,7 @@ export function validateSitadelAggregate(agg: SitadelAggregate): void {
     }
   }
   const fullYearRows = agg.rows.filter((r) => r.annee < last.annee);
-  const incomplete = fullYearRows.filter((r) => r.mois_couverts < 12).length;
+  const incomplete = fullYearRows.filter((r) => r.mois_couverts < MOIS_PAR_AN).length;
   if (incomplete > fullYearRows.length * INCOMPLETE_FULL_YEAR_THRESHOLD) {
     fail(
       `${incomplete}/${fullYearRows.length} lignes d'année pleine sans leurs 12 mois (> ${INCOMPLETE_FULL_YEAR_THRESHOLD * 100} %) — mois manquants en milieu de série : les totaux annuels seraient sous-comptés en silence.`,

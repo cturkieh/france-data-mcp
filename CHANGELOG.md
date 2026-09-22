@@ -18,7 +18,8 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   Même pattern que les cinq autres sources : SHA256, gardes avant swap, swap
   atomique, canary (3 communes réelles), `ingest_log`, alerte échec/run tué,
   vigie « donnée malade » avec fermeture automatique, `data_freshness`
-  (âge max attendu 45 j), nettoyage des `_previous`. Contrat `PermitsResult` inchangé ; pas de repli live
+  (âge max attendu 45 j), nettoyage des `_previous`. Contrat `PermitsResult`
+  inchangé à ce stade (modifié par la puce suivante) ; pas de repli live
   (commune absente → `indisponible:no_data`). Fenêtre d'années **ancrée sur le
   dernier mois publié, pas sur l'horloge** (sinon −17 % de lignes chaque
   10 janvier et 10 février → swap refusé deux crons par an, trouvé en revue).
@@ -36,6 +37,41 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   `_previous` compris), parité table ↔ live 12/12 (`scripts/sitadel-parity.ts`,
   ~150 ms vs ~35 s), `dynamique_immobiliere` Villejuif ~45 s → 10,9 s.
   Détail : `docs/plans/sitadel-ingestion.md`.
+- **`dynamique_immobiliere` : l'année en cours, incomplète, n'est plus sommée
+  aux années pleines** (décision produit 2026-09-22). Le SDES publie avec
+  ~2 mois de retard : en septembre, 2026 n'a que 7 mois et, servie comme 2025,
+  se lisait en chute de 80 % (Villejuif : 68 contre 328). `permitsForCommune`
+  lit `mois_couverts`, sort la dernière année publiée dans `annee_en_cours`
+  quand elle a moins de 12 mois (seule la plus récente peut l'être) et ne somme
+  que `years` années PLEINES (`limit years + 1`). `PermitsResult` devient une
+  **union discriminée** `PermitsFenetre | PermitsNoData` : `no_data` ne porte
+  AUCUN total, le composite ne peut plus lire de zéros (le bug « 0 servi comme
+  fiable » avait frappé deux fois avec des zéros typés). Contrat MCP :
+  `note.logements_*_recent` et `info.habitants_attendus` = années pleines ;
+  nouveau `info.permis { annees_pleines, annee_en_cours: { annee,
+  mois_couverts, logements_autorises, logements_commences } | null }` ; trois
+  statuts `partiel:` de plus sur `couverture.permis`, tous SERVIS mais non
+  scorés — `fenetre_courte` (moins de 5 années en base ; mesuré : 1 commune
+  vivante, 27676, trou complet en 2022), `annees_incompletes` (une année de la
+  fenêtre a moins de 12 mois publiés — les communes nouvelles naissent au
+  1er janvier, une année amputée n'est jamais légitime ; mesuré 0 aujourd'hui,
+  `par_annee[a].mois_couverts` exposé), `lignes_illisibles` (une ligne rejetée
+  au parse a amputé la fenêtre). Une commune dont seule l'année en cours existe
+  reste `no_data` (elle est servie dans `annee_en_cours`). **Impact mesuré en
+  prod** : la fenêtre passe de « 4 pleines + 7 mois » à 5 pleines, soit
+  +14,1 % sur les logements autorisés France (1 787 915 → 2 039 983) ; sur
+  l'axe permis de `computeSignal`, 1 670 communes (4,8 %) changent de classe
+  (1 399 en hausse, 271 en baisse). Seuils 100/30 **conservés** : ils
+  supposaient nominalement « 5 ans », c'est la fenêtre qui se met en
+  conformité. `years` ≤ 5 (`SITADEL_DEFAULT_YEARS`, test garde-fou contre la
+  rétention du cron) ; `years`/`currentYear` validés (`RangeError`) ; warn
+  « série tarie » si l'année en cours a plus d'un an de retard ;
+  `MOIS_PAR_AN` exporté, partagé avec le garde du cron. Preuves : tests rouges
+  sans le fix, parité guichet 12/12 + replis 3/3 (`scripts/sitadel-parity.ts`
+  prouve désormais le SPLIT et la complétude : mois distincts du CSV DiDo vs
+  `mois_couverts` par année, exit 2 sur preuve nulle ≠ exit 1 sur écart).
+  **À signaler à geo-intel** : `couverture.permis`, `info.permis`, et le
+  décalage de classes.
 
 ### Fixed
 
