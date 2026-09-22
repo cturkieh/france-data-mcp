@@ -110,7 +110,7 @@ Pour l'ingestion des CSV source (FINESS bimestriel ~95 K rows, Ameli hebdo ~462 
 
 **🏢 Entreprises** : `entreprises_in_radius`, `entreprise_by_siren`, `etablissement_by_siret`
 
-**🏥 Établissements FINESS** : `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`
+**🏥 Établissements FINESS** : `etablissements_finess_in_radius`, `etablissements_finess_by_categorie`, `etablissement_by_finess`, `etablissement_finess_by_nom`
 
 **👨‍⚕️ Professionnels Ameli (libéraux conventionnés)** : `professionnels_in_radius`, `professionnels_par_specialite_dept`
 

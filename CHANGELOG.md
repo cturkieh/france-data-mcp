@@ -6,6 +6,48 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+### Added
+
+- **`etablissement_finess_by_nom` — un établissement de santé par son NOM**
+  (plan `docs/plans/finess-recherche-par-nom.md`). « Le nouveau quartier
+  derrière l'IGR » : geo-intel envoyait le nom à la BAN, qui ne connaît que
+  des rues (« rue Gustave » n'importe où). FINESS se cherchait par numéro,
+  catégorie ou rayon, jamais par nom. Le LLM extrait le nom (et la commune
+  s'il la connaît), le tool vérifie contre le référentiel et rend les fiches
+  avec le point exact. Migration `20260922T100000` : fonction
+  `finess_nom_normalise` (IMMUTABLE, jumelle de `normalizeForCompare` — 5,8 %
+  des raisons sociales portent des accents), index GIN trigramme recopié dans
+  `ingest_create_finess_staging` (parité prouvée par `staging-parity`), RPC
+  `finess_search_by_name` (`word_similarity`, `<%` indexé, seuil de rappel
+  0,5 ; le nom cherché est normalisé PAR LA RPC avec la même fonction que la
+  colonne — une seule normalisation fait foi, le TS ne fait que valider ;
+  territoire = plage INSEE `BETWEEN` portée AVANT le `LIMIT`, `communeInseeRange`
+  source unique PLM : 75056 → 75101-75120, un post-filtre TS perdait du rappel
+  sur Lyon/Marseille — revue). Lib : `searchFinessByName` +
+  `resolveFinessNameCandidates` (pure) ; seuil de DÉCISION 0,8 **mesuré** sur
+  25 noms (vrais matchs à 1,00, faux positifs ≤ 0,79 : « GEORGES POMPIER »,
+  « CH DE VERNON ») ; rang de famille à similarité égale
+  (`FINESS_FAMILLE_PRIORITE_NOM`, à côté de la taxonomie : hôpital avant sa
+  pharmacie, son CMP, son EFS — « Necker » : 5 fiches à 1,00 dans le 15e),
+  puis fiche AVEC point avant fiche sans (2,4 % n'en ont pas) ;
+  `commune_prouvee` au niveau commune-mère seulement quand TOUS les candidats
+  retenus y sont — jamais un premier servi seul (« Clinique Pasteur » : 16
+  fiches, 9 villes → `communes_divergentes`) et **jamais sur un ensemble
+  tronqué** (`tronque: true` quand la RPC rend `limit` lignes ET que la
+  dernière est encore ≥ 0,8 — le rappel à 0,5 remplit souvent la fenêtre de
+  bruit, mesuré 13/25 faux « tronqué » avant cette règle ; « Sainte Marie » :
+  77 communes, 39 dans le top 50 — revue). `statut` unique | ambigu | aucun (l'IGR est `ambigu` par
+  nature : 4 fiches), `lignes_rejetees` visible, `meilleure_similarite: null`
+  = aucune ligne dans le territoire demandé (hint faux) ≠ nom inconnu ;
+  `code_insee` XOR `departement` et `limit` entier 1-200 validés dans la lib
+  (publiée npm). Table d'abréviations **écartée sur mesure** : « CH de
+  Bretagne Sud » n'existe pas sous ce nom, « ch » court ajoute du bruit ;
+  limite documentée dans la description. Preuves : 31 tests lib (strings
+  PostgREST, similarité illisible → comptée, aucune lisible → throw,
+  troncature, plage PLM, invariants), 4 tests boundary,
+  `scripts/finess-name-parity.ts` (25 cas attendus, point non nul exigé sur
+  le premier, exit 2 sur erreur). 36 → 37 outils.
+
 ### Changed
 
 - **Permis de construire Sit@del lus EN BASE, plus en direct sur l'API DiDo**

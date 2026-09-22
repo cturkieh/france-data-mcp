@@ -11,6 +11,11 @@
 
 const CEDEX_RE = /\bCEDEX\s*\d*/gi;
 
+/** « VILLEJUIF CEDEX 05 » → « VILLEJUIF » : le CEDEX est postal, pas géographique. */
+export function stripCedex(ville: string): string {
+  return ville.replace(CEDEX_RE, "").replace(/\s+/g, " ").trim();
+}
+
 export function normalizeAddressKey(
   adresse: string | null,
   codePostal: string | null,

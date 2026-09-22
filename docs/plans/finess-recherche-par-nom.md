@@ -113,3 +113,18 @@ cette mesure (doctrine projet : seuils sur mesure, jamais sur extrapolation).
 2. Lib `src/sante/` + tool MCP + validators boundary + tests (dont strings PostgREST).
 3. Mesure sur noms réels → seuils + abréviations.
 4. Côté geo-intel : champs séparés + appel du tool avant la BAN.
+
+## 8. Addendum post-implémentation (2026-09-22)
+
+- **§5 remplacé** : Sonnet nettoie l'entrée avant d'appeler le tool (nom
+  propre + commune), la mesure a porté sur 25 noms de grands établissements,
+  pas sur un export geo-intel. Seuil de décision **0,8** (vrais à 1,00, faux
+  ≤ 0,79). Recalibrage futur sur les noms réellement envoyés par Sonnet
+  (`docs/backlog.md`).
+- **Abréviations écartées** (mesuré) : « CH de Bretagne Sud » n'existe pas
+  sous ce nom dans FINESS ; « ch » court ajoute du bruit. « Georges Pompidou »
+  reste un `aucun` documenté (`HOP EUROPEEN G POMPIDOU`) — relancer
+  « Pompidou » + Paris donne l'HEGP en tête.
+- **Rang par famille en TS** (`finess-categories.ts`, source unique), pas en
+  SQL. **Commune prouvée au niveau commune-mère** (75056), pas arrondissement.
+- Tool livré : `etablissement_finess_by_nom` ; preuve : `scripts/finess-name-parity.ts`.

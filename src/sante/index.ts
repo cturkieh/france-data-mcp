@@ -97,7 +97,19 @@ export {
   type InRadiusInput,
   type ByCategorieInput,
   type FinessFamilleQuery,
+  searchFinessByName,
+  type SearchFinessByNameInput,
 } from "./finess-db.js";
+
+export {
+  FINESS_NAME_MATCH_THRESHOLD,
+  normalizeFinessName,
+  resolveFinessNameCandidates,
+  type FinessNameCandidate,
+  type FinessNameSearchResult,
+  type FinessNameStatut,
+  type FinessCommuneProofReason,
+} from "./finess-name-search.js";
 
 export {
   getRppsInRadius,

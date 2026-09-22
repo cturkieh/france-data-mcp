@@ -64,7 +64,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, Centres de 
 
 ---
 
-## Outils MCP (36 tools)
+## Outils MCP (37 tools)
 
 ### 🗺️ Territoire (4)
 `autocomplete_commune` · `get_commune_by_code` · `geocode_adresse` · `reverse_geocode`
@@ -72,8 +72,8 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, Centres de 
 ### 🏢 Entreprises (3)
 `entreprises_in_radius` · `entreprise_by_siren` (+ fallback INSEE SIRENE V3.11) · `etablissement_by_siret`
 
-### 🏥 Établissements santé FINESS (3)
-`etablissements_finess_in_radius` · `etablissements_finess_by_categorie` · `etablissement_by_finess`
+### 🏥 Établissements santé FINESS (4)
+`etablissements_finess_in_radius` · `etablissements_finess_by_categorie` · `etablissement_by_finess` · `etablissement_finess_by_nom` (recherche par nom : « Institut Gustave Roussy » → fiches, point exact, commune prouvée)
 
 > 24 familles couvrant ~92 % du volume. Source ANS publiée quotidiennement, ingérée le 1ᵉʳ et le 15 du mois.
 
