@@ -6,8 +6,10 @@
  *   pnpm tsx scripts/finess-name-parity.ts
  *
  * À rejouer après toute retouche du seuil (`FINESS_NAME_MATCH_THRESHOLD`), du
- * rang de famille ou de la normalisation SQL/TS. Exit 1 au moindre écart avec
- * l'attendu. Les attendus sont des MESURES du 2026-09-22 (plan
+ * rang de famille ou de la normalisation SQL/TS. Un cas échoue aussi si le
+ * premier candidat n'a pas de point ou si le résultat est `tronque`. Exit 1
+ * au moindre écart avec l'attendu, exit 2 si un cas a levé une erreur (RPC
+ * absente, timeout) — une erreur n'est pas une mesure. Les attendus sont des MESURES du 2026-09-22 (plan
  * docs/plans/finess-recherche-par-nom.md), pas des souhaits : un « aucun »
  * attendu (« Georges Pompidou », écrit « G POMPIDOU » chez l'ANS) documente
  * une limite connue, il ne la masque pas.

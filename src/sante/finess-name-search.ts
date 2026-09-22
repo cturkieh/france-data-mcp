@@ -37,7 +37,8 @@ export interface FinessNameCandidate extends FinessResult {
 /**
  * - `unique` : un seul établissement retenu ;
  * - `ambigu` : plusieurs (homonymes, ou plusieurs fiches d'un même campus —
- *   l'IGR en a 4) ; lire `commune_prouvee` avant de conclure ;
+ *   l'IGR en a 4), ou ensemble tronqué ; lire `commune_prouvee` avant de
+ *   conclure ;
  * - `aucun` : rien au-dessus du seuil.
  */
 export type FinessNameStatut = "unique" | "ambigu" | "aucun";
@@ -72,8 +73,8 @@ export interface FinessNameSearchResult {
   meilleure_similarite: number | null;
   /**
    * Des candidats ≥ seuil ont pu être coupés par `limit` : la RPC a rendu
-   * `limit` lignes ET la dernière (tri par similarité décroissante) est encore
-   * ≥ seuil. Une commune ne se PROUVE pas sur un ensemble tronqué (« Sainte
+   * `limit` lignes ET la dernière LISIBLE (tri par similarité décroissante)
+   * est encore ≥ seuil. Une commune ne se PROUVE pas sur un ensemble tronqué (« Sainte
    * Marie » : 77 communes, 39 dans le top 50 → preuve fausse sinon) →
    * `raison_commune: "tronque"`. Monter `limit` ou préciser le territoire.
    * Des lignes sous le seuil qui remplissent la fenêtre ne tronquent rien.

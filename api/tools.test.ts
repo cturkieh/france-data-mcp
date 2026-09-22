@@ -1719,7 +1719,11 @@ describe("FINESS — note de source partagée (V0.30.0, remplace la note troncat
       expect(tool?.description).toMatch(/FINESS \/ ANS/);
       expect(tool?.description).toMatch(/geo_precision: "adresse"/);
       expect(tool?.description).toMatch(/siret_ans/);
-      expect(tool?.description).not.toMatch(/DREES|abrég|tronqué à/i);
+      // `etablissement_finess_by_nom` expose légitimement `tronque` (fenêtre
+      // coupée) : seul le motif DREES « tronqué à ~38 caractères » est proscrit.
+      expect(tool?.description).not.toMatch(
+        name === "etablissement_finess_by_nom" ? /DREES|abrég|tronqué à/i : /DREES|abrég|tronqu/i,
+      );
     });
   }
 });
