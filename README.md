@@ -58,7 +58,7 @@ Les APIs officielles (INSEE, FINESS DREES, RPPS ANS, Annuaire Ameli, Centres de 
 - 🩺 **Centres de Santé** (1) : Annuaire santé CNAM (~3 K structures L.6323-1 CSP, sync hebdomadaire)
 - 📊 **Démographie infracommunale** (2) : INSEE IRIS (~48,6 K quartiers — RP 2022, FILOSOFI 2021 revenu, contours IGN) + INSEE Melodi (population de référence)
 - 🏢 **Entreprises** (2) : DINUM Recherche Entreprises + INSEE SIRENE V3.11
-- 🏗️ **Immobilier** (3) : ventes foncières DVF / DGFiP (€/m², cache paresseux PostGIS), permis de construire Sit@del via API DiDo / SDES (live), zones AU du PLU via apicarto / IGN (live)
+- 🏗️ **Immobilier** (3) : ventes foncières DVF / DGFiP (€/m², cache paresseux PostGIS), permis de construire Sit@del / SDES (table ingérée, cron mensuel), zones AU du PLU via apicarto / IGN (live)
 
 **Cross-source** : réconciliation FINESS ↔ RPPS ↔ SIRENE pour détecter SIRET fermés, rebrandings, raisons sociales périmées.
 
@@ -107,9 +107,9 @@ Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DR
 - `enrichir_concurrents` (V0.23) — enquête sur le top concurrents (statut actif + équipe + signal M&A + groupe parent), cap dur `max=3`.
 
 ### 🏗️ Immobilier — potentiel d'un site (2)
-`dynamique_immobiliere` (V0.26) — composite en 1 call : permis de construire (Sit@del / DiDo SDES, live) + zones AU du PLU (apicarto / IGN, live) + ventes de terrains DVF. Sortie 2 registres : `note` (volume → scoring) / `info` (quartiers AU + prix → contexte) ; `geojson` = polygones des zones AU. · `cout_foncier` (V0.26) — prix médian €/m² DVF (P25/P75, n_ventes, période), info seule.
+`dynamique_immobiliere` (V0.26) — composite en 1 call : permis de construire (Sit@del / SDES, table ingérée mensuellement) + zones AU du PLU (apicarto / IGN, live) + ventes de terrains DVF. Sortie 2 registres : `note` (volume → scoring) / `info` (quartiers AU + prix → contexte) ; `geojson` = polygones des zones AU. · `cout_foncier` (V0.26) — prix médian €/m² DVF (P25/P75, n_ventes, période), info seule.
 
-> Source DVF / DGFiP (cache paresseux PostGIS, anon lit / service écrit). Permis et zones AU = **live** (pas d'ingestion). Pensé pour les rapports d'implantation.
+> Source DVF / DGFiP (cache paresseux PostGIS, anon lit / service écrit). Zones AU = **live** ; permis Sit@del = table ingérée (cron mensuel, le 10). Pensé pour les rapports d'implantation.
 
 ### 🔀 Croisement multi-source (7)
 Réconciliation FINESS ↔ RPPS ↔ SIRENE ↔ CNAM — faits bruts sans interprétation métier.

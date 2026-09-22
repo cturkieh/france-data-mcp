@@ -1,0 +1,116 @@
+# .github/workflows/ingest-sitadel.yml
+name: Ingest Sit@del (permis de construire, logements par commune)
+
+on:
+  schedule:
+    # Le 10 du mois, 05:00 UTC. Le SDES publie le mois M vers la fin de M+1
+    # (mesure 2026-09-21 : millesime 2026-09 publie le 28/08, modifie le 04/09).
+    # Le 10 capte le millesime frais sans concurrencer FINESS (1/15), RPPS (5),
+    # Ameli/CDS (lundis), IRIS (20 janvier).
+    - cron: "0 5 10 * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Forcer la re-ingestion meme si le fichier DiDo est identique au dernier run (bypass court-circuit SHA256)."
+        type: boolean
+        default: false
+
+# Never run on pull_request - secrets are not available there, by design.
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ingest-sitadel
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # Telechargement DiDo filtre cote serveur ~107 Mo en ~100 s, agregation 2 s,
+    # ~42 lots PostgREST de 5 000 lignes. ~5 min attendues ; 20 min = marge x4
+    # pour un DiDo lent (un run tue par le budget = `cancelled`, alerte ci-dessous).
+    timeout-minutes: 20
+    steps:
+      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
+      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
+      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
+      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
+      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
+      - uses: actions/checkout@v6
+
+      # Preflight AVANT `pnpm install` (le checkout reste en 1er, cf. ci-dessus) : echoue vite et clairement si un secret
+      # manque (convention pour tout nouveau workflow Supabase) plutot que de
+      # crasher opaquement au milieu de l'ingestion.
+      - name: Validate required secrets present
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          missing=()
+          [ -z "$SUPABASE_URL" ] && missing+=("SUPABASE_URL")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Secrets manquants : ${missing[*]} — configurer dans Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+          echo "Secrets requis presents."
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run Sit@del ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Input booleen type (jamais github.event.inputs.force qui stringifie
+          # "false" -> truthy -> force a chaque cron). Voir ingest-rpps.yml.
+          FORCE_REINGEST: ${{ inputs.force && '1' || '0' }}
+        run: pnpm ingest:sitadel
+
+      # Vigie « run vert mais donnée malade » : run `partial` (canary/matview)
+      # ou source TARIE (skips same_checksum au-delà de la cadence attendue).
+      # `success()` : ne s'évalue que sur un cron réussi (le failed/cancelled a
+      # son step) ; `continue-on-error` : une notif KO ne re-rouge jamais un
+      # cron déjà réussi (swap fait). Cf. `.github/actions/notify-ingest-anomaly`.
+      - name: Notify ingest anomaly
+        if: success()
+        continue-on-error: true
+        uses: ./.github/actions/notify-ingest-anomaly
+        with:
+          source: sitadel
+          supabase-url: ${{ secrets.SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
+        with:
+          source-label: Sitadel
+          ingest-log-source: sitadel
+          issue-labels: ingestion-failure,sitadel
+          failure-modes: "API DiDo lente ou en panne (telechargement > 3 tentatives), syntaxe de filtre DiDo changee (lignes d'un autre TYPE_LGT), communes hors [33K, 37K] (maille changee), total national hors bande (colonne decalee), mois en double > 5 000 (serie republiee en double), annees pleines sans leurs 12 mois. (Une serie FIGEE ne fait pas echouer le run : elle le marque partial, cf. notify-ingest-anomaly.)"
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

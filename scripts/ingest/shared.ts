@@ -218,10 +218,13 @@ export type { IngestSource } from "../../src/storage/ingest-log.js";
  * logs GitHub Actions) — AUCUN script ne grep ces préfixes aujourd'hui.
  * Garder `ameli` (vs `ameli_ps`) évite le bruit dans les logs cron.
  */
-export type IngestStderrPrefix = "finess" | "ameli" | "rpps" | "cds" | "iris";
+// Dérivé de `IngestSource` (seul écart : `ameli_ps` se logue `ameli`) — une
+// nouvelle source n'a plus à être recopiée ici.
+export type IngestStderrPrefix = Exclude<IngestSource, "ameli_ps"> | "ameli";
 
 export interface IngestLogEntry {
-  source: string;
+  /** Typé : une faute de frappe rendrait le cron invisible de `data_freshness` ET de la vigie. */
+  source: IngestSource;
   started_at: string;
   finished_at?: string;
   status: "success" | "partial" | "failed";
@@ -812,7 +815,7 @@ export interface DropStalePreviousInput {
   /** Logical name of the production table (e.g. "rpps"). `<prodTable>_previous` is the candidate. */
   prodTable: string;
   /** Source name as written in `ingest_log` (e.g. "rpps", "finess", "ameli_ps"). */
-  source: string;
+  source: IngestSource;
   /** Tolerance before DROP. Default 7 days. */
   maxAgeDays?: number;
 }

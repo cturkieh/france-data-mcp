@@ -6,7 +6,53 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+### Changed
+
+- **Permis de construire Sit@del lus EN BASE, plus en direct sur l'API DiDo**
+  (mesuré 2026-09-21 : l'appel live prenait 35–37 s par commune même filtré,
+  soit ~42 des ~45 s de `dynamique_immobiliere`, et DiDo répond `429` dès deux
+  appels concurrents). Nouvelle source d'ingestion `sitadel` : cron mensuel
+  (`ingest-sitadel.yml`, le 10), fichier filtré côté serveur DiDo (« Tous
+  Logements », année courante − 5 : 107 Mo / 97 s au lieu de 1,3 Go), agrégé
+  commune × année dans `sitadel_logements` (209 725 lignes, 34 969 communes).
+  Même pattern que les cinq autres sources : SHA256, gardes avant swap, swap
+  atomique, canary (3 communes réelles), `ingest_log`, alerte échec/run tué,
+  vigie « donnée malade » avec fermeture automatique, `data_freshness`
+  (âge max attendu 45 j), nettoyage des `_previous`. Contrat `PermitsResult` inchangé ; pas de repli live
+  (commune absente → `indisponible:no_data`). Fenêtre d'années **ancrée sur le
+  dernier mois publié, pas sur l'horloge** (sinon −17 % de lignes chaque
+  10 janvier et 10 février → swap refusé deux crons par an, trouvé en revue).
+  Gardes calibrées sur mesure : filtre serveur inopérant, lignes illisibles,
+  **mois en double** (seul témoin d'une série republiée en double — toutes les
+  autres bandes resteraient vertes), communes, total national, années pleines
+  sans leurs 12 mois, volume ; « source tarie » (dernier mois publié > 4 mois)
+  → run `partial` avec swap, pas `failed` (une issue idempotente, pas un email
+  par mois). Le canary prouve aussi que la **lecture `anon` a survécu au swap**
+  (`anon_read_perdue`) : il tourne sous `service_role`, aveugle à une policy
+  perdue, et une table sans policy rend `[]` sans erreur. `staging-parity`
+  garde colonnes/CHECK/PK/index/policy contre la dernière staging-create.
+  `IngestLogEntry.source` typé `IngestSource`, `IngestStderrPrefix` dérivé.
+  Preuves : 2 ingestions réelles (209 725 lignes, 2e swap et rotation
+  `_previous` compris), parité table ↔ live 12/12 (`scripts/sitadel-parity.ts`,
+  ~150 ms vs ~35 s), `dynamique_immobiliere` Villejuif ~45 s → 10,9 s.
+  Détail : `docs/plans/sitadel-ingestion.md`.
+
 ### Fixed
+
+- **`dynamique_immobiliere` : « 0 logement autorisé » servi comme une donnée
+  fiable à Paris, Lyon, Marseille — et pour toute commune absente de Sit@del.**
+  Deux causes empilées. (1) Le composite ignorait le verdict de la brique :
+  `runSection` pose `ok` dès l'absence de throw, or `permitsForCommune` rend
+  `indisponible:no_data` SANS throw → `couverture.permis: "ok"` + zéros.
+  `permisStatus` (jumeau de `flagTruncation`) fait désormais primer ce verdict.
+  (2) Le géocodage inverse rend un code arrondissement (75115, 69383, 13208) que
+  Sit@del ne connaît pas (commune entière seulement) : la brique replie via
+  `parentCommuneInsee`, et le chiffre de la VILLE ENTIÈRE est exposé
+  (`meta.code_commune_permis`), étiqueté `partiel:ville_entiere_plm` et jamais
+  scoré (Paris entier rendrait `signal: "fort"` partout). La fixture de test
+  simulait Paris en `75056`, ce qui masquait le bug ; tests rouges sans le fix.
+- **`permitsForCommune` : corruption ≠ absence.** Des lignes en base dont aucune
+  n'est lisible → throw (plus `no_data`) ; `null` n'est plus lu comme 0.
 
 - **Vigie « run vert mais donnée malade » : fermeture automatique des issues
   `ingest-anomaly`** (post-mortem 2026-09-07 : les issues #82 Ameli et #83 CDS

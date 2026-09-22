@@ -510,3 +510,52 @@ describe("staging-create est un superset des index prod (iris)", () => {
     ).toEqual([]);
   });
 });
+
+describe("staging-create suit la table prod (sitadel_logements)", () => {
+  // Lit TOUTES les migrations + la DERNIÈRE def de la staging-create (jamais un
+  // fichier figé) : c'est la dérive FUTURE qu'on garde — un index, une colonne
+  // ou la policy anon ajoutés à `sitadel_logements` sans être recopiés dans
+  // `ingest_create_sitadel_logements_staging()` disparaissent au swap du 10.
+  const stagingBody = latestFunctionBody("ingest_create_sitadel_logements_staging");
+  const normalize = (block: string): string[] =>
+    block
+      .split("\n")
+      .map((l) => l.replace(/--.*$/, "").replace(/\s+/g, " ").trim().toLowerCase())
+      .filter(Boolean);
+  const createTableBlock = (sql: string, table: string): string[] => {
+    const m = sql.match(
+      new RegExp(`create table (?:if not exists )?${table} \\(([\\s\\S]*?)\\n\\s*\\);`, "i"),
+    );
+    if (!m?.[1]) throw new Error(`CREATE TABLE ${table} introuvable`);
+    return normalize(m[1]);
+  };
+
+  it("mêmes colonnes, types, CHECK et clé primaire", () => {
+    expect(stagingBody.length).toBeGreaterThan(0);
+    const prod = createTableBlock(allMigrationsSql(), "sitadel_logements");
+    expect(prod.length).toBeGreaterThan(5);
+    expect(createTableBlock(stagingBody, "sitadel_logements_staging")).toEqual(prod);
+  });
+
+  it("toute colonne ajoutée par ALTER TABLE existe dans la staging-create", () => {
+    const added = [
+      ...allMigrationsSql().matchAll(
+        /ALTER TABLE (?:public\.)?sitadel_logements\s+ADD COLUMN (?:IF NOT EXISTS )?(\w+)/gi,
+      ),
+    ].map((m) => m[1] ?? "");
+    const missing = added.filter((col) => !new RegExp(`\\b${col}\\b`).test(stagingBody));
+    expect(missing, `colonnes perdues au prochain swap : ${JSON.stringify(missing)}`).toEqual([]);
+  });
+
+  it("tout index prod existe dans la staging-create", () => {
+    const prodCols = liveIndexColumnLists(allMigrationsSql(), "sitadel_logements");
+    const stagingCols = indexColumnLists(stagingBody, "sitadel_logements_staging");
+    const missing = [...prodCols].filter((c) => !stagingCols.has(c));
+    expect(missing, `index perdus au prochain swap : ${JSON.stringify(missing)}`).toEqual([]);
+  });
+
+  it("la staging garde la lecture anon — sans policy, anon reçoit [] SANS erreur (permis 'no_data' partout, cron vert)", () => {
+    expect(stagingBody).toMatch(/on sitadel_logements_staging for select to anon/i);
+    expect(stagingBody).toMatch(/alter table sitadel_logements_staging enable row level security/i);
+  });
+});

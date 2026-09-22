@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sit@del en base — permis de construire (plan)</title>
+<style>
+  :root{
+    --marine:#0b2e4f; --marine2:#14385f; --bleu:#1d6fd6; --bleu-pale:#e8f1fc;
+    --bg:#eef2f6; --card:#ffffff; --ink:#1a2a3a; --muted:#5b6b7d;
+    --rouge:#c0271a; --rouge-pale:#fbe9e7; --vert:#16794c; --vert-pale:#e6f4ec;
+    --ambre:#b06f00; --ambre-pale:#fdf3e0; --bord:#dce4ec;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.6;font-size:15px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 80px;}
+  header{background:linear-gradient(135deg,var(--marine),var(--marine2));color:#fff;padding:48px 24px 40px;margin-bottom:36px;}
+  .header-inner{max-width:1080px;margin:0 auto;padding:0 24px;}
+  .kicker{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#8fb9e6;font-weight:700;margin-bottom:10px;}
+  h1{font-size:32px;line-height:1.2;font-weight:800;margin-bottom:18px;max-width:860px;}
+  .meta{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;}
+  .chip{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);padding:5px 12px;border-radius:20px;font-size:12.5px;font-weight:600;color:#dce9f7;}
+  .chip.go{background:var(--vert);border-color:var(--vert);color:#fff;}
+  .chip.wait{background:var(--ambre);border-color:var(--ambre);color:#fff;}
+  .tldr{margin-top:18px;font-size:16px;line-height:1.55;color:#cfdaea;max-width:820px;}
+  .tldr strong{color:#fff;}
+  section{margin-bottom:34px;}
+  h2{font-size:13px;letter-spacing:.1em;text-transform:uppercase;color:var(--bleu);font-weight:800;margin-bottom:14px;display:flex;align-items:center;gap:10px;}
+  h2 .num{background:var(--bleu);color:#fff;width:24px;height:24px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;font-size:13px;letter-spacing:0;flex-shrink:0;}
+  h3{font-size:16px;font-weight:700;margin:18px 0 8px;color:var(--marine);}
+  p{margin-bottom:10px;}
+  .card{background:var(--card);border:1px solid var(--bord);border-radius:12px;padding:22px 24px;box-shadow:0 1px 3px rgba(11,46,79,.05);}
+  .card + .card{margin-top:14px;}
+  .grid{display:grid;gap:14px;}
+  .g2{grid-template-columns:1fr 1fr;}
+  @media(max-width:720px){.g2{grid-template-columns:1fr;}}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:6px 0;}
+  th{background:var(--bleu-pale);color:var(--marine);text-align:left;padding:9px 12px;font-weight:700;font-size:12.5px;text-transform:uppercase;letter-spacing:.03em;border-bottom:2px solid #cfe0f3;}
+  td{padding:9px 12px;border-bottom:1px solid var(--bord);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  code{background:#eef2f6;border:1px solid var(--bord);border-radius:4px;padding:1px 5px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;color:var(--marine);}
+  header code{background:rgba(255,255,255,.12);border-color:rgba(255,255,255,.24);color:#dce9f7;}
+  .badge{display:inline-block;padding:2px 9px;border-radius:5px;font-size:12px;font-weight:700;white-space:nowrap;}
+  .b-ok{background:var(--vert-pale);color:var(--vert);}
+  .b-no{background:var(--rouge-pale);color:var(--rouge);}
+  .b-mid{background:var(--ambre-pale);color:var(--ambre);}
+  .b-info{background:var(--bleu-pale);color:var(--bleu);}
+  .callout{border-left:4px solid var(--bleu);background:var(--bleu-pale);padding:16px 20px;border-radius:0 10px 10px 0;}
+  .callout.warn{border-color:var(--ambre);background:var(--ambre-pale);}
+  .callout.danger{border-color:var(--rouge);background:var(--rouge-pale);}
+  .callout.good{border-color:var(--vert);background:var(--vert-pale);}
+  .callout .lbl{font-weight:800;font-size:12px;text-transform:uppercase;letter-spacing:.07em;display:block;margin-bottom:5px;color:var(--bleu);}
+  .callout.warn .lbl{color:var(--ambre);}
+  .callout.danger .lbl{color:var(--rouge);}
+  .callout.good .lbl{color:var(--vert);}
+  .diagram{background:#0e2138;color:#cfe0f3;border-radius:10px;padding:18px 20px;font-family:"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.7;overflow-x:auto;white-space:pre;}
+  .diagram .h{color:#ffd07a;font-weight:700;} .diagram .o{color:#9fffb8;} .diagram .n{color:#ff9a8c;} .diagram .a{color:#7ab7ff;}
+  .stat-row{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0;}
+  .stat{flex:1;min-width:150px;background:var(--card);border:1px solid var(--bord);border-radius:10px;padding:14px 16px;}
+  .stat .v{font-size:24px;font-weight:800;color:var(--marine);}
+  .stat .l{font-size:12px;color:var(--muted);margin-top:2px;}
+  ul{margin:6px 0 10px 20px;} li{margin-bottom:5px;}
+  .step{display:flex;gap:12px;align-items:flex-start;margin-bottom:10px;}
+  .step .n{background:var(--bleu);color:#fff;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;margin-top:2px;}
+  .muted{color:var(--muted);}
+</style>
+</head>
+<body>
+<header><div class="header-inner">
+  <div class="kicker">Plan + preuves · instruit et mesuré le 2026-09-21</div>
+  <h1>Sit@del en base — permis de construire lus en quelques millisecondes</h1>
+  <div class="meta">
+    <span class="chip go">Migrations prod + deux ingestions réelles — fait</span>
+    <span class="chip">dynamique_immobiliere : ~45 s → 10,9 s</span>
+    <span class="chip wait">Merge de la PR — validation Cyril</span>
+  </div>
+  <p class="tldr"><strong>En une phrase.</strong> <code>dynamique_immobiliere</code> passait ~42 de ses ~45 s à attendre l'API DiDo du SDES (le guichet Sit@del). La donnée ne change qu'une fois par mois : on la recopie une fois par mois dans une petite table, et l'outil la lit chez nous.</p>
+  <p class="tldr muted" style="color:#9fb4cd;font-size:13.5px;">Source de vérité pour les migrations <code>20260921T230000_sitadel_logements.sql</code> et <code>20260922T000500_sitadel_canary_anon_read.sql</code>, le cron <code>ingest-sitadel.yml</code>, <code>scripts/ingest/sitadel.ts</code> et la lecture <code>src/immobilier/sitadel.ts</code>. Jumeau texte : <code>sitadel-ingestion.md</code>.</p>
+</div></header>
+<div class="wrap">
+
+<section><h2><span class="num">0</span>En une phrase</h2><div class="card">
+<table><tr><th></th><th>Avant</th><th>Après (mesuré)</th></tr>
+<tr><td>Lecture des permis d'une commune</td><td>35–37 s (live DiDo)</td><td>quelques ms (table)</td></tr>
+<tr><td><code>dynamique_immobiliere</code> Villejuif, bout en bout</td><td>~45 s</td><td><strong>10,9 s</strong></td></tr>
+<tr><td>Paris / Lyon / Marseille</td><td>« ok, <strong>0 logement</strong> » servi comme une donnée fiable (bug, §4)</td><td>chiffre de la ville entière, étiqueté <code>partiel</code>, jamais scoré</td></tr>
+<tr><td>Deux utilisateurs simultanés</td><td>DiDo répond <code>429</code> (mesuré)</td><td>sans objet</td></tr>
+</table></div></section>
+
+<section><h2><span class="num">1</span>Mesures qui ont décidé l'architecture</h2>
+<div class="card">
+<div class="stat-row">
+<div class="stat"><div class="v">2 342 479</div><div class="l">lignes filtrées côté serveur DiDo, 107 Mo, 97 s</div></div>
+<div class="stat"><div class="v">209 725</div><div class="l">lignes agrégées, 34 969 communes</div></div>
+<div class="stat"><div class="v">1,7 s</div><div class="l">agrégation commune × année</div></div>
+<div class="stat"><div class="v">114 s</div><div class="l">première ingestion réelle en prod, canary vert</div></div>
+</div>
+<table><tr><th>Mesure (2026-09-21)</th><th>Résultat</th></tr>
+<tr><td>Fichier national complet</td><td>29 049 155 lignes, ~1,3 Go — <span class="badge b-no">écarté</span></td></tr>
+<tr><td>Filtré <strong>côté serveur DiDo</strong> (<code>TYPE_LGT=eq:Tous Logements</code>, <code>ANNEE=gte:2021</code>)</td><td>2 342 479 lignes, 107 Mo, <strong>97 s</strong></td></tr>
+<tr><td>Agrégation commune × année</td><td><strong>1,7 s</strong> → 209 725 lignes, 34 969 communes</td></tr>
+<tr><td>Parité agrégat vs appel live (Villejuif, Bordeaux)</td><td><strong>identique</strong>, année par année</td></tr>
+<tr><td>Première ingestion réelle en prod</td><td><code>success</code>, 209 725 lignes, <strong>114 s</strong>, canary vert</td></tr>
+<tr><td>Seconde ingestion (code final, forcée, <code>ANNEE=gte:2020</code> = une année de marge) : 2<sup>e</sup> swap, rotation <code>_previous</code></td><td>2 762 227 lignes lues, 34 968 hors fenêtre écartées, <code>success</code>, 209 725 lignes stockées (100 % de la bande), 133 s, policy anon et PK conservées</td></tr>
+<tr><td>Mois en double (communes fusionnées recodées sous un même INSEE, ex. 71042)</td><td>504 lignes sur 2,34 M — <strong>sommées</strong>, comme le faisait le live</td></tr>
+<tr><td>API DiDo interrogée en parallèle</td><td><code>429</code> dès 2 appels concurrents</td></tr>
+<tr><td>Années pleines : toutes les communes ont 12 mois distincts</td><td>0 exception</td></tr>
+<tr><td>Dernier mois publié</td><td>2026-07 (le mois M paraît vers la fin de M+1)</td></tr>
+<tr><td>Total national autorisés, années pleines</td><td>336 671 (2024) à 488 672 (2022)</td></tr>
+</table>
+<div class="callout warn"><span class="lbl">Pistes écartées</span>Télécharger le fichier complet (1,3 Go pour en jeter 92 %) ; garder un repli live quand une commune manque (ramène les 37 s et recouple l'outil à la disponibilité de DiDo — la table absente rend <code>indisponible:no_data</code>, comme avant).</div>
+</div></section>
+
+<section><h2><span class="num">2</span>Architecture</h2>
+<div class="card">
+<div class="diagram"><span class="h">cron le 10 du mois</span> ─► <span class="a">DiDo (filtré serveur)</span> ─► SHA256 identique ? ─► <span class="n">skip</span>
+                                             └► <span class="o">agrégation commune × année</span>
+                                                ─► gardes (§3) ─► staging
+                                                ─► <span class="o">swap atomique</span> ─► canary
+                                                ─► ingest_log ─► vigies
+<span class="h">dynamique_immobiliere</span> ─► permitsForCommune ─► <span class="o">SELECT sitadel_logements</span> (anon)</div>
+<ul>
+<li><strong>Table <code>sitadel_logements</code></strong> : <code>(code_insee TEXT, annee SMALLINT)</code> en clé primaire, <code>log_aut</code>, <code>log_com</code> (<code>INTEGER</code>), <code>mois_couverts</code>. <code>TEXT</code> et non <code>CHAR(5)</code> : évite le piège « colonne CHAR filtrée par un param TEXT → index inutilisable ». <code>INTEGER</code> et non <code>NUMERIC</code> : PostgREST rend des nombres, pas des chaînes (la lecture coerce quand même au boundary, testé en strings). Lecture publique <code>anon</code>, écriture <code>service_role</code>. Pas de matview → pas de bombe OID au swap.</li>
+<li><strong>Lignes à zéro conservées</strong> : « commune connue, 0 logement » (<code>ok</code>) ≠ « commune absente » (<code>indisponible:no_data</code>). Contrat <code>PermitsResult</code> <strong>inchangé</strong>, octet pour octet. Côté <code>dynamique_immobiliere</code>, deux ajouts que geo-intel doit connaître (§4) : le champ <code>meta.code_commune_permis</code> et deux nouvelles valeurs de <code>couverture.permis</code> (<code>indisponible:no_data</code>, <code>partiel:ville_entiere_plm</code>) là où il recevait un <code>ok</code> trompeur.</li>
+<li><strong>Fenêtre ancrée sur la DONNÉE, pas sur l'horloge</strong> : on stocke <code>[année du dernier mois publié − 5 ; cette année]</code> (6 étiquettes) ; la lecture sert les 5 dernières années <strong>publiées</strong> (tri décroissant + limite), pas <code>[horloge − 4 ; horloge]</code> qui ne rendrait que 4 années en janvier-février. Le SDES publie le mois M vers fin M+1 : en janvier et février l'année civile courante n'existe pas encore dans le flux. Une fenêtre calée sur l'horloge perdait une étiquette le 10 janvier (−17 % de lignes) → la garde de volume refusait le swap <strong>deux crons de suite, chaque année</strong> (trouvé en revue, test « décembre ≡ janvier »). On demande donc une année de plus à DiDo et on rogne après agrégation. Le « dernier mois publié » est le plus récent porté par au moins la moitié des lignes du mois le plus fourni — jamais un max sur une ligne isolée (un seul permis daté 2030 déplacerait tout).</li>
+<li><strong>Pattern d'ingestion = celui des 5 autres sources</strong>, rien de nouveau : preflight des secrets, <code>ingest_log</code>, court-circuit SHA256 (+ <code>FORCE_REINGEST</code>), bande relative de volume, swap atomique, canary (3 communes réelles : 94076, 33063, 2A004 <strong>+ preuve que la lecture <code>anon</code> a survécu au swap</strong>, §3bis → manquant = run <code>partial</code>), email + issue GitHub sur échec <strong>ou run tué</strong>, vigie « run vert mais donnée malade » avec fermeture automatique, <code>data_freshness</code> (<code>sitadel</code>, âge max attendu 45 j), nettoyage des <code>_previous</code>.</li>
+</ul>
+</div></section>
+
+<section><h2><span class="num">3</span>Gardes avant swap</h2>
+<div class="card">
+<p class="muted">Pures, testées sur les chiffres mesurés.</p>
+<table><tr><th>Garde</th><th>Seuil</th><th>Verdict</th><th>Ce qu'elle attrape</th></tr>
+<tr><td>Lignes d'un autre <code>TYPE_LGT</code></td><td>0 toléré</td><td><span class="badge b-no">refus</span></td><td>syntaxe de filtre DiDo changée (volume ×12)</td></tr>
+<tr><td>Lignes illisibles</td><td>≤ 0,1 %</td><td><span class="badge b-no">refus</span> ; &gt; 0 → tracé dans <code>ingest_log</code>, &gt; 100 → <code>partial</code></td><td>colonne renommée, secret statistique introduit</td></tr>
+<tr><td>Mois en double</td><td>≤ 5 000 (mesuré 504)</td><td><span class="badge b-no">refus</span></td><td><strong>série republiée en double</strong> : seul témoin, tout le reste resterait vert (336 K × 2 = 673 K &lt; 900 K)</td></tr>
+<tr><td>Communes</td><td>[33 000 ; 37 000]</td><td><span class="badge b-no">refus</span></td><td>fichier amputé, maille changée</td></tr>
+<tr><td>Total national, années <strong>pleines</strong> seulement</td><td>[150 K ; 900 K]</td><td><span class="badge b-no">refus</span></td><td>colonne décalée, double-comptage des sous-types</td></tr>
+<tr><td>Années pleines sans leurs 12 mois</td><td>≤ 1 % des lignes (mesuré 0)</td><td><span class="badge b-no">refus</span></td><td>mois manquants en milieu de série = sous-comptage silencieux (raison d'être de <code>mois_couverts</code>)</td></tr>
+<tr><td>Volume vs dernière ingestion réelle</td><td>[0,9 ; 1,3]</td><td><span class="badge b-no">refus</span></td><td>troncature</td></tr>
+<tr><td>Retard du dernier mois publié</td><td>≤ 4 mois</td><td><span class="badge b-mid">partial, swap fait</span></td><td><strong>source tarie</strong></td></tr>
+</table>
+<div class="callout danger"><span class="lbl">Source tarie — la leçon FINESS/DREES</span>La garde « source tarie » est la leçon FINESS/DREES (quatre mois de <code>same_checksum</code> en <code>success</code>) appliquée dès le premier jour, en <strong>deux étages</strong> : le SHA identique ne rafraîchit pas <code>data_age_days</code> (vigie à 45 j), et un fichier <em>différent</em> mais sans mois nouveau marque le run <code>partial</code>. <code>partial</code> et non <code>failed</code> : le fichier peut porter des révisions des mois passés (on les publie), et la vigie <code>notify-ingest-anomaly</code> ouvre UNE issue idempotente qui se ferme seule — un <code>failed</code> mensuel rouvrirait une issue et un email à chaque cron.</div>
+</div></section>
+
+<section><h2><span class="num">3b</span>Le canary prouve aussi la lecture publique</h2>
+<div class="card">
+<p><code>check_ingest_canary</code> tourne sous <code>service_role</code>, qui contourne la RLS : il voit les lignes quoi qu'il arrive côté <code>anon</code>, seul chemin du tool. Or une table sans policy rend <code>[]</code> <strong>sans erreur</strong> : l'outil dirait « pas de donnée » pour toute la France, cron vert, <code>data_freshness</code> fraîche.</p>
+<p>La branche <code>sitadel</code> du canary vérifie donc le droit <code>SELECT</code> d'<code>anon</code> et la présence de la policy → <code>anon_read_perdue</code> → <code>partial</code> → vigie.</p>
+<div class="callout good"><span class="lbl">Prouvé dans les deux sens en prod</span>Policy retirée dans une transaction annulée → <code>{anon_read_perdue}</code> ; en place → <code>{}</code>. Cette preuve a attrapé un bug du canary lui-même (<code>text[] || 'x'</code> = 22P02, uniquement dans la branche rouge) — d'où deux entrées d'historique côté prod.</div>
+<p style="margin-top:10px;">Côté repo, <code>staging-parity.test.ts</code> garde colonnes, CHECK, PK, index et policy entre la table et la DERNIÈRE def de la staging-create.</p>
+</div></section>
+
+<section><h2><span class="num">4</span>Bug fermé au passage : Paris, Lyon, Marseille — et sa vraie cause</h2>
+<div class="card">
+<p>Le géocodage inverse rend un code <strong>arrondissement</strong> (75115, 69383, 13208 — vérifié). Sit@del ne connaît que les communes entières (75056, 69123, 13055 : 0 ligne pour tout arrondissement — vérifié dans le fichier). La brique rendait donc <code>indisponible:no_data</code>… mais le composite <strong>ignorait ce verdict</strong> : <code>runSection</code> pose <code>ok</code> dès l'absence de throw. Résultat servi : <code>permis: "ok"</code>, 0 logement — « Paris n'a rien autorisé en 5 ans », donnée présentée comme fiable. La fixture de test simulait Paris avec <code>75056</code>, ce qui masquait le tout.</p>
+<h3>Deux corrections, à deux étages</h3>
+<div class="step"><span class="n">1</span><div><strong>Composite</strong> (<code>permisStatus</code>, jumeau de <code>flagTruncation</code>) : le verdict de la brique prime. Commune absente → <code>couverture.permis = "indisponible:no_data"</code>, pour toute commune, pas seulement PLM.</div></div>
+<div class="step"><span class="n">2</span><div><strong>Brique</strong> : repli arrondissement → commune (<code>parentCommuneInsee</code>), car la maille est une propriété de la source. Mais le chiffre est celui de la <strong>ville entière</strong> : il est exposé (<code>meta.code_commune_permis = "75056"</code>), étiqueté <code>couverture.permis = "partiel:ville_entiere_plm"</code>, et <strong>jamais scoré</strong> — les seuils du <code>signal</code> sont calibrés à la commune, Paris entier (10 247) rendrait « fort » pour n'importe quel point de Paris.</div></div>
+</div></section>
+
+<section><h2><span class="num">5</span>Preuves rejouables</h2><div class="card">
+<table><tr><th>Preuve</th><th>Commande</th></tr>
+<tr><td>Unitaires (agrégation, gardes, lecture, strings PostgREST, repli PLM)</td><td><code>pnpm test:unit</code></td></tr>
+<tr><td>Parité table ↔ live, 12 communes (dense, Corse, PLM, DROM, rural, commune à 0 habitant) + 3 replis d'arrondissement ; « deux côtés vides » = PREUVE NULLE, jamais vert</td><td><code>pnpm tsx scripts/sitadel-parity.ts</code> <span class="muted">(séquentiel : DiDo limite le débit)</span> — <strong>12/12 à parité</strong>, ~150 ms en table vs ~35 s en live</td></tr>
+<tr><td>Tests rouges sans le correctif (composite P1/P2, garde-fou staging dégradée, canary sans policy)</td><td>prouvé pendant la revue</td></tr>
+<tr><td>Garde-fous repo (alerting, vigie, fraîcheur)</td><td><code>workflows-alerting.test.ts</code>, <code>ingest-log.test.ts</code></td></tr>
+</table></div></section>
+
+<section><h2><span class="num">6</span>Ordre de mise en service</h2><div class="card">
+<div class="step"><span class="n">1</span><div>Migrations appliquées en prod (additives : table neuve + branche canary, 5 canaris existants vérifiés intacts) — <span class="badge b-ok">fait</span>.</div></div>
+<div class="step"><span class="n">2</span><div>Deux ingestions réelles (dont une avec le code final) — <span class="badge b-ok">fait</span>, la table est pleine avant que le code ne la lise.</div></div>
+<div class="step"><span class="n">3</span><div>Merge de la PR (validation Cyril) → l'endpoint lit la table.</div></div>
+<div class="step"><span class="n">4</span><div>Post-deploy : <code>/healthz</code>, smoke <code>dynamique_immobiliere</code>, Sentry.</div></div>
+<div class="step"><span class="n">5</span><div>Côté geo-intel, <strong>après</strong> mesure en prod : timeout <code>preloadRealEstate</code> 75 s → 30 s.</div></div>
+</div></section>
+</div>
+</body>
+</html>

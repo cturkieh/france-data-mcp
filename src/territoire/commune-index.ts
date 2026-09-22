@@ -97,6 +97,12 @@ export function normalizeCp(cp: string): string | null {
 }
 
 /**
+ * Code INSEE commune : 5 caractères, Corse en `2A`/`2B`. Source unique —
+ * partagée par Melodi (boundary) et l'ingestion Sit@del.
+ */
+export const COMMUNE_INSEE_PATTERN = /^[0-9][0-9AB][0-9]{3}$/u;
+
+/**
  * Replie un code INSEE d'arrondissement municipal sur le code de sa commune
  * parente. FINESS (et RPPS) portent l'INSEE arrondissement pour Paris / Lyon
  * / Marseille (ex 75112 = Paris 12e), alors que geo.api.gouv `/communes`

@@ -533,6 +533,81 @@ describe("dynamiqueImmobiliere", () => {
   //      reverseGeocode N'EST PAS appelé pour cette zone (pas de centroïde).
   // -------------------------------------------------------------------------
 
+  // --- Couverture permis : le VERDICT de la brique prime sur « pas de throw » ---
+  const NO_ZONES: ZonesAUResult = {
+    couverture: "ok",
+    n_zones_au: 0,
+    zones_au: [],
+    geojson: { type: "FeatureCollection", features: [] },
+  };
+
+  it("(P1) brique rend no_data SANS throw → couverture.permis 'indisponible:no_data', jamais 'ok' à 0 logement", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce({
+      ...REV_GEO_OK,
+      codeCommune: "97502",
+      commune: "Saint-Pierre",
+    });
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue({
+      couverture: "indisponible:no_data",
+      logements_autorises_recent: 0,
+      logements_commences_recent: 0,
+      par_annee: {},
+      habitants_attendus: 0,
+      annees: [],
+    });
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.couverture.permis).toBe("indisponible:no_data");
+    expect(result.meta.code_commune_permis).toBe("97502");
+  });
+
+  it("(P2) arrondissement RÉEL du géocodage (75115) → chiffre ville entière exposé mais 'partiel' et NON scoré", async () => {
+    // Le reverse-geocode IGN rend l'arrondissement (vérifié 2026-09-21), pas 75056.
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce({
+      ...REV_GEO_OK,
+      codeCommune: "75115",
+      commune: "Paris 15e Arrondissement",
+    });
+    // Paris ENTIER (chiffre réel) : sans garde, 10 247 ≥ 100 → « fort » partout dans Paris.
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue({
+      ...PERMITS_OK,
+      logements_autorises_recent: 10_247,
+    });
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.couverture.permis).toBe("partiel:ville_entiere_plm");
+    expect(result.meta.code_commune).toBe("75115");
+    expect(result.meta.code_commune_permis).toBe("75056");
+    expect(result.note.logements_autorises_recent).toBe(10_247);
+    expect(result.note.signal).toBe("faible");
+  });
+
+  it("(P3) commune ordinaire → 'ok', code_commune_permis = code_commune, permis scorés", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce({
+      ...REV_GEO_OK,
+      codeCommune: "94076",
+      commune: "Villejuif",
+    });
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.couverture.permis).toBe("ok");
+    expect(result.meta.code_commune_permis).toBe("94076");
+    expect(result.note.signal).toBe("fort");
+  });
+
   it("(B6) zone avec geometry:null → secteur null ET reverseGeocode non appelé pour la zone", async () => {
     const FEATURE_NO_GEOM = {
       type: "Feature",

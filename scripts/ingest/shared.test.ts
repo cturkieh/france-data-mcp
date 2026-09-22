@@ -857,7 +857,7 @@ describe("writeIngestLogFailureFallback — pattern défensif uniforme V0.12.3 (
     // — les .test.ts ne sont pas typecheckés par le CI, cf. tsconfig.api.json).
     for (const source of ["rpps", "finess", "ameli", "cds"] as const) {
       const { client } = fakeSupabase([null]);
-      await writeIngestLogFailureFallback({ ...failedLog(), source }, source, client);
+      await writeIngestLogFailureFallback(failedLog(), source, client);
       expect(
         errSpy.mock.calls.some((c) => String(c[0]).includes(`[${source}][ingest_log_fallback]`)),
       ).toBe(true);

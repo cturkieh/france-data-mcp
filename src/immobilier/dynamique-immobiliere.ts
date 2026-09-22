@@ -27,6 +27,7 @@ import {
   type SectionStatus,
   runSection,
 } from "../sante/panorama-implantation.js";
+import { parentCommuneInsee } from "../territoire/commune-index.js";
 import { communeContainingPoint } from "../territoire/communes.js";
 import { reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
@@ -80,6 +81,12 @@ export interface DynamiqueImmobiliereResult {
     code_commune: string | null;
     /** `null` si le point n'est rattaché à aucune commune (côtier/isolé). */
     commune: string | null;
+    /**
+     * Commune dont les chiffres `permis` sont servis. ≠ `code_commune` à Paris,
+     * Lyon et Marseille : Sit@del ne descend pas à l'arrondissement, on sert la
+     * VILLE ENTIÈRE (cf. `couverture.permis = "partiel:ville_entiere_plm"`).
+     */
+    code_commune_permis: string | null;
     lat: number;
     lon: number;
     rayon_km: number;
@@ -144,6 +151,34 @@ function featureCentroid(feature: unknown): { lat: number; lon: number } | null 
  */
 function communeLabel(rg: { commune?: string; label: string } | null): string | null {
   return rg ? (rg.commune ?? rg.label) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Couverture permis
+// ---------------------------------------------------------------------------
+
+/**
+ * Statut de la section `permis`, à partir du VERDICT de la brique — `runSection`
+ * pose `ok` dès l'absence de throw, or `permitsForCommune` rend sans throw une
+ * commune absente de Sit@del (`couverture: "indisponible:no_data"`, tous totaux
+ * à 0). Sans ce mapping, « pas de donnée » était servi comme « 0 logement
+ * autorisé, donnée fiable » (prouvé : tout point de Paris/Lyon/Marseille avant
+ * le repli arrondissement). Jumeau de `flagTruncation` (panorama).
+ *
+ * `partiel:ville_entiere_plm` : le chiffre est celui de la ville entière, pas
+ * du quartier — exposé, mais JAMAIS scoré (les seuils de `computeSignal` sont
+ * calibrés à la commune : Paris entier rendrait « fort » partout).
+ */
+function permisStatus(
+  outcome: SectionOutcome<PermitsResult>,
+  codeCommune: string | null,
+): SectionStatus {
+  if (outcome.status !== "ok" || !outcome.data) return outcome.status;
+  if (outcome.data.couverture !== "ok") return outcome.data.couverture;
+  if (codeCommune && parentCommuneInsee(codeCommune) !== codeCommune) {
+    return "partiel:ville_entiere_plm";
+  }
+  return "ok";
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +262,7 @@ export async function dynamiqueImmobiliere(
 
   // --- Couverture ---------------------------------------------------------
   const couverture = {
-    permis: permisOut.status,
+    permis: permisStatus(permisOut, code_commune),
     zones_au: zonesOut.status,
     terrains: dvfOut.status,
   };
@@ -237,7 +272,8 @@ export async function dynamiqueImmobiliere(
   const logAuth = permisData?.logements_autorises_recent ?? 0;
   const logCom = permisData?.logements_commences_recent ?? 0;
   const habitantsAttendus = permisData?.habitants_attendus ?? 0;
-  const permisAvailable = permisOut.status === "ok";
+  // Scorable seulement si le chiffre est bien celui de LA commune du point.
+  const permisAvailable = couverture.permis === "ok";
 
   // --- PLU zones AU -------------------------------------------------------
   const zonesData = zonesOut.data;
@@ -290,7 +326,14 @@ export async function dynamiqueImmobiliere(
   const signal = computeSignal(logAuth, zonesImm, permisAvailable);
 
   return {
-    meta: { code_commune, commune, lat, lon, rayon_km },
+    meta: {
+      code_commune,
+      commune,
+      code_commune_permis: code_commune ? parentCommuneInsee(code_commune) : null,
+      lat,
+      lon,
+      rayon_km,
+    },
     couverture,
     note: {
       logements_autorises_recent: logAuth,
