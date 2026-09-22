@@ -32,7 +32,7 @@ import { communeContainingPoint } from "../territoire/communes.js";
 import { reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
 import { aggregatePrix, dvfInRadius } from "./dvf.js";
-import { type PermitsResult, permitsForCommune } from "./sitadel.js";
+import { type PermitsAnneeEnCours, type PermitsResult, permitsForCommune } from "./sitadel.js";
 
 const LOG_TAG = "[france-data-mcp] dynamique_immobiliere";
 
@@ -47,9 +47,9 @@ export interface DynamiqueImmobiliereInput {
 }
 
 export interface DynamiqueImmobiliereNote {
-  /** Logements autorisés sur la fenêtre Sit@del (5 ans). */
+  /** Logements autorisés sur la fenêtre Sit@del (5 années PLEINES, `info.permis.annees_pleines`). */
   logements_autorises_recent: number;
-  /** Logements commencés sur la fenêtre Sit@del (5 ans). */
+  /** Logements commencés sur la fenêtre Sit@del (5 années pleines). */
   logements_commences_recent: number;
   /** Nombre total de zones AU dans le rayon. */
   zones_au_nombre: number;
@@ -64,9 +64,22 @@ export interface DynamiqueImmobiliereNote {
   signal: "fort" | "modéré" | "faible";
 }
 
+/**
+ * Fenêtre Sit@del effectivement servie. `annee_en_cours` = dernière année
+ * publiée quand elle est incomplète, HORS de tout total : sur 7 mois, elle
+ * passerait pour une chute face à une année pleine. `null` quand la dernière
+ * année publiée est complète.
+ */
+export interface DynamiqueImmobilierePermis {
+  /** Années pleines sommées dans `note.logements_*_recent` (vide si `couverture.permis` indisponible). */
+  annees_pleines: string[];
+  annee_en_cours: PermitsAnneeEnCours | null;
+}
+
 export interface DynamiqueImmobiliereInfo {
-  /** Estimation habitants attendus (permis × 2,2). */
+  /** Estimation habitants attendus (permis des années pleines × 2,2). */
   habitants_attendus: number;
+  permis: DynamiqueImmobilierePermis;
   /** Jusqu'à 5 zones AU avec libellé et secteur (null si centroïde non géocodable). */
   quartiers_au: { libelle: string; secteur: string | null }[];
   /** Prix médian m² des ventes bâties DVF dans le rayon, ou null si absent. */
@@ -185,17 +198,13 @@ function permisStatus(
 // Signal heuristic
 // ---------------------------------------------------------------------------
 
-function computeSignal(
-  logAuth: number,
-  zonesImm: number,
-  permisAvailable: boolean,
-): "fort" | "modéré" | "faible" {
-  if (permisAvailable) {
+/** `logAuth: null` = permis non scorables (indisponibles ou partiels) → signal sur les zones seules. */
+function computeSignal(logAuth: number | null, zonesImm: number): "fort" | "modéré" | "faible" {
+  if (logAuth !== null) {
     if (logAuth >= 100 || zonesImm >= 3) return "fort";
     if (logAuth >= 30 || zonesImm >= 1) return "modéré";
     return "faible";
   }
-  // Permis indisponible : signal uniquement sur les zones
   if (zonesImm >= 3) return "fort";
   if (zonesImm >= 1) return "modéré";
   return "faible";
@@ -268,12 +277,17 @@ export async function dynamiqueImmobiliere(
   };
 
   // --- Permis -------------------------------------------------------------
+  // Narrowing de l'union : `no_data` ne porte AUCUN total, on ne lit pas de zéros.
   const permisData = permisOut.data;
-  const logAuth = permisData?.logements_autorises_recent ?? 0;
-  const logCom = permisData?.logements_commences_recent ?? 0;
-  const habitantsAttendus = permisData?.habitants_attendus ?? 0;
-  // Scorable seulement si le chiffre est bien celui de LA commune du point.
-  const permisAvailable = couverture.permis === "ok";
+  const fenetre =
+    permisData && permisData.couverture !== "indisponible:no_data" ? permisData : null;
+  const logAuth = fenetre?.logements_autorises_recent ?? 0;
+  const logCom = fenetre?.logements_commences_recent ?? 0;
+  const habitantsAttendus = fenetre?.habitants_attendus ?? 0;
+  // Scorable seulement si le chiffre est bien celui de LA commune du point,
+  // sur la fenêtre pleine (`partiel:*` = ville entière PLM ou fenêtre courte).
+  const logAuthScorable =
+    couverture.permis === "ok" && fenetre ? fenetre.logements_autorises_recent : null;
 
   // --- PLU zones AU -------------------------------------------------------
   const zonesData = zonesOut.data;
@@ -323,7 +337,7 @@ export async function dynamiqueImmobiliere(
   };
 
   // --- Signal + result ---------------------------------------------------
-  const signal = computeSignal(logAuth, zonesImm, permisAvailable);
+  const signal = computeSignal(logAuthScorable, zonesImm);
 
   return {
     meta: {
@@ -344,6 +358,10 @@ export async function dynamiqueImmobiliere(
     },
     info: {
       habitants_attendus: habitantsAttendus,
+      permis: {
+        annees_pleines: fenetre?.annees ?? [],
+        annee_en_cours: permisData?.annee_en_cours ?? null,
+      },
       quartiers_au: quartiersAu,
       prix_m2_median: agg.prix_m2_median,
       terrains: terrainsInfo,

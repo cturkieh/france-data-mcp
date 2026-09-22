@@ -64,6 +64,13 @@ dynamique_immobiliere ─► permitsForCommune ─► SELECT sitadel_logements (
   geo-intel doit connaître (§4) : le champ `meta.code_commune_permis` et deux
   nouvelles valeurs de `couverture.permis` (`indisponible:no_data`,
   `partiel:ville_entiere_plm`) là où il recevait un `ok` trompeur.
+  > **Addendum post-implémentation (2026-09-22, décision produit)** — le
+  > contrat a bougé depuis : l'année en cours est servie À PART
+  > (`info.permis.annee_en_cours`), les totaux ne somment que 5 années
+  > PLEINES (`info.permis.annees_pleines`), et `couverture.permis` connaît
+  > trois valeurs `partiel:` de plus (`fenetre_courte`, `annees_incompletes`,
+  > `lignes_illisibles`). `PermitsResult` est une union discriminée
+  > (`PermitsFenetre | PermitsNoData`). Source de vérité : `CHANGELOG.md`.
 - **Fenêtre ancrée sur la DONNÉE, pas sur l'horloge** : on stocke
   `[année du dernier mois publié − 5 ; cette année]` (6 étiquettes) ; la lecture
   sert les 5 dernières années **publiées** (tri décroissant + limite), pas

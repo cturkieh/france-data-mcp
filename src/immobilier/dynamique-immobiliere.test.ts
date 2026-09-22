@@ -45,7 +45,7 @@ import * as dvfModule from "./dvf.js";
 import type { DvfMutation } from "./dvf.js";
 import { dynamiqueImmobiliere } from "./dynamique-immobiliere.js";
 import * as sitadelModule from "./sitadel.js";
-import type { PermitsResult } from "./sitadel.js";
+import type { PermitsFenetre } from "./sitadel.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -64,14 +64,31 @@ const REV_GEO_OK: GeocodeResult = {
   commune: "Paris",
 };
 
-/** Permis nominal : 120 logements autorisés → signal "fort" */
-const PERMITS_OK: PermitsResult = {
+/**
+ * Permis nominal : 120 logements autorisés sur 5 années PLEINES → signal
+ * "fort". État réalisable par la brique (`years: 5` ⇒ 5 années en `ok`).
+ * Typé `PermitsFenetre` pour que les `{ ...PERMITS_OK, x }` restent des
+ * fenêtres narrowées.
+ */
+const PERMITS_OK: PermitsFenetre = {
   couverture: "ok",
   logements_autorises_recent: 120,
   logements_commences_recent: 80,
-  par_annee: { "2023": { aut: 120, com: 80 } },
+  par_annee: {
+    "2021": { aut: 20, com: 10, mois_couverts: 12 },
+    "2022": { aut: 25, com: 15, mois_couverts: 12 },
+    "2023": { aut: 30, com: 20, mois_couverts: 12 },
+    "2024": { aut: 25, com: 20, mois_couverts: 12 },
+    "2025": { aut: 20, com: 15, mois_couverts: 12 },
+  },
+  annee_en_cours: {
+    annee: 2026,
+    mois_couverts: 7,
+    logements_autorises: 31,
+    logements_commences: 12,
+  },
   habitants_attendus: 264,
-  annees: ["2023"],
+  annees: ["2021", "2022", "2023", "2024", "2025"],
 };
 
 /** Deux zones AU : 1 AUC (ouverte) + 1 AUs (stricte) */
@@ -235,6 +252,16 @@ describe("dynamiqueImmobiliere", () => {
 
     // info — quartiers
     expect(result.info.habitants_attendus).toBe(264);
+    // L'année en cours voyage À PART : jamais dans note.*, jamais sommée.
+    expect(result.info.permis).toEqual({
+      annees_pleines: ["2021", "2022", "2023", "2024", "2025"],
+      annee_en_cours: {
+        annee: 2026,
+        mois_couverts: 7,
+        logements_autorises: 31,
+        logements_commences: 12,
+      },
+    });
     expect(result.info.quartiers_au).toHaveLength(2);
     // B1 : le centroïde de chaque quartier provient de la feature portée par SA
     // propre entrée zones_au (AU_FEATURE_AUC → Montrouge, AU_FEATURE_AUS → Kremlin-Bicêtre)
@@ -454,7 +481,7 @@ describe("dynamiqueImmobiliere", () => {
 
   // -------------------------------------------------------------------------
   // (B4) computeSignal — couverture des branches (seuils réels lus du code)
-  //   permisAvailable : logAuth>=100 || zonesImm>=3 → fort ;
+  //   logAuth scorable (non null) : logAuth>=100 || zonesImm>=3 → fort ;
   //                     logAuth>=30  || zonesImm>=1 → modéré ; sinon faible.
   //   permis indispo  : zonesImm>=3 → fort ; zonesImm>=1 → modéré ; sinon faible.
   // -------------------------------------------------------------------------
@@ -502,7 +529,7 @@ describe("dynamiqueImmobiliere", () => {
 
   it("(B4) permis indisponible + 3 zones AUc → signal 'fort' (fallback zones-only)", async () => {
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(REV_GEO_OK);
-    // permis throws → section indisponible → permisAvailable=false
+    // permis throws → section indisponible → logAuth non scorable (null)
     vi.mocked(sitadelModule.permitsForCommune).mockRejectedValue(new Error("sitadel down"));
     const aucFeature = {
       type: "Feature",
@@ -547,13 +574,10 @@ describe("dynamiqueImmobiliere", () => {
       codeCommune: "97502",
       commune: "Saint-Pierre",
     });
+    // L'union ne porte AUCUN total sur `no_data` : le composite ne peut pas lire de zéros.
     vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue({
       couverture: "indisponible:no_data",
-      logements_autorises_recent: 0,
-      logements_commences_recent: 0,
-      par_annee: {},
-      habitants_attendus: 0,
-      annees: [],
+      annee_en_cours: null,
     });
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
     vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
@@ -563,6 +587,33 @@ describe("dynamiqueImmobiliere", () => {
 
     expect(result.couverture.permis).toBe("indisponible:no_data");
     expect(result.meta.code_commune_permis).toBe("97502");
+    expect(result.info.permis).toEqual({ annees_pleines: [], annee_en_cours: null });
+  });
+
+  it("(P4) brique 'partiel:fenetre_courte' → couverture.permis le relaie, total SERVI mais NON scoré", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(REV_GEO_OK);
+    // 10 000 ≥ 100 : scoré, ce serait « fort » ; la fenêtre courte l'interdit.
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue({
+      ...PERMITS_OK,
+      couverture: "partiel:fenetre_courte",
+      logements_autorises_recent: 10_000,
+      logements_commences_recent: 400,
+      par_annee: {
+        "2024": { aut: 6_000, com: 250, mois_couverts: 12 },
+        "2025": { aut: 4_000, com: 150, mois_couverts: 12 },
+      },
+      annees: ["2024", "2025"],
+    });
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
+    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.couverture.permis).toBe("partiel:fenetre_courte");
+    expect(result.note.logements_autorises_recent).toBe(10_000);
+    expect(result.info.permis.annees_pleines).toEqual(["2024", "2025"]);
+    expect(result.note.signal).toBe("faible");
   });
 
   it("(P2) arrondissement RÉEL du géocodage (75115) → chiffre ville entière exposé mais 'partiel' et NON scoré", async () => {

@@ -2814,7 +2814,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
   {
     name: "dynamique_immobiliere",
     description:
-      "Dynamique immobilière et potentiel de croissance d'une zone (point + rayon). Combine 3 sources officielles : permis de construire (Sit@del/SDES, maille COMMUNE — logements autorisés/commencés récents → habitants attendus), zones AU du PLU (Géoportail de l'Urbanisme/IGN — futurs quartiers réservés, géolocalisés), ventes de terrains à bâtir (DGFiP DVF, géolocalisées). Sortie en 2 registres : 'note' = VOLUME (logements autorisés/commencés, nombre et immédiateté des zones AU) destiné au scoring de potentiel ; 'info' = quartiers concernés (nommés), habitants attendus, prix indicatifs (contexte, hors score). En ville dense les permis-commune sont grossiers → s'appuyer sur zones AU + terrains (géolocalisés). Point côtier/isolé sans commune au géocodage inverse → `couverture.permis`='indisponible:commune_introuvable' et `meta.code_commune`=null, MAIS zones AU + terrains restent servis (calcul par rayon) — l'outil ne plante jamais pour ça. Paris/Lyon/Marseille : Sit@del ne descend pas à l'arrondissement → les permis servis sont ceux de la VILLE ENTIÈRE (`meta.code_commune_permis`, ex 75056), `couverture.permis`='partiel:ville_entiere_plm' et le `signal` ne s'appuie alors que sur les zones AU. Commune absente de Sit@del → `couverture.permis`='indisponible:no_data' (les zéros ne sont PAS une donnée). 'geojson' = polygones des zones AU pour la carte. Sources : SDES, IGN/GPU, DGFiP.",
+      "Dynamique immobilière et potentiel de croissance d'une zone (point + rayon). Combine 3 sources officielles : permis de construire (Sit@del/SDES, maille COMMUNE — logements autorisés/commencés récents → habitants attendus), zones AU du PLU (Géoportail de l'Urbanisme/IGN — futurs quartiers réservés, géolocalisés), ventes de terrains à bâtir (DGFiP DVF, géolocalisées). Sortie en 2 registres : 'note' = VOLUME (logements autorisés/commencés, nombre et immédiateté des zones AU) destiné au scoring de potentiel ; 'info' = quartiers concernés (nommés), habitants attendus, prix indicatifs (contexte, hors score). En ville dense les permis-commune sont grossiers → s'appuyer sur zones AU + terrains (géolocalisés). Point côtier/isolé sans commune au géocodage inverse → `couverture.permis`='indisponible:commune_introuvable' et `meta.code_commune`=null, MAIS zones AU + terrains restent servis (calcul par rayon) — l'outil ne plante jamais pour ça. Paris/Lyon/Marseille : Sit@del ne descend pas à l'arrondissement → les permis servis sont ceux de la VILLE ENTIÈRE (`meta.code_commune_permis`, ex 75056), `couverture.permis`='partiel:ville_entiere_plm' et le `signal` ne s'appuie alors que sur les zones AU. Commune absente de Sit@del, ou sans aucune année pleine → `couverture.permis`='indisponible:no_data' (les zéros ne sont PAS une donnée ; `info.permis.annee_en_cours` peut malgré tout être servi pour une commune nouvelle). Les totaux permis ne somment que des ANNÉES PLEINES (`info.permis.annees_pleines`) ; l'année en cours, incomplète (le SDES publie avec ~2 mois de retard), est servie à part dans `info.permis.annee_en_cours` avec ses `mois_couverts` — ne JAMAIS la comparer telle quelle à une année pleine ni l'ajouter aux totaux. Moins de 5 années pleines en base → 'partiel:fenetre_courte' ; une année de la fenêtre à moins de 12 mois publiés → 'partiel:annees_incompletes' (total SERVI mais non comparable, non scoré dans les deux cas). 'geojson' = polygones des zones AU pour la carte. Sources : SDES, IGN/GPU, DGFiP.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2843,7 +2843,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
         info: {
           type: "object",
           description:
-            "Contexte non-scorable : habitants_attendus, quartiers_au (libellés), prix_m2_median, terrains. Ne PAS intégrer à une note d'attractivité.",
+            "Contexte non-scorable : habitants_attendus, permis { annees_pleines, annee_en_cours: { annee, mois_couverts, logements_autorises, logements_commences } | null }, quartiers_au (libellés), prix_m2_median, terrains. Ne PAS intégrer à une note d'attractivité.",
         },
         geojson: {
           type: "object",
@@ -2852,7 +2852,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
         couverture: {
           type: "object",
           description:
-            "Statut de dégradation par section : 'ok' | 'indisponible:<raison>'. Lire avant d'interpréter note/info.",
+            "Statut de dégradation par section : 'ok' | 'partiel:<raison>' | 'indisponible:<raison>'. Un 'partiel:' signifie que le chiffre est SERVI mais NON comparable et NON scoré ('partiel:ville_entiere_plm' = chiffre de la ville entière ; 'partiel:fenetre_courte' = moins de 5 années pleines ; 'partiel:annees_incompletes' = une année de la fenêtre a moins de 12 mois publiés ; 'partiel:lignes_illisibles'). Lire avant d'interpréter note/info.",
         },
       },
       required: ["couverture"],
