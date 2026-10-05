@@ -4,7 +4,7 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
-## [Unreleased]
+## [0.31.1] — 2026-10-05 — Six issues Sentry fermées : fautes caller et limites amont reclassées (-32602 / -32000), timeouts DVF et RPPS corrigés (index `geog` GiST + budget 15 s), contexte d'erreur RPPS
 
 ### Fixed
 
