@@ -24,8 +24,8 @@
 | `ip_hash` | `a4f2…` (16 hex chars) | Rate limiting + détection d'abus distribué |
 | `user_agent` | `claude-ai/1.2.3` | Comprendre quels clients MCP utilisent l'API |
 | `duration_ms` | `142` | Détection de régressions perfs |
-| `status` | `200` / `429` / `500` | Monitoring santé du service |
-| `outcome` | `success` / `rate_limited` / `not_found` / `bad_request` / `internal_error` | Idem |
+| `status` | `200` / `429` / `503` / `500` | Monitoring santé du service |
+| `outcome` | `success` / `rate_limited` / `not_found` / `bad_request` / `upstream_rate_limited` / `internal_error` | Idem |
 
 ### Hash IP : pourquoi et comment
 

@@ -21,7 +21,7 @@
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { HttpError, isTransientHttpStatus } from "../src/core/http.js";
+import { HttpError, RateLimitExceededError, isTransientHttpStatus } from "../src/core/http.js";
 import { VERSION } from "../src/core/version.js";
 import {
   type LogLevel,
@@ -32,7 +32,7 @@ import {
   scheduleObservabilityFlush,
 } from "./_lib/observability.js";
 import { checkRateLimit, extractIp, hashIp } from "./_lib/rate-limit.js";
-import { captureMcpError } from "./_lib/sentry.js";
+import { captureMcpError, captureUpstreamRateLimit } from "./_lib/sentry.js";
 import { TOOLS, findTool } from "./tools.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -424,6 +424,36 @@ async function handleRpc(
       return error(id, -32602, message, data);
     }
     const tool = typeof request.params?.name === "string" ? request.params.name : undefined;
+    // FRANCE-DATA-MCP-S : une dépendance amont (INSEE, DINUM…) en HTTP 429 APRÈS
+    // les retries de `fetchJson` est une limite de débit TRANSITOIRE, pas un bug
+    // serveur → Sentry `warning` agrégé par host (`captureUpstreamRateLimit`,
+    // fingerprint stable : volume visible sans noyer les vraies pannes, là où
+    // une `error` par event les noyait), jamais `captureMcpError` ;
+    // warn + log `upstream_rate_limited` (status 503 = indisponibilité passagère)
+    // et code JSON-RPC -32000 (erreur serveur applicative) avec `retryAfterSeconds`
+    // + `upstreamHost` en `error.data` pour qu'un client réessaie au bon moment.
+    if (err instanceof RateLimitExceededError) {
+      const upstreamHost = upstreamHostOf(err);
+      const retryAfterSeconds = err.retryAfterSeconds;
+      const message = `Dépendance amont ${upstreamHost} limite le débit (HTTP 429) — réessayer après ${retryAfterSeconds} s.`;
+      console.warn(`[france-data-mcp] upstream_rate_limited on ${request.method}: ${message}`);
+      captureUpstreamRateLimit({
+        upstreamHost,
+        retryAfterSeconds,
+        method: request.method,
+        tool,
+        ipHash: ctx.ipHash,
+        userAgent: ctx.userAgent,
+      });
+      emit(ctx, start, request.method, {
+        tool,
+        status: 503,
+        outcome: "upstream_rate_limited",
+        level: "warn",
+        extra: { error: message, upstreamHost, retryAfterSeconds },
+      });
+      return error(id, -32000, message, { retryAfterSeconds, upstreamHost });
+    }
     const message = reportInternalError(err, ctx, start, request.method, {
       tool,
       layer: "handle_rpc",
@@ -453,17 +483,25 @@ async function handleRpc(
  */
 export function describeUpstreamFailure(err: unknown): string | null {
   if (!(err instanceof HttpError)) return null;
-  let host = "amont";
-  try {
-    host = new URL(err.url).host;
-  } catch {
-    // err.url non parsable (ne devrait pas arriver — toujours une URL fetch
-    // complète) : on reste sur le placeholder plutôt que de fuiter l'URL brute.
-  }
+  const host = upstreamHostOf(err);
   const hint = isTransientHttpStatus(err.status)
     ? "panne transitoire — réessayer après un court délai"
     : "réponse inattendue de la dépendance amont";
   return `Dépendance amont ${host} a renvoyé HTTP ${err.status} (${hint}).`;
+}
+
+/**
+ * Host amont d'une `HttpError` (infrastructure publique, non sensible) — JAMAIS
+ * l'URL complète, dont la query porte l'input du caller.
+ */
+function upstreamHostOf(err: HttpError): string {
+  try {
+    return new URL(err.url).host;
+  } catch {
+    // err.url non parsable (ne devrait pas arriver — toujours une URL fetch
+    // complète) : on reste sur le placeholder plutôt que de fuiter l'URL brute.
+    return "amont";
+  }
 }
 
 function reportInternalError(

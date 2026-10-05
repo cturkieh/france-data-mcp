@@ -15,6 +15,7 @@ import { finessFamillePerimetre } from "../src/sante/perimetre.js";
 import * as rppsDb from "../src/sante/rpps-db.js";
 import * as ingestLog from "../src/storage/ingest-log.js";
 import * as geocode from "../src/territoire/geocode.js";
+import { extractErrorContext } from "./_lib/error-context.js";
 import {
   TOOLS,
   categorieCodesFromArgs,
@@ -2510,5 +2511,106 @@ describe("cout_foncier (MCP tool)", () => {
     await expect(tool?.handler({ lat: 48.87, lon: 2.35, rayon_km: 11 })).rejects.toThrow(
       RangeError,
     );
+  });
+});
+
+describe("contexte d'erreur anonymisé des tools RPPS (FRANCE-DATA-MCP-8 / -Q)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("professionnels_rpps_in_radius : attache un contexte sans coordonnées puis re-throw", async () => {
+    const err = new Error("rpps_in_radius (57014): canceling statement due to statement timeout");
+    vi.spyOn(rppsDb, "getRppsInRadius").mockRejectedValueOnce(err);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const tool = findTool("professionnels_rpps_in_radius");
+    await expect(
+      tool?.handler({
+        center: { lat: 48.8566, lon: 2.3522 },
+        radius_km: 3,
+        profession_codes: ["10"],
+        precise_only: true,
+        limit: 50,
+      }),
+    ).rejects.toBe(err);
+    const ctx = extractErrorContext(err);
+    expect(ctx).toEqual({
+      tool: "professionnels_rpps_in_radius",
+      radius_km: 3,
+      has_profession_filter: true,
+      has_savoir_faire_filter: false,
+      has_mode_exercice_filter: false,
+      precise_only: true,
+      limit: 50,
+    });
+    // Anonymisation : aucune coordonnée exacte ne voyage vers Sentry.
+    const serialized = JSON.stringify(ctx);
+    expect(serialized).not.toContain("48.8566");
+    expect(serialized).not.toContain("2.3522");
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("[france-data-mcp] rpps_radius_query_failed"),
+    );
+  });
+
+  it("professionnels_rpps_in_radius : défauts limit=100, precise_only=false, filtres vides non comptés", async () => {
+    const err = new Error("boom");
+    vi.spyOn(rppsDb, "getRppsInRadius").mockRejectedValueOnce(err);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const tool = findTool("professionnels_rpps_in_radius");
+    await expect(
+      tool?.handler({ center: { lat: 45.76, lon: 4.83 }, radius_km: 1, savoir_faire_codes: [] }),
+    ).rejects.toBe(err);
+    expect(extractErrorContext(err)).toMatchObject({
+      has_savoir_faire_filter: false,
+      precise_only: false,
+      limit: 100,
+    });
+  });
+
+  it("professionnels_rpps_par_dept : attache le contexte anonymisé puis re-throw", async () => {
+    const err = new Error("rpps_par_specialite_dept (57014): canceling statement");
+    vi.spyOn(rppsDb, "getRppsParSpecialiteDept").mockRejectedValueOnce(err);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const tool = findTool("professionnels_rpps_par_dept");
+    await expect(
+      tool?.handler({
+        departement: "75",
+        profession_code: "10",
+        mode_exercice_code: "L",
+        offset: 200,
+      }),
+    ).rejects.toBe(err);
+    expect(extractErrorContext(err)).toEqual({
+      tool: "professionnels_rpps_par_dept",
+      departement: "75",
+      has_profession_filter: true,
+      has_savoir_faire_filter: false,
+      has_mode_exercice_filter: true,
+      offset: 200,
+      limit: 100,
+    });
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("[france-data-mcp] rpps_dept_query_failed"),
+    );
+  });
+
+  it("RangeError (faute caller) : contexte attaché, mais PAS de console.error (déjà warn côté mcp.ts)", async () => {
+    const tool = findTool("professionnels_rpps_par_dept");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const err = new RangeError("departement invalide");
+    vi.spyOn(rppsDb, "getRppsParSpecialiteDept").mockRejectedValueOnce(err);
+    await expect(tool?.handler({ departement: "75" })).rejects.toBe(err);
+    expect(extractErrorContext(err)).toMatchObject({ tool: "professionnels_rpps_par_dept" });
+
+    const radiusErr = new RangeError("radius invalide");
+    vi.spyOn(rppsDb, "getRppsInRadius").mockRejectedValueOnce(radiusErr);
+    await expect(
+      findTool("professionnels_rpps_in_radius")?.handler({
+        center: { lat: 45.76, lon: 4.83 },
+        radius_km: 1,
+      }),
+    ).rejects.toBe(radiusErr);
+    expect(extractErrorContext(radiusErr)).toMatchObject({ tool: "professionnels_rpps_in_radius" });
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });

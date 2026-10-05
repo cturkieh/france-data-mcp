@@ -281,12 +281,186 @@ describe("searchEntreprises", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("ne masque PAS un 400 non lié au NAF — reste HttpError capturée", async () => {
-    // Garde-fou anti-sur-élargissement : un 400 dont le body ne parle pas
-    // d'`activite_principale` (et sans `naf` fourni) reste une HttpError (panne /
-    // faute amont légitime) — la conversion en RangeError est étroite et ciblée.
-    fetchMock.mockResolvedValue(apiError(400, { erreur: "Paramètre `departement` invalide" }));
-    await expect(searchEntreprises({ departement: "999" })).rejects.toThrow(HttpError);
+  it("un 400 DINUM SANS clé `erreur` dans le body reste HttpError (pas de masquage)", async () => {
+    // Garde-fou anti-sur-élargissement : seul un 400 de la forme documentée DINUM
+    // (`{"erreur": "…"}` = validation de paramètre) est une faute caller. Un 400
+    // d'une autre forme (proxy, HTML, payload inattendu) reste une HttpError capturée.
+    fetchMock.mockResolvedValue(apiError(400, { message: "Bad Request" }));
+    await expect(searchEntreprises({ departement: "75" })).rejects.toThrow(HttpError);
+    fetchMock.mockResolvedValue(new Response("<html>400 Bad Request</html>", { status: 400 }));
+    await expect(searchEntreprises({ departement: "75" })).rejects.toThrow(HttpError);
+  });
+
+  it("convertit tout 400 DINUM à clé `erreur` (ex. departement) en RangeError citant le motif (FRANCE-DATA-MCP-R)", async () => {
+    // Département existant côté `isExistingDept` (975) mais refusé par DINUM :
+    // le filet post-réseau convertit le 400 documenté en faute caller.
+    fetchMock.mockResolvedValue(
+      apiError(400, {
+        erreur:
+          "Au moins un paramètre `departement` est non valide. Les valeurs valides : ['01', '02', '2A', '2B', '971']",
+      }),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = await searchEntreprises({ departement: "975" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toContain("`departement` est non valide");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[france-data-mcp] searchEntreprises"),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("rejette un departement mal formé (payload path-traversal) en RangeError SANS appel réseau (FRANCE-DATA-MCP-R)", async () => {
+    // Payload réel du scanner de sécurité observé en prod.
+    const err = await searchEntreprises({
+      departement: "../../../../root/.mcp_traversal_canary.txt",
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toMatch(/departement .* invalide — format attendu/);
+    // Valeur caller tronquée à 40 caractères dans le message.
+    expect((err as RangeError).message).not.toContain("canary.txt");
+    // Départements INEXISTANTS rejetés aussi (00, 20 → 2A/2B, 96-99, 970, 979-983, 989).
+    for (const bad of [
+      "999",
+      "7",
+      "7500",
+      "ZZ",
+      "2C",
+      "08 ",
+      "00",
+      "20",
+      "96",
+      "99",
+      "970",
+      "980",
+    ]) {
+      await expect(searchEntreprises({ departement: bad })).rejects.toThrow(RangeError);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["08", "2A", "2B", "971", "976", "988"])(
+    "accepte le departement `%s` (appel réseau émis)",
+    async (dept) => {
+      fetchMock.mockResolvedValue(apiResponse({}));
+      await searchEntreprises({ departement: dept });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(lastFetchUrl()).toContain(`departement=${dept}`);
+    },
+  );
+
+  it("normalise `2a`/`2b` en majuscules avant envoi", async () => {
+    fetchMock.mockResolvedValue(apiResponse({}));
+    await searchEntreprises({ departement: "2a" });
+    expect(lastFetchUrl()).toContain("departement=2A");
+  });
+
+  // Corps RÉELS DINUM (forme prod 2026-10-05) : 756 octets pour `departement`,
+  // 7 417 pour un NAF inexistant — `fetchJson` les tronque à 500 caractères dans
+  // `HttpError.body`, le `JSON.parse` échoue : le repli regex doit les convertir.
+  const deptList = Array.from(
+    { length: 101 },
+    (_, i) => `'${String(i + 1).padStart(2, "0")}'`,
+  ).join(", ");
+  const nafList = Array.from({ length: 732 }, (_, i) => `'${String(i).padStart(2, "0")}.11Z'`).join(
+    ", ",
+  );
+  const realDeptBody = `{"erreur":"Au moins un paramètre \`departement\` est non valide. Les valeurs valides : [${deptList}]"}`;
+  const realNafBody = `{"erreur":"Au moins un paramètre \`activite_principale\` est non valide. Les valeurs valides : [${nafList}]"}`;
+
+  it("body DINUM `departement` TRONQUÉ à 500 car. par fetchJson → RangeError (C2)", async () => {
+    expect(realDeptBody.length).toBeGreaterThan(500);
+    fetchMock.mockResolvedValue(new Response(realDeptBody, { status: 400 }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = await searchEntreprises({ departement: "975" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toContain("`departement` est non valide");
+  });
+
+  it("le repli regex extrait le message d'un body coupé EXACTEMENT comme http.ts (`slice(0, 500)`)", async () => {
+    // Même coupe que `fetchJson`, appliquée ici à la main pour épingler la forme.
+    const cut = realNafBody.slice(0, 500);
+    expect(() => JSON.parse(cut)).toThrow();
+    fetchMock.mockResolvedValue(new Response(cut, { status: 400 }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(searchEntreprises({ departement: "44", q: "x" })).rejects.toThrow(RangeError);
+  });
+
+  it("body DINUM `activite_principale` TRONQUÉ (NAF inexistant, 7 Ko) → RangeError NAF (FRANCE-DATA-MCP-G)", async () => {
+    expect(realNafBody.length).toBeGreaterThan(7000);
+    fetchMock.mockResolvedValue(new Response(realNafBody, { status: 400 }));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = await searchEntreprises({ naf: "71.12Z", departement: "44" }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toContain("hors nomenclature NAF");
+  });
+
+  it("un 400 DINUM sur un de NOS paramètres (`per_page`) reste HttpError (dérive interne visible)", async () => {
+    // Body réel DINUM. `per_page` est construit par la lib (clamp 1-25) : un 400
+    // dessus = bug de NOTRE construction d'URL, pas une faute caller.
+    fetchMock.mockResolvedValue(
+      apiError(400, { erreur: "Veuillez indiquer un paramètre `per_page` entre `1` et `25`" }),
+    );
+    await expect(searchEntreprises({ departement: "75" })).rejects.toThrow(HttpError);
+  });
+
+  it("codePostal mal formé (`1234`) → RangeError SANS appel réseau", async () => {
+    for (const bad of ["1234", "750011", "75 001", "ABCDE", ""]) {
+      const err = await searchEntreprises({ q: "pharmacie", codePostal: bad }).catch(
+        (e: unknown) => e,
+      );
+      expect(err, bad).toBeInstanceOf(RangeError);
+      expect((err as RangeError).message).toContain("codePostal");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("q < 3 caractères sans autre filtre → RangeError citant la règle DINUM, SANS appel réseau", async () => {
+    for (const bad of ["a", "ab", "  ab  ", "   "]) {
+      const err = await searchEntreprises({ q: bad }).catch((e: unknown) => e);
+      expect(err, JSON.stringify(bad)).toBeInstanceOf(RangeError);
+      expect((err as RangeError).message).toContain("3 caractères minimum");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("q court AVEC un filtre reste envoyé (DINUM l'accepte)", async () => {
+    fetchMock.mockImplementation(async () => apiResponse({ results: [] }));
+    await searchEntreprises({ q: "ab", departement: "75" });
+    await searchEntreprises({ q: "ab", codePostal: "75001" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("corps DINUM réel `code_postal` SANS backticks → RangeError (filet post-réseau)", async () => {
+    // Corps live (code_postal=1234). La pré-validation l'arrête désormais avant
+    // réseau ; le filet post-réseau doit quand même reconnaître cette forme.
+    fetchMock.mockResolvedValue(
+      apiError(400, { erreur: "Au moins une valeur du paramètre code_postal est non valide." }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = await searchEntreprises({ q: "pharmacie", codePostal: "99999" }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toContain("code_postal est non valide");
+  });
+
+  it("corps DINUM réel « 3 caractères minimum » → RangeError (filet post-réseau)", async () => {
+    // Corps live (q=a). Une règle amont plus stricte que notre trim (décompte par
+    // terme) doit rester une faute caller.
+    fetchMock.mockResolvedValue(
+      apiError(400, {
+        erreur:
+          "3 caractères minimum pour les termes de la requête (ou utilisez au moins un filtre)",
+      }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = await searchEntreprises({ q: "a b c" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toContain("3 caractères minimum");
   });
 
   it("ne convertit PAS un 4xx non-400 même avec `activite_principale` dans le body (gate status === 400)", async () => {
@@ -551,6 +725,27 @@ describe("getEntrepriseBySiren", () => {
     await getEntrepriseBySiren("444444444");
     const secondUrl = fetchMock.mock.calls[1]?.[0] as string;
     expect(secondUrl).toContain("departement=2B");
+  });
+
+  it("siège à Monaco (98000) → enrichmentStatus='not_attempted', aucun appel d'enrichissement", async () => {
+    // `deptFromPostal("98000")` = "980" n'est pas un département existant : sans
+    // garde, la pré-validation de searchEntreprises lèverait une RangeError
+    // attrapée en `failed` alors que le caller n'a rien fourni de faux.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchMock.mockResolvedValueOnce(
+      entrepriseResponse({
+        siren: "888888888",
+        nom_complet: "LABO MONACO",
+        activite_principale: "86.90B",
+        nombre_etablissements: 4,
+        siege: { siret: "88888888800010", code_postal: "98000" },
+      }),
+    );
+    const e = assertFound(await getEntrepriseBySiren("888888888"));
+    expect(e.enrichmentStatus).toBe("not_attempted");
+    expect(e.enrichmentWarning).toContain("departement=non déductible");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(errSpy).not.toHaveBeenCalled();
   });
 
   it("dégrade gracieusement si le 2e appel échoue : enrichmentStatus='failed' + warning", async () => {

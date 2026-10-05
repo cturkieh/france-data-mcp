@@ -285,6 +285,55 @@ export function captureMcpConfigWarning(code: string, message: string): void {
   }
 }
 
+export type UpstreamRateLimitContext = {
+  upstreamHost: string;
+  retryAfterSeconds: number;
+  method: string;
+  tool?: string;
+  ipHash: string;
+  userAgent: string;
+};
+
+/**
+ * FRANCE-DATA-MCP-S : capture une limite de débit AMONT (HTTP 429 après les
+ * retries de `fetchJson`) en `warning` agrégé par host. Ni muet (règle « échec
+ * individuel = Sentry warning, jamais rien » : le volume reste visible), ni
+ * `error` par event (qui noyait les vraies pannes) : fingerprint stable
+ * `["mcp_upstream_rate_limited", upstreamHost]` → UNE issue par dépendance.
+ *
+ * Calquée sur `captureMcpConfigWarning` : level via le 2e arg `captureMessage`,
+ * no-op si Sentry désactivé, ne throw jamais.
+ */
+export function captureUpstreamRateLimit(ctx: UpstreamRateLimitContext): void {
+  ensureInit();
+  if (!enabled) return;
+
+  try {
+    Sentry.withScope((scope) => {
+      scope.setTag("mcp.method", ctx.method);
+      if (typeof ctx.tool === "string" && ctx.tool.length > 0) {
+        scope.setTag("mcp.tool", ctx.tool);
+      }
+      scope.setTag("mcp.outcome", "upstream_rate_limited");
+      scope.setTag("mcp.upstream_host", ctx.upstreamHost);
+      scope.setFingerprint(["mcp_upstream_rate_limited", ctx.upstreamHost]);
+      scope.setContext("mcp_request", {
+        ip_hash: ctx.ipHash,
+        user_agent: ctx.userAgent,
+        upstream_host: ctx.upstreamHost,
+        retry_after_s: ctx.retryAfterSeconds,
+      });
+      Sentry.captureMessage(
+        `Dépendance amont ${ctx.upstreamHost} limite le débit (HTTP 429 après retries)`,
+        "warning",
+      );
+    });
+  } catch (sentryErr) {
+    const reason = sentryErr instanceof Error ? sentryErr.message : String(sentryErr);
+    console.error(`[france-data-mcp] Sentry captureMessage failed: ${reason}`);
+  }
+}
+
 /**
  * Force le flush des events en attente. Vercel coupe le process serverless
  * juste après la réponse HTTP, sans ce flush les events en file d'attente

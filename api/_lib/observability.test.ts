@@ -119,6 +119,21 @@ describe("logMcpEvent", () => {
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("upstream_rate_limited (503) forcé en warn ne part PAS en console.error (FRANCE-DATA-MCP-S)", () => {
+    logMcpEvent({
+      method: "tools/call",
+      tool: "etablissement_by_siret",
+      ipHash: "h",
+      userAgent: "ua",
+      durationMs: 10,
+      status: 503,
+      outcome: "upstream_rate_limited",
+      level: "warn",
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
   it("omet la clé `tool` si non fournie", () => {
     logMcpEvent({
       method: "initialize",

@@ -42,6 +42,7 @@ CI GitHub Actions vérifie typecheck (2 tsconfigs) + biome + tests + Supabase lo
 - Matview `FROM` table swappée → **RECONSTRUIRE** post-swap (OID), jamais REFRESH-only.
 - Parité index prod ↔ `ingest_create_*_staging` (recopie VERBATIM, `staging-parity.test.ts`) ; GiST spatial rpps PARTIEL-à-PARTIEL.
 - RPC d'ingestion longue → `SET statement_timeout` fonction (< 60 s) + `ANALYZE` post-COPY ; jamais de `CREATE INDEX` lourd via PostgREST.
+- Toute RPC de LECTURE servie à `anon` hérite d'un `statement_timeout` de **3 s** → `SET statement_timeout = '15s'` au niveau fonction ; un `CREATE OR REPLACE FUNCTION` qui ne redéclare pas ses `SET` les PERD (prod : `rpps_par_specialite_dept`, `dvf_in_radius`). `ST_DWithin(geom::geography, …)` n'utilise JAMAIS un GiST sur `geom` → colonne `geog` STORED + GiST dédié.
 - `ban_join` = curseur keyset, jamais sentinelle ; acceptation BAN par **précision** (`result_type`), jamais par score.
 - Valider une nomenclature contre la matview NON filtrée source du count.
 - Coords centroïde + rayon = O(lignes/commune) → matview de centroïdes ; `ORDER BY geog <-> point` (KNN), jamais `ST_Distance`.

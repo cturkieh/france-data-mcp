@@ -139,7 +139,7 @@ describe.skipIf(!hasKey)("dvf_in_radius (PostGIS integration)", () => {
       r.id_mutation.startsWith(ITEST_PREFIX),
     );
 
-    // (a) Seule la row DANS le rayon est retournée (le cast ::geography mesure
+    // (a) Seule la row DANS le rayon est retournée (la colonne `geog` mesure
     //     des mètres réels : la row à ~2 km est exclue d'un rayon de 500 m).
     expect(returned).toHaveLength(1);
     const inside = returned[0] as {
@@ -151,7 +151,7 @@ describe.skipIf(!hasKey)("dvf_in_radius (PostGIS integration)", () => {
 
     // (b) La position dérivée du geom (longitude/latitude alimentant la colonne
     //     GENERATED) remonte peuplée et correspond au point inséré → preuve que
-    //     la colonne générée + le cast ::geography ont fonctionné de bout en bout.
+    //     les colonnes générées `geom` → `geog` ont fonctionné de bout en bout.
     expect(inside.longitude).not.toBeNull();
     expect(inside.latitude).not.toBeNull();
     expect(inside.longitude).toBeCloseTo(INSIDE.lon, 4);

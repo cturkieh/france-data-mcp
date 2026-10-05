@@ -43,6 +43,8 @@ export type McpOutcome =
   | "rate_limited"
   | "not_found"
   | "bad_request"
+  /** Dépendance amont (INSEE, DINUM, IGN…) en HTTP 429 après retries — limite transitoire, pas un bug (FRANCE-DATA-MCP-S). */
+  | "upstream_rate_limited"
   | "internal_error";
 
 export type McpEventInput = {

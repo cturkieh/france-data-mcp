@@ -12,10 +12,10 @@
 
 import { parseCoordinates } from "../core/coords.js";
 import { GEOPF_GEOCODAGE_BASE_URL } from "../core/geopf.js";
-import { fetchJson } from "../core/http.js";
+import { HttpError, fetchJson } from "../core/http.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
-import { diceCoefficient, normalizeForCompare } from "../core/text-match.js";
+import { diceCoefficient, normalizeForCompare, truncateForMessage } from "../core/text-match.js";
 import type { Coordinates } from "../core/types.js";
 
 // Base partagée avec le client bulk via `core/geopf.ts` : un changement de chemin IGN se fait à UN endroit.
@@ -170,6 +170,7 @@ export async function geocodeMany(
   options: GeocodeOptions = {},
 ): Promise<GeocodeResult[]> {
   const { codePostal, codeCommune, type, limit = 5, signal } = options;
+  assertGeocodableAddress(address);
 
   const params = new URLSearchParams({ q: address });
   params.set("limit", String(clamp(limit, 1, 20)));
@@ -178,9 +179,86 @@ export async function geocodeMany(
   if (type) params.set("type", type);
 
   const url = `${BASE_URL}/search/?${params.toString()}`;
-  const data = await fetchJson<ApiResponse>(url, { signal });
+  let data: ApiResponse;
+  try {
+    data = await fetchJson<ApiResponse>(url, { signal });
+  } catch (err) {
+    // Filet si la pré-validation laisse passer un `q` que l'IGN refuse (règle
+    // IGN évolutive) : HTTP 400 dont le `detail` vise `q`/`postcode`/`citycode`
+    // = input caller → RangeError. Tout autre 400 reste HttpError.
+    const detail =
+      err instanceof HttpError && err.status === 400 ? parseIgnQueryError(err.body) : null;
+    if (detail !== null) {
+      console.warn(
+        `[france-data-mcp] geocodeMany: adresse rejetée par l'IGN (HTTP 400 ${truncateForMessage(detail, 300)}) → RangeError -32602 (input caller invalide, pas une panne amont)`,
+      );
+      throw new RangeError(
+        `geocode: adresse rejetée par le géocodeur IGN (HTTP 400) : ${truncateForMessage(detail, 300)}`,
+      );
+    }
+    throw err;
+  }
 
   return usableGeocodeResults(data.features, `q="${address}"`, address);
+}
+
+/**
+ * Règle IGN du paramètre `q` (Géoplateforme `/search`) : « must contain between
+ * 3 and 200 chars and start with a number or a letter ». Pré-validée AVANT
+ * réseau (FRANCE-DATA-MCP-P : un scanner de sécurité a passé un payload de
+ * path-traversal à `geocode_adresse` → IGN HTTP 400 capturé en Sentry `error`).
+ *
+ * Tous les consommateurs (`geocode_adresse`, ancrage de
+ * `panorama_implantation_complet`) passent une adresse fournie par le caller :
+ * aucun libellé interne (FINESS/RPPS → BAN passe par le client bulk, pas ici),
+ * donc RangeError sans mode « non strict ».
+ */
+const IGN_QUERY_MIN_LENGTH = 3;
+const IGN_QUERY_MAX_LENGTH = 200;
+const IGN_QUERY_FIRST_CHAR = /^[\p{L}\p{N}]/u;
+
+function assertGeocodableAddress(address: string): void {
+  const trimmed = address.trim();
+  const shown = truncateForMessage(trimmed, 40);
+  if (trimmed.length < IGN_QUERY_MIN_LENGTH || trimmed.length > IGN_QUERY_MAX_LENGTH) {
+    throw new RangeError(
+      `geocode: adresse \`${shown}\` invalide — ${IGN_QUERY_MIN_LENGTH} à ${IGN_QUERY_MAX_LENGTH} caractères attendus (reçu ${trimmed.length}, espaces de bord exclus).`,
+    );
+  }
+  if (!IGN_QUERY_FIRST_CHAR.test(trimmed)) {
+    throw new RangeError(
+      `geocode: adresse \`${shown}\` invalide — elle doit commencer par une lettre ou un chiffre (ex. \`64 cours Aristide Briand 08000 Charleville-Mézières\`).`,
+    );
+  }
+}
+
+/**
+ * Extrait le motif d'un HTTP 400 IGN portant sur un paramètre FOURNI PAR
+ * L'APPELANT (`{"code":400,"message":"Failed parsing query","detail":["q: …"]}`).
+ * Exige `detail` tableau NON vide de strings dont au moins un élément commence
+ * par `q:`, `postcode:` ou `citycode:` — le `message` n'est PAS discriminant :
+ * l'IGN renvoie le même « Failed parsing query » pour un paramètre que NOUS
+ * construisons (`type: unexpected value 'foo'`, `limit: …`, prouvé prod), et
+ * cette dérive doit rester une HttpError capturée Sentry, pas une faute caller.
+ * `null` sinon (body non-JSON, `detail` absent / `null` / vide / non-string) :
+ * l'HttpError d'origine est re-throw.
+ */
+const IGN_CALLER_PARAM_DETAIL = /^(q|postcode|citycode):/;
+
+function parseIgnQueryError(body: string | undefined): string | null {
+  if (!body) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { detail } = parsed as { detail?: unknown };
+  if (!Array.isArray(detail) || detail.length === 0) return null;
+  if (!detail.every((d): d is string => typeof d === "string")) return null;
+  if (!detail.some((d) => IGN_CALLER_PARAM_DETAIL.test(d))) return null;
+  return detail.join(" ; ");
 }
 
 /**

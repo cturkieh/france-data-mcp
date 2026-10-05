@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HttpError } from "../core/http.js";
 import { geocode, geocodeMany, reverseGeocode } from "./geocode.js";
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -185,7 +186,7 @@ describe("confidence_low seuil par type + match_partial (P2)", () => {
 
   it("type IGN inconnu → seuil défaut prudent 0.5", async () => {
     fetchMock.mockResolvedValue(feature(0.45, "poi", "Quelque chose"));
-    const result = await geocode("X");
+    const result = await geocode("Xyz");
     expect(result?.confidence_low).toBe(true);
   });
 
@@ -231,7 +232,7 @@ describe("coordonnées invalides (symétrie B1 — payload IGN dégradé)", () =
         valid,
       ]),
     );
-    const results = await geocodeMany("x");
+    const results = await geocodeMany("xyz");
     expect(results).toHaveLength(1);
     expect(results[0]?.label).toBe("Valide 75001 Paris");
     expect(warnSpy).toHaveBeenCalledWith(
@@ -247,7 +248,7 @@ describe("coordonnées invalides (symétrie B1 — payload IGN dégradé)", () =
         valid,
       ]),
     );
-    const results = await geocodeMany("x");
+    const results = await geocodeMany("xyz");
     expect(results.map((r) => r.label)).toEqual(["Valide 75001 Paris"]);
   });
 
@@ -262,7 +263,7 @@ describe("coordonnées invalides (symétrie B1 — payload IGN dégradé)", () =
         valid,
       ]),
     );
-    const results = await geocodeMany("x");
+    const results = await geocodeMany("xyz");
     expect(results.map((r) => r.label)).toEqual(["Valide 75001 Paris"]);
   });
 
@@ -293,5 +294,109 @@ describe("coordonnées invalides (symétrie B1 — payload IGN dégradé)", () =
     );
     const result = await reverseGeocode({ lon: 2.35, lat: 48.85 });
     expect(result).toBeNull();
+  });
+});
+
+describe("adresse invalide → RangeError (FRANCE-DATA-MCP-P)", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  // Payload réel du scanner de sécurité (prod) : caractères combinants U+0338 + slashes.
+  const TRAVERSAL = "̸../../../../root/.mcp_traversal_canary.txt";
+
+  it.each([
+    ["payload path-traversal (1er caractère non alphanumérique)", TRAVERSAL],
+    ["slash en tête", "/etc/passwd"],
+    ["trop court après trim", "  ab  "],
+    ["vide", ""],
+    ["trop long (> 200)", `1 ${"a".repeat(200)}`],
+  ])("pré-validation sans appel réseau : %s", async (_label, adresse) => {
+    await expect(geocodeMany(adresse)).rejects.toBeInstanceOf(RangeError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepte une adresse commençant par une lettre accentuée ou un chiffre", async () => {
+    fetchMock.mockImplementation(async () => geocodeResponse([]));
+    await expect(geocodeMany("Évry 91000")).resolves.toEqual([]);
+    await expect(geocodeMany("  64 cours Aristide Briand  ")).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("HTTP 400 IGN « Failed parsing query » → RangeError portant le detail", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: 400,
+          message: "Failed parsing query",
+          detail: ["q: must contain between 3 and 200 chars and start with a number or a letter"],
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const err = await geocodeMany("Adresse que l'IGN refuse").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toContain("q: must contain between 3 and 200 chars");
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[france-data-mcp] geocodeMany"));
+  });
+
+  it("HTTP 400 sans detail ni « Failed parsing query » → reste HttpError", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ code: 400, message: "autre chose" }), { status: 400 }),
+    );
+    const err = await geocodeMany("10 rue de Rivoli Paris").catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(RangeError);
+    expect(err).toBeInstanceOf(HttpError);
+  });
+
+  it("HTTP 400 IGN sur un de NOS paramètres (`type`) → reste HttpError (body réel prod)", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: 400,
+          message: "Failed parsing query",
+          detail: ["type: unexpected value 'foo'"],
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const err = await geocodeMany("10 rue de Rivoli Paris").catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(RangeError);
+    expect(err).toBeInstanceOf(HttpError);
+  });
+
+  it.each([null, {}, [], [42]])(
+    "HTTP 400 IGN « Failed parsing query » à detail %j → reste HttpError",
+    async (detail) => {
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ code: 400, message: "Failed parsing query", detail }), {
+          status: 400,
+        }),
+      );
+      const err = await geocodeMany("10 rue de Rivoli Paris").catch((e: unknown) => e);
+      expect(err).not.toBeInstanceOf(RangeError);
+      expect(err).toBeInstanceOf(HttpError);
+    },
+  );
+
+  it("HTTP 503 → reste HttpError (panne amont, pas faute caller)", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockImplementation(
+        async () => new Response("Service Unavailable", { status: 503 }),
+      );
+      const pending = geocodeMany("10 rue de Rivoli Paris").catch((e: unknown) => e);
+      await vi.runAllTimersAsync(); // court-circuite le backoff des retries 5xx
+      const err = await pending;
+      expect(err).not.toBeInstanceOf(RangeError);
+      expect(err).toBeInstanceOf(HttpError);
+      expect((err as HttpError).status).toBe(503);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

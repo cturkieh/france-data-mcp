@@ -26,9 +26,13 @@ export class HttpError extends Error {
 }
 
 export class RateLimitExceededError extends HttpError {
+  /** Délai `retry-after` (secondes) annoncé par l'amont au dernier 429 (défaut 5 s si absent). */
+  public readonly retryAfterSeconds: number;
+
   constructor(url: string, retryAfter: number) {
     super(`Rate limit exceeded after retries on ${url} (retry-after: ${retryAfter}s)`, 429, url);
     this.name = "RateLimitExceededError";
+    this.retryAfterSeconds = retryAfter;
   }
 }
 

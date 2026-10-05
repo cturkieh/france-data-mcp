@@ -47,6 +47,13 @@ const LOOKUP_RPCS = [
   "centres_sante_by_finess",
   "lister_savoir_faire_rpps",
   "rpps_in_radius",
+  // 2026-10-05 — servies à `anon` (plafond rôle 3 s, prouvé prod) et perdues
+  // par DROP + CREATE (FRANCE-DATA-MCP-Q / -T). Migrations
+  // 20261005T100000 (dvf_in_radius) et 20261005T100100 (rpps_par_specialite_dept,
+  // l'ALTER `statement_timeout` DOIT rester le dernier statement touchant la
+  // fonction : ce garde-fou ne lit que la dernière déclaration).
+  "dvf_in_radius",
+  "rpps_par_specialite_dept",
 ] as const;
 
 const MIN_TIMEOUT_SECONDS = 15;
