@@ -20,6 +20,7 @@ import { HttpError, fetchJson } from "../core/http.js";
 import { type LookupResult, lookupFound, lookupNotFound } from "../core/lookup-result.js";
 import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
+import { truncateForMessage } from "../core/text-match.js";
 import type { Coordinates } from "../core/types.js";
 import { getInseeApiKey, lookupSirenViaInsee } from "./insee-sirene.js";
 
@@ -287,6 +288,16 @@ export async function searchEntreprises(
     throw new RangeError("searchEntreprises: radiusKm > 0 requis quand center est fourni");
   }
 
+  // Pré-validation AVANT réseau (FRANCE-DATA-MCP-R) : un scanner de sécurité a
+  // passé `departement="../../../../root/.mcp_traversal_canary.txt"` → DINUM HTTP
+  // 400 capturé en Sentry `error`. Faute d'input caller → RangeError (-32602),
+  // sans appel amont. Format DINUM : 2 chiffres, 2A/2B, ou DOM-TOM 97x/98x.
+  if (departement && !DEPARTEMENT_PATTERN.test(departement)) {
+    throw new RangeError(
+      `searchEntreprises: departement \`${truncateForMessage(departement, 40)}\` invalide — format attendu : 2 chiffres (ex. \`08\`), \`2A\`/\`2B\` (Corse) ou 3 chiffres DOM-TOM (ex. \`971\`).`,
+    );
+  }
+
   const params = new URLSearchParams();
   let endpoint: string;
 
@@ -326,30 +337,31 @@ export async function searchEntreprises(
   params.set("per_page", String(clamp(perPage, 1, 25)));
 
   const url = `${endpoint}?${params.toString()}`;
-  // Un NAF BIEN FORMÉ mais INEXISTANT (ex. `71.12Z` — 7112 est éclaté en
-  // 71.12A/71.12B, pas de `…Z`) passe `normalizeNafCode` puis est rejeté par DINUM
-  // en HTTP 400 (« activite_principale non valide » — seule la nomenclature sait
-  // qu'un code n'existe pas). Faute d'INPUT caller, pas une panne : on la convertit
-  // en RangeError (→ JSON-RPC -32602) au lieu de la laisser remonter en HttpError
-  // capturée Sentry `error`. Discrimination ÉTROITE (400 + `naf` fourni + body
-  // `activite_principale`) ; tout autre 400 et les 5xx transitoires restent des
-  // HttpError. Repro FRANCE-DATA-MCP-G (jumeau « existence-invalide » de
-  // FRANCE-DATA-MCP-A « format-invalide », lui rejeté pré-réseau par normalizeNafCode).
+  // HTTP 400 DINUM = erreur de VALIDATION des paramètres (doc API Recherche
+  // d'entreprises), tous fournis par l'appelant : faute d'INPUT caller, pas une
+  // panne → RangeError (JSON-RPC -32602) au lieu d'une HttpError capturée Sentry
+  // `error`. Discrimination : 400 + body JSON portant une clé `erreur` (forme
+  // documentée DINUM). Un 400 SANS cette clé (proxy, HTML…) et les 5xx restent
+  // des HttpError. Historique : FRANCE-DATA-MCP-G (NAF bien formé mais hors
+  // nomenclature, ex. `71.12Z`) — mapping étroit `naf` + `activite_principale`,
+  // élargi à tout 400 `erreur` par FRANCE-DATA-MCP-R (`departement` invalide).
   let data: ApiResponse;
   try {
     data = await fetchJson<ApiResponse>(url, { signal });
   } catch (err) {
-    if (
-      naf && // truthy : aligné sur le `if (naf)` qui POSE `activite_principale` (l.315/319)
-      err instanceof HttpError &&
-      err.status === 400 &&
-      /activite_principale/i.test(err.body ?? "")
-    ) {
+    const dinumError =
+      err instanceof HttpError && err.status === 400 ? parseDinumError(err.body) : null;
+    if (dinumError !== null) {
       console.warn(
-        `[france-data-mcp] searchEntreprises: NAF \`${naf}\` rejeté par DINUM (HTTP 400 activite_principale) → RangeError -32602 (input caller invalide, pas une panne amont)`,
+        `[france-data-mcp] searchEntreprises: paramètre rejeté par DINUM (HTTP 400 erreur=${truncateForMessage(dinumError, 300)}) → RangeError -32602 (input caller invalide, pas une panne amont)`,
       );
+      if (naf && /activite_principale/i.test(dinumError)) {
+        throw new RangeError(
+          `searchEntreprises: code NAF \`${naf}\` rejeté par l'API DINUM — bien formé mais hors nomenclature NAF rév.2 (ex. 7112 n'a pas de \`…Z\` : c'est \`71.12A\`/\`71.12B\`). Utiliser une sous-classe RÉELLE à 5 caractères (ex. \`71.12B\` ingénierie, \`86.90B\` labos).`,
+        );
+      }
       throw new RangeError(
-        `searchEntreprises: code NAF \`${naf}\` rejeté par l'API DINUM — bien formé mais hors nomenclature NAF rév.2 (ex. 7112 n'a pas de \`…Z\` : c'est \`71.12A\`/\`71.12B\`). Utiliser une sous-classe RÉELLE à 5 caractères (ex. \`71.12B\` ingénierie, \`86.90B\` labos).`,
+        `searchEntreprises: paramètre rejeté par l'API DINUM (HTTP 400) : ${truncateForMessage(dinumError, 300)}`,
       );
     }
     throw err;
@@ -651,4 +663,30 @@ function toEtablissement(api: ApiSiege): Etablissement {
     }),
     ...(point ? { point } : {}),
   };
+}
+
+/**
+ * Format `departement` accepté par DINUM : 2 chiffres, `2A`/`2B`, ou 3 chiffres
+ * DOM-TOM `97x`/`98x` (FRANCE-DATA-MCP-R).
+ */
+const DEPARTEMENT_PATTERN = /^(\d{2}|2A|2B|9[78]\d)$/;
+
+/**
+ * Extrait le message `erreur` d'un body HTTP 400 DINUM (`{"erreur": "…"}`).
+ * `null` si le body est absent, non-JSON ou sans clé `erreur` string : ce 400
+ * n'a alors PAS la forme documentée et reste une HttpError (pas de masquage).
+ */
+function parseDinumError(body: string | undefined): string | null {
+  if (!body) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // Body non-JSON (HTML de proxy, tronqué à 500 car. par fetchJson) : pas la
+    // forme DINUM documentée → le caller re-throw l'HttpError d'origine (tracée).
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || !("erreur" in parsed)) return null;
+  const erreur = (parsed as { erreur: unknown }).erreur;
+  return typeof erreur === "string" && erreur.length > 0 ? erreur : null;
 }

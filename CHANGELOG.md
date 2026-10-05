@@ -6,7 +6,42 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
-_Rien pour l'instant._
+### Fixed
+
+- **`cout_foncier` / `dynamique_immobiliere` : la recherche DVF par rayon
+  n'est plus coupée en timeout** (Sentry `FRANCE-DATA-MCP-T`, 11 events en un
+  jour). La RPC `dvf_in_radius` filtrait `geom::geography` : le cast rendait
+  l'index GiST inutilisable, d'où un scan complet de la table sous le budget
+  de 3 s du rôle `anon`. Migration : colonne `geog` STORED + GiST dédié, RPC
+  sur `geog` avec `statement_timeout` 15 s, sortie explicite sans colonnes
+  géométriques hex hors contrat.
+- **`professionnels_rpps_par_dept` : `rpps_par_specialite_dept` retrouve son
+  `statement_timeout` de 15 s et son `search_path`** (Sentry
+  `FRANCE-DATA-MCP-Q`), perdus lors de deux re-créations successives de la
+  fonction ; elle était coupée au plafond de 3 s du rôle `anon`. Garde-fou
+  `lookup-statement-timeout.test.ts` étendu aux deux RPC.
+- **`professionnels_rpps_in_radius` / `professionnels_rpps_par_dept` : un
+  échec attache à Sentry un contexte anonymisé** (rayon ou département,
+  présence des filtres, pagination, jamais de coordonnées) pour diagnostiquer
+  les timeouts (Sentry `FRANCE-DATA-MCP-8`).
+- **`entreprises_in_radius` : un `departement` invalide est une faute de
+  l'appelant, plus une panne serveur** (Sentry `FRANCE-DATA-MCP-R`). Un
+  scanner de sécurité passait un chemin de fichier en `departement` : DINUM
+  renvoyait HTTP 400, capturé en `internal_error`. `searchEntreprises`
+  pré-valide le format (`08`, `2A`/`2B`, `971`…) avant tout appel réseau et
+  convertit tout HTTP 400 DINUM à clé `erreur` en `RangeError` (-32602) avec
+  le motif DINUM ; un 400 d'une autre forme reste une `HttpError`.
+- **`geocode_adresse` : une adresse que l'IGN refuse est une faute de
+  l'appelant** (Sentry `FRANCE-DATA-MCP-P`). `geocodeMany` applique la règle
+  IGN du paramètre `q` avant réseau (3 à 200 caractères, commence par une
+  lettre ou un chiffre) et convertit un HTTP 400 « Failed parsing query » en
+  `RangeError` (-32602) avec le `detail` IGN.
+- **Limite de débit amont (HTTP 429 après retries) : plus capturée comme un
+  bug** (Sentry `FRANCE-DATA-MCP-S`, `etablissement_by_siret` sur INSEE). Le
+  handler répond JSON-RPC `-32000` avec `retryAfterSeconds` et `upstreamHost`
+  dans `error.data`, logue `outcome=upstream_rate_limited` (status 503,
+  niveau warn) et ne remonte plus à Sentry. `RateLimitExceededError` expose
+  `retryAfterSeconds`.
 
 ## [0.31.0] — 2026-09-22 — `etablissement_finess_by_nom` (un établissement de santé par son nom, commune prouvée), permis Sit@del lus en base avec l'année en cours servie à part, fix « 0 logement » Paris/Lyon/Marseille
 

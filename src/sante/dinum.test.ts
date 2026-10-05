@@ -281,13 +281,60 @@ describe("searchEntreprises", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("ne masque PAS un 400 non lié au NAF — reste HttpError capturée", async () => {
-    // Garde-fou anti-sur-élargissement : un 400 dont le body ne parle pas
-    // d'`activite_principale` (et sans `naf` fourni) reste une HttpError (panne /
-    // faute amont légitime) — la conversion en RangeError est étroite et ciblée.
-    fetchMock.mockResolvedValue(apiError(400, { erreur: "Paramètre `departement` invalide" }));
-    await expect(searchEntreprises({ departement: "999" })).rejects.toThrow(HttpError);
+  it("un 400 DINUM SANS clé `erreur` dans le body reste HttpError (pas de masquage)", async () => {
+    // Garde-fou anti-sur-élargissement : seul un 400 de la forme documentée DINUM
+    // (`{"erreur": "…"}` = validation de paramètre) est une faute caller. Un 400
+    // d'une autre forme (proxy, HTML, payload inattendu) reste une HttpError capturée.
+    fetchMock.mockResolvedValue(apiError(400, { message: "Bad Request" }));
+    await expect(searchEntreprises({ departement: "75" })).rejects.toThrow(HttpError);
+    fetchMock.mockResolvedValue(new Response("<html>400 Bad Request</html>", { status: 400 }));
+    await expect(searchEntreprises({ departement: "75" })).rejects.toThrow(HttpError);
   });
+
+  it("convertit tout 400 DINUM à clé `erreur` (ex. departement) en RangeError citant le motif (FRANCE-DATA-MCP-R)", async () => {
+    // Format valide côté regex (`98x` DOM-TOM) mais refusé par la nomenclature DINUM :
+    // le filet post-réseau convertit le 400 documenté en faute caller.
+    fetchMock.mockResolvedValue(
+      apiError(400, {
+        erreur:
+          "Au moins un paramètre `departement` est non valide. Les valeurs valides : ['01', '02', '2A', '2B', '971']",
+      }),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = await searchEntreprises({ departement: "989" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toContain("`departement` est non valide");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[france-data-mcp] searchEntreprises"),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("rejette un departement mal formé (payload path-traversal) en RangeError SANS appel réseau (FRANCE-DATA-MCP-R)", async () => {
+    // Payload réel du scanner de sécurité observé en prod.
+    const err = await searchEntreprises({
+      departement: "../../../../root/.mcp_traversal_canary.txt",
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RangeError);
+    expect((err as RangeError).message).toMatch(/departement .* invalide — format attendu/);
+    // Valeur caller tronquée à 40 caractères dans le message.
+    expect((err as RangeError).message).not.toContain("canary.txt");
+    for (const bad of ["999", "7", "7500", "ZZ", "2C", "08 "]) {
+      await expect(searchEntreprises({ departement: bad })).rejects.toThrow(RangeError);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["08", "2A", "2B", "971", "976", "988"])(
+    "accepte le departement `%s` (appel réseau émis)",
+    async (dept) => {
+      fetchMock.mockResolvedValue(apiResponse({}));
+      await searchEntreprises({ departement: dept });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(lastFetchUrl()).toContain(`departement=${dept}`);
+    },
+  );
 
   it("ne convertit PAS un 4xx non-400 même avec `activite_principale` dans le body (gate status === 400)", async () => {
     // Épingle la spécificité du gate `status === 400` (avec `naf` fourni ET body

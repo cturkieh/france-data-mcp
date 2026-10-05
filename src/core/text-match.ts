@@ -72,3 +72,12 @@ export function diceCoefficient(a: string, b: string): number {
   if (totalA + totalB === 0) return 0;
   return (2 * intersection) / (totalA + totalB);
 }
+
+/**
+ * Tronque une chaîne pour l'embarquer dans un message d'erreur/log (ellipse
+ * `…` ajoutée si tronquée). Borne la taille d'un input caller ou d'un body
+ * amont recopié dans un `RangeError` (FRANCE-DATA-MCP-R/P).
+ */
+export function truncateForMessage(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}

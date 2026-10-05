@@ -111,6 +111,36 @@ type AmeliQueryErrorContext = {
   readonly limit: number;
 };
 
+/**
+ * Diagnostic context anonymisé du tool `professionnels_rpps_in_radius`
+ * (FRANCE-DATA-MCP-8, 57014 sans contexte). Type FERMÉ, même doctrine que
+ * `AmeliQueryErrorContext`. JAMAIS de coordonnées exactes : le rayon et la
+ * forme des filtres suffisent à reproduire la classe de requête qui timeout.
+ */
+type RppsRadiusQueryErrorContext = {
+  readonly tool: "professionnels_rpps_in_radius";
+  readonly radius_km: number;
+  readonly has_profession_filter: boolean;
+  readonly has_savoir_faire_filter: boolean;
+  readonly has_mode_exercice_filter: boolean;
+  readonly precise_only: boolean;
+  readonly limit: number;
+};
+
+/**
+ * Diagnostic context anonymisé du tool `professionnels_rpps_par_dept`
+ * (FRANCE-DATA-MCP-Q). Type FERMÉ, même doctrine que `AmeliQueryErrorContext`.
+ */
+type RppsDeptQueryErrorContext = {
+  readonly tool: "professionnels_rpps_par_dept";
+  readonly departement: string;
+  readonly has_profession_filter: boolean;
+  readonly has_savoir_faire_filter: boolean;
+  readonly has_mode_exercice_filter: boolean;
+  readonly offset: number;
+  readonly limit: number;
+};
+
 /** Liste des codes mode exercice ANS prête à inclure dans une description tool. */
 const RPPS_MODE_EXERCICE_HINT = `Codes mode_exercice ANS : ${RPPS_MODE_EXERCICE.LIBERAL} libéral, ${RPPS_MODE_EXERCICE.SALARIE} salarié, ${RPPS_MODE_EXERCICE.MIXTE} mixte, ${RPPS_MODE_EXERCICE.REMPLACANT} remplaçant, ${RPPS_MODE_EXERCICE.BENEVOLE} bénévole, ${RPPS_MODE_EXERCICE.AUTRE} autre.`;
 
@@ -2155,10 +2185,29 @@ Filtres : \`profession_codes\` (ex: \`["10"]\` Médecin, \`["60"]\` Infirmier), 
       // côté lib, `input.preciseOnly === true` strict reste sûr).
       const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
       if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
-      return withPerimetre(
-        await withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]),
-        RPPS_PERIMETRE,
-      );
+      try {
+        return withPerimetre(
+          await withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]),
+          RPPS_PERIMETRE,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[france-data-mcp] rpps_radius_query_failed: ${message}`);
+        // FRANCE-DATA-MCP-8 — diagnostic anonymisé (57014 sans contexte). Les
+        // `has_*_filter` reflètent le filtre EFFECTIVEMENT transmis à la lib
+        // (tableau non vide), pas la simple présence de la clé.
+        const queryContext: RppsRadiusQueryErrorContext = {
+          tool: "professionnels_rpps_in_radius",
+          radius_km: radiusKm,
+          has_profession_filter: (professionCodes?.length ?? 0) > 0,
+          has_savoir_faire_filter: (savoirFaireCodes?.length ?? 0) > 0,
+          has_mode_exercice_filter: (modeExerciceCodes?.length ?? 0) > 0,
+          precise_only: preciseOnly === true,
+          limit: limit ?? 100,
+        };
+        attachErrorContext(err, queryContext);
+        throw err;
+      }
     },
   },
   {
@@ -2218,12 +2267,30 @@ Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
-      return withPerimetre(
-        await withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, [
-          "rpps",
-        ]),
-        RPPS_PERIMETRE,
-      );
+      try {
+        return withPerimetre(
+          await withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, [
+            "rpps",
+          ]),
+          RPPS_PERIMETRE,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[france-data-mcp] rpps_dept_query_failed: ${message}`);
+        // FRANCE-DATA-MCP-Q — diagnostic anonymisé. `has_*_filter` = filtre
+        // effectivement appliqué (`""` n'en est pas un, cf. truthy plus haut).
+        const queryContext: RppsDeptQueryErrorContext = {
+          tool: "professionnels_rpps_par_dept",
+          departement,
+          has_profession_filter: Boolean(professionCode),
+          has_savoir_faire_filter: Boolean(savoirFaireCode),
+          has_mode_exercice_filter: Boolean(modeExerciceCode),
+          offset: offset ?? 0,
+          limit: limit ?? 100,
+        };
+        attachErrorContext(err, queryContext);
+        throw err;
+      }
     },
   },
   {
