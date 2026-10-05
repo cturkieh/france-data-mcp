@@ -27,7 +27,7 @@ import {
   reconcilierFinessSirene,
   verifierSiteActif,
 } from "../src/sante/cross-source.js";
-import { RADIUS_MAX_KM, RADIUS_MIN_KM } from "../src/sante/db-helpers.js";
+import { DEFAULT_LIMIT, RADIUS_MAX_KM, RADIUS_MIN_KM } from "../src/sante/db-helpers.js";
 import {
   MODE_EXERCICE_ACTIVITE_REGULIERE,
   PROFESSION_CODE_MEDECIN,
@@ -92,7 +92,7 @@ import {
   requireSiretId,
   requireString,
 } from "./_lib/args.js";
-import { attachErrorContext } from "./_lib/error-context.js";
+import { withQueryErrorContext } from "./_lib/error-context.js";
 
 /**
  * Diagnostic context anonymisé attaché aux erreurs du tool
@@ -1983,7 +1983,18 @@ export const TOOLS: McpTool[] = [
       if (typePsCode) input.typePsCode = typePsCode;
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
-      try {
+      // Diagnostic anonymisé (FRANCE-DATA-MCP-3, timeout 57014). `has_*_filter`
+      // reflète le filtre EFFECTIVEMENT appliqué (truthy plus haut : `""` n'en est
+      // pas un), sinon le scope Sentry mentirait sur le pattern qui timeout.
+      const queryContext: AmeliQueryErrorContext = {
+        tool: "professionnels_par_specialite_dept",
+        departement,
+        has_specialite_filter: Boolean(specialiteCode),
+        has_type_ps_filter: Boolean(typePsCode),
+        offset: offset ?? 0,
+        limit: limit ?? DEFAULT_LIMIT,
+      };
+      return withQueryErrorContext("ameli_query_failed", queryContext, async () => {
         const result = await getAmeliBySpecialiteDept(input);
         return withPerimetre(
           await withFreshness(dedupe ? dedupeAmeliByPs(result) : result, args.include_freshness, [
@@ -1991,25 +2002,7 @@ export const TOOLS: McpTool[] = [
           ]),
           AMELI_PERIMETRE,
         );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[france-data-mcp] ameli_query_failed: ${message}`);
-        // V0.9.4 — diagnostic anonymisé pour Sentry FRANCE-DATA-MCP-3 (timeout
-        // 57014). `has_*_filter` reflète l'application EFFECTIVE du filtre
-        // (truthy check `if (specialiteCode) input.specialiteCode = …` plus
-        // haut — `""` n'est PAS un filtre actif), sinon le scope Sentry
-        // mentirait sur le pattern qui timeout.
-        const queryContext: AmeliQueryErrorContext = {
-          tool: "professionnels_par_specialite_dept",
-          departement,
-          has_specialite_filter: Boolean(specialiteCode),
-          has_type_ps_filter: Boolean(typePsCode),
-          offset: offset ?? 0,
-          limit: limit ?? 100,
-        };
-        attachErrorContext(err, queryContext);
-        throw err;
-      }
+      });
     },
   },
   {
@@ -2185,29 +2178,23 @@ Filtres : \`profession_codes\` (ex: \`["10"]\` Médecin, \`["60"]\` Infirmier), 
       // côté lib, `input.preciseOnly === true` strict reste sûr).
       const preciseOnly = coerceBoolean(args.precise_only, "precise_only");
       if (preciseOnly !== undefined) input.preciseOnly = preciseOnly;
-      try {
-        return withPerimetre(
+      // `has_*_filter` = filtre EFFECTIVEMENT transmis à la lib (tableau non
+      // vide), pas la simple présence de la clé.
+      const queryContext: RppsRadiusQueryErrorContext = {
+        tool: "professionnels_rpps_in_radius",
+        radius_km: radiusKm,
+        has_profession_filter: (professionCodes?.length ?? 0) > 0,
+        has_savoir_faire_filter: (savoirFaireCodes?.length ?? 0) > 0,
+        has_mode_exercice_filter: (modeExerciceCodes?.length ?? 0) > 0,
+        precise_only: preciseOnly === true,
+        limit: limit ?? DEFAULT_LIMIT,
+      };
+      return withQueryErrorContext("rpps_radius_query_failed", queryContext, async () =>
+        withPerimetre(
           await withFreshness(await getRppsInRadius(input), args.include_freshness, ["rpps"]),
           RPPS_PERIMETRE,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[france-data-mcp] rpps_radius_query_failed: ${message}`);
-        // FRANCE-DATA-MCP-8 — diagnostic anonymisé (57014 sans contexte). Les
-        // `has_*_filter` reflètent le filtre EFFECTIVEMENT transmis à la lib
-        // (tableau non vide), pas la simple présence de la clé.
-        const queryContext: RppsRadiusQueryErrorContext = {
-          tool: "professionnels_rpps_in_radius",
-          radius_km: radiusKm,
-          has_profession_filter: (professionCodes?.length ?? 0) > 0,
-          has_savoir_faire_filter: (savoirFaireCodes?.length ?? 0) > 0,
-          has_mode_exercice_filter: (modeExerciceCodes?.length ?? 0) > 0,
-          precise_only: preciseOnly === true,
-          limit: limit ?? 100,
-        };
-        attachErrorContext(err, queryContext);
-        throw err;
-      }
+        ),
+      );
     },
   },
   {
@@ -2267,30 +2254,25 @@ Filtres optionnels : \`profession_code\`, \`savoir_faire_code\`, \`mode_exercice
       input.categorieCodes = categorieCodesFromArgs(args);
       if (limit !== undefined) input.limit = limit;
       if (offset !== undefined) input.offset = offset;
-      try {
-        return withPerimetre(
+      // `has_*_filter` = filtre EFFECTIVEMENT appliqué (`""` n'en est pas un, cf.
+      // truthy plus haut).
+      const queryContext: RppsDeptQueryErrorContext = {
+        tool: "professionnels_rpps_par_dept",
+        departement,
+        has_profession_filter: Boolean(professionCode),
+        has_savoir_faire_filter: Boolean(savoirFaireCode),
+        has_mode_exercice_filter: Boolean(modeExerciceCode),
+        offset: offset ?? 0,
+        limit: limit ?? DEFAULT_LIMIT,
+      };
+      return withQueryErrorContext("rpps_dept_query_failed", queryContext, async () =>
+        withPerimetre(
           await withFreshness(await getRppsParSpecialiteDept(input), args.include_freshness, [
             "rpps",
           ]),
           RPPS_PERIMETRE,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error(`[france-data-mcp] rpps_dept_query_failed: ${message}`);
-        // FRANCE-DATA-MCP-Q — diagnostic anonymisé. `has_*_filter` = filtre
-        // effectivement appliqué (`""` n'en est pas un, cf. truthy plus haut).
-        const queryContext: RppsDeptQueryErrorContext = {
-          tool: "professionnels_rpps_par_dept",
-          departement,
-          has_profession_filter: Boolean(professionCode),
-          has_savoir_faire_filter: Boolean(savoirFaireCode),
-          has_mode_exercice_filter: Boolean(modeExerciceCode),
-          offset: offset ?? 0,
-          limit: limit ?? 100,
-        };
-        attachErrorContext(err, queryContext);
-        throw err;
-      }
+        ),
+      );
     },
   },
   {

@@ -76,3 +76,29 @@ export function extractErrorContext(err: unknown): ErrorContext | undefined {
   if (Array.isArray(value)) return undefined;
   return value as ErrorContext;
 }
+
+/**
+ * Exécute une requête de tool et, en cas d'échec, attache `context` à l'erreur
+ * avant re-throw (lu par `captureMcpError`). Le caller construit `context` sous
+ * un type FERMÉ annoté (`const ctx: XQueryErrorContext = {…}`) : c'est
+ * l'annotation qui bloque l'ajout silencieux d'un champ PII.
+ *
+ * Une `RangeError` est une faute caller déjà loguée en warn par `mcp.ts`
+ * (-32602) : pas de `console.error` (bruit), le contexte s'attache quand même.
+ */
+export async function withQueryErrorContext<T, C extends ErrorContext>(
+  logTag: string,
+  context: C,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    if (!(err instanceof RangeError)) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[france-data-mcp] ${logTag}: ${message}`);
+    }
+    attachErrorContext(err, context);
+    throw err;
+  }
+}

@@ -14,16 +14,21 @@
 --      hérite du rôle `anon` = 3 s (rolconfig prod), plafond franchi à froid.
 --
 -- FIX :
---   a. Colonne `geog GEOGRAPHY GENERATED ALWAYS AS ((geom::geography)) STORED`
---      + `GIST (geog)` — idiome finess v2. Colonne générée : JAMAIS écrite
+--   a. Colonne `geog GEOGRAPHY GENERATED ALWAYS AS (…) STORED` + `GIST (geog)`
+--      — idiome finess v2, MAIS dérivée de `longitude`/`latitude` et NON de
+--      `geom` : `geom` est elle-même GENERATED et Postgres refuse une colonne
+--      générée qui en référence une autre (42P17 « cannot use generated column
+--      in column generation expression », reproduit prod en BEGIN/ROLLBACK
+--      lors de la revue ; la CI ne le voit pas, le CLI saute le format T).
+--      Expression byte-identique à celle de `geom` + cast. Colonne générée : JAMAIS écrite
 --      par `upsertMutations` (payload à colonnes explicites, `geom` en est
 --      déjà absent — src/immobilier/dvf.ts).
 --   b. RPC réécrite sur `m.geog` (index-able) + `SET statement_timeout='15s'`
 --      (parité `rpps_in_radius`, < 60 s passerelle PostgREST).
 --   c. Sortie : `RETURNS TABLE` EXPLICITE calquée sur le type TS `DvfMutation`
---      au lieu de `RETURNS SETOF dvf_mutations`. Avec SETOF, la nouvelle
---      colonne `geog` (et déjà `geom`) partaient sur le fil en hex EWKB string,
---      hors contrat TS, ×500 lignes, et vers les consommateurs de la lib npm
+--      au lieu de `RETURNS SETOF dvf_mutations`. Avec SETOF, `geom` partait
+--      en GeoJSON hors du contrat TS (et la nouvelle colonne `geog` l'aurait
+--      suivie), ×500 lignes, et vers les consommateurs de la lib npm
 --      publique (`dvfInRadius` est exporté). Aucun consommateur ne lit
 --      `geom`/`geog` (grep src/ : seuls aggregatePrix + date_mutation).
 --      Changer le type de retour impose DROP + CREATE (CREATE OR REPLACE
@@ -50,7 +55,10 @@
 --   -- attendu : {"search_path=public, extensions",statement_timeout=15s}
 
 ALTER TABLE dvf_mutations
-  ADD COLUMN IF NOT EXISTS geog GEOGRAPHY GENERATED ALWAYS AS ((geom::geography)) STORED;
+  ADD COLUMN IF NOT EXISTS geog GEOGRAPHY GENERATED ALWAYS AS (
+    CASE WHEN longitude IS NOT NULL AND latitude IS NOT NULL
+         THEN ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)::geography END
+  ) STORED;
 
 CREATE INDEX IF NOT EXISTS dvf_mutations_geog_gist
   ON dvf_mutations USING GIST (geog);

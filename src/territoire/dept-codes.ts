@@ -45,6 +45,18 @@ export function isValidDept(dept: string): boolean {
 }
 
 /**
+ * Variante STRICTE de `isValidDept` : uniquement les départements qui existent
+ * (01-19, 21-95, 2A/2B, 971-978, 984-988). `isValidDept` reste volontairement
+ * permissif sur la métropole (`\d{2}` accepte `00`, `96`, `99` — rétro-compat
+ * DB layer). À utiliser quand le code part vers une API amont qui rejette les
+ * départements inexistants (DINUM `departement`) : un rejet pré-réseau évite un
+ * 400 amont. Casse non normalisée : le caller passe `2A`/`2B` en majuscules.
+ */
+export function isExistingDept(dept: string): boolean {
+  return /^(0[1-9]|1\d|2[1-9]|[3-8]\d|9[0-5]|2A|2B|97[1-8]|98[4-8])$/.test(dept);
+}
+
+/**
  * Variante throw-on-invalid de `isValidDept`. Cohérent avec les autres
  * validators du DB layer (`validateCoords`, `validateRadiusKm`) : `RangeError`
  * pour permettre au boundary MCP de mapper vers JSON-RPC -32602 (Invalid

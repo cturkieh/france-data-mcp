@@ -184,7 +184,8 @@ export async function geocodeMany(
     data = await fetchJson<ApiResponse>(url, { signal });
   } catch (err) {
     // Filet si la pré-validation laisse passer un `q` que l'IGN refuse (règle
-    // IGN évolutive) : HTTP 400 « Failed parsing query » = input caller → RangeError.
+    // IGN évolutive) : HTTP 400 dont le `detail` vise `q`/`postcode`/`citycode`
+    // = input caller → RangeError. Tout autre 400 reste HttpError.
     const detail =
       err instanceof HttpError && err.status === 400 ? parseIgnQueryError(err.body) : null;
     if (detail !== null) {
@@ -232,27 +233,32 @@ function assertGeocodableAddress(address: string): void {
 }
 
 /**
- * Extrait le motif d'un HTTP 400 IGN de parsing de requête
- * (`{"code":400,"message":"Failed parsing query","detail":["q: …"]}`).
- * `null` si la forme ne correspond pas : l'HttpError d'origine est re-throw.
+ * Extrait le motif d'un HTTP 400 IGN portant sur un paramètre FOURNI PAR
+ * L'APPELANT (`{"code":400,"message":"Failed parsing query","detail":["q: …"]}`).
+ * Exige `detail` tableau NON vide de strings dont au moins un élément commence
+ * par `q:`, `postcode:` ou `citycode:` — le `message` n'est PAS discriminant :
+ * l'IGN renvoie le même « Failed parsing query » pour un paramètre que NOUS
+ * construisons (`type: unexpected value 'foo'`, `limit: …`, prouvé prod), et
+ * cette dérive doit rester une HttpError capturée Sentry, pas une faute caller.
+ * `null` sinon (body non-JSON, `detail` absent / `null` / vide / non-string) :
+ * l'HttpError d'origine est re-throw.
  */
+const IGN_CALLER_PARAM_DETAIL = /^(q|postcode|citycode):/;
+
 function parseIgnQueryError(body: string | undefined): string | null {
   if (!body) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(body);
   } catch {
-    // Body non-JSON (HTML de proxy…) : seule la mention textuelle compte.
-    return /Failed parsing query/i.test(body) ? "Failed parsing query" : null;
+    return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
-  const { message, detail } = parsed as { message?: unknown; detail?: unknown };
-  if (detail !== undefined) {
-    const parts = Array.isArray(detail) ? detail.map(String) : [String(detail)];
-    const joined = parts.join(" ; ");
-    if (joined.length > 0) return joined;
-  }
-  return typeof message === "string" && /Failed parsing query/i.test(message) ? message : null;
+  const { detail } = parsed as { detail?: unknown };
+  if (!Array.isArray(detail) || detail.length === 0) return null;
+  if (!detail.every((d): d is string => typeof d === "string")) return null;
+  if (!detail.some((d) => IGN_CALLER_PARAM_DETAIL.test(d))) return null;
+  return detail.join(" ; ");
 }
 
 /**

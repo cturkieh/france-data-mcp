@@ -28,20 +28,31 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   l'appelant, plus une panne serveur** (Sentry `FRANCE-DATA-MCP-R`). Un
   scanner de sécurité passait un chemin de fichier en `departement` : DINUM
   renvoyait HTTP 400, capturé en `internal_error`. `searchEntreprises`
-  pré-valide le format (`08`, `2A`/`2B`, `971`…) avant tout appel réseau et
-  convertit tout HTTP 400 DINUM à clé `erreur` en `RangeError` (-32602) avec
-  le motif DINUM ; un 400 d'une autre forme reste une `HttpError`.
+  pré-valide le code (`isExistingDept` : 01-95 sauf 20, `2A`/`2B`, DOM/COM),
+  le code postal (5 chiffres) et `q` (3 caractères minimum sans autre filtre,
+  règle DINUM) avant tout appel réseau et convertit en `RangeError` (-32602) un HTTP 400
+  DINUM dont le motif cite un paramètre fourni par l'appelant (`q`,
+  `departement`, `code_postal`, `code_commune`, `activite_principale`), y
+  compris quand le corps est tronqué à 500 caractères ; un 400 sur un
+  paramètre construit côté serveur reste une `HttpError` capturée (une dérive
+  de nos URL ne doit jamais passer pour une faute client). Le motif est
+  reconnu cité entre backticks ou sans (« paramètre code_postal »). Un siège
+  à Monaco ou hors France ne fait plus échouer l'enrichissement de
+  `entreprise_by_siren` : il est marqué `not_attempted`.
 - **`geocode_adresse` : une adresse que l'IGN refuse est une faute de
   l'appelant** (Sentry `FRANCE-DATA-MCP-P`). `geocodeMany` applique la règle
   IGN du paramètre `q` avant réseau (3 à 200 caractères, commence par une
-  lettre ou un chiffre) et convertit un HTTP 400 « Failed parsing query » en
-  `RangeError` (-32602) avec le `detail` IGN.
+  lettre ou un chiffre) et convertit en `RangeError` (-32602) un HTTP 400 dont
+  le `detail` IGN porte sur `q`, `postcode` ou `citycode` (paramètres de
+  l'appelant) ; un 400 sur `limit`/`type` reste une `HttpError` capturée.
 - **Limite de débit amont (HTTP 429 après retries) : plus capturée comme un
   bug** (Sentry `FRANCE-DATA-MCP-S`, `etablissement_by_siret` sur INSEE). Le
   handler répond JSON-RPC `-32000` avec `retryAfterSeconds` et `upstreamHost`
   dans `error.data`, logue `outcome=upstream_rate_limited` (status 503,
-  niveau warn) et ne remonte plus à Sentry. `RateLimitExceededError` expose
-  `retryAfterSeconds`.
+  niveau warn) et remonte à Sentry en `warning` agrégé par host (fingerprint
+  `mcp_upstream_rate_limited` + host) au lieu d'une `error` par event : le
+  volume reste visible sans noyer les vraies pannes. `RateLimitExceededError`
+  expose `retryAfterSeconds`.
 
 ## [0.31.0] — 2026-09-22 — `etablissement_finess_by_nom` (un établissement de santé par son nom, commune prouvée), permis Sit@del lus en base avec l'année en cours servie à part, fix « 0 logement » Paris/Lyon/Marseille
 

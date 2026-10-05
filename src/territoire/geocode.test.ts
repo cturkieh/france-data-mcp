@@ -353,6 +353,36 @@ describe("adresse invalide → RangeError (FRANCE-DATA-MCP-P)", () => {
     expect(err).toBeInstanceOf(HttpError);
   });
 
+  it("HTTP 400 IGN sur un de NOS paramètres (`type`) → reste HttpError (body réel prod)", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: 400,
+          message: "Failed parsing query",
+          detail: ["type: unexpected value 'foo'"],
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const err = await geocodeMany("10 rue de Rivoli Paris").catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(RangeError);
+    expect(err).toBeInstanceOf(HttpError);
+  });
+
+  it.each([null, {}, [], [42]])(
+    "HTTP 400 IGN « Failed parsing query » à detail %j → reste HttpError",
+    async (detail) => {
+      fetchMock.mockResolvedValue(
+        new Response(JSON.stringify({ code: 400, message: "Failed parsing query", detail }), {
+          status: 400,
+        }),
+      );
+      const err = await geocodeMany("10 rue de Rivoli Paris").catch((e: unknown) => e);
+      expect(err).not.toBeInstanceOf(RangeError);
+      expect(err).toBeInstanceOf(HttpError);
+    },
+  );
+
   it("HTTP 503 → reste HttpError (panne amont, pas faute caller)", async () => {
     vi.useFakeTimers();
     try {

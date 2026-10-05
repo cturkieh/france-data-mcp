@@ -32,7 +32,7 @@ import {
   scheduleObservabilityFlush,
 } from "./_lib/observability.js";
 import { checkRateLimit, extractIp, hashIp } from "./_lib/rate-limit.js";
-import { captureMcpError } from "./_lib/sentry.js";
+import { captureMcpError, captureUpstreamRateLimit } from "./_lib/sentry.js";
 import { TOOLS, findTool } from "./tools.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -426,7 +426,9 @@ async function handleRpc(
     const tool = typeof request.params?.name === "string" ? request.params.name : undefined;
     // FRANCE-DATA-MCP-S : une dépendance amont (INSEE, DINUM…) en HTTP 429 APRÈS
     // les retries de `fetchJson` est une limite de débit TRANSITOIRE, pas un bug
-    // serveur → pas de Sentry (le capturer en `error` noyait les vraies pannes),
+    // serveur → Sentry `warning` agrégé par host (`captureUpstreamRateLimit`,
+    // fingerprint stable : volume visible sans noyer les vraies pannes, là où
+    // une `error` par event les noyait), jamais `captureMcpError` ;
     // warn + log `upstream_rate_limited` (status 503 = indisponibilité passagère)
     // et code JSON-RPC -32000 (erreur serveur applicative) avec `retryAfterSeconds`
     // + `upstreamHost` en `error.data` pour qu'un client réessaie au bon moment.
@@ -435,6 +437,14 @@ async function handleRpc(
       const retryAfterSeconds = err.retryAfterSeconds;
       const message = `Dépendance amont ${upstreamHost} limite le débit (HTTP 429) — réessayer après ${retryAfterSeconds} s.`;
       console.warn(`[france-data-mcp] upstream_rate_limited on ${request.method}: ${message}`);
+      captureUpstreamRateLimit({
+        upstreamHost,
+        retryAfterSeconds,
+        method: request.method,
+        tool,
+        ipHash: ctx.ipHash,
+        userAgent: ctx.userAgent,
+      });
       emit(ctx, start, request.method, {
         tool,
         status: 503,

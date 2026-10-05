@@ -2593,4 +2593,24 @@ describe("contexte d'erreur anonymisé des tools RPPS (FRANCE-DATA-MCP-8 / -Q)",
       expect.stringContaining("[france-data-mcp] rpps_dept_query_failed"),
     );
   });
+
+  it("RangeError (faute caller) : contexte attaché, mais PAS de console.error (déjà warn côté mcp.ts)", async () => {
+    const tool = findTool("professionnels_rpps_par_dept");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const err = new RangeError("departement invalide");
+    vi.spyOn(rppsDb, "getRppsParSpecialiteDept").mockRejectedValueOnce(err);
+    await expect(tool?.handler({ departement: "75" })).rejects.toBe(err);
+    expect(extractErrorContext(err)).toMatchObject({ tool: "professionnels_rpps_par_dept" });
+
+    const radiusErr = new RangeError("radius invalide");
+    vi.spyOn(rppsDb, "getRppsInRadius").mockRejectedValueOnce(radiusErr);
+    await expect(
+      findTool("professionnels_rpps_in_radius")?.handler({
+        center: { lat: 45.76, lon: 4.83 },
+        radius_km: 1,
+      }),
+    ).rejects.toBe(radiusErr);
+    expect(extractErrorContext(radiusErr)).toMatchObject({ tool: "professionnels_rpps_in_radius" });
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
 });

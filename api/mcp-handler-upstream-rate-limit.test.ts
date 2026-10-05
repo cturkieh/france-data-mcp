@@ -4,8 +4,10 @@
  * transitoire, pas un bug serveur.
  *
  * Contrat : JSON-RPC `-32000` + `error.data = { retryAfterSeconds, upstreamHost }`,
- * log `outcome=upstream_rate_limited` (status 503, level warn), et AUCUNE
- * capture Sentry (avant le fix : `-32603` + `captureMcpError` niveau `error`).
+ * log `outcome=upstream_rate_limited` (status 503, level warn), et une capture
+ * Sentry `warning` agrégée par host (`captureUpstreamRateLimit`, fingerprint
+ * `["mcp_upstream_rate_limited", upstreamHost]`), JAMAIS `captureMcpError`
+ * (avant le fix : `-32603` + `captureMcpError` niveau `error` par event).
  *
  * Bout-en-bout : `fetch` stubbé renvoie 429 sur l'IGN, le vrai `fetchJson`
  * épuise ses retries (timers simulés) puis throw la vraie classe d'erreur.
@@ -17,11 +19,13 @@ import { makeMockVercelRes } from "./_lib/test-helpers.js";
 
 const mocks = vi.hoisted(() => ({
   captureMcpError: vi.fn(),
+  captureUpstreamRateLimit: vi.fn(),
   logMcpEvent: vi.fn(),
 }));
 
 vi.mock("./_lib/sentry.js", () => ({
   captureMcpError: mocks.captureMcpError,
+  captureUpstreamRateLimit: mocks.captureUpstreamRateLimit,
   captureMcpConfigWarning: vi.fn(),
   flushSentry: vi.fn().mockResolvedValue(undefined),
 }));
@@ -42,6 +46,7 @@ const fetchMock = vi.fn<typeof fetch>();
 describe("api/mcp.ts — dépendance amont en 429 après retries (FRANCE-DATA-MCP-S)", () => {
   beforeEach(() => {
     mocks.captureMcpError.mockClear();
+    mocks.captureUpstreamRateLimit.mockClear();
     mocks.logMcpEvent.mockClear();
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
@@ -55,7 +60,7 @@ describe("api/mcp.ts — dépendance amont en 429 après retries (FRANCE-DATA-MC
     vi.restoreAllMocks();
   });
 
-  it("geocode_adresse sur IGN 429 → -32000 + retryAfterSeconds/upstreamHost, sans Sentry", async () => {
+  it("geocode_adresse sur IGN 429 → -32000 + retryAfterSeconds/upstreamHost, Sentry warning agrégé par host", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
     fetchMock.mockImplementation(
@@ -92,8 +97,18 @@ describe("api/mcp.ts — dépendance amont en 429 après retries (FRANCE-DATA-MC
     expect(json.error.message).not.toContain("Rivoli");
     expect(json.error.data).toEqual({ retryAfterSeconds: 7, upstreamHost: "data.geopf.fr" });
 
-    // Pas un bug serveur : aucune capture Sentry.
+    // Pas un bug serveur : jamais captureMcpError (exception niveau error)…
     expect(mocks.captureMcpError).not.toHaveBeenCalled();
+    // …mais un warning agrégé par host (fingerprint/level : sentry.test.ts).
+    expect(mocks.captureUpstreamRateLimit).toHaveBeenCalledTimes(1);
+    expect(mocks.captureUpstreamRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        upstreamHost: "data.geopf.fr",
+        retryAfterSeconds: 7,
+        method: "tools/call",
+        tool: "geocode_adresse",
+      }),
+    );
     // Log structuré dédié, jamais `internal_error`.
     expect(mocks.logMcpEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -136,5 +151,6 @@ describe("api/mcp.ts — dépendance amont en 429 après retries (FRANCE-DATA-MC
     const json = captured.json as { error: { code: number } };
     expect(json.error.code).toBe(-32603);
     expect(mocks.captureMcpError).toHaveBeenCalledTimes(1);
+    expect(mocks.captureUpstreamRateLimit).not.toHaveBeenCalled();
   });
 });

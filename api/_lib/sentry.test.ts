@@ -7,6 +7,7 @@ import {
   beforeSendEvent,
   captureMcpConfigWarning,
   captureMcpError,
+  captureUpstreamRateLimit,
   flushSentry,
   isBotNoiseEvent,
   isSentryEnabled,
@@ -587,5 +588,69 @@ describe("beforeSendEvent (FRANCE-DATA-MCP-1 bot noise filter)", () => {
       const event = makeEvent({ method: "tools/call", exMessage: "boom" });
       expect(() => beforeSendEvent(event)).not.toThrow();
     });
+  });
+});
+
+describe("captureUpstreamRateLimit (FRANCE-DATA-MCP-S)", () => {
+  const rlCtx = {
+    upstreamHost: "data.geopf.fr",
+    retryAfterSeconds: 7,
+    method: "tools/call",
+    tool: "geocode_adresse",
+    ipHash: "deadbeef",
+    userAgent: "Claude/1.0",
+  };
+
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    __resetSentryForTesting();
+    vi.mocked(Sentry.captureMessage).mockClear();
+    vi.mocked(Sentry.captureException).mockClear();
+    mockedScope().setTag.mockClear();
+    mockedScope().setContext.mockClear();
+    mockedScope().setFingerprint.mockClear();
+    vi.stubEnv("SENTRY_DSN", "");
+    vi.stubEnv("VERCEL_ENV", "");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("sans DSN : no-op", () => {
+    captureUpstreamRateLimit(rlCtx);
+    expect(Sentry.captureMessage).not.toHaveBeenCalled();
+  });
+
+  it("avec DSN : captureMessage warning, fingerprint agrégé par host, jamais captureException", () => {
+    vi.stubEnv("SENTRY_DSN", "https://k@sentry.io/1");
+    captureUpstreamRateLimit(rlCtx);
+
+    const scope = mockedScope();
+    expect(scope.setFingerprint).toHaveBeenCalledWith([
+      "mcp_upstream_rate_limited",
+      "data.geopf.fr",
+    ]);
+    expect(scope.setTag).toHaveBeenCalledWith("mcp.method", "tools/call");
+    expect(scope.setTag).toHaveBeenCalledWith("mcp.tool", "geocode_adresse");
+    expect(scope.setTag).toHaveBeenCalledWith("mcp.outcome", "upstream_rate_limited");
+    expect(scope.setContext).toHaveBeenCalledWith(
+      "mcp_request",
+      expect.objectContaining({ ip_hash: "deadbeef", user_agent: "Claude/1.0" }),
+    );
+    expect(Sentry.captureMessage).toHaveBeenCalledWith(
+      expect.stringContaining("data.geopf.fr"),
+      "warning",
+    );
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it("Sentry.captureMessage qui throw → ne propage pas", () => {
+    vi.stubEnv("SENTRY_DSN", "https://k@sentry.io/1");
+    vi.mocked(Sentry.captureMessage).mockImplementationOnce(() => {
+      throw new Error("network down");
+    });
+    expect(() => captureUpstreamRateLimit(rlCtx)).not.toThrow();
   });
 });

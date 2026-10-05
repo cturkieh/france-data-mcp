@@ -8,8 +8,8 @@ import { latestFunctionBody, readAllMigrationsSql } from "./migration-sql.js";
 //     cast runtime `geom::geography` (l'index GiST(geom) devient inutilisable →
 //     Parallel Seq Scan sur toute la table, prouvé prod) ;
 //  2. la sortie est un RETURNS TABLE explicite sans `geom` ni `geog` (avec
-//     `SETOF dvf_mutations`, ces colonnes partiraient en hex EWKB hors du
-//     contrat TS `DvfMutation`, vers les consommateurs de la lib publique).
+//     `SETOF dvf_mutations`, `geom` partait en GeoJSON hors du contrat TS
+//     `DvfMutation`, vers les consommateurs de la lib publique).
 
 const sql = readAllMigrationsSql().toLowerCase();
 
@@ -40,7 +40,7 @@ describe("dvf_in_radius — filtre indexable et sortie conforme à DvfMutation",
 
   it("une colonne geog GÉNÉRÉE et son index GiST existent sur dvf_mutations", () => {
     expect(sql).toMatch(
-      /alter\s+table\s+dvf_mutations\s+add\s+column\s+if\s+not\s+exists\s+geog\s+geography\s+generated\s+always\s+as\s+\(\(geom::geography\)\)\s+stored/,
+      /alter\s+table\s+dvf_mutations\s+add\s+column\s+if\s+not\s+exists\s+geog\s+geography\s+generated\s+always\s+as\s+\(\s*case\s+when\s+longitude\s+is\s+not\s+null\s+and\s+latitude\s+is\s+not\s+null\s+then\s+st_setsrid\(st_makepoint\(longitude,\s*latitude\),\s*4326\)::geography\s+end\s*\)\s+stored/,
     );
     expect(sql).toMatch(
       /create\s+index\s+if\s+not\s+exists\s+dvf_mutations_geog_gist\s+on\s+dvf_mutations\s+using\s+gist\s*\(\s*geog\s*\)/,

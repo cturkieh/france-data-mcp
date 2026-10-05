@@ -3,6 +3,7 @@ import {
   assertValidCodeInsee,
   deptFromCodeInsee,
   deriveDeptFromCp,
+  isExistingDept,
   isValidCodeInsee,
   isValidDept,
 } from "./dept-codes.js";
@@ -36,6 +37,17 @@ describe("deptFromCodeInsee", () => {
     expect(deptFromCodeInsee("97")).toBeUndefined();
     expect(deptFromCodeInsee("98")).toBeUndefined();
   });
+});
+
+describe("isExistingDept", () => {
+  it.each(["01", "08", "19", "21", "95", "2A", "2B", "971", "976", "978", "984", "988"])(
+    "accepte %s",
+    (d) => expect(isExistingDept(d)).toBe(true),
+  );
+  it.each(["00", "20", "96", "99", "970", "979", "980", "983", "989", "2a", "2C", "", "8", "075"])(
+    "rejette %j",
+    (d) => expect(isExistingDept(d)).toBe(false),
+  );
 });
 
 describe("isValidDept", () => {

@@ -22,6 +22,7 @@ import { clamp } from "../core/numbers.js";
 import { pickDefined } from "../core/object-utils.js";
 import { truncateForMessage } from "../core/text-match.js";
 import type { Coordinates } from "../core/types.js";
+import { isExistingDept } from "../territoire/dept-codes.js";
 import { getInseeApiKey, lookupSirenViaInsee } from "./insee-sirene.js";
 
 const BASE_URL = "https://recherche-entreprises.api.gouv.fr/search";
@@ -268,7 +269,7 @@ export async function searchEntreprises(
     q,
     naf,
     codePostal,
-    departement,
+    departement: rawDepartement,
     codeCommune,
     center,
     radiusKm,
@@ -277,6 +278,8 @@ export async function searchEntreprises(
     perPage = 10,
     signal,
   } = options;
+  // `2a`/`2b` → `2A`/`2B` : seule forme acceptée par DINUM et `isExistingDept`.
+  const departement = rawDepartement?.toUpperCase();
 
   if (!q && !naf && !codePostal && !departement && !codeCommune && !center) {
     throw new RangeError(
@@ -291,10 +294,38 @@ export async function searchEntreprises(
   // Pré-validation AVANT réseau (FRANCE-DATA-MCP-R) : un scanner de sécurité a
   // passé `departement="../../../../root/.mcp_traversal_canary.txt"` → DINUM HTTP
   // 400 capturé en Sentry `error`. Faute d'input caller → RangeError (-32602),
-  // sans appel amont. Format DINUM : 2 chiffres, 2A/2B, ou DOM-TOM 97x/98x.
-  if (departement && !DEPARTEMENT_PATTERN.test(departement)) {
+  // sans appel amont. Départements EXISTANTS seulement (`isExistingDept` :
+  // 01-95 hors 20, 2A/2B, 971-978, 984-988).
+  if (departement && !isExistingDept(departement)) {
     throw new RangeError(
-      `searchEntreprises: departement \`${truncateForMessage(departement, 40)}\` invalide — format attendu : 2 chiffres (ex. \`08\`), \`2A\`/\`2B\` (Corse) ou 3 chiffres DOM-TOM (ex. \`971\`).`,
+      `searchEntreprises: departement \`${truncateForMessage(rawDepartement ?? "", 40)}\` invalide — format attendu : département existant, 2 chiffres (ex. \`08\`), \`2A\`/\`2B\` (Corse) ou 3 chiffres DROM/COM (971-978, 984-988).`,
+    );
+  }
+
+  // Pré-validation `codePostal` AVANT réseau : DINUM répond HTTP 400
+  // `{"erreur":"Au moins une valeur du paramètre code_postal est non valide."}`
+  // (corps live, sans backticks) — faute caller, on la tranche ici.
+  if (codePostal !== undefined && !/^\d{5}$/.test(codePostal)) {
+    throw new RangeError(
+      `searchEntreprises: codePostal \`${truncateForMessage(codePostal, 40)}\` invalide — format attendu : 5 chiffres (ex. \`08000\`, \`75001\`).`,
+    );
+  }
+
+  // Pré-validation `q` AVANT réseau : sans autre filtre, DINUM exige ≥ 3
+  // caractères (corps live : `{"erreur":"3 caractères minimum pour les termes
+  // de la requête (ou utilisez au moins un filtre)"}`). Avec un filtre
+  // (naf/codePostal/departement/codeCommune), un `q` court reste accepté.
+  if (
+    q !== undefined &&
+    q.trim().length < 3 &&
+    !naf &&
+    !codePostal &&
+    !departement &&
+    !codeCommune &&
+    !center
+  ) {
+    throw new RangeError(
+      `searchEntreprises: q \`${truncateForMessage(q, 40)}\` trop court — l'API DINUM exige 3 caractères minimum pour les termes de la requête quand aucun filtre (naf, codePostal, departement, codeCommune) n'est posé.`,
     );
   }
 
@@ -338,20 +369,22 @@ export async function searchEntreprises(
 
   const url = `${endpoint}?${params.toString()}`;
   // HTTP 400 DINUM = erreur de VALIDATION des paramètres (doc API Recherche
-  // d'entreprises), tous fournis par l'appelant : faute d'INPUT caller, pas une
+  // d'entreprises) : faute d'INPUT caller quand le paramètre vient de lui, pas une
   // panne → RangeError (JSON-RPC -32602) au lieu d'une HttpError capturée Sentry
-  // `error`. Discrimination : 400 + body JSON portant une clé `erreur` (forme
-  // documentée DINUM). Un 400 SANS cette clé (proxy, HTML…) et les 5xx restent
-  // des HttpError. Historique : FRANCE-DATA-MCP-G (NAF bien formé mais hors
-  // nomenclature, ex. `71.12Z`) — mapping étroit `naf` + `activite_principale`,
-  // élargi à tout 400 `erreur` par FRANCE-DATA-MCP-R (`departement` invalide).
+  // `error`. Discrimination : 400 + body à clé `erreur` (forme documentée DINUM,
+  // éventuellement tronqué) QUI CITE un paramètre caller. Un 400 sans cette clé
+  // (proxy, HTML…), un 400 sur un de NOS paramètres (`per_page`…) et les 5xx
+  // restent des HttpError (FRANCE-DATA-MCP-G NAF hors nomenclature, -R département).
   let data: ApiResponse;
   try {
     data = await fetchJson<ApiResponse>(url, { signal });
   } catch (err) {
     const dinumError =
       err instanceof HttpError && err.status === 400 ? parseDinumError(err.body) : null;
-    if (dinumError !== null) {
+    if (
+      dinumError !== null &&
+      (DINUM_CALLER_PARAM_CITED.test(dinumError) || DINUM_QUERY_TERMS_RULE.test(dinumError))
+    ) {
       console.warn(
         `[france-data-mcp] searchEntreprises: paramètre rejeté par DINUM (HTTP 400 erreur=${truncateForMessage(dinumError, 300)}) → RangeError -32602 (input caller invalide, pas une panne amont)`,
       );
@@ -544,6 +577,15 @@ function warnFailed(opts: { errType: string; msg: string; totalSirene: number })
  * les codes postaux (Corse `20xxx`) qui demandent un mapping par plage.
  */
 function deptFromPostal(codePostal: string | undefined): string | undefined {
+  const dept = rawDeptFromPostal(codePostal);
+  // Siège hors département existant (Monaco 98000 → "980", étranger…) :
+  // `undefined` → chemin `not_attempted` + `warnSkipped`. Sinon la pré-validation
+  // `isExistingDept` de `searchEntreprises` lèverait une RangeError attrapée en
+  // `failed`, alors que le caller n'a rien fourni de faux.
+  return dept !== undefined && isExistingDept(dept) ? dept : undefined;
+}
+
+function rawDeptFromPostal(codePostal: string | undefined): string | undefined {
   if (!codePostal || codePostal.length < 2) return undefined;
   if (codePostal.startsWith("97") || codePostal.startsWith("98")) {
     return codePostal.length >= 3 ? codePostal.slice(0, 3) : undefined;
@@ -666,15 +708,15 @@ function toEtablissement(api: ApiSiege): Etablissement {
 }
 
 /**
- * Format `departement` accepté par DINUM : 2 chiffres, `2A`/`2B`, ou 3 chiffres
- * DOM-TOM `97x`/`98x` (FRANCE-DATA-MCP-R).
- */
-const DEPARTEMENT_PATTERN = /^(\d{2}|2A|2B|9[78]\d)$/;
-
-/**
  * Extrait le message `erreur` d'un body HTTP 400 DINUM (`{"erreur": "…"}`).
- * `null` si le body est absent, non-JSON ou sans clé `erreur` string : ce 400
- * n'a alors PAS la forme documentée et reste une HttpError (pas de masquage).
+ * `null` si le body est absent ou sans clé `erreur` string : ce 400 n'a alors
+ * PAS la forme documentée et reste une HttpError (pas de masquage).
+ *
+ * Body TRONQUÉ : `fetchJson` coupe `HttpError.body` à 500 caractères, or les
+ * vrais 400 DINUM font de 756 octets (`departement`) à 7 417 octets (NAF
+ * inexistant : liste des valeurs valides), mesuré prod 2026-10-05. Le
+ * `JSON.parse` échoue alors → repli par regex sur le DÉBUT du body, qui capture
+ * le message jusqu'à sa fin ou jusqu'à la coupure.
  */
 function parseDinumError(body: string | undefined): string | null {
   if (!body) return null;
@@ -682,11 +724,47 @@ function parseDinumError(body: string | undefined): string | null {
   try {
     parsed = JSON.parse(body);
   } catch {
-    // Body non-JSON (HTML de proxy, tronqué à 500 car. par fetchJson) : pas la
-    // forme DINUM documentée → le caller re-throw l'HttpError d'origine (tracée).
-    return null;
+    return extractTruncatedDinumError(body);
   }
   if (typeof parsed !== "object" || parsed === null || !("erreur" in parsed)) return null;
   const erreur = (parsed as { erreur: unknown }).erreur;
   return typeof erreur === "string" && erreur.length > 0 ? erreur : null;
 }
+
+const DINUM_ERREUR_PREFIX = /^\s*\{\s*"erreur"\s*:\s*"((?:[^"\\]|\\.)*)/;
+
+function extractTruncatedDinumError(body: string): string | null {
+  const captured = DINUM_ERREUR_PREFIX.exec(body)?.[1];
+  // Pas la forme DINUM (HTML de proxy, autre JSON) → HttpError d'origine re-throw.
+  if (!captured) return null;
+  // La coupure peut tomber au milieu d'un échappement (`\u00`, `\`) : on le retire
+  // avant de décoder les échappements JSON restants.
+  const safe = captured.replace(/\\(u[0-9a-fA-F]{0,3})?$/, "");
+  try {
+    return JSON.parse(`"${safe}"`) as string;
+  } catch {
+    return safe;
+  }
+}
+
+/**
+ * Paramètres DINUM fournis par l'APPELANT (`q`, `departement`, `code_postal`,
+ * `code_commune`, `activite_principale`). Seul un 400 qui en cite un est une
+ * faute caller → RangeError. DINUM le cite sous DEUX formes (corps live) :
+ * entre backticks (« paramètre \`departement\` est non valide ») ou après
+ * « paramètre » sans backticks (« valeur du paramètre code_postal est non
+ * valide »). Un 400 sur un paramètre que NOUS construisons (`per_page`, `page`,
+ * `radius`, `lat`/`long`, `etat_administratif`…) est une dérive de notre code :
+ * il reste HttpError, capturée Sentry, sinon une panne systémique deviendrait
+ * invisible.
+ */
+const DINUM_CALLER_PARAM_CITED =
+  /(?:`|paramètre\s)(q|departement|code_postal|code_commune|activite_principale)\b/;
+
+/**
+ * Règle DINUM sur les termes de `q` (paramètre caller) qui ne nomme pas le
+ * paramètre : « 3 caractères minimum pour les termes de la requête (ou utilisez
+ * au moins un filtre) ». Pré-validée avant réseau sur `q` trimé ; ce repli
+ * couvre une règle amont plus stricte (ex. décompte par terme).
+ */
+const DINUM_QUERY_TERMS_RULE = /caractères minimum pour les termes de la requête/;
