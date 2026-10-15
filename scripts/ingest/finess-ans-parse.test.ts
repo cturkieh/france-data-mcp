@@ -21,6 +21,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { haversineMeters } from "../../src/core/geo-distance.js";
 import { SMT_CATEGORIE_LABELS } from "../../src/sante/finess-categories-labels.js";
 import {
   type AnsEge,
@@ -259,22 +260,13 @@ describe("resolveCoordinates — les deux systèmes coexistent, dans un ordre va
   });
 });
 
-/** Distance haversine en mètres — référence indépendante de proj4. */
-function metersBetween(a: { lon: number; lat: number }, b: { lon: number; lat: number }): number {
-  const rad = Math.PI / 180;
-  const h =
-    Math.sin(((b.lat - a.lat) * rad) / 2) ** 2 +
-    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lon - a.lon) * rad) / 2) ** 2;
-  return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
-}
-
 describe("resolveCoordinates — paire Lambert 93 seule (format ANS depuis le 2026-10-15)", () => {
   it("origine de la projection : Lambert (700000, 6600000) ⇔ WGS84 (3, 46.5) exactement", () => {
     const r = resolveCoordinates({ coordonneeX: "700000", coordonneeY: "6600000" });
     expect(r.layout).toBe("lambert_only");
     expect(r.present).toBe(true);
     if (r.point === null) throw new Error("point attendu");
-    expect(metersBetween(r.point, { lon: 3, lat: 46.5 })).toBeLessThan(1);
+    expect(haversineMeters(r.point, { lon: 3, lat: 46.5 })).toBeLessThan(1);
     expect(r.lambert93).toEqual({ x: 700_000, y: 6_600_000 });
   });
 
@@ -329,7 +321,7 @@ describe("resolveCoordinates — paire Lambert 93 seule (format ANS depuis le 20
       if (!m) throw new Error(`geom inattendu : ${geom}`);
       return { lon: Number(m[1]), lat: Number(m[2]) };
     };
-    expect(metersBetween(point(parsed.row.geom), point(reference.row.geom))).toBeLessThan(5);
+    expect(haversineMeters(point(parsed.row.geom), point(reference.row.geom))).toBeLessThan(5);
   });
 
   it("banc de cohérence : sur 10 adresses réelles à deux paires (flux du 2026-10-15), la reprojection retombe à < 5 m du WGS84 ANS", () => {
@@ -355,7 +347,7 @@ describe("resolveCoordinates — paire Lambert 93 seule (format ANS depuis le 20
       expect(r.layout, `${x},${y}`).toBe("lambert_only");
       if (r.point === null) throw new Error(`point attendu pour ${x},${y}`);
       expect(
-        metersBetween(r.point, { lon: Number(lon), lat: Number(lat) }),
+        haversineMeters(r.point, { lon: Number(lon), lat: Number(lat) }),
         `${x},${y}`,
       ).toBeLessThan(5);
     }
