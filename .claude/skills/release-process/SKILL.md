@@ -1,6 +1,8 @@
 ---
 name: release-process
 description: "Checklist de release maintainer : bump 3 sources, server.json ≤ 100 caractères, CHANGELOG, tag, CI, npm OTP, mcp-publisher, Release GitHub auto, vérification registry MCP paginée, Glama sync/build/release. À charger pour pnpm release ou toute publication."
+metadata:
+  internal: true
 ---
 
 # Release process (maintainer-only)

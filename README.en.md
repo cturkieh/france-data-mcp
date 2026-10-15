@@ -41,6 +41,16 @@ The wrapper forwards stdio → remote HTTPS endpoint. No local DB to provision. 
 
 Client-by-client setup + self-hosting: [docs/installation-claude.md](docs/installation-claude.md).
 
+### Agent Skill — teach your agent when and how to use this server
+
+[`skills/france-data-mcp/`](skills/france-data-mcp/SKILL.md) is a public [Agent Skill](https://agentskills.io): map of the 37 tools, traps (`perimetre`, `activite_hebergee`, `geo_precision`, Ameli vs ANS code systems), typical workflows and citation rules. Works with Claude Code, Cursor, Codex and any agent that reads `SKILL.md`.
+
+```bash
+npx skills add cturkieh/france-data-mcp --skill france-data-mcp
+```
+
+Without the `skills` CLI: copy `skills/france-data-mcp/` into `~/.claude/skills/` (or your agent's skills folder). The skill does not install the server: set up option 1 or 2 first.
+
 ---
 
 ## What it does

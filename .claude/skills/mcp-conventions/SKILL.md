@@ -1,6 +1,8 @@
 ---
 name: mcp-conventions
 description: "Conventions de code de france-data-mcp : lib src/ (LookupResult, RangeError, expectSingleRow, dédup identité, couches core/sante/territoire, reverseGeocode vs communeContainingPoint, resolver SIRET succession), endpoint api/ (Sentry, -32700, perimetre, activite_hebergee, applyCommuneResolver), boundary args. À charger avant de toucher src/, api/ ou un tool MCP."
+metadata:
+  internal: true
 ---
 
 # Conventions de code (lib, endpoint, boundary)
