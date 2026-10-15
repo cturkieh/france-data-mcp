@@ -380,7 +380,8 @@ export type ResolvedCoordinates =
  * TOUJOURS du WGS84 — et 53 570 adresses ne portent plus QUE la paire
  * Lambert (`direction*` = null), dont 25 898 EGE actifs. Sans WGS84
  * plausible mais avec `coordonnee*` dans l'emprise Lambert 93, le point est
- * reprojeté (`lambert_only`) et doit encore passer `isWgs84` (défense).
+ * reprojeté (`lambert_only`) et doit encore passer `isWgs84` — ce contrôle
+ * ne filtre que NaN, toute l'emprise L93 retombant dans le domaine mondial.
  * Une paire seule hors emprise (2 266 DOM, vraisemblablement de l'UTM dont
  * le fuseau n'est pas déclaré) reste inexploitable : point null, compté
  * `coordsPresentButUnusable`. Une paire Lambert seule dans `direction*`
@@ -558,7 +559,8 @@ export function mapEgeToRow(ege: AnsEge): ParsedEge {
           geom: `SRID=4326;POINT(${point.lon} ${point.lat})`,
           geom_source: GEOM_SOURCES.ANS,
           // Lambert 93 conservé pour rétro-compatibilité des consommateurs
-          // existants — la géolocalisation vient désormais du WGS84 natif,
+          // existants — la géolocalisation vient du WGS84 natif du flux ou,
+          // depuis le 2026-10-15 (`lambert_only`), de sa reprojection ici,
           // plus d'une reprojection server-side.
           coordx_lambert93: resolved.lambert93?.x ?? null,
           coordy_lambert93: resolved.lambert93?.y ?? null,

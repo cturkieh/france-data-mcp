@@ -287,10 +287,14 @@ export function assessParsedRows(stats: IngestStreamStats, now: number = Date.no
   // point posé vient de l'ANS dans les trois cas (`raw.geom_source = "ans"`),
   // WGS84 natif ou reprojeté depuis son Lambert 93 (`lambert_only`, format du
   // flux depuis le 2026-10-15).
-  const { wgs84_first, lambert_first, lambert_only } = stats.geomByLayout;
-  const geomNone = stats.inserted - wgs84_first - lambert_first - lambert_only;
+  // Somme et libellé dérivés du `Record<CoordLayout, number>` : une 4e
+  // disposition ajoutée au type est comptée ET affichée sans retouche ici.
+  const layouts = Object.entries(stats.geomByLayout);
+  const geomPlaced = layouts.reduce((sum, [, n]) => sum + n, 0);
+  const geomNone = stats.inserted - geomPlaced;
+  const byLayout = layouts.map(([k, n]) => `${k}=${n}`).join(" ");
   a.info.push(
-    `[finess] geom à l'insert : wgs84_first=${wgs84_first} lambert_first=${lambert_first} lambert_only=${lambert_only} none=${geomNone} (dont centroïdes commune BAN refusés : ${stats.municipalityRejected})`,
+    `[finess] geom à l'insert : ${byLayout} none=${geomNone} (dont centroïdes commune BAN refusés : ${stats.municipalityRejected})`,
   );
   // SIRET ANS — deux signaux, jamais fatals (pas load-bearing pour le service) :
   //  (1) remplissage sous le plancher relatif (champ renommé/encapsulé → colonne
