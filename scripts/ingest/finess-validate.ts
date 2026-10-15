@@ -86,7 +86,11 @@ export const STRUCTURAL_FAIL_THRESHOLD = 0.01;
 
 /**
  * Coordonnées présentes mais inexploitables (aucune paire en WGS84
- * plausible) : warn > 2 %, throw > 5 %. Cf. `resolveCoordinates`.
+ * plausible, ni Lambert 93 reprojetable) : warn > 2 %, throw > 5 %. Cf.
+ * `resolveCoordinates`. Le seuil a fait son travail le 2026-10-15 : 24,73 %
+ * au changement de format ANS (paires Lambert seules), swap refusé. Après la
+ * reprojection `lambert_only`, le résidu attendu est la paire seule hors
+ * emprise des DOM (≈ 2 266 adresses du flux, non toutes retenues).
  */
 export const COORDS_UNUSABLE_WARN_RATE = 0.02;
 /**
@@ -127,7 +131,7 @@ export interface IngestStreamStats {
   pmej: number;
   /** Compteur par raison — `Record<SkipReason, …>` : une raison ajoutée sans compteur ne compile pas. */
   skipped: Record<SkipReason, number>;
-  /** Quelle paire portait le WGS84 (diagnostic de format) ; `none` = inserted − les deux. */
+  /** Quelle paire portait le WGS84 (diagnostic de format) ; `none` = inserted − les trois. */
   geomByLayout: Record<CoordLayout, number>;
   coordsUnusable: number;
   /**
@@ -271,7 +275,7 @@ export function assessParsedRows(stats: IngestStreamStats, now: number = Date.no
   const unusableRate = stats.coordsUnusable / stats.inserted;
   if (stats.coordsUnusable > 0 && unusableRate > COORDS_UNUSABLE_WARN_RATE) {
     a.warnings.push(
-      `[finess] coordonnées présentes mais aucune paire WGS84 plausible : ${stats.coordsUnusable} rows (${fmt(unusableRate)}) — nouveau système de coordonnées upstream ?`,
+      `[finess] coordonnées présentes mais ni WGS84 plausible ni Lambert 93 reprojetable : ${stats.coordsUnusable} rows (${fmt(unusableRate)}) — nouveau système de coordonnées upstream ?`,
     );
     if (unusableRate > COORDS_UNUSABLE_FAIL_RATE) {
       a.fatal.push(
@@ -280,11 +284,17 @@ export function assessParsedRows(stats: IngestStreamStats, now: number = Date.no
     }
   }
   // Disposition des paires (diagnostic de format), PAS une provenance : le
-  // point posé est du WGS84 ANS dans les deux cas (`raw.geom_source = "ans"`).
-  const geomNone =
-    stats.inserted - stats.geomByLayout.wgs84_first - stats.geomByLayout.lambert_first;
+  // point posé vient de l'ANS dans les trois cas (`raw.geom_source = "ans"`),
+  // WGS84 natif ou reprojeté depuis son Lambert 93 (`lambert_only`, format du
+  // flux depuis le 2026-10-15).
+  // Somme et libellé dérivés du `Record<CoordLayout, number>` : une 4e
+  // disposition ajoutée au type est comptée ET affichée sans retouche ici.
+  const layouts = Object.entries(stats.geomByLayout);
+  const geomPlaced = layouts.reduce((sum, [, n]) => sum + n, 0);
+  const geomNone = stats.inserted - geomPlaced;
+  const byLayout = layouts.map(([k, n]) => `${k}=${n}`).join(" ");
   a.info.push(
-    `[finess] geom à l'insert : wgs84_first=${stats.geomByLayout.wgs84_first} lambert_first=${stats.geomByLayout.lambert_first} none=${geomNone} (dont centroïdes commune BAN refusés : ${stats.municipalityRejected})`,
+    `[finess] geom à l'insert : ${byLayout} none=${geomNone} (dont centroïdes commune BAN refusés : ${stats.municipalityRejected})`,
   );
   // SIRET ANS — deux signaux, jamais fatals (pas load-bearing pour le service) :
   //  (1) remplissage sous le plancher relatif (champ renommé/encapsulé → colonne

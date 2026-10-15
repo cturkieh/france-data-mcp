@@ -36,7 +36,7 @@ function realStats(overrides: Partial<IngestStreamStats> = {}): IngestStreamStat
       no_commune: 0,
       bad_commune: 0,
     },
-    geomByLayout: { wgs84_first: 57_930, lambert_first: 20_497 },
+    geomByLayout: { wgs84_first: 57_930, lambert_first: 20_497, lambert_only: 0 },
     coordsUnusable: 0,
     // 32 lignes sans categorie_code en prod le 2026-09-05 (0,03 %) — repéré
     // par la revue, aucun compteur ne les signalait.
@@ -91,7 +91,7 @@ describe("assessParsedRows — chiffres réels", () => {
     expect(
       a.info.some((l) =>
         l.includes(
-          "wgs84_first=57930 lambert_first=20497 none=26307 (dont centroïdes commune BAN refusés : 186)",
+          "wgs84_first=57930 lambert_first=20497 lambert_only=0 none=26307 (dont centroïdes commune BAN refusés : 186)",
         ),
       ),
     ).toBe(true);
@@ -132,8 +132,22 @@ describe("assessParsedRows — chiffres réels", () => {
     expect(overByName.fatal[0]).toMatch(/Content anomaly rate 1\.05%/);
   });
 
+  it("les trois dispositions comptent comme geom posé : none = inserted − wgs84_first − lambert_first − lambert_only", () => {
+    // Forme du flux depuis le 2026-10-15 : plus de `wgs84_first`, une part
+    // `lambert_only` reprojetée — elle ne doit PAS gonfler `none`.
+    const a = assessParsedRows(
+      realStats({ geomByLayout: { wgs84_first: 0, lambert_first: 60_000, lambert_only: 25_000 } }),
+    );
+    expect(a.fatal).toEqual([]);
+    expect(
+      a.info.some((l) =>
+        l.includes("wgs84_first=0 lambert_first=60000 lambert_only=25000 none=19734"),
+      ),
+    ).toBe(true);
+  });
+
   it("coordonnées inexploitables : silence ≤ 2 %, warn entre 2 et 5 %, fatal > 5 %", () => {
-    const unusable = (l: string) => /aucune paire WGS84 plausible/.test(l);
+    const unusable = (l: string) => /ni WGS84 plausible ni Lambert 93 reprojetable/.test(l);
     expect(assessParsedRows(realStats({ coordsUnusable: 2_000 })).warnings.some(unusable)).toBe(
       false,
     );

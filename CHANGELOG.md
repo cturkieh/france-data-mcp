@@ -4,6 +4,23 @@ Toutes les modifications notables apparaissent ici. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; le projet suit
 SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
+## [Unreleased]
+
+### Fixed
+
+- **Ingestion FINESS : le changement de format du flux ANS du 15 octobre ne
+  bloque plus le swap.** L'ANS publie désormais toujours le Lambert 93 dans
+  `coordonneeX/Y` et le WGS84 dans `direction*`, et 53 570 adresses ne portent
+  plus que la paire Lambert. Le cron du 2026-10-15 a refusé le swap (24,73 %
+  de coordonnées « inexploitables » pour un plafond de 5 %). Le parseur
+  reprojette maintenant une paire Lambert 93 seule en WGS84 (`proj4`, en
+  devDependency des scripts, jamais dans la lib), disposition `lambert_only`,
+  provenance toujours `ans`. Une paire seule hors emprise Lambert 93 (DOM,
+  2 266 adresses) reste inexploitable et comptée. Banc sur les 184 973
+  adresses du flux à deux paires : écart entre reprojection et WGS84 ANS
+  médian 4 mm, maximum 7 mm. Dry-run contre la prod : 24 450 points
+  reprojetés, couverture géo 99,04 %, validation passée.
+
 ## [0.31.1] — 2026-10-05 — Six issues Sentry fermées : fautes caller et limites amont reclassées (-32602 / -32000), timeouts DVF et RPPS corrigés (index `geog` GiST + budget 15 s), contexte d'erreur RPPS
 
 ### Fixed
