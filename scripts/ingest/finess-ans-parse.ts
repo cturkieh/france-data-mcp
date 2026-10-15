@@ -14,6 +14,7 @@
  * du flux (`__fixtures__/finess-ans-ege.json`), sans monter une ingestion.
  */
 
+import proj4 from "proj4";
 import { SIRET_PATTERN } from "../../src/sante/db-helpers.js";
 import { SMT_CATEGORIE_LABELS } from "../../src/sante/finess-categories-labels.js";
 import { type FinessGeomSource, GEOM_SOURCES } from "../../src/sante/finess-geom-source.js";
@@ -70,6 +71,19 @@ const WGS84_LAT = [-90, 90] as const;
 /** Emprise Lambert 93 (EPSG:2154), métropole uniquement. */
 const L93_X = [100_000, 1_300_000] as const;
 const L93_Y = [6_000_000, 7_200_000] as const;
+
+/**
+ * EPSG:2154 (RGF93 v1 / Lambert-93), chaîne proj classique inline : pas de
+ * registre EPSG à charger, le run reste hors réseau pour la reprojection.
+ * RGF93 ≡ WGS84 à l'échelle métrique (`towgs84` nul). Mesuré le 2026-10-15
+ * sur les adresses du flux qui portent les deux paires : la reprojection de
+ * la paire Lambert retombe sur la paire WGS84 de l'ANS — chiffres dans le
+ * CHANGELOG (fix `lambert_only`).
+ */
+const LAMBERT93_TO_WGS84 = proj4(
+  "+proj=lcc +lat_0=46.5 +lon_0=3 +lat_1=49 +lat_2=44 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
+  "WGS84",
+);
 
 /**
  * Contraintes des colonnes de `finess_staging` (migration 20260509000001)
@@ -196,10 +210,12 @@ export { GEOM_SOURCES, type FinessGeomSource } from "../../src/sante/finess-geom
 
 /**
  * Quelle paire portait le WGS84 — détail de parsing (statistiques, diagnostic
- * d'une dérive de format), PAS une provenance : le point posé est toujours du
- * WGS84 natif ANS, quelle que soit la paire qui le portait.
+ * d'une dérive de format), PAS une provenance : `geom_source` reste `ans`
+ * dans les trois cas. `wgs84_first` / `lambert_first` = WGS84 natif ANS ;
+ * `lambert_only` = aucune paire WGS84, point REPROJETÉ depuis le Lambert 93
+ * de l'ANS (format du flux depuis le 2026-10-15, cf. `resolveCoordinates`).
  */
-export type CoordLayout = "wgs84_first" | "lambert_first";
+export type CoordLayout = "wgs84_first" | "lambert_first" | "lambert_only";
 
 export type SkipReason =
   | "no_finess_id"
@@ -357,6 +373,18 @@ export type ResolvedCoordinates =
  * Le Lambert n'est conservé que s'il est dans l'emprise EPSG:2154 : un DOM
  * en mode « projeté » porterait de l'UTM, qu'on ne doit pas stocker comme
  * du Lambert 93.
+ *
+ * **Changement de format du 2026-10-15** (le cron du 15 a refusé le swap :
+ * 24,73 % de coordonnées « inexploitables ») : l'ANS a normalisé les paires —
+ * `coordonneeX/Y` est désormais TOUJOURS du Lambert 93, `direction*`
+ * TOUJOURS du WGS84 — et 53 570 adresses ne portent plus QUE la paire
+ * Lambert (`direction*` = null), dont 25 898 EGE actifs. Sans WGS84
+ * plausible mais avec `coordonnee*` dans l'emprise Lambert 93, le point est
+ * reprojeté (`lambert_only`) et doit encore passer `isWgs84` (défense).
+ * Une paire seule hors emprise (2 266 DOM, vraisemblablement de l'UTM dont
+ * le fuseau n'est pas déclaré) reste inexploitable : point null, compté
+ * `coordsPresentButUnusable`. Une paire Lambert seule dans `direction*`
+ * n'a jamais été observée et n'est pas reprojetée.
  */
 export function resolveCoordinates(coords: AnsCoordonnees | null | undefined): ResolvedCoordinates {
   const c = coords ?? {};
@@ -376,7 +404,21 @@ export function resolveCoordinates(coords: AnsCoordonnees | null | undefined): R
     : isWgs84(b)
       ? ({ wgs: b, other: a, layout: "lambert_first" } as const)
       : null;
-  if (hit === null) return { point: null, layout: null, lambert93: null, present };
+  if (hit === null) {
+    if (isLambert93(a)) {
+      const [lon, lat] = LAMBERT93_TO_WGS84.forward([a.x, a.y]);
+      const reprojected: Pair = { x: lon ?? null, y: lat ?? null };
+      if (isWgs84(reprojected)) {
+        return {
+          point: { lon: reprojected.x, lat: reprojected.y },
+          layout: "lambert_only",
+          lambert93: { x: a.x, y: a.y },
+          present: true,
+        };
+      }
+    }
+    return { point: null, layout: null, lambert93: null, present };
+  }
   return {
     point: { lon: hit.wgs.x, lat: hit.wgs.y },
     layout: hit.layout,

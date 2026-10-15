@@ -405,7 +405,7 @@ async function streamAnsToStaging(
       no_commune: 0,
       bad_commune: 0,
     },
-    geomByLayout: { wgs84_first: 0, lambert_first: 0 },
+    geomByLayout: { wgs84_first: 0, lambert_first: 0, lambert_only: 0 },
     coordsUnusable: 0,
     nullCategorieCode: 0,
     emptyRaisonSociale: 0,

@@ -192,12 +192,15 @@ describe("resolveCoordinates — les deux systèmes coexistent, dans un ordre va
     });
   });
 
-  it("paires présentes mais aucune en WGS84 plausible → layout null, present=true (signal de dérive)", () => {
+  it("paires présentes mais ni WGS84 plausible ni Lambert 93 → layout null, present=true (signal de dérive)", () => {
+    // Avant le 2026-10-15, deux paires Lambert identiques suffisaient à
+    // incarner ce cas ; la règle `lambert_only` les reprojette désormais.
+    // Ici aucune paire n'est dans une emprise connue (Y Lambert à 9 M).
     const r = resolveCoordinates({
       coordonneeX: "873766.07",
-      coordonneeY: "6570414.61",
+      coordonneeY: "9570414.61",
       directionLongitude: "873766.07",
-      directionLatitude: "6570414.61",
+      directionLatitude: "9570414.61",
     });
     expect(r.layout).toBeNull();
     expect(r.present).toBe(true);
@@ -253,6 +256,109 @@ describe("resolveCoordinates — les deux systèmes coexistent, dans un ordre va
     const r = resolveCoordinates({ coordonneeX: "0", coordonneeY: "0" });
     expect(r.layout).toBeNull();
     expect(r.present).toBe(true);
+  });
+});
+
+/** Distance haversine en mètres — référence indépendante de proj4. */
+function metersBetween(a: { lon: number; lat: number }, b: { lon: number; lat: number }): number {
+  const rad = Math.PI / 180;
+  const h =
+    Math.sin(((b.lat - a.lat) * rad) / 2) ** 2 +
+    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lon - a.lon) * rad) / 2) ** 2;
+  return 2 * 6_371_008.8 * Math.asin(Math.sqrt(h));
+}
+
+describe("resolveCoordinates — paire Lambert 93 seule (format ANS depuis le 2026-10-15)", () => {
+  it("origine de la projection : Lambert (700000, 6600000) ⇔ WGS84 (3, 46.5) exactement", () => {
+    const r = resolveCoordinates({ coordonneeX: "700000", coordonneeY: "6600000" });
+    expect(r.layout).toBe("lambert_only");
+    expect(r.present).toBe(true);
+    if (r.point === null) throw new Error("point attendu");
+    expect(metersBetween(r.point, { lon: 3, lat: 46.5 })).toBeLessThan(1);
+    expect(r.lambert93).toEqual({ x: 700_000, y: 6_600_000 });
+  });
+
+  it("direction* null ou vide → même reprojection", () => {
+    for (const empty of [null, ""]) {
+      const r = resolveCoordinates({
+        coordonneeX: "700000",
+        coordonneeY: "6600000",
+        directionLongitude: empty,
+        directionLatitude: empty,
+      });
+      expect(r.layout, String(empty)).toBe("lambert_only");
+    }
+  });
+
+  it("paire seule HORS emprise Lambert 93 (UTM d'un DOM) → point null, present=true", () => {
+    const r = resolveCoordinates({ coordonneeX: "700000", coordonneeY: "1600000" });
+    expect(r.point).toBeNull();
+    expect(r.layout).toBeNull();
+    expect(r.lambert93).toBeNull();
+    expect(r.present).toBe(true);
+  });
+
+  it("une paire WGS84 plausible prime toujours sur la reprojection", () => {
+    const r = resolveCoordinates({
+      coordonneeX: "824475.06",
+      coordonneeY: "6969000",
+      directionLongitude: "4.72",
+      directionLatitude: "49.77",
+    });
+    expect(r.layout).toBe("lambert_first");
+    expect(r.point).toEqual({ lon: 4.72, lat: 49.77 });
+  });
+
+  it("080010093 sans direction* : point reprojeté à moins de 5 m du WGS84 ANS, provenance `ans`, Lambert conservé", () => {
+    const reference = rowOf("080010093");
+    const parsed = kept(
+      mutated("080010093", (e) => {
+        const g = geoAddr(e).coordonneesGeographique;
+        if (!g) throw new Error("fixture sans coordonnées");
+        g.directionLongitude = null;
+        g.directionLatitude = null;
+      }),
+    );
+    expect(parsed.coordLayout).toBe("lambert_only");
+    expect(parsed.coordsPresentButUnusable).toBe(false);
+    expect(parsed.row.geom_source).toBe("ans");
+    expect(parsed.row.coordx_lambert93).toBe(reference.row.coordx_lambert93);
+    expect(parsed.row.coordy_lambert93).toBe(reference.row.coordy_lambert93);
+    const point = (geom: string | null) => {
+      const m = /^SRID=4326;POINT\((-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)\)$/.exec(geom ?? "");
+      if (!m) throw new Error(`geom inattendu : ${geom}`);
+      return { lon: Number(m[1]), lat: Number(m[2]) };
+    };
+    expect(metersBetween(point(parsed.row.geom), point(reference.row.geom))).toBeLessThan(5);
+  });
+
+  it("banc de cohérence : sur 10 adresses réelles à deux paires (flux du 2026-10-15), la reprojection retombe à < 5 m du WGS84 ANS", () => {
+    // [coordonneeX, coordonneeY, directionLongitude, directionLatitude],
+    // échantillon réparti en métropole (Ain, Aisne, Nièvre, Var, Alpes-
+    // Maritimes, Pyrénées-Orientales, Hérault, Bouches-du-Rhône, Calvados).
+    // Banc complet sur les 184 973 adresses Lambert + WGS84 du flux : écart
+    // max 7 mm (arrondi à 6 décimales de `direction*`).
+    const samples = [
+      ["871897.4", "6570525.62", "5.230015", "46.212734"],
+      ["725870.22", "6922491.52", "3.356309", "49.401382"],
+      ["725889.89", "6607534.39", "3.338011", "46.567344"],
+      ["910620.01", "6330099.55", "5.628235", "44.038348"],
+      ["1046110.73", "6299922.71", "7.295803", "43.71358"],
+      ["548507.93", "6211210.22", "1.144128", "42.984227"],
+      ["648004.11", "6234679.45", "2.360586", "43.209433"],
+      ["912354.58", "6234591.86", "5.610478", "43.178962"],
+      ["839891.38", "6957776.23", "4.938271", "49.703575"],
+      ["454318.51", "6915862.81", "-0.37781", "49.29508"],
+    ] as const;
+    for (const [x, y, lon, lat] of samples) {
+      const r = resolveCoordinates({ coordonneeX: x, coordonneeY: y });
+      expect(r.layout, `${x},${y}`).toBe("lambert_only");
+      if (r.point === null) throw new Error(`point attendu pour ${x},${y}`);
+      expect(
+        metersBetween(r.point, { lon: Number(lon), lat: Number(lat) }),
+        `${x},${y}`,
+      ).toBeLessThan(5);
+    }
   });
 });
 
