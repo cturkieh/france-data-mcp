@@ -6,6 +6,18 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+### Added
+
+- **Agent Skill public `skills/france-data-mcp/SKILL.md`.** Un skill au format
+  Agent Skills apprend à n'importe quel agent (Claude Code, Cursor, Codex…)
+  quand et comment appeler le serveur : carte des 37 tools avec l'argument clé
+  et le piège de chacun, cinq workflows (offre de soins autour d'une adresse,
+  établissement par son nom, profil d'une commune, étude d'implantation,
+  fermeture ou reprise d'un site), règles de citation (`data_age_days`,
+  `perimetre`, mentions de source) et limites. Installation :
+  `npx skills add cturkieh/france-data-mcp --skill france-data-mcp`, documentée
+  dans les deux README. Distinct des skills contributeurs de `.claude/skills/`.
+
 ### Fixed
 
 - **Ingestion FINESS : le changement de format du flux ANS du 15 octobre ne
