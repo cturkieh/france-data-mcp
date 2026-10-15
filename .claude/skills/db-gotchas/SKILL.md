@@ -1,6 +1,8 @@
 ---
 name: db-gotchas
 description: "Post-mortems et pièges Supabase/PostGIS/PostgREST : NUMERIC en string, matview OID au swap, parité index staging, statement_timeout 8 s, ban_join keyset, acceptation BAN par précision, KNN GiST, GiST partiel precise, RLS cache paresseux, dédup PK avant ON CONFLICT. À charger avant toute migration SQL, RPC, requête PostGIS ou optimisation de plan."
+metadata:
+  internal: true
 ---
 
 # Top gotchas DB (post-mortems prouvés prod)

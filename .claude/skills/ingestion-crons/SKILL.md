@@ -1,6 +1,8 @@
 ---
 name: ingestion-crons
 description: "Crons d'ingestion FINESS/Ameli/RPPS : pattern download→staging→swap→canary→ingest_log, typage service client, apply des migrations via MCP Supabase, marqueur forced, PGRST204_RECOVERABLE_FIELDS, source FINESS = flux ANS depuis 2026-09-05 et ses pièges. À charger avant de toucher scripts/ingest/, supabase/migrations/ ou un workflow ingest-*."
+metadata:
+  internal: true
 ---
 
 # Ingestion (crons GitHub Actions)
