@@ -72,15 +72,23 @@ describe("fonctions d'ingestion", () => {
     expect(body).toMatch(/count\(\*\)/);
   });
 
-  it.each(["ingest_create_dvf_mutations_staging", "ingest_analyze_dvf_mutations_staging"])(
-    "%s : réservée à service_role",
-    (fn) => {
-      expect(lower).toContain(
-        `revoke execute on function ${fn}() from public, anon, authenticated;`,
-      );
-      expect(lower).toContain(`grant execute on function ${fn}() to service_role;`);
-    },
-  );
+  it("la dernière date a un budget propre : pas d'index, table nationale froide", () => {
+    const h = header("ingest_dvf_latest_date");
+    expect(h).toMatch(/returns date/);
+    expect(h).toMatch(/set\s+statement_timeout\s*=\s*'55s'/);
+    expect(latestFunctionBody(lower, "ingest_dvf_latest_date")).toMatch(
+      /max\(date_mutation\) from dvf_mutations/,
+    );
+  });
+
+  it.each([
+    "ingest_create_dvf_mutations_staging",
+    "ingest_analyze_dvf_mutations_staging",
+    "ingest_dvf_latest_date",
+  ])("%s : réservée à service_role", (fn) => {
+    expect(lower).toContain(`revoke execute on function ${fn}() from public, anon, authenticated;`);
+    expect(lower).toContain(`grant execute on function ${fn}() to service_role;`);
+  });
 });
 
 describe("check_ingest_canary", () => {

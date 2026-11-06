@@ -75,6 +75,21 @@ $$;
 REVOKE EXECUTE ON FUNCTION ingest_analyze_dvf_mutations_staging() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION ingest_analyze_dvf_mutations_staging() TO service_role;
 
+-- Dernière date servie, pour refuser une livraison qui recule. Budget propre : sans
+-- index sur `date_mutation`, une lecture directe via PostgREST serait coupée à 8 s sur
+-- la table nationale froide, et le cron échouerait dès la 2e livraison.
+CREATE OR REPLACE FUNCTION ingest_dvf_latest_date()
+RETURNS DATE
+LANGUAGE sql
+STABLE
+SET search_path = public, extensions
+SET statement_timeout = '55s'
+AS $$
+  SELECT max(date_mutation) FROM dvf_mutations;
+$$;
+REVOKE EXECUTE ON FUNCTION ingest_dvf_latest_date() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION ingest_dvf_latest_date() TO service_role;
+
 -- Marche aussi sur la table actuelle : la colonne `geog` y existe déjà.
 CREATE OR REPLACE FUNCTION dvf_stats_in_radius(
   p_lat DOUBLE PRECISION,

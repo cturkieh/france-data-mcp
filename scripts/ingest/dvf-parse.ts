@@ -236,7 +236,7 @@ function isInMetropoleFrame(longitude: number, latitude: number): boolean {
   );
 }
 
-/** Types de locaux pour lesquels un prix au m² a un sens (même règle que `parseDvfCsv`). */
+/** Types de locaux pour lesquels un prix au m² a un sens. */
 const BUILT_TYPES: ReadonlySet<string> = new Set(["Maison", "Appartement"]);
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -296,8 +296,8 @@ function compareRows(a: DvfStagingRow, b: DvfStagingRow): number {
 }
 
 /**
- * Applique les règles de `parseDvfCsv` (`src/immobilier/dvf.ts`) au flux national,
- * puis le filtre utile, le dédoublonnage, la fenêtre de 12 mois et le tri final.
+ * Applique au flux national les règles de l'ancien lecteur par commune, puis le filtre
+ * utile, le dédoublonnage, la fenêtre de 12 mois et le tri final.
  * Fenêtre ancrée sur la DONNÉE : aucune horloge ici, le résultat ne dépend que des
  * fichiers.
  */

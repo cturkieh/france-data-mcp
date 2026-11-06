@@ -11,7 +11,7 @@ const h = vi.hoisted(() => ({
   lastChecksum: null as string | null,
   lastMonth: "2026-06",
   validationError: null as Error | null,
-  latestProdRows: [{ date_mutation: "2026-06-30" }] as unknown[],
+  latestProdDate: "2026-06-30" as unknown,
   latestProdError: null as { message: string } | null,
   successLogs: [] as unknown[],
   failureLogs: [] as unknown[],
@@ -81,18 +81,11 @@ vi.mock("./shared.js", async (original) => ({
   }),
   preValidateFile: vi.fn(async () => {}),
   getUntypedServiceClient: vi.fn(() => ({
-    from: vi.fn((table: string) => ({
-      select: () => ({
-        order: (column: string, opts: { ascending: boolean }) => ({
-          limit: async (n: number) => {
-            h.calls.push(`read:${table}:${column}:${opts.ascending ? "asc" : "desc"}:${n}`);
-            return { data: h.latestProdRows, error: h.latestProdError };
-          },
-        }),
-      }),
-    })),
     rpc: vi.fn(async (name: string) => {
       h.calls.push(`rpc:${name}`);
+      if (name === "ingest_dvf_latest_date") {
+        return { data: h.latestProdDate, error: h.latestProdError };
+      }
       return {
         data: name === "ingest_analyze_dvf_mutations_staging" ? h.stagingCount : null,
         error: null,
@@ -134,7 +127,7 @@ beforeEach(() => {
   h.lastChecksum = null;
   h.lastMonth = "2026-06";
   h.validationError = null;
-  h.latestProdRows = [{ date_mutation: "2026-06-30" }];
+  h.latestProdDate = "2026-06-30";
   h.latestProdError = null;
   vi.stubEnv("DVF_DRY_RUN", "");
   vi.stubEnv("FORCE_REINGEST", "");
@@ -159,7 +152,10 @@ afterEach(() => {
 
 const swapped = () => h.calls.some((c) => c.startsWith("swap:"));
 const downloaded = () => h.calls.some((c) => c.startsWith("download:"));
-const dbWrites = () => h.calls.filter((c) => c.startsWith("rpc:") || c.startsWith("insert:"));
+const dbWrites = () =>
+  h.calls.filter(
+    (c) => (c.startsWith("rpc:") && c !== "rpc:ingest_dvf_latest_date") || c.startsWith("insert:"),
+  );
 
 describe("main : chemin nominal", () => {
   it("enchaîne téléchargement, gardes, staging, compte, swap, canari, journal", async () => {
@@ -169,7 +165,7 @@ describe("main : chemin nominal", () => {
       "download:full-2025.csv.gz",
       "download:full-2026-s1.csv.gz",
       "validate",
-      "read:dvf_mutations:date_mutation:desc:1",
+      "rpc:ingest_dvf_latest_date",
       "rpc:ingest_create_dvf_mutations_staging",
       "insert:dvf_mutations_staging:2000",
       "insert:dvf_mutations_staging:2000",
@@ -203,13 +199,13 @@ describe("main : chemin nominal", () => {
   });
 
   it("table prod vide (premier chargement) : pas de garde de recul", async () => {
-    h.latestProdRows = [];
+    h.latestProdDate = null;
     await main();
     expect(swapped()).toBe(true);
   });
 
   it("source tarie : swap fait, run `partial`, raison dans le journal", async () => {
-    h.latestProdRows = [{ date_mutation: "2025-06-30" }];
+    h.latestProdDate = "2025-06-30";
     h.lastMonth = "2025-06";
     await main();
     expect(swapped()).toBe(true);
@@ -324,7 +320,7 @@ describe("main : dry-run", () => {
 
   it("source tarie : le verdict sort en `::warning::` avant la fin", async () => {
     // Prod vide : un `lastMonth` ancien ne déclenche pas la garde de recul.
-    h.latestProdRows = [];
+    h.latestProdDate = null;
     h.lastMonth = "2025-06";
     await main();
     expect(console.log).toHaveBeenCalledWith(expect.stringMatching(/^::warning::.*source tarie/));
@@ -340,7 +336,7 @@ describe("main : dry-run", () => {
   it("livraison qui recule : le dry-run échoue aussi, avant d'écrire la staging", async () => {
     h.lastMonth = "2025-12";
     await main();
-    expect(h.calls.filter((c) => c.startsWith("rpc:"))).toEqual([]);
+    expect(dbWrites()).toEqual([]);
     expect(h.failureLogs).toEqual([]);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });

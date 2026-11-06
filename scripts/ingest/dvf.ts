@@ -74,11 +74,7 @@ async function resolveDvfFiles(): Promise<[DvfFile, DvfFile]> {
 
 /** `date_mutation` le plus récent en prod, `null` si la table est vide. Une erreur de lecture fait échouer le run. */
 async function readLatestProdDate(supabase: SupabaseClient): Promise<string | null> {
-  const { data, error } = await supabase
-    .from("dvf_mutations")
-    .select("date_mutation")
-    .order("date_mutation", { ascending: false })
-    .limit(1);
+  const { data, error } = await supabase.rpc("ingest_dvf_latest_date");
   if (error) {
     throw new IngestError(
       "validate",
@@ -86,12 +82,11 @@ async function readLatestProdDate(supabase: SupabaseClient): Promise<string | nu
       error,
     );
   }
-  const latest = (data?.[0] as { date_mutation?: unknown } | undefined)?.date_mutation;
-  if (latest === undefined) return null;
-  if (typeof latest !== "string") {
-    throw new IngestError("validate", `date_mutation illisible en prod : ${String(latest)}`);
+  if (data === null) return null;
+  if (typeof data !== "string") {
+    throw new IngestError("validate", `date_mutation illisible en prod : ${String(data)}`);
   }
-  return latest;
+  return data;
 }
 
 function describeAggregate(agg: DvfAggregate): string {
