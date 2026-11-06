@@ -16,6 +16,7 @@ import { createGunzip } from "node:zlib";
 import { parse } from "csv-parse";
 import { parseRpcCount } from "../../src/core/parse-rpc-count.js";
 import { COMMUNE_INSEE_PATTERN } from "../../src/territoire/commune-index.js";
+import { deptFromCodeInsee } from "../../src/territoire/dept-codes.js";
 import { IngestError } from "./ingest-error.js";
 
 // ---------------------------------------------------------------------------
@@ -38,14 +39,14 @@ export interface DvfFile {
   /** `null` : fichier d'année pleine (`full-2025.csv.gz`). */
   semester: 1 | 2 | null;
   filesize: number | null;
-  /** Vide si l'API n'en publie pas : l'URL, horodatée à chaque dépôt, reste discriminante. */
+  /** Vide si l'API n'en publie pas : la signature de livraison se rabat alors sur l'URL. */
   checksum: string;
 }
 
 /** Ignore `dvf.csv.gz` (fichier unique 5 ans) et les ressources `url` non CSV. */
 const DVF_FILE_PATTERN = /^full-(\d{4})(?:-s([12]))?\.csv\.gz$/;
 
-/** Une année pleine finit en décembre : elle se range après ses deux semestres. */
+/** Une année pleine finit en décembre, comme son 2e semestre. */
 const periodRank = (f: DvfFile): number => f.year * 10 + (f.semester ?? 3);
 
 function fileFromResource(resource: DvfResource): DvfFile | null {
@@ -74,31 +75,42 @@ function fileFromResource(resource: DvfResource): DvfFile | null {
 /**
  * Les 2 derniers fichiers, du plus ancien au plus récent : cet ordre est aussi
  * celui de lecture, donc celui du « dernière ligne gardée » du dédoublonnage.
+ *
+ * `full-Y` remplace `full-Y-s1` et `full-Y-s2` : `id_mutation` change d'une livraison
+ * à l'autre (mesuré à Paris 15e, `2025-1293021` en avril, `2025-1361587` en octobre).
+ * Un annuel lu avec ses semestres doublerait donc les ventes sans que le dédoublonnage
+ * le voie (mesuré : 2,41 M et 2,51 M lignes, médiane inchangée).
  */
-export function selectDvfFiles(resources: readonly DvfResource[]): DvfFile[] {
+export function selectDvfFiles(resources: readonly DvfResource[]): [DvfFile, DvfFile] {
   const sorted = resources
     .map(fileFromResource)
     .filter((f): f is DvfFile => f !== null)
     .sort((a, b) => periodRank(a) - periodRank(b) || (a.url < b.url ? -1 : 1));
   // Même nom déposé deux fois : le dépôt le plus récent (URL horodatée) l'emporte.
   const byName = new Map(sorted.map((f) => [f.fileName, f]));
-  const files = [...byName.values()].sort((a, b) => periodRank(a) - periodRank(b));
+  const candidates = [...byName.values()];
+  const annualYears = new Set(candidates.filter((f) => f.semester === null).map((f) => f.year));
+  const files = candidates
+    .filter((f) => f.semester === null || !annualYears.has(f.year))
+    .sort((a, b) => periodRank(a) - periodRank(b));
   if (files.length < 2) {
     throw new IngestError(
       "download",
       `Dataset DVF : ${files.length} fichier(s) full-AAAA[-sN].csv.gz trouvé(s), 2 attendus — fichiers renommés côté Etalab ?`,
     );
   }
-  return files.slice(-2);
+  return files.slice(-2) as [DvfFile, DvfFile];
 }
 
 /**
- * Signature de la LIVRAISON, calculée depuis l'API avant tout téléchargement :
- * sha256 de la concaténation triée des `url|checksum`. Stable quel que soit
- * l'ordre des fichiers, et de même longueur que `ingest_log.csv_sha256`.
+ * Signature de la LIVRAISON, calculée depuis l'API avant tout téléchargement : sha256
+ * de la concaténation triée des checksums, l'URL seulement en repli si l'un manque. Un
+ * contenu identique re-déposé sous une nouvelle URL horodatée ne recharge donc rien et
+ * ne remet pas `data_age_days` à 0. Stable quel que soit l'ordre des fichiers, et de
+ * même longueur que `ingest_log.csv_sha256`.
  */
 export function dvfDeliverySignature(files: readonly Pick<DvfFile, "url" | "checksum">[]): string {
-  const parts = files.map((f) => `${f.url}|${f.checksum}`).sort();
+  const parts = files.map((f) => f.checksum || f.url).sort();
   return createHash("sha256").update(parts.join("\n")).digest("hex");
 }
 
@@ -212,7 +224,22 @@ export interface DvfAggregate {
   rowsByCommune: ReadonlyMap<string, number>;
   avecPrix: number;
   avecTerrain: number;
+  /** Lignes gardées dans le cadre métropole, cf. `isInMetropoleFrame`. */
+  dansCadreMetropole: number;
   medianPrixM2: number | null;
+}
+
+/** Cadre large de la métropole, Corse comprise. L'outre-mer en sort, à juste titre. */
+const METROPOLE_LONGITUDE = [-5.5, 10] as const;
+const METROPOLE_LATITUDE = [41, 51.5] as const;
+
+function isInMetropoleFrame(longitude: number, latitude: number): boolean {
+  return (
+    longitude >= METROPOLE_LONGITUDE[0] &&
+    longitude <= METROPOLE_LONGITUDE[1] &&
+    latitude >= METROPOLE_LATITUDE[0] &&
+    latitude <= METROPOLE_LATITUDE[1]
+  );
 }
 
 /** Types de locaux pour lesquels un prix au m² a un sens (même règle que `parseDvfCsv`). */
@@ -377,6 +404,7 @@ export async function aggregateDvfRecords(
   const rowsByCommune = new Map<string, number>();
   const prix: number[] = [];
   let avecTerrain = 0;
+  let dansCadreMetropole = 0;
   for (const row of byKey.values()) {
     const month = row.date_mutation.slice(0, 7);
     if (!window.has(month)) continue;
@@ -385,6 +413,7 @@ export async function aggregateDvfRecords(
     rowsByCommune.set(row.code_commune, (rowsByCommune.get(row.code_commune) ?? 0) + 1);
     if (row.prix_m2 !== null) prix.push(row.prix_m2);
     if (row.surface_terrain !== null) avecTerrain++;
+    if (isInMetropoleFrame(row.longitude, row.latitude)) dansCadreMetropole++;
   }
   const doublons = utiles - byKey.size;
   const horsFenetre = byKey.size - rows.length;
@@ -405,6 +434,7 @@ export async function aggregateDvfRecords(
     rowsByCommune,
     avecPrix: prix.length,
     avecTerrain,
+    dansCadreMetropole,
     medianPrixM2: medianOf(prix),
   };
 }
@@ -432,6 +462,25 @@ export const MIN_MONTH_SHARE = 0.3;
 export const MAX_INVALID_RATE = 0.001;
 /** Mesuré : 1,2 % à 3,8 %. */
 export const MAX_NO_COORDS_RATE = 0.15;
+/** Mesuré : 0. Sans elle, un fichier récent sans aucune date passe : l'ancien suffit à la fenêtre. */
+export const MAX_NO_DATE_RATE = 0.01;
+/** Mesuré : 875 291. Sans elle, `surface_reelle_bati` vidée peut passer sur les terrains seuls. */
+export const MIN_AVEC_PRIX = 600_000;
+export const MAX_AVEC_PRIX = 1_300_000;
+/** Mesuré : 1 217 931. Sans elle, `surface_terrain` vidée peut passer sur les prix seuls. */
+export const MIN_AVEC_TERRAIN = 800_000;
+export const MAX_AVEC_TERRAIN = 1_700_000;
+/** Mesuré : 19,7 % (1 080 713 / 5 491 055). */
+export const MAX_INUTILES_RATE = 0.35;
+/** Doublons sur lignes utiles avant dédoublonnage. Mesuré : 44,6 % (1 920 393 / 4 301 483). */
+export const MAX_DOUBLONS_RATE = 0.6;
+/**
+ * Mesuré : 99,083 % (1 595 071 / 1 609 828). Sans elle, longitude et latitude permutées
+ * passent toutes les gardes et donnent 0 vente partout en `success`.
+ */
+export const MIN_METROPOLE_SHARE = 0.95;
+/** Mesuré : minimum 1 783 (973), puis 2 548 (972), 2 982 (48). */
+export const MIN_DEPARTEMENT_ROWS = 300;
 /** Retard maximal du dernier mois sur l'horloge, en mois, avant de déclarer la source tarie. */
 export const MAX_LAST_MONTH_LAG = 12;
 
@@ -448,8 +497,51 @@ export const PLM_ARRONDISSEMENTS: readonly string[] = [
 /** Codes ville : DVF n'y porte aucune vente (mesuré : 0), tout est aux arrondissements. */
 export const PLM_CODES_VILLE: readonly string[] = ["75056", "69123", "13055"];
 
-/** Throw `IngestError("validate")` au premier refus : aucun swap sur un fichier suspect. */
-export function validateDvfAggregate(agg: DvfAggregate): void {
+const twoDigits = (from: number, to: number): string[] =>
+  range(from, to).map((d) => d.padStart(2, "0"));
+
+/**
+ * Les 97 départements mesurés dans la source. Absents légitimes, non couverts par DVF :
+ * 57, 67, 68 (Alsace-Moselle) et 976 (Mayotte). Sans cette liste, une région entière
+ * peut manquer : la bande sur les communes laisse 3 635 communes de marge.
+ */
+export const DVF_DEPARTEMENTS: readonly string[] = [
+  ...twoDigits(1, 19),
+  "2A",
+  "2B",
+  ...twoDigits(21, 56),
+  ...twoDigits(58, 66),
+  ...twoDigits(69, 95),
+  "971",
+  "972",
+  "973",
+  "974",
+];
+
+/** Lignes gardées par département, dérivées du compte par commune. */
+export function dvfRowsByDepartement(
+  rowsByCommune: ReadonlyMap<string, number>,
+): ReadonlyMap<string, number> {
+  const byDept = new Map<string, number>();
+  for (const [commune, n] of rowsByCommune) {
+    const dept = deptFromCodeInsee(commune);
+    if (dept !== undefined) byDept.set(dept, (byDept.get(dept) ?? 0) + n);
+  }
+  return byDept;
+}
+
+/** Ce que la validation doit connaître en plus de l'agrégat, qui ne dépend que des lignes. */
+export interface DvfValidationContext {
+  newestFile: Pick<DvfFile, "year" | "semester">;
+  now: Date;
+}
+
+/**
+ * Throw `IngestError("validate")` au premier refus : aucun swap sur un fichier suspect.
+ * `context` ferme le trou du fichier récent sans ligne utile : l'ancien fichier suffit
+ * alors à toutes les bandes, seul le dernier mois trahit le problème.
+ */
+export function validateDvfAggregate(agg: DvfAggregate, context: DvfValidationContext): void {
   const fail = (msg: string): never => {
     throw new IngestError("validate", `${msg} Swap refusé.`);
   };
@@ -467,12 +559,49 @@ export function validateDvfAggregate(agg: DvfAggregate): void {
       `${agg.sansCoords}/${agg.lignesLues} lignes sans coordonnées (${(noCoordsRate * 100).toFixed(1)} % > ${MAX_NO_COORDS_RATE * 100} %) : géolocalisation Etalab dégradée.`,
     );
   }
+  const noDateRate = agg.sansDate / agg.lignesLues;
+  if (noDateRate > MAX_NO_DATE_RATE) {
+    fail(
+      `${agg.sansDate}/${agg.lignesLues} lignes sans date (${(noDateRate * 100).toFixed(2)} % > ${MAX_NO_DATE_RATE * 100} %) : colonne date_mutation vidée.`,
+    );
+  }
+  const inutilesRate = agg.inutiles / agg.lignesLues;
+  if (inutilesRate > MAX_INUTILES_RATE) {
+    fail(
+      `${agg.inutiles}/${agg.lignesLues} lignes inutiles (${(inutilesRate * 100).toFixed(1)} % > ${MAX_INUTILES_RATE * 100} %) : colonnes de prix ou de surface vidées.`,
+    );
+  }
   if (agg.rows.length < MIN_ROWS || agg.rows.length > MAX_ROWS) {
     fail(`${agg.rows.length} lignes gardées hors [${MIN_ROWS}, ${MAX_ROWS}].`);
+  }
+  if (agg.avecPrix < MIN_AVEC_PRIX || agg.avecPrix > MAX_AVEC_PRIX) {
+    fail(`${agg.avecPrix} lignes avec prix hors [${MIN_AVEC_PRIX}, ${MAX_AVEC_PRIX}].`);
+  }
+  if (agg.avecTerrain < MIN_AVEC_TERRAIN || agg.avecTerrain > MAX_AVEC_TERRAIN) {
+    fail(`${agg.avecTerrain} lignes avec terrain hors [${MIN_AVEC_TERRAIN}, ${MAX_AVEC_TERRAIN}].`);
+  }
+  const utiles = agg.lignesLues - agg.sansCoords - agg.sansDate - agg.invalides - agg.inutiles;
+  const doublonsRate = agg.doublons / utiles;
+  if (doublonsRate > MAX_DOUBLONS_RATE) {
+    fail(
+      `${agg.doublons}/${utiles} doublons parmi les lignes utiles (${(doublonsRate * 100).toFixed(1)} % > ${MAX_DOUBLONS_RATE * 100} %) : ventes dupliquées dans la source.`,
+    );
+  }
+  const metropoleShare = agg.dansCadreMetropole / agg.rows.length;
+  if (metropoleShare < MIN_METROPOLE_SHARE) {
+    fail(
+      `${agg.dansCadreMetropole}/${agg.rows.length} lignes dans le cadre métropole (${(metropoleShare * 100).toFixed(1)} % < ${MIN_METROPOLE_SHARE * 100} %) : longitude et latitude permutées ?`,
+    );
   }
   const communes = agg.rowsByCommune.size;
   if (communes < MIN_COMMUNES || communes > MAX_COMMUNES) {
     fail(`${communes} communes hors [${MIN_COMMUNES}, ${MAX_COMMUNES}] : fichier amputé.`);
+  }
+  const byDept = dvfRowsByDepartement(agg.rowsByCommune);
+  const maigres = DVF_DEPARTEMENTS.filter((d) => (byDept.get(d) ?? 0) < MIN_DEPARTEMENT_ROWS);
+  if (maigres.length > 0) {
+    const detail = maigres.map((d) => `${d}=${byDept.get(d) ?? 0}`).join(", ");
+    fail(`Départements sous ${MIN_DEPARTEMENT_ROWS} lignes : ${detail} : région manquante.`);
   }
   const absents = PLM_ARRONDISSEMENTS.filter((c) => !agg.rowsByCommune.has(c));
   if (absents.length > 0) {
@@ -486,6 +615,18 @@ export function validateDvfAggregate(agg: DvfAggregate): void {
   }
 
   const last = agg.lastMonth ?? fail("Aucun mois valide rencontré.");
+  // Mesuré : `2026-06` pour `full-2026-s1`, décembre pour `full-2025`.
+  const { year, semester } = context.newestFile;
+  const minLast = `${year}-${semester === 1 ? "04" : "10"}`;
+  if (!last.startsWith(`${year}-`) || last < minLast) {
+    fail(
+      `Dernier mois ${last} incohérent avec le fichier le plus récent (${year}${semester ? `-s${semester}` : ""}, ${minLast} au minimum) : ce fichier n'apporte pas ses lignes.`,
+    );
+  }
+  const currentMonth = context.now.toISOString().slice(0, 7);
+  if (last > currentMonth) {
+    fail(`Dernier mois ${last} postérieur au mois courant ${currentMonth} : dates fausses.`);
+  }
   const counts = dvfWindowMonths(last).map((m) => [m, agg.rowsByMonth.get(m) ?? 0] as const);
   const fullest = Math.max(...counts.map(([, n]) => n));
   const thin = counts.filter(([, n]) => n < fullest * MIN_MONTH_SHARE);
@@ -515,6 +656,22 @@ export function staleDvfReason(lastMonth: string, now: Date): string | null {
   const lag = (now.getUTCFullYear() - year) * 12 + (now.getUTCMonth() + 1 - month);
   if (lag <= MAX_LAST_MONTH_LAG) return null;
   return `source tarie : dernier mois publié ${lastMonth} = ${lag} mois de retard (> ${MAX_LAST_MONTH_LAG}) : livraison DVF figée côté DGFiP/Etalab`;
+}
+
+/**
+ * Livraison qui recule : si data.gouv retire `full-2026-s1`, la paire devient
+ * `full-2024 + full-2025`, toutes les bandes passent et la prod reculerait en `success`.
+ * `latestProdDate` : `date_mutation` le plus récent en prod, `null` si la table est vide.
+ */
+export function assertDvfNotReceding(lastMonth: string, latestProdDate: string | null): void {
+  if (latestProdDate === null) return;
+  const prodMonth = latestProdDate.slice(0, 7);
+  if (lastMonth < prodMonth) {
+    throw new IngestError(
+      "validate",
+      `Livraison en recul : dernier mois ${lastMonth}, la prod va déjà jusqu'à ${prodMonth} (fichier retiré côté data.gouv ?). Swap refusé.`,
+    );
+  }
 }
 
 /**

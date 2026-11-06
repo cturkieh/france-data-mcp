@@ -525,7 +525,10 @@ describe("vigie « run vert mais donnée malade » — notify-ingest-anomaly sur
       const block = stepBlock(src, ANOMALY_STEP);
       expect(block, `${file} : step de vigie introuvable`).not.toBeNull();
       expect(block).toContain(`uses: ${NOTIFY_ANOMALY}`);
-      expect(stepIfCondition(src, ANOMALY_STEP)).toBe("success()");
+      // Seule exception : un dry-run DVF n'écrit aucune ligne, la vigie jugerait un autre run.
+      expect(stepIfCondition(src, ANOMALY_STEP)).toBe(
+        file === "ingest-dvf.yml" ? "success() && !inputs.dry_run" : "success()",
+      );
       expect(block).toMatch(/^\s+continue-on-error: true$/m);
       // ⚠️ Ameli logue `ameli_ps` : un slug `ameli` ne matcherait aucune ligne
       // → vigie muette à vie (faux négatif silencieux).

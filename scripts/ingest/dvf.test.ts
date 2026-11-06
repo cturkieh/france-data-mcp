@@ -11,6 +11,8 @@ const h = vi.hoisted(() => ({
   lastChecksum: null as string | null,
   lastMonth: "2026-06",
   validationError: null as Error | null,
+  latestProdRows: [{ date_mutation: "2026-06-30" }] as unknown[],
+  latestProdError: null as { message: string } | null,
   successLogs: [] as unknown[],
   failureLogs: [] as unknown[],
 }));
@@ -45,6 +47,7 @@ vi.mock("./dvf-parse.js", async (original) => ({
     rowsByCommune: new Map(),
     avecPrix: 0,
     avecTerrain: 0,
+    dansCadreMetropole: 0,
     medianPrixM2: 2650,
   })),
   validateDvfAggregate: vi.fn(() => {
@@ -78,6 +81,16 @@ vi.mock("./shared.js", async (original) => ({
   }),
   preValidateFile: vi.fn(async () => {}),
   getUntypedServiceClient: vi.fn(() => ({
+    from: vi.fn((table: string) => ({
+      select: () => ({
+        order: (column: string, opts: { ascending: boolean }) => ({
+          limit: async (n: number) => {
+            h.calls.push(`read:${table}:${column}:${opts.ascending ? "asc" : "desc"}:${n}`);
+            return { data: h.latestProdRows, error: h.latestProdError };
+          },
+        }),
+      }),
+    })),
     rpc: vi.fn(async (name: string) => {
       h.calls.push(`rpc:${name}`);
       return {
@@ -121,6 +134,8 @@ beforeEach(() => {
   h.lastChecksum = null;
   h.lastMonth = "2026-06";
   h.validationError = null;
+  h.latestProdRows = [{ date_mutation: "2026-06-30" }];
+  h.latestProdError = null;
   vi.stubEnv("DVF_DRY_RUN", "");
   vi.stubEnv("FORCE_REINGEST", "");
   vi.stubEnv("GITHUB_EVENT_NAME", "");
@@ -153,6 +168,7 @@ describe("main : chemin nominal", () => {
       "download:full-2025.csv.gz",
       "download:full-2026-s1.csv.gz",
       "validate",
+      "read:dvf_mutations:date_mutation:desc:1",
       "rpc:ingest_create_dvf_mutations_staging",
       "insert:dvf_mutations_staging:2000",
       "insert:dvf_mutations_staging:2000",
@@ -173,7 +189,26 @@ describe("main : chemin nominal", () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
+  it("la validation reçoit le fichier le plus récent et l'horloge du run", async () => {
+    const { validateDvfAggregate } = await import("./dvf-parse.js");
+    await main();
+    expect(validateDvfAggregate).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        newestFile: expect.objectContaining({ year: 2026, semester: 1 }),
+        now: new Date("2026-11-12T05:00:00Z"),
+      }),
+    );
+  });
+
+  it("table prod vide (premier chargement) : pas de garde de recul", async () => {
+    h.latestProdRows = [];
+    await main();
+    expect(swapped()).toBe(true);
+  });
+
   it("source tarie : swap fait, run `partial`, raison dans le journal", async () => {
+    h.latestProdRows = [{ date_mutation: "2025-06-30" }];
     h.lastMonth = "2025-06";
     await main();
     expect(swapped()).toBe(true);
@@ -218,6 +253,33 @@ describe("main : le swap est refusé", () => {
     expect(swapped()).toBe(true);
   });
 
+  it("livraison qui recule : aucune écriture, pas de swap, run `failed`", async () => {
+    h.lastMonth = "2025-12";
+    await main();
+    expect(h.calls.filter((c) => c.startsWith("rpc:") || c.startsWith("insert:"))).toEqual([]);
+    expect(swapped()).toBe(false);
+    expect(h.failureLogs[0]).toMatchObject({ status: "failed", error_phase: "validate" });
+    expect((h.failureLogs[0] as IngestLogEntry).error_message).toMatch(/recul/);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it("FORCE_REINGEST ne contourne pas la garde de recul", async () => {
+    h.lastMonth = "2025-12";
+    vi.stubEnv("FORCE_REINGEST", "1");
+    await main();
+    expect(swapped()).toBe(false);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it("lecture de la prod en erreur : échec visible, pas de contournement", async () => {
+    h.latestProdError = { message: "canceling statement due to statement timeout" };
+    await main();
+    expect(h.calls.filter((c) => c.startsWith("rpc:") || c.startsWith("insert:"))).toEqual([]);
+    expect(swapped()).toBe(false);
+    expect((h.failureLogs[0] as IngestLogEntry).error_message).toMatch(/statement timeout/);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
   it("garde en échec : la base n'est même pas touchée", async () => {
     const { IngestError } = await import("./ingest-error.js");
     h.validationError = new IngestError("validate", "médiane hors bande");
@@ -250,10 +312,35 @@ describe("main : dry-run", () => {
     expect(h.successLogs).toEqual([]);
   });
 
-  it("un compte faux fait quand même échouer le dry-run", async () => {
+  it("en échec : `exit 1` et stderr, mais aucune ligne de journal", async () => {
     h.stagingCount = 1;
     await main();
-    expect((h.failureLogs[0] as IngestLogEntry).error_message).toMatch(/^\[dry-run\]/);
+    expect(h.failureLogs).toEqual([]);
+    expect(h.successLogs).toEqual([]);
+    expect(console.error).toHaveBeenCalledWith(expect.stringMatching(/DRY RUN FAILED at validate/));
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it("source tarie : le verdict sort en `::warning::` avant la fin", async () => {
+    // Prod vide : un `lastMonth` ancien ne déclenche pas la garde de recul.
+    h.latestProdRows = [];
+    h.lastMonth = "2025-06";
+    await main();
+    expect(console.log).toHaveBeenCalledWith(expect.stringMatching(/^::warning::.*source tarie/));
+    expect(swapped()).toBe(false);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("source à jour : aucun `::warning::`", async () => {
+    await main();
+    expect(console.log).not.toHaveBeenCalledWith(expect.stringMatching(/^::warning::/));
+  });
+
+  it("livraison qui recule : le dry-run échoue aussi, avant d'écrire la staging", async () => {
+    h.lastMonth = "2025-12";
+    await main();
+    expect(h.calls.filter((c) => c.startsWith("rpc:"))).toEqual([]);
+    expect(h.failureLogs).toEqual([]);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
@@ -261,7 +348,7 @@ describe("main : dry-run", () => {
     vi.stubEnv("GITHUB_EVENT_NAME", "schedule");
     await main();
     expect(h.calls).toEqual([]);
-    expect(h.failureLogs[0]).toMatchObject({ status: "failed", error_phase: "validate" });
+    expect(h.failureLogs).toEqual([]);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });

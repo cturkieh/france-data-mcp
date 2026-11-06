@@ -6,12 +6,18 @@ import { gzipSync } from "node:zlib";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import {
   DVF_COLUMNS,
+  DVF_DEPARTEMENTS,
   type DvfAggregate,
+  type DvfValidationContext,
+  MAX_AVEC_PRIX,
+  MAX_AVEC_TERRAIN,
   MAX_COMMUNES,
   MAX_INVALID_RATE,
   MAX_MEDIAN_PRIX_M2,
   MAX_NO_COORDS_RATE,
   MAX_ROWS,
+  MIN_AVEC_PRIX,
+  MIN_AVEC_TERRAIN,
   MIN_COMMUNES,
   MIN_MEDIAN_PRIX_M2,
   MIN_ROWS,
@@ -19,8 +25,10 @@ import {
   PLM_CODES_VILLE,
   aggregateDvfRecords,
   assertDvfDryRunAllowed,
+  assertDvfNotReceding,
   assertDvfStagingCount,
   dvfDeliverySignature,
+  dvfRowsByDepartement,
   dvfWindowMonths,
   selectDvfFiles,
   staleDvfReason,
@@ -90,13 +98,29 @@ describe("selectDvfFiles", () => {
     spy.mockRestore();
   });
 
-  it("une année pleine se range après ses semestres", () => {
+  it("full-Y retire full-Y-s1 et full-Y-s2 : lus ensemble, ils doubleraient les ventes", () => {
     const files = selectDvfFiles([
-      resource("full-2026-s1.csv.gz"),
-      resource("full-2026.csv.gz"),
       resource("full-2025.csv.gz"),
+      resource("full-2026-s1.csv.gz"),
+      resource("full-2026-s2.csv.gz"),
+      resource("full-2026.csv.gz"),
     ]);
-    expect(files.map((f) => f.fileName)).toEqual(["full-2026-s1.csv.gz", "full-2026.csv.gz"]);
+    expect(files.map((f) => f.fileName)).toEqual(["full-2025.csv.gz", "full-2026.csv.gz"]);
+  });
+
+  it("les semestres d'une année sans annuel restent sélectionnables", () => {
+    const files = selectDvfFiles([
+      resource("full-2025.csv.gz"),
+      resource("full-2026-s1.csv.gz"),
+      resource("full-2026-s2.csv.gz"),
+    ]);
+    expect(files.map((f) => f.fileName)).toEqual(["full-2026-s1.csv.gz", "full-2026-s2.csv.gz"]);
+  });
+
+  it("un annuel et son semestre ne font qu'un fichier : refus plutôt que double compte", () => {
+    expect(() =>
+      selectDvfFiles([resource("full-2026.csv.gz"), resource("full-2026-s1.csv.gz")]),
+    ).toThrow(/1 fichier/);
   });
 
   it("le même nom déposé deux fois compte pour un seul fichier", () => {
@@ -121,18 +145,32 @@ describe("selectDvfFiles", () => {
 });
 
 describe("dvfDeliverySignature", () => {
-  const a = { url: "https://x.test/a.csv.gz", checksum: "1" };
-  const b = { url: "https://x.test/b.csv.gz", checksum: "2" };
+  const a = { url: "https://x.test/20261020/a.csv.gz", checksum: "1" };
+  const b = { url: "https://x.test/20261020/b.csv.gz", checksum: "2" };
 
   it("sha256 hex, stable quel que soit l'ordre", () => {
     expect(dvfDeliverySignature([a, b])).toMatch(/^[0-9a-f]{64}$/);
     expect(dvfDeliverySignature([b, a])).toBe(dvfDeliverySignature([a, b]));
   });
 
-  it("change si l'URL ou le checksum change", () => {
-    const base = dvfDeliverySignature([a, b]);
-    expect(dvfDeliverySignature([a, { ...b, checksum: "3" }])).not.toBe(base);
-    expect(dvfDeliverySignature([a, { ...b, url: "https://x.test/c.csv.gz" }])).not.toBe(base);
+  it("change si le contenu change", () => {
+    expect(dvfDeliverySignature([a, { ...b, checksum: "3" }])).not.toBe(
+      dvfDeliverySignature([a, b]),
+    );
+  });
+
+  it("contenu identique re-déposé sous une nouvelle URL horodatée : même signature", () => {
+    const redepose = { ...b, url: "https://x.test/20261105/b.csv.gz" };
+    expect(dvfDeliverySignature([a, redepose])).toBe(dvfDeliverySignature([a, b]));
+  });
+
+  it("checksum absent : repli sur l'URL de ce fichier seulement", () => {
+    const sansChecksum = { url: b.url, checksum: "" };
+    const redepose = { url: "https://x.test/20261105/b.csv.gz", checksum: "" };
+    expect(dvfDeliverySignature([a, redepose])).not.toBe(dvfDeliverySignature([a, sansChecksum]));
+    expect(dvfDeliverySignature([{ ...a, url: "https://x.test/autre" }, sansChecksum])).toBe(
+      dvfDeliverySignature([a, sansChecksum]),
+    );
   });
 });
 
@@ -331,6 +369,27 @@ describe("aggregateDvfRecords : fenêtre ancrée sur la donnée", () => {
 });
 
 describe("aggregateDvfRecords : tri et statistiques", () => {
+  it("cadre métropole : bornes incluses, outre-mer et coordonnées permutées dehors", async () => {
+    const coords = [
+      ["2.36", "48.79"],
+      ["-5.5", "41"],
+      ["10", "51.5"],
+      ["-5.51", "48"],
+      ["10.01", "48"],
+      ["2", "40.99"],
+      ["2", "51.51"],
+      ["55.45", "-20.88"],
+      ["48.79", "2.36"],
+    ];
+    const agg = await aggregateDvfRecords(
+      coords.map(([longitude, latitude], i) =>
+        rec({ id_mutation: `c${i}`, longitude: longitude ?? "", latitude: latitude ?? "" }),
+      ),
+    );
+    expect(agg.rows).toHaveLength(coords.length);
+    expect(agg.dansCadreMetropole).toBe(3);
+  });
+
   it("tri par (commune, date, id, type), indépendant de l'ordre d'entrée", async () => {
     const lignes = [
       rec({ code_commune: "94076", date_mutation: "2026-03-02", id_mutation: "b" }),
@@ -380,35 +439,52 @@ describe("aggregateDvfRecords : tri et statistiques", () => {
 
 describe("validateDvfAggregate", () => {
   const LAST = "2026-06";
+  /** Mesuré le 2026-11-06 : `full-2025` + `full-2026-s1`. */
+  const LUES = 5_491_055;
+  const GARDEES = 1_609_828;
+  const CONTEXTE: DvfValidationContext = {
+    newestFile: { year: 2026, semester: 1 },
+    now: new Date("2026-11-07T00:00:00Z"),
+  };
+
+  const communes = (n = 32_635): Map<string, number> => {
+    const base = new Map<string, number>(PLM_ARRONDISSEMENTS.map((c) => [c, 100]));
+    for (const d of DVF_DEPARTEMENTS) base.set(d.length === 3 ? `${d}01` : `${d}001`, 1_783);
+    for (let i = 0; base.size < n; i++) base.set(`99${String(i).padStart(4, "0")}`, 10);
+    return base;
+  };
+
+  const moisDeLaFenetre = (last: string) =>
+    new Map(dvfWindowMonths(last).map((m) => [m, 130_000] as const));
 
   /** Agrégat sain aux chiffres mesurés. Sans lignes réelles : seules les longueurs comptent. */
   function sain(overrides: Partial<DvfAggregate> = {}): DvfAggregate {
-    const rowsByCommune = new Map<string, number>(PLM_ARRONDISSEMENTS.map((c) => [c, 100]));
-    for (let i = 0; rowsByCommune.size < 32_635; i++) {
-      rowsByCommune.set(`9${String(i).padStart(4, "0")}`, 10);
-    }
     return {
-      rows: new Array(1_609_828),
-      lignesLues: 5_500_000,
-      sansCoords: 100_000,
+      rows: new Array(GARDEES),
+      lignesLues: LUES,
+      sansCoords: 108_859,
       sansDate: 0,
       invalides: 0,
-      inutiles: 3_000_000,
-      doublons: 500_000,
-      horsFenetre: 800_000,
+      inutiles: 1_080_713,
+      doublons: 1_920_393,
+      horsFenetre: 771_262,
       lastMonth: LAST,
-      rowsByMonth: new Map(dvfWindowMonths(LAST).map((m) => [m, 130_000])),
-      rowsByCommune,
+      rowsByMonth: moisDeLaFenetre(LAST),
+      rowsByCommune: communes(),
       avecPrix: 875_291,
       avecTerrain: 1_217_931,
+      dansCadreMetropole: 1_595_071,
       medianPrixM2: 2_650,
       ...overrides,
     };
   }
 
-  function refus(agg: DvfAggregate): IngestError {
+  const accepte = (agg: DvfAggregate, contexte = CONTEXTE) =>
+    expect(() => validateDvfAggregate(agg, contexte)).not.toThrow();
+
+  function refus(agg: DvfAggregate, contexte = CONTEXTE): IngestError {
     try {
-      validateDvfAggregate(agg);
+      validateDvfAggregate(agg, contexte);
     } catch (err) {
       expect(err).toBeInstanceOf(IngestError);
       expect((err as IngestError).phase).toBe("validate");
@@ -418,30 +494,21 @@ describe("validateDvfAggregate", () => {
     throw new Error("swap accepté alors qu'un refus était attendu");
   }
 
-  const communes = (n: number): Map<string, number> => {
-    const base = new Map<string, number>(PLM_ARRONDISSEMENTS.map((c) => [c, 100]));
-    for (let i = 0; base.size < n; i++) base.set(`9${String(i).padStart(4, "0")}`, 10);
-    return base;
-  };
-
   it("accepte les chiffres mesurés le 2026-11-06", () => {
-    expect(() => validateDvfAggregate(sain())).not.toThrow();
+    accepte(sain());
   });
 
   it("lignes gardées : bornes incluses, hors bornes refusées", () => {
-    expect(() => validateDvfAggregate(sain({ rows: new Array(MIN_ROWS) }))).not.toThrow();
-    expect(() => validateDvfAggregate(sain({ rows: new Array(MAX_ROWS) }))).not.toThrow();
-    expect(refus(sain({ rows: new Array(MIN_ROWS - 1) })).message).toMatch(/lignes gardées/);
-    expect(refus(sain({ rows: new Array(MAX_ROWS + 1) })).message).toMatch(/lignes gardées/);
+    const avec = (n: number) => sain({ rows: new Array(n), dansCadreMetropole: n });
+    accepte(avec(MIN_ROWS));
+    accepte(avec(MAX_ROWS));
+    expect(refus(avec(MIN_ROWS - 1)).message).toMatch(/lignes gardées/);
+    expect(refus(avec(MAX_ROWS + 1)).message).toMatch(/lignes gardées/);
   });
 
   it("communes : bornes incluses, hors bornes refusées", () => {
-    expect(() =>
-      validateDvfAggregate(sain({ rowsByCommune: communes(MIN_COMMUNES) })),
-    ).not.toThrow();
-    expect(() =>
-      validateDvfAggregate(sain({ rowsByCommune: communes(MAX_COMMUNES) })),
-    ).not.toThrow();
+    accepte(sain({ rowsByCommune: communes(MIN_COMMUNES) }));
+    accepte(sain({ rowsByCommune: communes(MAX_COMMUNES) }));
     expect(refus(sain({ rowsByCommune: communes(MIN_COMMUNES - 1) })).message).toMatch(/communes/);
     expect(refus(sain({ rowsByCommune: communes(MAX_COMMUNES + 1) })).message).toMatch(/communes/);
   });
@@ -449,7 +516,7 @@ describe("validateDvfAggregate", () => {
   it("les 45 arrondissements sont exigés", () => {
     expect(PLM_ARRONDISSEMENTS).toHaveLength(45);
     for (const code of ["75101", "75120", "69381", "69389", "13201", "13216"]) {
-      const rowsByCommune = communes(32_635);
+      const rowsByCommune = communes();
       rowsByCommune.delete(code);
       expect(refus(sain({ rowsByCommune })).message).toContain(code);
     }
@@ -457,14 +524,14 @@ describe("validateDvfAggregate", () => {
 
   it("aucune ligne sur un code ville", () => {
     for (const code of PLM_CODES_VILLE) {
-      const rowsByCommune = communes(32_635);
+      const rowsByCommune = communes();
       rowsByCommune.set(code, 1);
       expect(refus(sain({ rowsByCommune })).message).toContain(code);
     }
   });
 
   it("les 12 mois doivent être présents", () => {
-    const rowsByMonth = new Map(dvfWindowMonths(LAST).map((m) => [m, 130_000]));
+    const rowsByMonth = moisDeLaFenetre(LAST);
     rowsByMonth.delete("2026-02");
     expect(refus(sain({ rowsByMonth })).message).toContain("2026-02=0");
   });
@@ -476,7 +543,7 @@ describe("validateDvfAggregate", () => {
           dvfWindowMonths(LAST).map((m) => [m, m === "2025-09" ? n : 100_000] as const),
         ),
       });
-    expect(() => validateDvfAggregate(avec(30_000))).not.toThrow();
+    accepte(avec(30_000));
     expect(refus(avec(29_999)).message).toContain("2025-09=29999");
   });
 
@@ -485,29 +552,212 @@ describe("validateDvfAggregate", () => {
   });
 
   it("médiane : bornes incluses, hors bornes et absence refusées", () => {
-    expect(() => validateDvfAggregate(sain({ medianPrixM2: MIN_MEDIAN_PRIX_M2 }))).not.toThrow();
-    expect(() => validateDvfAggregate(sain({ medianPrixM2: MAX_MEDIAN_PRIX_M2 }))).not.toThrow();
+    accepte(sain({ medianPrixM2: MIN_MEDIAN_PRIX_M2 }));
+    accepte(sain({ medianPrixM2: MAX_MEDIAN_PRIX_M2 }));
     for (const medianPrixM2 of [MIN_MEDIAN_PRIX_M2 - 1, MAX_MEDIAN_PRIX_M2 + 1, null]) {
       expect(refus(sain({ medianPrixM2 })).message).toMatch(/Médiane/);
     }
   });
 
   it("invalides ≤ 0,1 % : seuil inclus, au-delà refusé", () => {
-    const lignesLues = 1_000_000;
-    const seuil = lignesLues * MAX_INVALID_RATE;
-    expect(() => validateDvfAggregate(sain({ lignesLues, invalides: seuil }))).not.toThrow();
-    expect(refus(sain({ lignesLues, invalides: seuil + 1 })).message).toMatch(/invalides/);
+    const seuil = Math.floor(LUES * MAX_INVALID_RATE);
+    accepte(sain({ invalides: seuil }));
+    expect(refus(sain({ invalides: seuil + 1 })).message).toMatch(/invalides/);
   });
 
   it("sans coordonnées ≤ 15 % : seuil inclus, au-delà refusé", () => {
-    const lignesLues = 1_000_000;
-    const seuil = lignesLues * MAX_NO_COORDS_RATE;
-    expect(() => validateDvfAggregate(sain({ lignesLues, sansCoords: seuil }))).not.toThrow();
-    expect(refus(sain({ lignesLues, sansCoords: seuil + 1 })).message).toMatch(/coordonnées/);
+    const seuil = Math.floor(LUES * MAX_NO_COORDS_RATE);
+    accepte(sain({ sansCoords: seuil, doublons: 0 }));
+    expect(refus(sain({ sansCoords: seuil + 1 })).message).toMatch(/coordonnées/);
   });
 
   it("aucune ligne lue : refus", () => {
     expect(refus(sain({ lignesLues: 0 })).message).toMatch(/Aucune ligne/);
+  });
+
+  it("sans date ≤ 1 % : 0 mesuré accepté, seuil inclus, fichier récent sans date refusé", () => {
+    const seuil = Math.floor(LUES * 0.01);
+    accepte(sain({ sansDate: 0 }));
+    accepte(sain({ sansDate: seuil, doublons: 0 }));
+    expect(refus(sain({ sansDate: seuil + 1 })).message).toMatch(/sans date/);
+    // Le fichier le plus récent (1,7 M lignes) sans aucune date.
+    expect(refus(sain({ sansDate: 1_700_000 })).message).toMatch(/sans date/);
+  });
+
+  it("lignes avec prix : mesuré et bornes acceptés, hors bornes refusées", () => {
+    accepte(sain({ avecPrix: 875_291 }));
+    accepte(sain({ avecPrix: MIN_AVEC_PRIX }));
+    accepte(sain({ avecPrix: MAX_AVEC_PRIX }));
+    expect(refus(sain({ avecPrix: MIN_AVEC_PRIX - 1 })).message).toMatch(/avec prix/);
+    expect(refus(sain({ avecPrix: MAX_AVEC_PRIX + 1 })).message).toMatch(/avec prix/);
+  });
+
+  it("lignes avec terrain : mesuré et bornes acceptés, `surface_terrain` vide partout refusée", () => {
+    accepte(sain({ avecTerrain: 1_217_931 }));
+    accepte(sain({ avecTerrain: MIN_AVEC_TERRAIN }));
+    accepte(sain({ avecTerrain: MAX_AVEC_TERRAIN }));
+    expect(refus(sain({ avecTerrain: 0 })).message).toMatch(/avec terrain/);
+    expect(refus(sain({ avecTerrain: MIN_AVEC_TERRAIN - 1 })).message).toMatch(/avec terrain/);
+    expect(refus(sain({ avecTerrain: MAX_AVEC_TERRAIN + 1 })).message).toMatch(/avec terrain/);
+  });
+
+  it("inutiles ≤ 35 % : 19,7 % mesuré accepté, seuil inclus, au-delà refusé", () => {
+    expect(1_080_713 / LUES).toBeCloseTo(0.197, 3);
+    const seuil = Math.floor(LUES * 0.35);
+    accepte(sain({ inutiles: seuil, doublons: 0 }));
+    expect(refus(sain({ inutiles: seuil + 1 })).message).toMatch(/inutiles/);
+  });
+
+  it("doublons ≤ 60 % des lignes utiles : 44,6 % mesuré accepté, au-delà refusé", () => {
+    const utiles = LUES - 108_859 - 1_080_713;
+    expect(utiles).toBe(4_301_483);
+    expect(1_920_393 / utiles).toBeCloseTo(0.446, 3);
+    const seuil = Math.floor(utiles * 0.6);
+    accepte(sain({ doublons: seuil }));
+    expect(refus(sain({ doublons: seuil + 1 })).message).toMatch(/doublons/);
+  });
+
+  it("le dénominateur des doublons sort les lignes écartées avant dédoublonnage", () => {
+    // Même nombre de doublons : accepté avec 4,3 M lignes utiles, refusé avec 3,2 M.
+    accepte(sain({ doublons: 2_000_000 }));
+    expect(
+      refus(sain({ doublons: 2_000_000, sansCoords: 700_000, inutiles: 1_500_000 })).message,
+    ).toMatch(/doublons/);
+  });
+
+  it("cadre métropole ≥ 95 % : 99,083 % mesuré accepté, permutation refusée", () => {
+    expect(1_595_071 / GARDEES).toBeCloseTo(0.99083, 5);
+    const seuil = Math.ceil(GARDEES * 0.95);
+    accepte(sain({ dansCadreMetropole: seuil }));
+    expect(refus(sain({ dansCadreMetropole: seuil - 1 })).message).toMatch(/permutées/);
+    expect(refus(sain({ dansCadreMetropole: 0 })).message).toMatch(/permutées/);
+  });
+
+  it("une permutation réelle des coordonnées est bien comptée hors du cadre", async () => {
+    const agg = await aggregateDvfRecords([rec({ longitude: "48.79", latitude: "2.36" })]);
+    expect(agg.invalides).toBe(0);
+    expect(agg.dansCadreMetropole).toBe(0);
+  });
+
+  describe("départements", () => {
+    it("liste exacte des 97 attendus, sans les absents légitimes", () => {
+      expect(DVF_DEPARTEMENTS).toHaveLength(97);
+      expect(new Set(DVF_DEPARTEMENTS).size).toBe(97);
+      for (const d of ["01", "19", "2A", "2B", "21", "56", "58", "66", "69", "95", "971", "974"]) {
+        expect(DVF_DEPARTEMENTS).toContain(d);
+      }
+      for (const d of ["20", "57", "67", "68", "96", "975", "976"]) {
+        expect(DVF_DEPARTEMENTS).not.toContain(d);
+      }
+    });
+
+    it("compte par département depuis le compte par commune, Corse et outre-mer compris", () => {
+      const byDept = dvfRowsByDepartement(
+        new Map([
+          ["75115", 10],
+          ["75101", 5],
+          ["2A004", 3],
+          ["97411", 7],
+        ]),
+      );
+      expect(Object.fromEntries(byDept)).toEqual({ "75": 15, "2A": 3, "974": 7 });
+    });
+
+    it("le minimum mesuré (973 : 1 783) et le seuil de 300 passent", () => {
+      accepte(sain());
+      const rowsByCommune = communes();
+      rowsByCommune.set("48001", 300);
+      accepte(sain({ rowsByCommune }));
+    });
+
+    it("299 lignes dans un département : refus qui le nomme", () => {
+      const rowsByCommune = communes();
+      rowsByCommune.set("48001", 299);
+      expect(refus(sain({ rowsByCommune })).message).toContain("48=299");
+    });
+
+    it("une région entière absente : refus, même avec assez de communes", () => {
+      const rowsByCommune = communes();
+      rowsByCommune.delete("29001");
+      rowsByCommune.delete("22001");
+      const message = refus(sain({ rowsByCommune })).message;
+      expect(message).toContain("29=0");
+      expect(message).toContain("22=0");
+    });
+
+    it("un département d'outre-mer absent : refus", () => {
+      const rowsByCommune = communes();
+      rowsByCommune.delete("97301");
+      expect(refus(sain({ rowsByCommune })).message).toContain("973=0");
+    });
+
+    it("un département en plus ne bloque pas", () => {
+      const rowsByCommune = communes();
+      rowsByCommune.set("97601", 5);
+      rowsByCommune.set("57001", 5);
+      accepte(sain({ rowsByCommune }));
+    });
+  });
+
+  describe("cohérence du dernier mois", () => {
+    const avecDernierMois = (lastMonth: string) =>
+      sain({ lastMonth, rowsByMonth: moisDeLaFenetre(lastMonth) });
+    const fichier = (year: number, semester: 1 | 2 | null, now = "2027-12-01T00:00:00Z") => ({
+      newestFile: { year, semester },
+      now: new Date(now),
+    });
+
+    it("`-s1` : `2026-06` mesuré et `2026-04` passent, `2026-03` et 2025 refusés", () => {
+      accepte(avecDernierMois("2026-06"), fichier(2026, 1));
+      accepte(avecDernierMois("2026-04"), fichier(2026, 1));
+      expect(refus(avecDernierMois("2026-03"), fichier(2026, 1)).message).toMatch(/incohérent/);
+      // Le fichier récent n'apporte aucune ligne utile : seul ce contrôle le voit.
+      expect(refus(avecDernierMois("2025-12"), fichier(2026, 1)).message).toMatch(/incohérent/);
+    });
+
+    it("annuel : décembre mesuré et octobre passent, septembre refusé", () => {
+      accepte(avecDernierMois("2025-12"), fichier(2025, null));
+      accepte(avecDernierMois("2025-10"), fichier(2025, null));
+      expect(refus(avecDernierMois("2025-09"), fichier(2025, null)).message).toMatch(/incohérent/);
+    });
+
+    it("`-s2` : octobre passe, septembre refusé", () => {
+      accepte(avecDernierMois("2026-10"), fichier(2026, 2));
+      expect(refus(avecDernierMois("2026-09"), fichier(2026, 2)).message).toMatch(/incohérent/);
+    });
+
+    it("une autre année que celle du fichier le plus récent est refusée", () => {
+      expect(refus(avecDernierMois("2027-01"), fichier(2026, 1)).message).toMatch(/incohérent/);
+    });
+
+    it("jamais postérieur au mois courant, mois courant accepté", () => {
+      accepte(avecDernierMois("2026-06"), fichier(2026, 1, "2026-06-15T00:00:00Z"));
+      expect(
+        refus(avecDernierMois("2026-06"), fichier(2026, 1, "2026-05-31T23:00:00Z")).message,
+      ).toMatch(/postérieur/);
+    });
+  });
+});
+
+describe("assertDvfNotReceding", () => {
+  it("table vide : pas de garde", () => {
+    expect(() => assertDvfNotReceding("2025-12", null)).not.toThrow();
+  });
+
+  it("même mois ou plus récent : accepté", () => {
+    expect(() => assertDvfNotReceding("2026-06", "2026-06-30")).not.toThrow();
+    expect(() => assertDvfNotReceding("2026-12", "2026-06-30")).not.toThrow();
+  });
+
+  it("livraison qui recule (`full-2024` + `full-2025` après `full-2026-s1`) : refus", () => {
+    try {
+      assertDvfNotReceding("2025-12", "2026-06-30");
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(IngestError);
+      expect((err as IngestError).phase).toBe("validate");
+      expect((err as IngestError).message).toMatch(/recul.*2025-12.*2026-06.*Swap refusé/);
+    }
   });
 });
 

@@ -1,4 +1,5 @@
 import "./load-env.js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { DEFAULT_USER_AGENT, fetchJson } from "../../src/core/http.js";
 import {
   type DvfAggregate,
@@ -6,6 +7,7 @@ import {
   type DvfResource,
   aggregateDvfRecords,
   assertDvfDryRunAllowed,
+  assertDvfNotReceding,
   assertDvfStagingCount,
   dvfDeliverySignature,
   selectDvfFiles,
@@ -24,6 +26,7 @@ import {
   getUntypedServiceClient,
   insertStagingBatchWithRetry,
   isForceReingestEnv,
+  oneLine,
   preValidateFile,
   runAndRecordCanary,
   runIfMain,
@@ -36,7 +39,9 @@ import {
 // 12 mois glissants, staging + swap atomique. Règles et gardes : `dvf-parse.ts`.
 //
 // `DVF_DRY_RUN=1` : tout jusqu'à la vérification du nombre de lignes, staging
-// conservée pour mesure, ni swap ni ligne `success`. Refusé sur un `schedule`.
+// conservée pour mesure, ni swap ni aucune ligne `ingest_log`, même en échec : elle
+// fausserait `last_attempt_status` puis déclencherait une fausse alerte « source tarie ».
+// Refusé sur un `schedule`.
 
 const DATASET_API_URL =
   "https://www.data.gouv.fr/api/1/datasets/demandes-de-valeurs-foncieres-geolocalisees/";
@@ -47,7 +52,7 @@ const MIN_SIZE_BYTES = 30_000_000;
 /** ~805 lots à 1,6 M lignes, ~570 Ko de JSON par lot (mesuré), insérés avec le GiST déjà posé. */
 const BATCH_SIZE = 2_000;
 
-async function resolveDvfFiles(): Promise<DvfFile[]> {
+async function resolveDvfFiles(): Promise<[DvfFile, DvfFile]> {
   let dataset: { resources?: unknown };
   try {
     dataset = await fetchJson<{ resources?: unknown }>(DATASET_API_URL, {
@@ -67,8 +72,30 @@ async function resolveDvfFiles(): Promise<DvfFile[]> {
   return selectDvfFiles(dataset.resources as DvfResource[]);
 }
 
+/** `date_mutation` le plus récent en prod, `null` si la table est vide. Une erreur de lecture fait échouer le run. */
+async function readLatestProdDate(supabase: SupabaseClient): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("dvf_mutations")
+    .select("date_mutation")
+    .order("date_mutation", { ascending: false })
+    .limit(1);
+  if (error) {
+    throw new IngestError(
+      "validate",
+      `Lecture du dernier mois de dvf_mutations échouée : ${error.message}`,
+      error,
+    );
+  }
+  const latest = (data?.[0] as { date_mutation?: unknown } | undefined)?.date_mutation;
+  if (latest === undefined) return null;
+  if (typeof latest !== "string") {
+    throw new IngestError("validate", `date_mutation illisible en prod : ${String(latest)}`);
+  }
+  return latest;
+}
+
 function describeAggregate(agg: DvfAggregate): string {
-  return `lues=${agg.lignesLues}, gardées=${agg.rows.length}, avec_prix=${agg.avecPrix}, avec_terrain=${agg.avecTerrain}, communes=${agg.rowsByCommune.size}, dernier_mois=${agg.lastMonth ?? "aucun"}, médiane=${agg.medianPrixM2 ?? "aucune"}, sans_coords=${agg.sansCoords}, sans_date=${agg.sansDate}, invalides=${agg.invalides}, inutiles=${agg.inutiles}, doublons=${agg.doublons}, hors_fenêtre=${agg.horsFenetre}`;
+  return `lues=${agg.lignesLues}, gardées=${agg.rows.length}, avec_prix=${agg.avecPrix}, avec_terrain=${agg.avecTerrain}, communes=${agg.rowsByCommune.size}, dans_cadre_metropole=${agg.dansCadreMetropole}, dernier_mois=${agg.lastMonth ?? "aucun"}, médiane=${agg.medianPrixM2 ?? "aucune"}, sans_coords=${agg.sansCoords}, sans_date=${agg.sansDate}, invalides=${agg.invalides}, inutiles=${agg.inutiles}, doublons=${agg.doublons}, hors_fenêtre=${agg.horsFenetre}`;
 }
 
 export async function main(): Promise<void> {
@@ -122,11 +149,15 @@ export async function main(): Promise<void> {
     // 3. AGRÉGATION en mémoire + gardes AVANT toute écriture en base.
     const agg = await aggregateDvfRecords(streamDvfFiles(filePaths));
     console.log(`[dvf] agrégé : ${describeAggregate(agg)}`);
-    validateDvfAggregate(agg);
+    validateDvfAggregate(agg, { newestFile: files[1], now: startedAt });
+
+    // `lastMonth` non nul ici : `validateDvfAggregate` a refusé « aucun mois ».
+    const lastMonth = agg.lastMonth as string;
+    const supabase = getUntypedServiceClient("dvf");
+    assertDvfNotReceding(lastMonth, await readLatestProdDate(supabase));
 
     // 4. STAGING : index déjà posés par la RPC (un `CREATE INDEX` lourd est impossible
     // via PostgREST, plafond passerelle de 60 s).
-    const supabase = getUntypedServiceClient("dvf");
     const { error: stagingErr } = await supabase.rpc("ingest_create_dvf_mutations_staging");
     if (stagingErr) {
       throw new IngestError(
@@ -163,7 +194,10 @@ export async function main(): Promise<void> {
     }
     assertDvfStagingCount(rawCount, inserted);
 
+    const stale = staleDvfReason(lastMonth, startedAt);
+
     if (dryRun) {
+      if (stale) console.log(`::warning::${oneLine(`[dvf] DRY RUN : ${stale}`)}`);
       console.log(
         `[dvf] DRY RUN : ${inserted} lignes vérifiées dans dvf_mutations_staging, conservée pour mesure. Swap NON exécuté, aucune ligne ingest_log écrite.`,
       );
@@ -174,8 +208,6 @@ export async function main(): Promise<void> {
     await atomicSwapTables({ prodTable: "dvf_mutations" });
     await runAndRecordCanary(supabase, "dvf", log, "dvf");
 
-    // `lastMonth` non nul ici : `validateDvfAggregate` a refusé « aucun mois ».
-    const stale = agg.lastMonth ? staleDvfReason(agg.lastMonth, startedAt) : null;
     if (stale) {
       log.status = "partial";
       appendLogMessage(log, stale);
@@ -197,12 +229,16 @@ export async function main(): Promise<void> {
             `unexpected non-IngestError (programming bug): ${err instanceof Error ? err.message : String(err)}`,
             err,
           );
-    log.status = "failed";
-    log.error_phase = ingestErr.phase;
-    log.error_message = dryRun ? `[dry-run] ${ingestErr.message}` : ingestErr.message;
-    log.finished_at = new Date().toISOString();
-    await writeIngestLogFailureFallback(log, "dvf");
-    console.error(`[dvf] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
+    if (!dryRun) {
+      log.status = "failed";
+      log.error_phase = ingestErr.phase;
+      log.error_message = ingestErr.message;
+      log.finished_at = new Date().toISOString();
+      await writeIngestLogFailureFallback(log, "dvf");
+    }
+    console.error(
+      `[dvf] ${dryRun ? "DRY RUN " : ""}FAILED at ${ingestErr.phase}: ${ingestErr.message}`,
+    );
     process.exit(1);
   }
 }

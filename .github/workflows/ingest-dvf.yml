@@ -2,12 +2,11 @@
 name: Ingest DVF (ventes immobilieres, chargement national)
 
 on:
-  schedule:
-    # Le 12 du mois, 05:00 UTC : ne concurrence pas FINESS (1/15), RPPS (5),
-    # Sit@del (10), Ameli/CDS (lundis). Detection MENSUELLE d'une livraison
-    # SEMESTRIELLE (avril, octobre) : le court-circuit sur la signature de
-    # livraison, calculee depuis l'API, evite tout telechargement sinon.
-    - cron: "0 5 12 * *"
+  # Pas de cron ici : il est ajoute par la PR de lecture. Une fois merge, il ferait le
+  # swap seul avant le deploiement du nouveau code de lecture et casserait le cache
+  # paresseux encore en prod (son upsert vise une cle primaire qui disparait au swap).
+  # Cron prevu : le 12 du mois, 05:00 UTC (ne concurrence pas FINESS 1/15, RPPS 5,
+  # Sit@del 10, Ameli/CDS lundis), detection mensuelle d'une livraison semestrielle.
   workflow_dispatch:
     inputs:
       force:
@@ -15,7 +14,7 @@ on:
         type: boolean
         default: false
       dry_run:
-        description: "Tout jusqu'a la verification du nombre de lignes, staging conservee, SANS swap ni ligne ingest_log."
+        description: "Tout jusqu'a la verification du nombre de lignes, SANS swap ni ligne ingest_log. La staging reste en base jusqu'au prochain run reel."
         type: boolean
         default: false
 
@@ -89,10 +88,10 @@ jobs:
       # Vigie « run vert mais donnée malade » : run `partial` (canary) ou source
       # TARIE (aucune livraison au-delà de la cadence attendue). `success()` : ne
       # s'évalue que sur un cron réussi ; `continue-on-error` : une notif KO ne
-      # re-rouge jamais un cron déjà réussi. Un dry-run n'écrit aucune ligne : la
-      # vigie juge alors le dernier vrai run et le signale en annotation.
+      # re-rouge jamais un cron déjà réussi. Pas de vigie sur un dry-run : il n'écrit
+      # aucune ligne, elle jugerait un autre run que le sien.
       - name: Notify ingest anomaly
-        if: success()
+        if: success() && !inputs.dry_run
         continue-on-error: true
         uses: ./.github/actions/notify-ingest-anomaly
         with:
