@@ -59,6 +59,7 @@ const SOURCES: Array<{ prodTable: string; source: IngestSource }> = [
   { prodTable: "iris_familles", source: "iris" },
   { prodTable: "iris_revenu", source: "iris" },
   { prodTable: "sitadel_logements", source: "sitadel" },
+  { prodTable: "dvf_mutations", source: "dvf" },
 ];
 
 function parseMaxAgeDaysFromArgv(): number {

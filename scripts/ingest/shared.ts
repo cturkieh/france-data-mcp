@@ -12,8 +12,9 @@ import { parseRpcCount } from "../../src/core/parse-rpc-count.js";
 import { withTimeout } from "../../src/core/with-timeout.js";
 import { type IngestSource, REAL_INGEST_STATUSES } from "../../src/storage/ingest-log.js";
 import { getServiceClient, requireEnv } from "../../src/storage/supabase.js";
+import { IngestError, type IngestPhase } from "./ingest-error.js";
 
-export type IngestPhase = "download" | "pre_validate" | "copy" | "validate" | "swap";
+export { IngestError, type IngestPhase };
 
 /**
  * Read a column from a CSV record, returning `null` if it is missing or empty.
@@ -38,20 +39,6 @@ export function getNonEmpty(rec: Record<string, string>, name: string): string |
   // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional strip of \x00-\x1f from CSV residues
   const cleaned = raw.replace(/[\x00-\x1f]+/g, " ").trim();
   return cleaned === "" ? null : cleaned;
-}
-
-export class IngestError extends Error {
-  constructor(
-    public readonly phase: IngestPhase,
-    message: string,
-    cause?: unknown,
-  ) {
-    // Pass cause via Error options so engine-internal slots (Sentry,
-    // util.inspect, structured loggers) read it correctly. Constructor-field
-    // shadowing breaks that machinery.
-    super(message, cause !== undefined ? { cause } : undefined);
-    this.name = "IngestError";
-  }
 }
 
 /** Signature d'un fichier gzip : deux premiers octets (RFC 1952). */

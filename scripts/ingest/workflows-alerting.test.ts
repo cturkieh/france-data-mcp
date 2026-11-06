@@ -208,13 +208,14 @@ describe("tout workflow non exempté alerte via notify-ingest-failure", () => {
     "cleanup-stale-previous.yml",
     "ingest-ameli.yml",
     "ingest-cds.yml",
+    "ingest-dvf.yml",
     "ingest-finess.yml",
     "ingest-iris.yml",
     "ingest-rpps.yml",
     "ingest-sitadel.yml",
   ];
 
-  it("partition EXPLICITE : 1 réutilisable + 3 appelants + 8 workflows à steps + 3 exemptés", () => {
+  it("partition EXPLICITE : 1 réutilisable + 3 appelants + 9 workflows à steps + 3 exemptés", () => {
     expect(reusableFiles).toEqual(EXPECTED_REUSABLE);
     expect(callerFiles).toEqual(EXPECTED_CALLERS);
     expect(alerting).toEqual(EXPECTED_ALERTING);
@@ -511,9 +512,10 @@ describe("vigie « run vert mais donnée malade » — notify-ingest-anomaly sur
     "ingest-cds.yml": "cds",
     "ingest-iris.yml": "iris",
     "ingest-sitadel.yml": "sitadel",
+    "ingest-dvf.yml": "dvf",
   };
 
-  it("les 6 crons d'ingestion sont couverts", () => {
+  it("les 7 crons d'ingestion sont couverts", () => {
     expect(ingestWorkflows).toEqual(Object.keys(EXPECTED_SOURCE).sort());
   });
 

@@ -19,7 +19,15 @@ import { getUntypedAnonClient } from "./supabase.js";
  * `ingest_log` par les scripts dans `scripts/ingest/*`). Les sources live
  * (DINUM, INSEE, ANS FHIR) ne passent pas par ingest_log car non DB-backed.
  */
-export const INGEST_SOURCES = ["finess", "ameli_ps", "rpps", "cds", "iris", "sitadel"] as const;
+export const INGEST_SOURCES = [
+  "finess",
+  "ameli_ps",
+  "rpps",
+  "cds",
+  "iris",
+  "sitadel",
+  "dvf",
+] as const;
 export type IngestSource = (typeof INGEST_SOURCES)[number];
 
 /**
@@ -39,7 +47,8 @@ export interface IngestCadence {
    * silence, `data_freshness` disant « fraîche » pendant que l'alerte dort.
    * Calibré source par source (pas de formule) : deux cadences pour l'hebdo
    * (Ameli/CDS → 14) et le bimensuel (FINESS → 30), une cadence et demie pour
-   * le mensuel (RPPS, Sit@del → 45), un millésime plus un mois pour l'annuel (IRIS → 400).
+   * le mensuel (RPPS, Sit@del → 45), un millésime plus un mois pour l'annuel (IRIS → 400),
+   * un semestre plus ~7 semaines pour une livraison semestrielle (DVF → 230).
    */
   maxAgeDays: number;
 }
@@ -52,6 +61,7 @@ export const INGEST_SOURCE_LABEL: Record<IngestSource, string> = {
   cds: "CDS",
   iris: "IRIS",
   sitadel: "Sitadel",
+  dvf: "DVF",
 };
 
 export const INGEST_CADENCE: Record<IngestSource, IngestCadence> = {
@@ -69,6 +79,10 @@ export const INGEST_CADENCE: Record<IngestSource, IngestCadence> = {
   sitadel: {
     hint: "mensuelle (SDES/DiDo, permis de construire Sit@del — le mois M paraît vers la fin de M+1) ; cron le 10 du mois",
     maxAgeDays: 45,
+  },
+  dvf: {
+    hint: "semestrielle côté DGFiP/Etalab (livraisons avril et octobre) ; cron mensuel qui détecte la nouvelle livraison",
+    maxAgeDays: 230,
   },
 };
 
