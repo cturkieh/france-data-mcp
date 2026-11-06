@@ -6,6 +6,8 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+## [0.31.2] — 2026-11-06 — `rpps_search_by_name` sans erreur sur les noms courts, fonctions internes réservées à `service_role`, FINESS adapté au flux ANS
+
 ### Security
 
 - **Les fonctions internes d'ingestion et de géocodage sont réservées à
@@ -41,6 +43,9 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   57014 restant remonte comme une panne visible dans Sentry : il n'accuse plus
   l'appelant d'un « nom très commun » et n'écrit plus le nom cherché dans les
   logs. Mesures : `docs/experiences/2026-11-06-rpps-noms-distincts.md`.
+
+- **Liens Smithery retirés.** La page du serveur et son badge répondent 404 : le
+  badge des README et le bouton de la page d'accueil sont supprimés.
 
 - **Ingestion FINESS : le changement de format du flux ANS du 15 octobre ne
   bloque plus le swap.** L'ANS publie désormais toujours le Lambert 93 dans

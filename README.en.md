@@ -6,7 +6,6 @@
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
 [![MCP](https://img.shields.io/badge/MCP-live-success)](https://france-data-mcp.vercel.app/mcp)
 [![npm](https://img.shields.io/npm/v/france-data-mcp.svg)](https://www.npmjs.com/package/france-data-mcp)
-[![smithery badge](https://smithery.ai/badge/cturkieh/france-data)](https://smithery.ai/servers/cturkieh/france-data)
 
 🇬🇧 Short English overview. [Full documentation in French →](README.md)
 
@@ -92,9 +91,9 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.31.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+✅ **v0.31.2 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
-> Latest release (v0.31.0): `etablissement_finess_by_nom` — a healthcare facility by its name ("Institut Gustave Roussy" → records, exact point, proven commune, never a lone first hit); Sit@del building permits read from the database (10.9 s instead of 45 s) with the current partial year served apart from the 5 full years, and the Paris/Lyon/Marseille "0 housing units" fix. 13 reference datasets / 37 tools.
+> Latest release (v0.31.2): `rpps_search_by_name` no longer fails on short names and no longer drops people, thanks to 2 lists of distinct last and first names; internal ingestion functions restricted to `service_role`; FINESS ingestion adapted to the new ANS feed format; public Agent Skill. 13 sources / 37 tools.
 
 ---
 

@@ -6,7 +6,6 @@
 [![CI](https://github.com/cturkieh/france-data-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cturkieh/france-data-mcp/actions)
 [![MCP](https://img.shields.io/badge/MCP-live-success)](https://france-data-mcp.vercel.app/mcp)
 [![npm](https://img.shields.io/npm/v/france-data-mcp.svg)](https://www.npmjs.com/package/france-data-mcp)
-[![smithery badge](https://smithery.ai/badge/cturkieh/france-data)](https://smithery.ai/servers/cturkieh/france-data)
 
 🇫🇷 Documentation principale en français. [English version →](README.en.md)
 
@@ -141,9 +140,9 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.31.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.31.2 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
-> Dernière version (V0.31.0) : `etablissement_finess_by_nom` — un établissement de santé par son nom (« Institut Gustave Roussy » → fiches, point exact, commune prouvée, jamais un premier résultat servi seul) ; permis de construire Sit@del lus en base (10,9 s au lieu de 45 s) avec l'année en cours servie à part des 5 années pleines et le « 0 logement » de Paris/Lyon/Marseille corrigé. 13 référentiels / 37 outils.
+> Dernière version (V0.31.2) : `rpps_search_by_name` ne tombe plus en erreur sur les noms courts et ne perd plus de personnes, grâce à 2 listes de noms et de prénoms distincts ; fonctions internes d'ingestion réservées à `service_role` ; ingestion FINESS adaptée au nouveau format du flux ANS ; Agent Skill public. 13 référentiels / 37 outils.
 
 ---
 
