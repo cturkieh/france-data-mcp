@@ -8,6 +8,7 @@
  * Paris 15e : médiane exacte 4 833 €/m², 500 lignes les plus récentes 8 370 €/m²).
  */
 
+import { parseRpcCount } from "../core/parse-rpc-count.js";
 import { formatRpcError, validateCoords, validateRadiusKm } from "../sante/db-helpers.js";
 import { getUntypedAnonClient } from "../storage/supabase.js";
 
@@ -38,35 +39,19 @@ function contractError(detail: string): Error {
   return new Error(`[france-data-mcp] ${RPC}: RPC contract violation — ${detail}`);
 }
 
-/**
- * `null` si la valeur n'est pas un nombre fini. Plus strict qu'un `Number(v)` nu :
- * `Number("")`, `Number(null)` et `Number(false)` valent 0, soit un faux zéro servi
- * comme une donnée.
- */
-function finiteOrNull(v: unknown): number | null {
-  if (typeof v === "number") return Number.isFinite(v) ? v : null;
-  if (typeof v === "string" && v.trim() !== "") {
-    const x = Number(v);
-    return Number.isFinite(x) ? x : null;
-  }
-  return null;
-}
-
 /** Un compteur illisible lève : le remplacer par 0 ferait passer une panne pour « aucune vente ». */
 function readCount(row: Record<string, unknown>, field: string): number {
-  const x = finiteOrNull(row[field]);
-  if (x === null || !Number.isInteger(x) || x < 0) {
-    throw contractError(`${field} illisible (raw=${JSON.stringify(row[field])})`);
-  }
-  return x;
+  return parseRpcCount(row[field], `[france-data-mcp] ${RPC}: ${field}`);
 }
 
 /** `null` est légitime (aucune vente) ; une clé absente ou une valeur illisible ne l'est pas. */
 function readNullableNumber(row: Record<string, unknown>, field: string): number | null {
   const raw = row[field];
   if (raw === null) return null;
-  const x = finiteOrNull(raw);
-  if (x === null) {
+  // Pas de `Number(raw)` nu : `Number("")` et `Number(false)` valent 0, soit un faux
+  // zéro servi comme une donnée. `numOrNull` a ce défaut, d'où ce contrôle local.
+  const x = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : raw;
+  if (typeof x !== "number" || !Number.isFinite(x)) {
     throw contractError(`${field} illisible (raw=${JSON.stringify(raw)})`);
   }
   return x;

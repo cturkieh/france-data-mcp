@@ -106,7 +106,7 @@ describe("dvfStatsInRadius — coercition au boundary", () => {
   ])("compteur illisible %s=%j → throw, jamais 0", async (field, value) => {
     rpcReturns([{ ...ROW_STRINGS, [field]: value }]);
     await expect(dvfStatsInRadius(48.84, 2.29, 1)).rejects.toThrow(
-      new RegExp(`^\\[france-data-mcp\\] dvf_stats_in_radius.*${field} illisible`),
+      new RegExp(`^\\[france-data-mcp\\] dvf_stats_in_radius.*${field} returned .*RPC contract`),
     );
   });
 

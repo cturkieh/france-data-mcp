@@ -16,13 +16,10 @@
  *     `permis` est dégradée (`indisponible:commune_introuvable`). La commune ne
  *     sert QU'AUX permis Sit@del (maille commune) ; les zones AU (apicarto) et les
  *     terrains (DVF) restent calculés PAR RAYON (lat/lon) dans tous les cas. Un point
- *     en mer peut donc rendre `couverture.terrains = indisponible:no_data` : aucune
- *     ligne DVF exploitable dans le rayon, soit zone non couverte (57, 67, 68, 976),
- *     soit aucune vente retenue sur les 12 derniers mois publiés (rural, point en
- *     mer) ; ce n'est pas une panne. Un rayon à cheval sur une zone non couverte rend
- *     `ok` : seules les ventes de la partie couverte comptent. L'outil NE doit JAMAIS
- *     échouer en entier (régression prouvée : -32602 sur tout l'appel pour un point
- *     côtier).
+ *     en mer peut donc rendre `couverture.terrains = indisponible:no_data`, qui n'est
+ *     pas une panne (sens exact : description du tool, `api/tools.ts`). L'outil NE doit
+ *     JAMAIS échouer en entier (régression prouvée : -32602 sur tout l'appel pour un
+ *     point côtier).
  *   - Échec d'une section → `couverture.<section>` = "indisponible:<raison>",
  *     le reste du résultat est préservé.
  */
@@ -347,10 +344,6 @@ export async function dynamiqueImmobiliere(
 
   // --- DVF foncier --------------------------------------------------------
   const dvfStats = dvfOut.data;
-  const terrainsInfo = {
-    n: dvfStats?.n_terrains ?? 0,
-    prix_terrain_median: dvfStats?.prix_terrain_median ?? null,
-  };
 
   // --- Signal + result ---------------------------------------------------
   const signal = computeSignal(logAuthScorable, zonesImm);
@@ -380,7 +373,10 @@ export async function dynamiqueImmobiliere(
       },
       quartiers_au: quartiersAu,
       prix_m2_median: dvfStats?.prix_m2_median ?? null,
-      terrains: terrainsInfo,
+      terrains: {
+        n: dvfStats?.n_terrains ?? 0,
+        prix_terrain_median: dvfStats?.prix_terrain_median ?? null,
+      },
     },
     geojson: {
       type: "FeatureCollection",
