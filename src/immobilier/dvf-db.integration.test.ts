@@ -32,6 +32,7 @@ const EMPTY_POINT = { lat: 45.0, lon: -4.0 };
 const ITEST_PREFIX = "__itest_dvf__";
 const INSIDE_ID = `${ITEST_PREFIX}inside`;
 const OUTSIDE_ID = `${ITEST_PREFIX}outside`;
+const TERRAIN_ID = `${ITEST_PREFIX}terrain`;
 const ITEST_COMMUNE = "08105";
 const ITEST_DATE = "2026-03-01";
 
@@ -51,7 +52,7 @@ async function cleanup(): Promise<void> {
   const { error } = await getUntypedServiceClient()
     .from("dvf_mutations")
     .delete()
-    .in("id_mutation", [INSIDE_ID, OUTSIDE_ID]);
+    .in("id_mutation", [INSIDE_ID, OUTSIDE_ID, TERRAIN_ID]);
   if (error) {
     // Ne pas masquer un échec de nettoyage (sinon lignes de test laissées en base).
     console.error(`[dvf-db.integration] cleanup failed: ${error.message}`);
@@ -63,14 +64,13 @@ afterAll(async () => {
 });
 
 describe.skipIf(!hasKey)("dvf_stats_in_radius (PostGIS integration)", () => {
-  it("n'agrège que la mutation DANS le rayon", async () => {
+  it("n'agrège que les mutations DANS le rayon, terrains compris", async () => {
     await cleanup();
 
     const commun = {
       date_mutation: ITEST_DATE,
       nature_mutation: "Vente",
       code_commune: ITEST_COMMUNE,
-      surface_terrain: null,
     };
     // `geom`/`geog` sont GENERATED : surtout pas dans le payload.
     const { error: insertError } = await getUntypedServiceClient()
@@ -82,6 +82,7 @@ describe.skipIf(!hasKey)("dvf_stats_in_radius (PostGIS integration)", () => {
           valeur_fonciere: 200000,
           type_local: "Appartement",
           surface_reelle_bati: 50,
+          surface_terrain: null,
           prix_m2: 4000,
           longitude: INSIDE.lon,
           latitude: INSIDE.lat,
@@ -92,20 +93,34 @@ describe.skipIf(!hasKey)("dvf_stats_in_radius (PostGIS integration)", () => {
           valeur_fonciere: 900000,
           type_local: "Maison",
           surface_reelle_bati: 100,
+          surface_terrain: null,
           prix_m2: 9000,
           longitude: OUTSIDE.lon,
           latitude: OUTSIDE.lat,
+        },
+        {
+          ...commun,
+          id_mutation: TERRAIN_ID,
+          valeur_fonciere: 120000,
+          type_local: "",
+          surface_reelle_bati: null,
+          surface_terrain: 300,
+          prix_m2: null,
+          longitude: INSIDE.lon,
+          latitude: INSIDE.lat,
         },
       ]);
     expect(insertError).toBeNull();
 
     const stats = await dvfStatsInRadius(CENTER.lat, CENTER.lon, RADIUS_KM);
 
-    expect(stats.n_lignes).toBe(1);
+    expect(stats.n_lignes).toBe(2);
     expect(stats.n_ventes).toBe(1);
     expect(stats.prix_m2_median).toBe(4000);
     expect(stats.prix_m2_p25).toBe(4000);
     expect(stats.prix_m2_p75).toBe(4000);
+    expect(stats.n_terrains).toBe(1);
+    expect(stats.prix_terrain_median).toBe(120000);
     expect(stats.date_min).toBe(ITEST_DATE);
     expect(stats.date_max).toBe(ITEST_DATE);
   });

@@ -2960,7 +2960,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
   {
     name: "dynamique_immobiliere",
     description:
-      "Dynamique immobilière et potentiel de croissance d'une zone (point + rayon). Combine 3 sources officielles : permis de construire (Sit@del/SDES, maille COMMUNE — logements autorisés/commencés récents → habitants attendus), zones AU du PLU (Géoportail de l'Urbanisme/IGN — futurs quartiers réservés, géolocalisés), ventes de terrains à bâtir (DGFiP DVF, géolocalisées). Sortie en 2 registres : 'note' = VOLUME (logements autorisés/commencés, nombre et immédiateté des zones AU) destiné au scoring de potentiel ; 'info' = quartiers concernés (nommés), habitants attendus, prix indicatifs (contexte, hors score). En ville dense les permis-commune sont grossiers → s'appuyer sur zones AU + terrains (géolocalisés). Point côtier/isolé sans commune au géocodage inverse → `couverture.permis`='indisponible:commune_introuvable' et `meta.code_commune`=null, MAIS zones AU + terrains restent servis (calcul par rayon) — l'outil ne plante jamais pour ça. Paris/Lyon/Marseille : Sit@del ne descend pas à l'arrondissement → les permis servis sont ceux de la VILLE ENTIÈRE (`meta.code_commune_permis`, ex 75056), `couverture.permis`='partiel:ville_entiere_plm' et le `signal` ne s'appuie alors que sur les zones AU. Commune absente de Sit@del, ou sans aucune année pleine → `couverture.permis`='indisponible:no_data' (les zéros ne sont PAS une donnée ; `info.permis.annee_en_cours` peut malgré tout être servi pour une commune nouvelle). Les totaux permis ne somment que des ANNÉES PLEINES (`info.permis.annees_pleines`) ; l'année en cours, incomplète (le SDES publie avec ~2 mois de retard), est servie à part dans `info.permis.annee_en_cours` avec ses `mois_couverts` — ne JAMAIS la comparer telle quelle à une année pleine ni l'ajouter aux totaux. Moins de 5 années pleines en base → 'partiel:fenetre_courte' ; une année de la fenêtre à moins de 12 mois publiés → 'partiel:annees_incompletes' (total SERVI mais non comparable, non scoré dans les deux cas). L'Alsace-Moselle (57, 67, 68) et Mayotte ne sont pas couverts par DVF : `couverture.terrains`='indisponible:no_data' n'y veut pas dire « aucune vente ». 'geojson' = polygones des zones AU pour la carte. Sources : SDES, IGN/GPU, DGFiP.",
+      "Dynamique immobilière et potentiel de croissance d'une zone (point + rayon). Combine 3 sources officielles : permis de construire (Sit@del/SDES, maille COMMUNE — logements autorisés/commencés récents → habitants attendus), zones AU du PLU (Géoportail de l'Urbanisme/IGN — futurs quartiers réservés, géolocalisés), mutations avec surface de terrain (DGFiP DVF, géolocalisées ; bâti compris, une maison avec jardin compte, donc `info.terrains.prix_terrain_median` n'est pas le prix d'un terrain nu). Sortie en 2 registres : 'note' = VOLUME (logements autorisés/commencés, nombre et immédiateté des zones AU) destiné au scoring de potentiel ; 'info' = quartiers concernés (nommés), habitants attendus, prix indicatifs (contexte, hors score). En ville dense les permis-commune sont grossiers → s'appuyer sur zones AU + terrains (géolocalisés). Point côtier/isolé sans commune au géocodage inverse → `couverture.permis`='indisponible:commune_introuvable' et `meta.code_commune`=null, MAIS zones AU + terrains restent calculés par rayon (un point en mer peut donc rendre `couverture.terrains`='indisponible:no_data') — l'outil ne plante jamais pour ça. Paris/Lyon/Marseille : Sit@del ne descend pas à l'arrondissement → les permis servis sont ceux de la VILLE ENTIÈRE (`meta.code_commune_permis`, ex 75056), `couverture.permis`='partiel:ville_entiere_plm' et le `signal` ne s'appuie alors que sur les zones AU. Commune absente de Sit@del, ou sans aucune année pleine → `couverture.permis`='indisponible:no_data' (les zéros ne sont PAS une donnée ; `info.permis.annee_en_cours` peut malgré tout être servi pour une commune nouvelle). Les totaux permis ne somment que des ANNÉES PLEINES (`info.permis.annees_pleines`) ; l'année en cours, incomplète (le SDES publie avec ~2 mois de retard), est servie à part dans `info.permis.annee_en_cours` avec ses `mois_couverts` — ne JAMAIS la comparer telle quelle à une année pleine ni l'ajouter aux totaux. Moins de 5 années pleines en base → 'partiel:fenetre_courte' ; une année de la fenêtre à moins de 12 mois publiés → 'partiel:annees_incompletes' (total SERVI mais non comparable, non scoré dans les deux cas). `couverture.terrains`='indisponible:no_data' = aucune ligne DVF exploitable dans le rayon : soit zone non couverte (57, 67, 68, 976), soit aucune vente retenue sur les 12 derniers mois publiés (rural, point en mer) ; ce n'est pas une panne. Un rayon à cheval sur une zone non couverte rend 'ok' : seules les ventes de la partie couverte comptent. 'geojson' = polygones des zones AU pour la carte. Sources : SDES, IGN/GPU, DGFiP.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3017,7 +3017,7 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
   {
     name: "cout_foncier",
     description:
-      "Coût du foncier d'une zone (point + rayon) : prix médian au m² RÉSIDENTIEL bâti — maisons + appartements UNIQUEMENT, PAS les locaux commerciaux/professionnels (+ quartiles p25/p75), volume de ventes, période couverte. Source DGFiP DVF (ventes réelles géolocalisées). La médiane et les quartiles portent sur TOUTES les ventes résidentielles du rayon sur les 12 derniers mois publiés (livraison semestrielle, donc plusieurs mois de décalage ; `periode` dit ce qui est couvert) ; `n_ventes` est le nombre exact de ventes bâties. L'Alsace-Moselle (57, 67, 68) et Mayotte ne sont pas couverts par DVF : `indisponible:no_data` n'y veut pas dire « aucune vente ». Pour un local pro (labo, cabinet), ce prix résidentiel est un PROXY indicatif, pas le prix d'un local commercial. INFORMATION pour le business case d'implantation — NE PAS intégrer à une note d'attractivité : le coût d'installation est distinct du potentiel de marché.",
+      "Coût du foncier d'une zone (point + rayon) : prix médian au m² RÉSIDENTIEL bâti — maisons + appartements UNIQUEMENT, PAS les locaux commerciaux/professionnels (+ quartiles p25/p75), volume de ventes, années des ventes trouvées. Source DGFiP DVF (ventes réelles géolocalisées). Médiane et quartiles calculés sans échantillonnage sur toutes les lignes retenues du rayon, sur les 12 derniers mois publiés (livraison semestrielle, donc plusieurs mois de décalage). Retenues = géolocalisées, une ligne par mutation, commune, date et type de local : une vente de plusieurs lots du même type compte pour une ligne ; toutes natures de mutation confondues. `n_ventes` = nombre de lignes de vente bâtie retenues. `periode` = années des ventes trouvées dans le rayon, pas la fenêtre de données. `indisponible:no_data` = aucune ligne DVF exploitable dans le rayon : soit zone non couverte (57, 67, 68, 976), soit aucune vente retenue sur les 12 derniers mois publiés (rural, point en mer) ; ce n'est pas une panne. Un rayon à cheval sur une zone non couverte rend `ok` : seules les ventes de la partie couverte comptent. Pour un local pro (labo, cabinet), ce prix résidentiel est un PROXY indicatif, pas le prix d'un local commercial. INFORMATION pour le business case d'implantation — NE PAS intégrer à une note d'attractivité : le coût d'installation est distinct du potentiel de marché.",
     inputSchema: {
       type: "object",
       properties: {
@@ -3036,19 +3036,30 @@ Alias : \`dept\`/\`departement\` → \`code_dept\`, \`codeInsee\`/\`insee\` → 
     outputSchema: {
       type: "object",
       description:
-        "Prix foncier DVF dans le rayon. couverture='indisponible:no_data' si aucune donnée DVF (aucune vente, ou zone non couverte).",
+        "Prix foncier DVF dans le rayon. couverture='indisponible:no_data' si aucune ligne DVF exploitable (zone non couverte, ou aucune vente retenue sur les 12 derniers mois publiés).",
       properties: {
         couverture: {
           type: "string",
           enum: ["ok", "indisponible:no_data"],
           description:
-            "Statut : 'ok' = données disponibles, 'indisponible:no_data' = aucune donnée DVF dans le rayon (aucune vente, ou zone non couverte : Alsace-Moselle, Mayotte).",
+            "Statut : 'ok' = au moins une ligne DVF dans le rayon, ce qui peut venir avec n_ventes=0 et des prix null (terrains seuls) ; 'indisponible:no_data' = aucune ligne DVF exploitable dans le rayon, soit zone non couverte (57, 67, 68, 976), soit aucune vente retenue sur les 12 derniers mois publiés (rural, point en mer) : ce n'est pas une panne.",
         },
-        prix_m2_median: { type: ["number", "null"], description: "Prix médian au m² bâti." },
+        prix_m2_median: {
+          type: ["number", "null"],
+          description: "Prix médian au m² bâti, null si aucune vente bâtie retenue.",
+        },
         prix_m2_p25: { type: ["number", "null"], description: "1er quartile prix au m²." },
         prix_m2_p75: { type: ["number", "null"], description: "3ème quartile prix au m²." },
-        n_ventes: { type: "number", description: "Nombre exact de ventes bâties dans le rayon." },
-        periode: { type: ["string", "null"], description: "Années couvertes (ex: '2025–2026')." },
+        n_ventes: {
+          type: "number",
+          description:
+            "Nombre de lignes de vente bâtie retenues : une vente de plusieurs lots du même type compte pour une ligne.",
+        },
+        periode: {
+          type: ["string", "null"],
+          description:
+            "Années des ventes trouvées dans le rayon (ex: '2025–2026'), pas la fenêtre de données.",
+        },
         source: { type: "string", description: "Toujours 'DGFiP DVF'." },
       },
       required: ["couverture", "n_ventes"],

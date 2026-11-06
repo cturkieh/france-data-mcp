@@ -15,9 +15,14 @@
  *     DEUX échouent (point réellement en mer / hors France) → SEULE la section
  *     `permis` est dégradée (`indisponible:commune_introuvable`). La commune ne
  *     sert QU'AUX permis Sit@del (maille commune) ; les zones AU (apicarto) et les
- *     terrains (DVF) sont calculés PAR RAYON (lat/lon) → ils restent servis dans
- *     tous les cas. L'outil NE doit JAMAIS échouer en entier (régression prouvée :
- *     -32602 sur tout l'appel pour un point côtier).
+ *     terrains (DVF) restent calculés PAR RAYON (lat/lon) dans tous les cas. Un point
+ *     en mer peut donc rendre `couverture.terrains = indisponible:no_data` : aucune
+ *     ligne DVF exploitable dans le rayon, soit zone non couverte (57, 67, 68, 976),
+ *     soit aucune vente retenue sur les 12 derniers mois publiés (rural, point en
+ *     mer) ; ce n'est pas une panne. Un rayon à cheval sur une zone non couverte rend
+ *     `ok` : seules les ventes de la partie couverte comptent. L'outil NE doit JAMAIS
+ *     échouer en entier (régression prouvée : -32602 sur tout l'appel pour un point
+ *     côtier).
  *   - Échec d'une section → `couverture.<section>` = "indisponible:<raison>",
  *     le reste du résultat est préservé.
  */
@@ -84,7 +89,10 @@ export interface DynamiqueImmobiliereInfo {
   quartiers_au: { libelle: string; secteur: string | null }[];
   /** Prix médian m² des ventes bâties DVF dans le rayon, ou null si absent. */
   prix_m2_median: number | null;
-  /** Ventes de terrains (surface_terrain > 0). */
+  /**
+   * Mutations avec surface de terrain (`surface_terrain > 0`), bâti compris : une maison
+   * avec jardin compte, donc `prix_terrain_median` n'est pas le prix d'un terrain nu.
+   */
   terrains: { n: number; prix_terrain_median: number | null };
 }
 
@@ -196,8 +204,8 @@ function permisStatus(
 
 /**
  * Statut de la section `terrains` : `runSection` pose `ok` dès l'absence de throw,
- * or une zone sans aucune mutation (Alsace-Moselle et Mayotte, absentes de la
- * source) serait servie comme « 0 terrain, donnée fiable ». Jumeau de `permisStatus`.
+ * or un rayon sans aucune ligne DVF (zone non couverte, ou aucune vente retenue)
+ * serait servi comme « 0 terrain, donnée fiable ». Jumeau de `permisStatus`.
  */
 function terrainsStatus(outcome: SectionOutcome<DvfStats>): SectionStatus {
   if (outcome.status !== "ok" || !outcome.data) return outcome.status;

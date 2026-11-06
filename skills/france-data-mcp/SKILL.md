@@ -160,8 +160,8 @@ salaried and hospital staff.
 
 ### Real estate
 
-- **dynamique_immobiliere** — growth potential around a point: building permits (Sit@del), PLU AU zones, land sales (DVF) · `lat`, `lon`, `rayon_km` · two registers: `note` (volumes, for scoring) and `info` (context, not scored). The current year (`info.permis.annee_en_cours`) is partial: never add it to totals or compare it to a full year. In Paris, Lyon, Marseille permits are city-wide (`partiel:ville_entiere_plm`).
-- **cout_foncier** — median residential price per m² (P25 / P75, sales count, period) · `lat`, `lon`, `rayon_km` · residential only: for a commercial unit it is a proxy. Context for a business case, not an attractiveness score.
+- **dynamique_immobiliere** — growth potential around a point: building permits (Sit@del), PLU AU zones, transactions with land area (DVF, buildings included, so not a bare-land price) · `lat`, `lon`, `rayon_km` · two registers: `note` (volumes, for scoring) and `info` (context, not scored). The current year (`info.permis.annee_en_cours`) is partial: never add it to totals or compare it to a full year. In Paris, Lyon, Marseille permits are city-wide (`partiel:ville_entiere_plm`). `couverture.terrains` = `indisponible:no_data`: no usable DVF row in the radius, see `cout_foncier`.
+- **cout_foncier** — median residential price per m² (P25 / P75, sales count, period) · `lat`, `lon`, `rayon_km` · residential only: for a commercial unit it is a proxy. Context for a business case, not an attractiveness score. Last 12 published months (half-yearly release). `indisponible:no_data` means no usable DVF row in the radius: uncovered area (57, 67, 68, 976) or no retained sale (rural, at sea), not an outage. A radius straddling an uncovered area returns `ok`, counting only the covered part.
 
 ## Workflows
 

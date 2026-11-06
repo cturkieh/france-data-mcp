@@ -26,7 +26,7 @@ beforeEach(() => {
 });
 
 describe("coutFoncier", () => {
-  it("ventes présentes → couverture ok, chiffres de la base, n_ventes exact, période sur 2 années", async () => {
+  it("ventes présentes → couverture ok, chiffres de la base, n_ventes relayé, période sur 2 années", async () => {
     vi.mocked(dvfStatsInRadius).mockResolvedValueOnce(STATS);
 
     await expect(coutFoncier(INPUT)).resolves.toStrictEqual({

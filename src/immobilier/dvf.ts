@@ -3,7 +3,7 @@
  *
  * `dvf_mutations` est chargée par un cron mensuel qui détecte les livraisons
  * semestrielles et garde les 12 derniers mois publiés. Médiane et quartiles sont
- * calculés DANS la base par la RPC `dvf_stats_in_radius` : lire un échantillon
+ * calculés DANS la base par la RPC `dvf_stats_in_radius`, sans échantillonnage : lire un échantillon
  * plafonné puis agréger côté TypeScript faussait le prix (mesuré à 50 km de
  * Paris 15e : médiane exacte 4 833 €/m², 500 lignes les plus récentes 8 370 €/m²).
  */
@@ -14,13 +14,18 @@ import { getUntypedAnonClient } from "../storage/supabase.js";
 const RPC = "dvf_stats_in_radius";
 
 export interface DvfStats {
-  /** Mutations du rayon. `0` = aucune donnée DVF ici (zone non couverte ou sans vente). */
+  /** Lignes retenues du rayon. `0` = zone non couverte (57, 67, 68, 976) ou aucune vente retenue. */
   n_lignes: number;
-  /** Nombre exact de ventes bâties résidentielles portant les prix ci-dessous. */
+  /**
+   * Lignes de vente bâtie retenues, celles qui portent les prix ci-dessous. Retenues =
+   * géolocalisées, une ligne par mutation, commune, date et type de local : une vente
+   * de plusieurs lots du même type compte pour une ligne.
+   */
   n_ventes: number;
   prix_m2_median: number | null;
   prix_m2_p25: number | null;
   prix_m2_p75: number | null;
+  /** Mutations avec `surface_terrain > 0`, bâti compris : pas seulement des terrains nus. */
   n_terrains: number;
   prix_terrain_median: number | null;
   /** Date ISO `YYYY-MM-DD` de la mutation la plus ancienne, null si `n_lignes` = 0. */

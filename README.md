@@ -116,7 +116,7 @@ Population de référence INSEE croisée avec RPPS / FINESS — méthodologie DR
 - `enrichir_concurrents` (V0.23) — enquête sur le top concurrents (statut actif + équipe + signal M&A + groupe parent), cap dur `max=3`.
 
 ### 🏗️ Immobilier — potentiel d'un site (2)
-`dynamique_immobiliere` (V0.26) — composite en 1 call : permis de construire (Sit@del / SDES, table ingérée mensuellement) + zones AU du PLU (apicarto / IGN, live) + ventes de terrains DVF. Sortie 2 registres : `note` (volume → scoring) / `info` (quartiers AU + prix → contexte) ; `geojson` = polygones des zones AU. · `cout_foncier` (V0.26) — prix médian €/m² DVF (P25/P75, n_ventes, période), info seule.
+`dynamique_immobiliere` (V0.26) — composite en 1 call : permis de construire (Sit@del / SDES, table ingérée mensuellement) + zones AU du PLU (apicarto / IGN, live) + mutations DVF avec surface de terrain. Sortie 2 registres : `note` (volume → scoring) / `info` (quartiers AU + prix → contexte) ; `geojson` = polygones des zones AU. · `cout_foncier` (V0.26) — prix médian €/m² DVF (P25/P75, n_ventes, période), info seule.
 
 > Source DVF / DGFiP : table nationale PostGIS mise à jour par un cron mensuel qui détecte les livraisons semestrielles (12 derniers mois publiés ; Alsace-Moselle et Mayotte non couverts). Zones AU = **live** ; permis Sit@del = table ingérée (cron mensuel, le 10). Pensé pour les rapports d'implantation.
 
