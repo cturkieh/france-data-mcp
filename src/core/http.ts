@@ -193,8 +193,8 @@ export function fetchJson<T>(url: string, options: FetchJsonOptions = {}): Promi
 /**
  * GET une URL et retourne la réponse en texte brut, avec EXACTEMENT la même
  * politique de retry/backoff/429/timeout que `fetchJson`. Conçu pour les
- * endpoints CSV (geo-DVF) — sans ça, un 429/5xx amont sur le téléchargement
- * commune produisait un échec sec (raw `fetch`, zéro retry).
+ * endpoints CSV — sans ça, un 429/5xx amont sur le téléchargement produit un échec
+ * sec (raw `fetch`, zéro retry).
  *
  * `response.text()` ne peut pas produire de `SyntaxError` : le chemin de retry
  * "body non-parsable" de la boucle partagée reste donc inerte ici (un body

@@ -1,7 +1,7 @@
 /**
  * Tests unitaires — dynamique_immobiliere composite.
  *
- * Tous les leaf services (permitsForCommune, getZonesAU, dvfInRadius) et
+ * Tous les leaf services (permitsForCommune, getZonesAU, dvfStatsInRadius) et
  * reverseGeocode sont mockés via vi.spyOn / vi.mock. Pas de réseau.
  */
 
@@ -20,8 +20,7 @@ vi.mock("./apicarto-plu.js", () => ({
 }));
 
 vi.mock("./dvf.js", () => ({
-  dvfInRadius: vi.fn(),
-  aggregatePrix: vi.fn(),
+  dvfStatsInRadius: vi.fn(),
 }));
 
 vi.mock("../territoire/geocode.js", () => ({
@@ -42,7 +41,7 @@ import type { GeocodeResult } from "../territoire/geocode.js";
 import * as pluModule from "./apicarto-plu.js";
 import type { ZonesAUResult } from "./apicarto-plu.js";
 import * as dvfModule from "./dvf.js";
-import type { DvfMutation } from "./dvf.js";
+import type { DvfStats } from "./dvf.js";
 import { dynamiqueImmobiliere } from "./dynamique-immobiliere.js";
 import * as sitadelModule from "./sitadel.js";
 import type { PermitsFenetre } from "./sitadel.js";
@@ -138,43 +137,29 @@ const ZONES_OK: ZonesAUResult = {
 };
 
 /** DVF : une vente bâtie + un terrain */
-const DVF_ROWS: DvfMutation[] = [
-  {
-    id_mutation: "m1",
-    date_mutation: "2023-05-01",
-    nature_mutation: "Vente",
-    valeur_fonciere: 300000,
-    code_commune: "75056",
-    type_local: "Appartement",
-    surface_reelle_bati: 60,
-    surface_terrain: null,
-    prix_m2: 5000,
-    longitude: 2.35,
-    latitude: 48.86,
-  },
-  {
-    id_mutation: "m2",
-    date_mutation: "2023-06-01",
-    nature_mutation: "Vente",
-    valeur_fonciere: 150000,
-    code_commune: "75056",
-    type_local: "",
-    surface_reelle_bati: null,
-    surface_terrain: 200,
-    prix_m2: null,
-    longitude: 2.36,
-    latitude: 48.87,
-  },
-];
-
-/** Aggregate réel calculé depuis DVF_ROWS */
-const AGG_OK = {
+const DVF_STATS: DvfStats = {
+  n_lignes: 2,
+  n_ventes: 1,
   prix_m2_median: 5000,
   prix_m2_p25: 5000,
   prix_m2_p75: 5000,
-  n_ventes: 1,
   n_terrains: 1,
   prix_terrain_median: 150000,
+  date_min: "2025-07-01",
+  date_max: "2026-06-30",
+};
+
+/** DVF : aucune mutation dans le rayon. */
+const DVF_STATS_EMPTY: DvfStats = {
+  n_lignes: 0,
+  n_ventes: 0,
+  prix_m2_median: null,
+  prix_m2_p25: null,
+  prix_m2_p75: null,
+  n_terrains: 0,
+  prix_terrain_median: null,
+  date_min: null,
+  date_max: null,
 };
 
 /** Reverse-geocode centroïde AUC → Montrouge */
@@ -224,8 +209,7 @@ describe("dynamiqueImmobiliere", () => {
 
     vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -287,8 +271,7 @@ describe("dynamiqueImmobiliere", () => {
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(REV_GEO_OK);
     vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
     vi.mocked(pluModule.getZonesAU).mockRejectedValue(new Error("apicarto timeout"));
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -331,8 +314,7 @@ describe("dynamiqueImmobiliere", () => {
     vi.mocked(geocodeModule.reverseGeocode).mockResolvedValue(null);
     vi.mocked(communesModule.communeContainingPoint).mockResolvedValue(null);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -361,8 +343,7 @@ describe("dynamiqueImmobiliere", () => {
     // Frontières aussi sans commune → la dégradation `permis` est conservée.
     vi.mocked(communesModule.communeContainingPoint).mockResolvedValue(null);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -390,8 +371,7 @@ describe("dynamiqueImmobiliere", () => {
     });
     vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -436,15 +416,7 @@ describe("dynamiqueImmobiliere", () => {
 
     vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue({
-      prix_m2_median: null,
-      prix_m2_p25: null,
-      prix_m2_p75: null,
-      n_ventes: 0,
-      n_terrains: 0,
-      prix_terrain_median: null,
-    });
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -469,8 +441,7 @@ describe("dynamiqueImmobiliere", () => {
       .mockResolvedValueOnce(REV_GEO_CENTROID_AUS);
     vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(ZONES_OK);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue(DVF_ROWS);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -499,8 +470,7 @@ describe("dynamiqueImmobiliere", () => {
       zones_au: [],
       geojson: { type: "FeatureCollection", features: [] },
     });
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
     expect(result.note.zones_au_immediates).toBe(0);
@@ -519,8 +489,7 @@ describe("dynamiqueImmobiliere", () => {
       zones_au: [],
       geojson: { type: "FeatureCollection", features: [] },
     });
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
     expect(result.note.zones_au_immediates).toBe(0);
@@ -546,8 +515,7 @@ describe("dynamiqueImmobiliere", () => {
       ],
       geojson: { type: "FeatureCollection", features: [aucFeature, aucFeature, aucFeature] },
     });
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
     expect(result.couverture.permis).toMatch(/indisponible/);
@@ -580,8 +548,7 @@ describe("dynamiqueImmobiliere", () => {
       annee_en_cours: null,
     });
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -605,8 +572,7 @@ describe("dynamiqueImmobiliere", () => {
       annees: ["2024", "2025"],
     });
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -629,8 +595,7 @@ describe("dynamiqueImmobiliere", () => {
       logements_autorises_recent: 10_247,
     });
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
@@ -649,14 +614,91 @@ describe("dynamiqueImmobiliere", () => {
     });
     vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
     vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 
     expect(result.couverture.permis).toBe("ok");
     expect(result.meta.code_commune_permis).toBe("94076");
     expect(result.note.signal).toBe("fort");
+  });
+
+  // -------------------------------------------------------------------------
+  // (T) Couverture terrains : le VERDICT des statistiques prime sur « pas de throw »
+  // -------------------------------------------------------------------------
+
+  it("(T1) Strasbourg, Alsace non couverte par DVF : n_lignes 0 → 'indisponible:no_data', jamais 'ok' à 0 terrain", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce({
+      ...REV_GEO_OK,
+      codeCommune: "67482",
+      commune: "Strasbourg",
+    });
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
+
+    const result = await dynamiqueImmobiliere({ lat: 48.58, lon: 7.75, rayon_km: 3 });
+
+    expect(result.couverture.terrains).toBe("indisponible:no_data");
+    expect(result.info.prix_m2_median).toBeNull();
+    expect(result.info.terrains).toEqual({ n: 0, prix_terrain_median: null });
+    // Les autres sections ne sont pas touchées.
+    expect(result.couverture.permis).toBe("ok");
+    expect(result.couverture.zones_au).toBe("ok");
+    expect(result.note.signal).toBe("fort");
+  });
+
+  it("(T2) échec de section (RPC absente) → 'indisponible:<raison>' distinct de no_data, prix null, composite résolu", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(REV_GEO_OK);
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockRejectedValue(
+      new Error("[france-data-mcp] dvf_stats_in_radius (PGRST202): not found"),
+    );
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.couverture.terrains).toMatch(/^indisponible:.*PGRST202/);
+    expect(result.couverture.terrains).not.toBe("indisponible:no_data");
+    expect(result.info.prix_m2_median).toBeNull();
+    expect(result.info.terrains).toEqual({ n: 0, prix_terrain_median: null });
+    expect(result.couverture.permis).toBe("ok");
+  });
+
+  it("(T3) Paris avec ventes, arrondissement réel 75115 → terrains 'ok', chiffres servis", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce({
+      ...REV_GEO_OK,
+      codeCommune: "75115",
+      commune: "Paris 15e Arrondissement",
+    });
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS);
+
+    const result = await dynamiqueImmobiliere({ lat: 48.84, lon: 2.29, rayon_km: 3 });
+
+    expect(dvfModule.dvfStatsInRadius).toHaveBeenCalledWith(48.84, 2.29, 3);
+    expect(result.couverture.terrains).toBe("ok");
+    expect(result.couverture.permis).toBe("partiel:ville_entiere_plm");
+    expect(result.info.prix_m2_median).toBe(5000);
+    expect(result.info.terrains).toEqual({ n: 1, prix_terrain_median: 150000 });
+  });
+
+  it("(T4) des ventes bâties mais aucun terrain → 'ok' avec n=0 : ici le zéro est une donnée", async () => {
+    vi.mocked(geocodeModule.reverseGeocode).mockResolvedValueOnce(REV_GEO_OK);
+    vi.mocked(sitadelModule.permitsForCommune).mockResolvedValue(PERMITS_OK);
+    vi.mocked(pluModule.getZonesAU).mockResolvedValue(NO_ZONES);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue({
+      ...DVF_STATS,
+      n_terrains: 0,
+      prix_terrain_median: null,
+    });
+
+    const result = await dynamiqueImmobiliere(BASE_INPUT);
+
+    expect(result.couverture.terrains).toBe("ok");
+    expect(result.info.prix_m2_median).toBe(5000);
+    expect(result.info.terrains).toEqual({ n: 0, prix_terrain_median: null });
   });
 
   it("(B6) zone avec geometry:null → secteur null ET reverseGeocode non appelé pour la zone", async () => {
@@ -676,8 +718,7 @@ describe("dynamiqueImmobiliere", () => {
       zones_au: [{ typezone: "AUc", libelle: "1AUc", libelong: null, feature: FEATURE_NO_GEOM }],
       geojson: { type: "FeatureCollection", features: [FEATURE_NO_GEOM] },
     });
-    vi.mocked(dvfModule.dvfInRadius).mockResolvedValue([]);
-    vi.mocked(dvfModule.aggregatePrix).mockReturnValue(AGG_OK);
+    vi.mocked(dvfModule.dvfStatsInRadius).mockResolvedValue(DVF_STATS_EMPTY);
 
     const result = await dynamiqueImmobiliere(BASE_INPUT);
 

@@ -31,7 +31,7 @@ import { parentCommuneInsee } from "../territoire/commune-index.js";
 import { communeContainingPoint } from "../territoire/communes.js";
 import { reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
-import { aggregatePrix, dvfInRadius } from "./dvf.js";
+import { type DvfStats, dvfStatsInRadius } from "./dvf.js";
 import { type PermitsAnneeEnCours, type PermitsResult, permitsForCommune } from "./sitadel.js";
 
 const LOG_TAG = "[france-data-mcp] dynamique_immobiliere";
@@ -194,6 +194,16 @@ function permisStatus(
   return "ok";
 }
 
+/**
+ * Statut de la section `terrains` : `runSection` pose `ok` dès l'absence de throw,
+ * or une zone sans aucune mutation (Alsace-Moselle et Mayotte, absentes de la
+ * source) serait servie comme « 0 terrain, donnée fiable ». Jumeau de `permisStatus`.
+ */
+function terrainsStatus(outcome: SectionOutcome<DvfStats>): SectionStatus {
+  if (outcome.status !== "ok" || !outcome.data) return outcome.status;
+  return outcome.data.n_lignes === 0 ? "indisponible:no_data" : "ok";
+}
+
 // ---------------------------------------------------------------------------
 // Signal heuristic
 // ---------------------------------------------------------------------------
@@ -266,14 +276,14 @@ export async function dynamiqueImmobiliere(
   const [permisOut, zonesOut, dvfOut] = await Promise.all([
     permisSection,
     runSection("zones_au", () => getZonesAU(lat, lon, { radiusKm: rayon_km })),
-    runSection("terrains", () => dvfInRadius(lat, lon, rayon_km)),
+    runSection("terrains", () => dvfStatsInRadius(lat, lon, rayon_km)),
   ]);
 
   // --- Couverture ---------------------------------------------------------
   const couverture = {
     permis: permisStatus(permisOut, code_commune),
     zones_au: zonesOut.status,
-    terrains: dvfOut.status,
+    terrains: terrainsStatus(dvfOut),
   };
 
   // --- Permis -------------------------------------------------------------
@@ -328,12 +338,10 @@ export async function dynamiqueImmobiliere(
   });
 
   // --- DVF foncier --------------------------------------------------------
-  const dvfRows = dvfOut.data ?? [];
-  const agg = aggregatePrix(dvfRows);
-  // n_terrains comes directly from aggregatePrix — no redundant re-filter
+  const dvfStats = dvfOut.data;
   const terrainsInfo = {
-    n: agg.n_terrains,
-    prix_terrain_median: agg.prix_terrain_median,
+    n: dvfStats?.n_terrains ?? 0,
+    prix_terrain_median: dvfStats?.prix_terrain_median ?? null,
   };
 
   // --- Signal + result ---------------------------------------------------
@@ -363,7 +371,7 @@ export async function dynamiqueImmobiliere(
         annee_en_cours: permisData?.annee_en_cours ?? null,
       },
       quartiers_au: quartiersAu,
-      prix_m2_median: agg.prix_m2_median,
+      prix_m2_median: dvfStats?.prix_m2_median ?? null,
       terrains: terrainsInfo,
     },
     geojson: {

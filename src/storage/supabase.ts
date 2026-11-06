@@ -81,8 +81,7 @@ export function getUntypedAnonClient(): SupabaseClient {
 
 /**
  * Privileged client SANS typage Database — jumeau de `getUntypedAnonClient`
- * mais avec la clé service_role (bypass RLS). Utilisé pour les ÉCRITURES de
- * cache paresseux côté serveur (ex. `dvf_mutations` / `dvf_commune_cache`),
+ * mais avec la clé service_role (bypass RLS). Pour les ÉCRITURES côté serveur
  * quand la table n'est pas encore dans les types générés. Comme
  * `getServiceClient`, ne JAMAIS exposer aux end users : réservé au runtime
  * serveur (endpoint Vercel, scripts). Doctrine du projet : le rôle anon reste
