@@ -6,6 +6,16 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+### Security
+
+- **Les fonctions internes d'ingestion et de géocodage sont réservées à
+  `service_role`.** Supabase donne par défaut le droit d'exécution à `anon` et
+  `authenticated` sur toute nouvelle fonction de `public`, et `REVOKE ... FROM
+  PUBLIC` ne le retire pas. 33 fonctions restaient ainsi appelables avec la clé
+  publique, sans usage par `src/` ou `api/`. Aucun appel vu dans les logs
+  disponibles (24 h). Droit retiré en prod le 2026-11-06. Un test fait désormais
+  échouer la CI si une fonction `ingest_*` ne retire pas ce droit.
+
 ### Added
 
 - **Agent Skill public `skills/france-data-mcp/SKILL.md`.** Un skill au format
