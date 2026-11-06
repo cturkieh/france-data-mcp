@@ -1,6 +1,6 @@
 # Banc : recherche RPPS par nom via un index de noms distincts
 
-**Date :** 2026-11-06. **Statut :** concluant sur une copie locale des données réelles, avec une conception différente de la piste de départ (2 listes et 1 index). Implémentation prête en PR, mesure en prod à faire après application de la migration.
+**Date :** 2026-11-06. **Statut :** concluant sur une copie locale des données réelles, avec une conception différente de la piste de départ (2 listes et 1 index). Migration appliquée en prod le 2026-11-06 et mesurée, résultats en fin de série ; code en PR.
 
 ## Question
 
@@ -125,9 +125,38 @@ Selon le passage, la version actuelle compte 198, 203, 273 ou 397 recherches au-
 - **Insertion de 2,3 M de lignes, tous index en place :** 99 et 106 s avec les index actuels, 74 et 78 s avec la conception retenue.
 - **Disque :** index `(nom, prenom, id)` de 128 Mo et listes de 42 Mo, contre 176 Mo pour les 2 index trigrammes retirés en prod.
 
+### Mesure en prod après application
+
+`20261106T120000` appliquée depuis l'éditeur SQL. `EXPLAIN (ANALYZE, BUFFERS)` sur la vraie RPC, à limite 101. Le cache était chaud, car la construction venait de relire la table : ces durées ne sont pas des mesures à froid.
+
+| Recherche | Lignes | Durée | Lectures disque |
+|---|---:|---:|---:|
+| `ab` | 101 | 171 ms | 88 |
+| `test` | 101 | 63 ms | 77 |
+| nom rare | 101 | 107 ms | 86 |
+| `martin` | 101 | 102 ms | 97 |
+| `le` | 101 | 173 ms | 94 |
+| `de la` | 101 | 190 ms | 93 |
+| `ab` + département | 51 | 187 ms | 214 |
+| nom rare + département | 101 | 101 ms | 283 |
+| `test` + département | 51 | 32 ms | 54 |
+| `martin` + département | 101 | 1 008 ms | 1 377 |
+| `ab` + prénom | 11 | 75 ms | 5 |
+| nom rare + prénom | 54 | 74 ms | 24 |
+| `test` + prénom | 25 | 32 ms | 17 |
+| `martin` + prénom | 101 | 763 ms | 1 097 |
+| `le` + `ab` | 0 | 218 ms | 273 |
+| `le` + `marie` + département | 16 | 764 ms | 825 |
+
+- **Justesse :** les 6 personnes du nom rare sont rendues, contre 3 avant. Les 5 recherches sans troncature de la deuxième série rendent le même nombre de lignes.
+- **Limite :** absente ou de 9 999, elle rend 501 lignes.
+- **Service en ligne, code encore ancien :** 12 recherches via `/mcp` en HTTP 200, en 0,5 s au plus, coordonnées présentes. 2 entrées invalides rendent bien `-32602`. Le smoke post-déploiement passe, `professionnels_rpps_in_radius` aussi. Aucune issue Sentry sur l'heure écoulée.
+- **Droits :** en rôle `anon`, la RPC répond avec `geom` en GeoJSON ; la reconstruction reste réservée à `service_role`.
+- **Disque :** listes de 46 et 8 Mo, index de 98 Mo, soit 152 Mo contre 176 Mo pour les 2 index trigrammes, encore en place jusqu'au prochain swap.
+
 ## Limites
 
-- Les durées sont estimées depuis une copie locale. Seule une mesure en prod après déploiement les confirmera. Le disque local est bien plus rapide, seuls les nombres de lectures sont comparables.
+- Les durées à froid sont estimées depuis une copie locale : la mesure en prod s'est faite à chaud. Seuls le suivi des 57014 et la première ingestion trancheront. Le disque local est bien plus rapide, seuls les nombres de lectures sont comparables.
 - Le plan de la version actuelle varie entre les passages (198 à 397 cas au-delà de 10 s). Cette version sert de comparaison, pas de mesure exacte de la prod.
 - Non mesurés : la durée de reconstruction lors d'une vraie ingestion, le verrou de la bascule sous le trafic de prod, le coût de `ST_AsGeoJSON` dans la sortie (PostGIS est simulé en local ; les lignes sont déjà lues, il ne change pas leur nombre).
 - Non testé : la piste « nom exact d'abord », qui laisserait les fautes de frappe sur le chemin lent. Un serveur plus puissant non plus : il ne corrige pas le plafond qui perd des résultats.
