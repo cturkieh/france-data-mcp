@@ -26,7 +26,7 @@ CI GitHub Actions vérifie typecheck (2 tsconfigs) + biome + tests + Supabase lo
 
 - « Pas trouvé » ≠ « erreur » (`LookupResult<T>`) ; catch jamais silencieux, préfixe `[france-data-mcp]` ; `RangeError` pour input invalide au boundary (→ `-32602`).
 - PostgREST sérialise `NUMERIC`/`BIGINT` en **string** → coercer au boundary (`numOrNull`), tester avec des strings.
-- Migrations prod via **MCP Supabase `apply_migration`** (le CLI `db push` est cassé, format `T`), sur le serveur d'écriture `supabase_france_data_write` : désactivé par défaut, Cyril l'active dans `/mcp` le temps de la migration. Le serveur courant reste en lecture seule.
+- Migrations prod via **MCP Supabase `apply_migration`** (le CLI `db push` est cassé, format `T`), sur le serveur d'écriture `supabase_france_data_write` : bloqué par défaut, seul Cyril le débloque, le temps de la migration (procédure dans le skill `ingestion-crons`). Le serveur courant reste en lecture seule.
 - `.mcp.json` ne se commite jamais : le dépôt est public et ce fichier porte l'identifiant du projet Supabase prod.
 - Source tarie ≠ succès : `data_freshness` expose l'âge réel (`data_age_days`), un canary manquant marque le run `partial`.
 
