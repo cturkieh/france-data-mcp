@@ -1,6 +1,6 @@
 # Banc : recherche RPPS par nom via un index de noms distincts
 
-**Date :** 2026-11-06. **Statut :** concluant sur une copie locale des données réelles, avec une conception différente de la piste de départ (2 listes et 1 index). Implémentation en attente de validation, mesure en prod à faire après déploiement.
+**Date :** 2026-11-06. **Statut :** concluant sur une copie locale des données réelles, avec une conception différente de la piste de départ (2 listes et 1 index). Implémentation prête en PR, mesure en prod à faire après application de la migration.
 
 ## Question
 
@@ -18,7 +18,7 @@ La référence est l'`EXPLAIN ANALYZE` de la requête de candidats actuelle, à 
 
 ## Coût
 
-Première série : 21 s de lecture sur la base de prod. Deuxième série et seuil : moins de 4 minutes de lecture. Copie locale : téléchargement du fichier public (829 Mo) et environ 40 minutes de machine locale ; en prod, seulement des lectures de catalogue et de réglages, et un échantillon de 1 % pour la taille des lignes. Aucune écriture permanente, aucun service payant.
+Première série : 21 s de lecture sur la base de prod. Deuxième série et seuil : moins de 4 minutes de lecture. Copie locale : téléchargement du fichier public (829 Mo) et environ 40 minutes de machine locale ; en prod, seulement des lectures de catalogue et de réglages, et un échantillon de 1 % pour la taille des lignes. Puis plusieurs passages locaux de 7 à 8 minutes, et une construction des 2 listes en prod sur des tables temporaires (22 s). Aucune écriture permanente, aucun service payant.
 
 ## Résultats
 
@@ -52,7 +52,7 @@ Même protocole, sans plafond avant filtre, au seuil de 0,3. Le prénom testé e
 
 **Deux constats.** Avec un filtre, le plafond ne coupe plus la lecture : un nom court dépasse donc les 10 s à froid (18 à 23 s pour le nom rare et `ab`). Et la liste seule ferait dépasser ces 10 s à `martin` filtré, qui répond aujourd'hui en 0,6 s.
 
-**Construction de la liste.** 9,4 s pour la liste et 2,1 s pour son index, sur une table temporaire qui porte aussi les identifiants. La reconstruction réelle après swap reste non mesurée.
+**Construction de la liste.** 9,4 s pour la liste et 2,1 s pour son index, sur une table temporaire qui porte aussi les identifiants. La mesure des 2 listes finales figure plus bas.
 
 ### Piste plus simple : relever le seuil de similarité
 
@@ -91,7 +91,7 @@ Le nom rare prend encore 10,5 s à froid au seuil de 0,5. La tolérance aux faut
 | Liste des noms, index trigramme gardé sur le prénom | `le` + `ab` : 84 095 lectures | Un prénom court fausse l'estimation : 129 lignes prévues, 289 942 candidats |
 | 2 listes, parcours pour toute catégorie | `le` + catégorie `M` : 22 111 lectures (1 032 aujourd'hui) | Le parcours lit la table pour écarter les autres catégories |
 
-**Conception retenue** (SQL en annexe) : deux tables de valeurs distinctes, noms et prénoms, chacune avec son index trigramme ; un index `(nom, prenom, id)` sur `rpps` ; l'index département existant. Sans filtre, les noms sont parcourus du plus proche au plus lointain, avec arrêt à la limite. Avec un filtre, une seule requête prend les noms et prénoms proches. Les index trigrammes de `rpps` ne servent plus : seules `rpps_search_by_name` et la création du staging y font référence.
+**Conception retenue** (SQL en annexe) : deux vues matérialisées de valeurs distinctes, noms et prénoms, chacune avec son index trigramme ; un index `(nom, prenom, id)` sur `rpps` ; l'index département existant. Sans filtre, les noms sont parcourus du plus proche au plus lointain, avec arrêt à la limite. Avec un filtre, une seule requête prend les noms et prénoms proches. Les index trigrammes de `rpps` ne servent plus : seules `rpps_search_by_name` et la création du staging y font référence.
 
 **Échantillon.** 278 personnes tirées au hasard (200 lignes, donc pondérées par la fréquence des noms, et 78 noms distincts) × 8 formes de recherche = 2 224 recherches, à limite 101. La référence est la même recherche sans aucun plafond.
 
@@ -109,112 +109,39 @@ Lectures à froid, version finale :
 | 2 premières lettres + département | 5 714 | 80 813 | 93 | 2 857 | 5 027 | 0 |
 | **Total** | **5 291** | **80 813** | **273 (12 %)** | **1 087** | **5 027** | **0** |
 
-Un premier passage, avant les swaps, comptait 203 recherches actuelles au-delà de 10 s : l'ordre de grandeur est de 9 à 12 %.
+Selon le passage, la version actuelle compte 198, 203, 273 ou 397 recherches au-delà de 10 s (9 à 18 %), car son plan varie ; le tableau montre le passage à 273. Le dernier passage, sur la migration de la PR, donne pour la version finale les mêmes totaux que le tableau : médiane 1 087, 95e centile 2 930, maximum 5 027, aucune au-delà de 10 s.
 
-**Justesse.** La version finale rend les mêmes lignes que la référence dans 2 224 cas sur 2 224. La version actuelle : 1 915, soit 86 %. 26 cas limites ont aussi été comparés à la référence, tous identiques : limite 501, catégories rares, `---`, apostrophe, tiret, accents, 200 caractères.
+**Justesse.** La version finale rend les mêmes lignes que la référence dans 2 224 cas sur 2 224. La version actuelle : 1 915, soit 86 %. 29 cas limites ont aussi été comparés à la référence, tous identiques : limite 501, catégories rares, `---`, apostrophe, tiret, accents, 200 caractères. Une limite absente ou de 9 999 rend 501 lignes au plus, comme le plafond de l'endpoint.
 
-**Contrepartie.** 456 recherches sur 2 224 lisent plus qu'aujourd'hui, dont une seule de plus de 2 500 lectures (environ 1 s de plus à froid). Exemples : `martin` + département passe de 2 360 à 3 605 lectures, `martin` + `jean` de 1 921 à 3 576, `le` + département rare de 303 à 2 837. Au second passage, les pages sont déjà en mémoire et ces recherches ne lisent plus rien sur disque.
+**Contrepartie.** Selon le plan de la version actuelle, 456 à 947 recherches sur 2 224 lisent plus qu'aujourd'hui, dont 3 au plus de plus de 2 500 lectures (environ 1 s de plus à froid). Au total, le dernier passage lit 2,9 M de blocs, contre 18,8 M pour la version actuelle. Exemples : `martin` + département passe de 2 360 à 3 605 lectures, `martin` + `jean` de 1 921 à 3 576, `le` + département rare de 303 à 2 837. Au second passage, les pages sont déjà en mémoire et ces recherches ne lisent plus rien sur disque.
 
 **Ingestion, test de bout en bout avec la fonction de swap de la prod :**
 
 - **Nom nouveau :** introuvable avant reconstruction, trouvé après. Aucune fiche rendue n'est fausse ni absente de la nouvelle table, car les listes ne portent que des valeurs.
-- **Panne de reconstruction, puis swap suivant :** une matview témoin est détruite par le `DROP ... CASCADE` du swap. La liste en table ordinaire survit et la recherche continue, seuls les noms nouveaux manquent.
-- **Reconstruction des 2 listes :** 2 à 3,5 s en local.
+- **Une panne de reconstruction :** la recherche continue, seuls les noms nouveaux manquent. Le run passe en `partial`, et son message donne le délai et la commande de réparation.
+- **Sans réparation :** testé avec le swap suivant, dont le `DROP ... CASCADE` détruit les listes. La recherche rend 42P01, et une reconstruction rétablit tout. D'après le code, non exécuté, le nettoyage du dimanche a le même effet dès la semaine de la panne : `ingest_drop_stale_previous` ne compte pas un run `partial` comme réussi.
+- **Reconstruction des 2 listes :** 2 à 3,5 s en local, 22,2 s en prod sur des tables temporaires (14,6 s pour 444 943 noms, 7,6 s pour 83 820 prénoms, index et `ANALYZE` compris). Ajoutée aux 21,5 s de `ingest_rebuild_rpps_matviews`, elle approcherait la coupure de 60 s de la passerelle : elle a son propre appel, avec une limite de 55 s.
+- **Recherches pendant une reconstruction :** 100 recherches en local, médiane 19 ms, maximum 33 ms, avec la bascule en fin de fonction. Avec une bascule après chaque liste, le maximum montait à 397 ms.
 - **Insertion de 2,3 M de lignes, tous index en place :** 99 et 106 s avec les index actuels, 74 et 78 s avec la conception retenue.
 - **Disque :** index `(nom, prenom, id)` de 128 Mo et listes de 42 Mo, contre 176 Mo pour les 2 index trigrammes retirés en prod.
 
 ## Limites
 
 - Les durées sont estimées depuis une copie locale. Seule une mesure en prod après déploiement les confirmera. Le disque local est bien plus rapide, seuls les nombres de lectures sont comparables.
-- Le plan de la version actuelle varie entre les passages (203 ou 273 cas au-delà de 10 s). Cette version sert de comparaison, pas de mesure exacte de la prod.
-- Non mesurés : la durée de reconstruction en prod, le verrou de `RENAME` sous trafic, le coût de `ST_AsGeoJSON` dans la sortie (les lignes sont déjà lues, il ne change pas leur nombre).
+- Le plan de la version actuelle varie entre les passages (198 à 397 cas au-delà de 10 s). Cette version sert de comparaison, pas de mesure exacte de la prod.
+- Non mesurés : la durée de reconstruction lors d'une vraie ingestion, le verrou de la bascule sous le trafic de prod, le coût de `ST_AsGeoJSON` dans la sortie (PostGIS est simulé en local ; les lignes sont déjà lues, il ne change pas leur nombre).
 - Non testé : la piste « nom exact d'abord », qui laisserait les fautes de frappe sur le chemin lent. Un serveur plus puissant non plus : il ne corrige pas le plafond qui perd des résultats.
 
 ## Décision
 
-Retenir la conception en annexe. Écartés, chiffres ci-dessus : la liste seule, le seuil relevé (il casse la tolérance aux fautes sans supprimer la lenteur), et `work_mem` à 64 Mo (il supprime les blocs lossy sans changer la durée, 23,8 s sur `ab`).
+Retenir la conception de la migration en annexe. Écartés, chiffres ci-dessus : la liste seule, le seuil relevé (il casse la tolérance aux fautes sans supprimer la lenteur), et `work_mem` à 64 Mo (il supprime les blocs lossy sans changer la durée, 23,8 s sur `ab`).
 
-Les listes sont des tables ordinaires, et non des matviews comme les 3 autres listes dérivées de `rpps` : une matview ne survit pas à une reconstruction ratée suivie d'un swap.
+Les listes sont des vues matérialisées, comme les 3 autres listes dérivées de `rpps`. Des tables ordinaires survivraient au nettoyage et au swap suivant, mais elles ajoutent des droits d'écriture et une RLS à maintenir. Priorité à la maintenance simple. Risque accepté, le même que pour ces 3 listes : une panne de reconstruction laisse au plus 7 jours pour lancer une commande. Passé ce délai, la recherche rend une erreur visible jusqu'à la reconstruction.
 
-Les critères fixés avant cette série sont tenus, sauf un : `martin` filtré n'est pas strictement « non dégradé » (environ 0,5 s de plus à froid). Ce coût est accepté au regard des 273 recherches qui dépassent 10 s aujourd'hui.
+Les critères fixés avant cette série sont tenus, sauf un : `martin` filtré n'est pas strictement « non dégradé » (environ 0,5 s de plus à froid). Ce coût est accepté au regard des 198 à 397 recherches sur 2 224 qui dépassent 10 s aujourd'hui.
 
-Preuve attendue après implémentation : `EXPLAIN` en prod sur les termes de cette page, parité des index prod et staging, durée réelle de reconstruction à la première ingestion.
+Preuve attendue en prod : `EXPLAIN` sur les termes de cette page, `SET` portés par la RPC, appel réel en tant qu'`anon` avec `ST_AsGeoJSON`, parité des index prod et staging, durée réelle de reconstruction à la première ingestion.
 
-## Annexe : SQL mesuré
+## Annexe : SQL
 
-Sans PostGIS : la RPC de prod doit garder ses colonnes de sortie, dont `geom`, `geo_precision` et son `statement_timeout`.
-
-```sql
-create index rpps_nom_prenom_id_idx on rpps (nom, prenom, id);
-
--- Reconstruction après swap : table neuve, puis RENAME.
-create table rpps_noms_rebuild as select nom, lower(nom) as nom_lower from rpps group by 1 order by 2;
-create unique index rpps_noms_rebuild_pk on rpps_noms_rebuild (nom);
-create index rpps_noms_rebuild_trgm on rpps_noms_rebuild using gin (nom_lower gin_trgm_ops);
--- Même chose pour rpps_prenoms (prenom, prenom_lower), puis analyze, drop de l'ancienne et rename.
-
-create function v6(p_nom text, p_prenom text, p_departement text, p_categorie_codes text[], p_limit integer)
-returns table(id bigint, rpps_id text, nom text, prenom text, code_departement char(3), match_score real)
-language plpgsql stable
-set plan_cache_mode = force_custom_plan
-as $function$
-declare
-  v_nom text := lower(trim(p_nom));
-  v_prenom text := lower(trim(coalesce(p_prenom, '')));
-  v_categorie_codes text[] := coalesce(nullif(p_categorie_codes, array[]::text[]), array['C']);
-  v_reste int := p_limit;
-  v_lues int;
-  v_n record;
-  v_noms text[];
-  v_prenoms text[];
-begin
-  if v_prenom = '' and p_departement is null and v_categorie_codes @> array['C'] then
-    for v_n in
-      select n.nom, similarity(n.nom_lower, v_nom)::real as s
-      from rpps_noms n where n.nom_lower % v_nom
-      order by s desc, n.nom
-    loop
-      return query
-        select r.id, r.rpps_id, r.nom, r.prenom, r.code_departement, v_n.s
-        from rpps r
-        where r.nom = v_n.nom
-          and (r.categorie_code = any(v_categorie_codes) or r.categorie_code is null)
-        order by r.prenom, r.id
-        limit v_reste;
-      get diagnostics v_lues = row_count;
-      v_reste := v_reste - v_lues;
-      exit when v_reste <= 0;
-    end loop;
-    return;
-  end if;
-
-  select array_agg(n.nom) into v_noms from rpps_noms n where n.nom_lower % v_nom;
-  if v_noms is null then return; end if;
-
-  if v_prenom = '' then
-    return query
-      select r.id, r.rpps_id, r.nom, r.prenom, r.code_departement, similarity(lower(r.nom), v_nom)::real as s
-      from rpps r
-      where r.nom = any(v_noms)
-        and (p_departement is null or r.code_departement = p_departement::char(3))
-        and (r.categorie_code = any(v_categorie_codes) or r.categorie_code is null)
-      order by s desc, r.nom, r.prenom, r.id
-      limit p_limit;
-    return;
-  end if;
-
-  select array_agg(n.prenom) into v_prenoms from rpps_prenoms n where n.prenom_lower % v_prenom;
-  if v_prenoms is null then return; end if;
-  return query
-    select r.id, r.rpps_id, r.nom, r.prenom, r.code_departement,
-      ((similarity(lower(r.nom), v_nom) + similarity(lower(r.prenom), v_prenom)) / 2.0)::real as s
-    from rpps r
-    where r.nom = any(v_noms)
-      and r.prenom = any(v_prenoms)
-      and (p_departement is null or r.code_departement = p_departement::char(3))
-      and (r.categorie_code = any(v_categorie_codes) or r.categorie_code is null)
-    order by s desc, r.nom, r.prenom, r.id
-    limit p_limit;
-end;
-$function$;
-```
+Le SQL final vit dans `supabase/migrations/20261106T120000_rpps_search_by_name_listes.sql`, appliquée telle quelle sur la copie locale, et `20261106T130000_rpps_retrait_index_trigrammes.sql` pour le retrait des index trigrammes. La migration fait foi.
