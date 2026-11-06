@@ -1,10 +1,14 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { describe, expect, it, vi } from "vitest";
 import {
   allMigrationsSql,
   ingestDir,
   latestFunctionBodyLoose as latestFunctionBody,
+  latestFunctionDef,
 } from "./migration-sql.js";
+import { rebuildRppsSearchLists } from "./rpps.js";
+import type { IngestLogEntry } from "./shared.js";
 
 // Garde-fou structurel — sans DB, lit les migrations + le pipeline ingest.
 //
@@ -125,5 +129,96 @@ describe("fix matview/swap RPPS : reconstruction post-swap (pas REFRESH-only)", 
         `${mv} : SELECT de ${mv}_rebuild dans ingest_rebuild_rpps_matviews diverge de la migration canonique (drift de définition matview = données fausses servies en prod). Canonique="${canonical}" Rebuild="${rebuilt}"`,
       ).toBe(canonical);
     }
+  });
+});
+
+// Les listes de `rpps_search_by_name` suivent le même patron de reconstruction, dans
+// un appel séparé : voir `20261106T120000` et `docs/experiences/2026-11-06-rpps-noms-distincts.md`.
+describe("listes de rpps_search_by_name", () => {
+  const LISTES = ["rpps_noms", "rpps_prenoms"];
+  const REBUILD = "ingest_rebuild_rpps_search_lists";
+
+  it("chaque liste est reconstruite FROM rpps, bascule par RENAME, SELECT identique à sa création", () => {
+    const body = latestFunctionBody(REBUILD);
+    const migs = allMigrationsSql();
+    for (const liste of LISTES) {
+      const canonical = matviewSelectCore(migs, liste);
+      expect(canonical, `${liste} : création introuvable`).toMatch(/from rpps\b/i);
+      expect(matviewSelectCore(body, `${liste}_rebuild`)).toBe(canonical);
+      expect(body).toMatch(
+        new RegExp(`drop\\s+materialized\\s+view\\s+if\\s+exists\\s+${liste}\\s*;`, "i"),
+      );
+      expect(body).toMatch(
+        new RegExp(
+          `alter\\s+materialized\\s+view\\s+${liste}_rebuild\\s+rename\\s+to\\s+${liste}\\b`,
+          "i",
+        ),
+      );
+      // Sans ce GIN, chaque recherche parcourrait toute la liste après le premier cron.
+      expect(body).toMatch(
+        new RegExp(`on\\s+${liste}_rebuild\\s+using\\s+gin\\s*\\(\\s*\\w+_lower\\b`, "i"),
+      );
+      // Sans ce GRANT, la RPC appelée par `anon` échoue après la première reconstruction.
+      expect(body).toMatch(
+        new RegExp(`grant\\s+select\\s+on\\s+${liste}_rebuild\\s+to\\s+anon`, "i"),
+      );
+    }
+  });
+
+  it("la reconstruction reste sous la coupure de la passerelle, réservée à service_role", () => {
+    expect(latestFunctionDef(REBUILD)).toMatch(/set\s+statement_timeout\s*=\s*'55s'/i);
+    expect(allMigrationsSql()).toMatch(
+      new RegExp(
+        `revoke\\s+execute\\s+on\\s+function\\s+${REBUILD}\\s+from\\s+public,\\s*anon,\\s*authenticated\\s*;`,
+        "i",
+      ),
+    );
+  });
+
+  it("la RPC lit les listes, garde ses SET et n'applique plus de plafond avant le tri", () => {
+    const body = latestFunctionBody("rpps_search_by_name");
+    expect(body).toMatch(/from\s+rpps_noms\b/i);
+    expect(body).toMatch(/from\s+rpps_prenoms\b/i);
+    expect(body).not.toMatch(/lower\(r\.(nom|prenom)\)\s*%/i);
+    expect(body).not.toContain("v_candidate_cap");
+    // Un appel `anon` direct reste borné à 501 lignes, quelle que soit la limite demandée.
+    expect(body).toMatch(/v_reste\s+int\s*:=\s*least\(/i);
+    expect(body).not.toMatch(/limit\s+p_limit/i);
+    expect(latestFunctionDef("rpps_search_by_name")).toMatch(
+      /set\s+statement_timeout\s*=\s*'10s'\s+set\s+plan_cache_mode\s*=\s*force_custom_plan/i,
+    );
+  });
+
+  it("la bascule vient après toute construction : le verrou du DROP tient jusqu'au commit", () => {
+    const body = latestFunctionBody(REBUILD);
+    const derniereConstruction = body.lastIndexOf("analyze rpps_prenoms_rebuild");
+    expect(derniereConstruction).toBeGreaterThan(-1);
+    for (const liste of LISTES) {
+      const bascule = body.search(
+        new RegExp(`drop\\s+materialized\\s+view\\s+if\\s+exists\\s+${liste}\\s*;`, "i"),
+      );
+      expect(bascule).toBeGreaterThan(derniereConstruction);
+    }
+  });
+
+  it("rpps.ts reconstruit les listes après les matviews", () => {
+    const src = readFileSync(`${ingestDir}/rpps.ts`, "utf8");
+    const matviews = src.indexOf("await rebuildRppsMatviews(supabase, log)");
+    const listes = src.indexOf("await rebuildRppsSearchLists(supabase, log)");
+    expect(matviews).toBeGreaterThan(-1);
+    expect(listes).toBeGreaterThan(matviews);
+  });
+
+  it("un échec dégrade en partial sans interrompre l'ingestion", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const log = { status: "success" } as IngestLogEntry;
+    const supabase = {
+      rpc: async () => ({ data: null, error: { code: "57014", message: "timeout" } }),
+    } as unknown as SupabaseClient;
+    await expect(rebuildRppsSearchLists(supabase, log)).resolves.toBeUndefined();
+    expect(log.status).toBe("partial");
+    expect(log.error_message).toContain("SELECT ingest_rebuild_rpps_search_lists()");
+    expect(log.error_message).toContain("nettoyage du dimanche");
+    consoleError.mockRestore();
   });
 });

@@ -560,7 +560,6 @@ export const rppsSearchByNameMetadata = (): QueryMetadata => {
   const md = buildMetadata("centroide_commune_ans_mixte", false);
   md.notes.push(
     "Résultats triés par similarité trigram (pg_trgm) sur nom + prénom. Le champ `match_score` (0..1) indique la pertinence — un score < 0.5 = homonymie partielle, à confirmer côté caller.",
-    "Sur un nom TRÈS commun sans `departement` ni `prenom`, les candidats sont plafonnés (cap interne) AVANT le tri de pertinence : le résultat est alors un ÉCHANTILLON non exhaustif (et non strictement les plus pertinents au niveau national). Préciser `departement=` ou `prenom=` pour un résultat exhaustif et stable.",
   );
   return md;
 };

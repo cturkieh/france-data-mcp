@@ -288,17 +288,17 @@ describe("getRppsByName — V0.6.0 search par identité", () => {
     expect(mockRpc).toHaveBeenCalled();
   });
 
-  it("timeout SQL 57014 → RangeError actionnable (A1), PAS une Error opaque", async () => {
+  it("timeout SQL 57014 → panne visible, jamais présentée comme une faute de l'appelant", async () => {
     mockRpc.mockResolvedValueOnce({
       data: null,
       error: { code: "57014", message: "canceling statement due to statement timeout" },
     });
-    await expect(getRppsByName({ nom: "DUPONT" })).rejects.toThrow(RangeError);
-    mockRpc.mockResolvedValueOnce({
-      data: null,
-      error: { code: "57014", message: "canceling statement due to statement timeout" },
-    });
-    await expect(getRppsByName({ nom: "DUPONT" })).rejects.toThrow(/trop large|departement|prenom/);
+    const err = await getRppsByName({ nom: "DUPONT" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(RangeError);
+    // Le groupement Sentry repose sur `(57014)` ; le nom cherché ne doit pas fuiter.
+    expect((err as Error).message).toContain("(57014)");
+    expect((err as Error).message).not.toContain("DUPONT");
   });
 
   it("autre erreur RPC reste une Error (formatRpcError), pas un RangeError", async () => {
