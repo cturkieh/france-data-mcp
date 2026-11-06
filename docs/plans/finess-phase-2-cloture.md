@@ -153,7 +153,7 @@ côté des SIRET RPPS** (dédoublonnés, même validation `^\d{14}$`) : la casca
 existante valide chaque candidat contre DINUM et fait primer l'établissement
 actif, donc un SIRET ANS périmé est traité comme l'est déjà un SIRET RPPS
 périmé. `method` gagne la valeur `finess_ans` quand c'est lui qui a porté le
-`best_match`. Aucune recalibration des seuils (mémoire `v016-succession-fix`).
+`best_match`. Aucune recalibration des seuils (skill `mcp-conventions`, resolver SIRET).
 
 **Mesure avant merge** (script one-shot en scratchpad, DINUM live, ~300 EGE
 tirés au sort parmi ceux SANS SIRET RPPS) : part des SIRET ANS actifs selon
