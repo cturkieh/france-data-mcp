@@ -30,6 +30,18 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ### Fixed
 
+- **`rpps_search_by_name` ne tombe plus en HTTP 500 sur les noms courts.** Le
+  trigramme parcourait les 2,3 M de lignes de `rpps` : un nom court dépassait la
+  coupure à 10 s dès que les données n'étaient pas en mémoire, et le plafond de
+  2 000 candidats, appliqué avant le tri, perdait des personnes (3 sur 6 portant
+  le même nom rare). Le trigramme cherche désormais dans 2 petites listes de noms
+  et de prénoms distincts, reconstruites à chaque ingestion RPPS. Sur 2 224
+  recherches testées sur une copie locale : aucune au-delà de 10 s estimées,
+  contre 198 à 397 avant, et les mêmes lignes qu'une recherche sans plafond. Un
+  57014 restant remonte comme une panne visible dans Sentry : il n'accuse plus
+  l'appelant d'un « nom très commun » et n'écrit plus le nom cherché dans les
+  logs. Mesures : `docs/experiences/2026-11-06-rpps-noms-distincts.md`.
+
 - **Ingestion FINESS : le changement de format du flux ANS du 15 octobre ne
   bloque plus le swap.** L'ANS publie désormais toujours le Lambert 93 dans
   `coordonneeX/Y` et le WGS84 dans `direction*`, et 53 570 adresses ne portent

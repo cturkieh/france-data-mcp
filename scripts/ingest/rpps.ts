@@ -649,6 +649,9 @@ async function main(): Promise<void> {
     // throw → "failed" + exit(1) (LOUD, fin de l'avalement silencieux).
     await rebuildRppsMatviews(supabase, log);
 
+    // 6b-bis. LISTES de `rpps_search_by_name`, reconstruites comme les matviews ci-dessus.
+    await rebuildRppsSearchLists(supabase, log);
+
     // 6d. PHASE 1 MESURE du delta BAN — POST-SWAP sur `rpps` (le résidu après
     // ban_join = la vraie taille de file que la future automatisation Phase 2
     // aurait à géocoder). BEST-EFFORT : un échec (timeout, RPC absente, contrat
@@ -734,7 +737,8 @@ async function main(): Promise<void> {
 
     // IMPORTANT : préserver un éventuel `status: "partial"` posé par
     // `rebuildRppsMatviews` (échec TRANSITOIRE de reconstruction matview ;
-    // un échec STRUCTUREL aurait throw → on ne serait pas ici).
+    // un échec STRUCTUREL aurait throw → on ne serait pas ici) ou par
+    // `rebuildRppsSearchLists`.
     // `runAndRecordCanary` actuel ne pose pas "partial" — il remplit seulement
     // `canary_failures`. Si un futur change y ajoute "partial", ce check le
     // préserve aussi. Écraser inconditionnellement masquerait un incident
@@ -1070,6 +1074,39 @@ export async function rebuildRppsMatviews(
   // Politique d'erreur (partial sans throw, couche secondaire) dans la
   // fonction partagée — cf. `rebuildHostedActivities` (`./shared.js`).
   await rebuildHostedActivities(supabase, log, "rpps");
+}
+
+/**
+ * Reconstruit `rpps_noms` et `rpps_prenoms` après le swap. Appel séparé de
+ * `rebuildRppsMatviews` pour rester loin de la coupure à 60 s de la passerelle : un
+ * échec ici n'annule pas les autres matviews. Il dégrade en `partial` sans throw :
+ * la RPC est transactionnelle, l'ancienne liste reste servie et seuls les noms récents
+ * manquent. Cette liste dépend encore de `rpps_previous` : le nettoyage du dimanche, qui
+ * ne compte pas un run `partial` comme réussi, ou le swap suivant la détruit. La recherche
+ * rend alors 42P01, bruyant dans Sentry, jusqu'à la reconstruction. Le message d'alerte
+ * donne donc le délai et la commande de réparation.
+ */
+export async function rebuildRppsSearchLists(
+  supabase: SupabaseClient,
+  log: IngestLogEntry,
+): Promise<void> {
+  const start = Date.now();
+  const { error } = await supabase.rpc("ingest_rebuild_rpps_search_lists");
+  const elapsedMs = Date.now() - start;
+  if (error) {
+    // `code` est vide sur une panne réseau, d'où `||`.
+    const code = error.code || "no-code";
+    console.error(
+      `[rpps] post-swap search lists rebuild failed [code=${code}] after ${elapsedMs}ms: ${error.message} — dégradé en partial`,
+    );
+    log.status = "partial";
+    appendLogMessage(
+      log,
+      `post-swap search lists rebuild (${code}): ${error.message} — rpps_search_by_name manque les noms récents et sera indisponible dès le prochain nettoyage du dimanche (cleanup-stale-previous) ; réparer avant : SELECT ingest_rebuild_rpps_search_lists()`,
+    );
+    return;
+  }
+  console.log(`[rpps] ingest_rebuild_rpps_search_lists OK in ${elapsedMs}ms`);
 }
 
 /**
