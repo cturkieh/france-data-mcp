@@ -1,6 +1,6 @@
 # Banc : recherche RPPS par nom via un index de noms distincts
 
-**Date :** 2026-11-06. **Statut :** la liste seule est insuffisante, car elle dégrade les noms courants filtrés. Variante avec index classique à prouver sur une copie locale.
+**Date :** 2026-11-06. **Statut :** concluant sur une copie locale des données réelles, avec une conception différente de la piste de départ (2 listes et 1 index). Implémentation en attente de validation, mesure en prod à faire après déploiement.
 
 ## Question
 
@@ -18,7 +18,7 @@ La référence est l'`EXPLAIN ANALYZE` de la requête de candidats actuelle, à 
 
 ## Coût
 
-Première série : 21 s de lecture sur la base de prod. Séries suivantes : moins de 4 minutes de lecture. Aucune écriture permanente, aucun service payant.
+Première série : 21 s de lecture sur la base de prod. Deuxième série et seuil : moins de 4 minutes de lecture. Copie locale : téléchargement du fichier public (829 Mo) et environ 40 minutes de machine locale ; en prod, seulement des lectures de catalogue et de réglages, et un échantillon de 1 % pour la taille des lignes. Aucune écriture permanente, aucun service payant.
 
 ## Résultats
 
@@ -74,14 +74,147 @@ Le nom rare prend encore 10,5 s à froid au seuil de 0,5. La tolérance aux faut
 | 8-9 lettres | 880 | 100 % / 100 % / 100 % | 100 % / 100 % / 100 % |
 | 10 lettres ou plus | 243 | 100 % / 100 % / 100 % | 100 % / 100 % / 100 % |
 
+### Troisième série : copie locale des données réelles
+
+**Protocole.** Postgres 17.10 jetable, avec les réglages de planification et de mémoire de la prod (`shared_buffers`, `work_mem`, `effective_cache_size`, `random_page_cost`, parallélisme). Données : le fichier RPPS public qui alimente la prod, version du 2026-11-06, 2 315 657 lignes (prod au 2026-11-05 : 2 315 279). Sans PostGIS, `geom` et `geog` sont remplacés par des `bytea` de même largeur. Les index de la prod sont repris, hors GiST.
+
+**Calibrage.** Sur les 12 mesures de la prod, le rapport des blocs local/prod va de 0,63 à 1,32 et vaut le plus souvent 0,85. La table locale est plus compacte (84 000 pages contre 110 000 : pas de lignes mortes). Sur les 8 recherches filtrées, 7 rendent le même nombre de lignes et la dernière 3 de plus ; sans filtre, l'écart atteint 4 %.
+
+**Conversion en durée.** Les lectures à froid sont comptées après vidage du cache Postgres (`pg_buffercache_evict`). Les mesures en prod donnent environ 3 000 lectures par seconde (68 648 en 22,9 s, 57 753 en 18,3 s, 44 626 en 15,8 s). Avec le rapport de 0,85, 25 000 lectures locales valent environ 10 s en prod. Cette durée est une estimation.
+
+**Variantes écartées**, chacune sur un cas mesuré :
+
+| Variante | Pire cas | Problème |
+|---|---:|---|
+| Liste + index sur `lower(nom)` | `le` + département : 26 633 blocs | Lit toutes les fiches des noms proches |
+| Index composite, parcours nom par nom | `le` + département rare : 22 435 lectures (151 aujourd'hui) | Le parcours touche tout l'index quand le filtre est rare |
+| Liste des noms, index trigramme gardé sur le prénom | `le` + `ab` : 84 095 lectures | Un prénom court fausse l'estimation : 129 lignes prévues, 289 942 candidats |
+| 2 listes, parcours pour toute catégorie | `le` + catégorie `M` : 22 111 lectures (1 032 aujourd'hui) | Le parcours lit la table pour écarter les autres catégories |
+
+**Conception retenue** (SQL en annexe) : deux tables de valeurs distinctes, noms et prénoms, chacune avec son index trigramme ; un index `(nom, prenom, id)` sur `rpps` ; l'index département existant. Sans filtre, les noms sont parcourus du plus proche au plus lointain, avec arrêt à la limite. Avec un filtre, une seule requête prend les noms et prénoms proches. Les index trigrammes de `rpps` ne servent plus : seules `rpps_search_by_name` et la création du staging y font référence.
+
+**Échantillon.** 278 personnes tirées au hasard (200 lignes, donc pondérées par la fréquence des noms, et 78 noms distincts) × 8 formes de recherche = 2 224 recherches, à limite 101. La référence est la même recherche sans aucun plafond.
+
+Lectures à froid, version finale :
+
+| Forme | Actuelle : médiane | Actuelle : maximum | Actuelle : au-delà de 10 s | Finale : médiane | Finale : maximum | Finale : au-delà de 10 s |
+|---|---:|---:|---:|---:|---:|---:|
+| Nom | 7 042 | 60 181 | 17 | 833 | 2 703 | 0 |
+| Nom + département | 453 | 59 788 | 10 | 880 | 3 452 | 0 |
+| Nom + prénom | 6 836 | 77 474 | 34 | 1 060 | 3 251 | 0 |
+| Nom + prénom + département | 535 | 77 474 | 20 | 1 248 | 3 314 | 0 |
+| Nom avec une faute | 4 556 | 59 713 | 23 | 515 | 2 568 | 0 |
+| Nom avec une faute + prénom | 5 319 | 77 474 | 31 | 648 | 2 894 | 0 |
+| 3 premières lettres | 11 201 | 59 555 | 45 | 1 553 | 2 938 | 0 |
+| 2 premières lettres + département | 5 714 | 80 813 | 93 | 2 857 | 5 027 | 0 |
+| **Total** | **5 291** | **80 813** | **273 (12 %)** | **1 087** | **5 027** | **0** |
+
+Un premier passage, avant les swaps, comptait 203 recherches actuelles au-delà de 10 s : l'ordre de grandeur est de 9 à 12 %.
+
+**Justesse.** La version finale rend les mêmes lignes que la référence dans 2 224 cas sur 2 224. La version actuelle : 1 915, soit 86 %. 26 cas limites ont aussi été comparés à la référence, tous identiques : limite 501, catégories rares, `---`, apostrophe, tiret, accents, 200 caractères.
+
+**Contrepartie.** 456 recherches sur 2 224 lisent plus qu'aujourd'hui, dont une seule de plus de 2 500 lectures (environ 1 s de plus à froid). Exemples : `martin` + département passe de 2 360 à 3 605 lectures, `martin` + `jean` de 1 921 à 3 576, `le` + département rare de 303 à 2 837. Au second passage, les pages sont déjà en mémoire et ces recherches ne lisent plus rien sur disque.
+
+**Ingestion, test de bout en bout avec la fonction de swap de la prod :**
+
+- **Nom nouveau :** introuvable avant reconstruction, trouvé après. Aucune fiche rendue n'est fausse ni absente de la nouvelle table, car les listes ne portent que des valeurs.
+- **Panne de reconstruction, puis swap suivant :** une matview témoin est détruite par le `DROP ... CASCADE` du swap. La liste en table ordinaire survit et la recherche continue, seuls les noms nouveaux manquent.
+- **Reconstruction des 2 listes :** 2 à 3,5 s en local.
+- **Insertion de 2,3 M de lignes, tous index en place :** 99 et 106 s avec les index actuels, 74 et 78 s avec la conception retenue.
+- **Disque :** index `(nom, prenom, id)` de 128 Mo et listes de 42 Mo, contre 176 Mo pour les 2 index trigrammes retirés en prod.
+
 ## Limites
 
-- Les durées sont indicatives : elles dépendent du cache, chauffé par les mesures précédentes. Le nombre de blocs est la mesure robuste.
-- Le côté « liste » lit chaque ligne par clé primaire, faute d'index sur `lower(nom)` en prod. C'est un majorant : un vrai index peut se combiner avec ceux du département et du prénom, ce qui n'a pas été mesuré.
-- Non testés : le filtre de catégorie avant plafond, la reconstruction après swap, le coût du futur index sur `lower(nom)`, et la piste « nom exact d'abord » (elle laisserait les fautes de frappe sur le chemin lent).
+- Les durées sont estimées depuis une copie locale. Seule une mesure en prod après déploiement les confirmera. Le disque local est bien plus rapide, seuls les nombres de lectures sont comparables.
+- Le plan de la version actuelle varie entre les passages (203 ou 273 cas au-delà de 10 s). Cette version sert de comparaison, pas de mesure exacte de la prod.
+- Non mesurés : la durée de reconstruction en prod, le verrou de `RENAME` sous trafic, le coût de `ST_AsGeoJSON` dans la sortie (les lignes sont déjà lues, il ne change pas leur nombre).
+- Non testé : la piste « nom exact d'abord », qui laisserait les fautes de frappe sur le chemin lent. Un serveur plus puissant non plus : il ne corrige pas le plafond qui perd des résultats.
 
 ## Décision
 
-La liste seule est écartée. Le seuil relevé aussi : il ne supprime pas la lenteur et casse la tolérance aux fautes. `work_mem` à 64 Mo est écarté : il supprime les blocs lossy, sans changer la durée (23,8 s sur `ab`).
+Retenir la conception en annexe. Écartés, chiffres ci-dessus : la liste seule, le seuil relevé (il casse la tolérance aux fautes sans supprimer la lenteur), et `work_mem` à 64 Mo (il supprime les blocs lossy sans changer la durée, 23,8 s sur `ab`).
 
-Piste à prouver : liste des noms plus index classique sur `lower(nom)`, combinable avec les filtres, sur une copie locale des données réelles. Critères : aucun cas de cette page au-delà de 10 s à froid, comparaison perdu/gagné/identique des résultats, `martin` filtré non dégradé, parité des index prod et staging, reconstruction réelle mesurée après swap. En cas d'échec sur `martin` : garder le chemin actuel pour les noms qui ont beaucoup de lignes.
+Les listes sont des tables ordinaires, et non des matviews comme les 3 autres listes dérivées de `rpps` : une matview ne survit pas à une reconstruction ratée suivie d'un swap.
+
+Les critères fixés avant cette série sont tenus, sauf un : `martin` filtré n'est pas strictement « non dégradé » (environ 0,5 s de plus à froid). Ce coût est accepté au regard des 273 recherches qui dépassent 10 s aujourd'hui.
+
+Preuve attendue après implémentation : `EXPLAIN` en prod sur les termes de cette page, parité des index prod et staging, durée réelle de reconstruction à la première ingestion.
+
+## Annexe : SQL mesuré
+
+Sans PostGIS : la RPC de prod doit garder ses colonnes de sortie, dont `geom`, `geo_precision` et son `statement_timeout`.
+
+```sql
+create index rpps_nom_prenom_id_idx on rpps (nom, prenom, id);
+
+-- Reconstruction après swap : table neuve, puis RENAME.
+create table rpps_noms_rebuild as select nom, lower(nom) as nom_lower from rpps group by 1 order by 2;
+create unique index rpps_noms_rebuild_pk on rpps_noms_rebuild (nom);
+create index rpps_noms_rebuild_trgm on rpps_noms_rebuild using gin (nom_lower gin_trgm_ops);
+-- Même chose pour rpps_prenoms (prenom, prenom_lower), puis analyze, drop de l'ancienne et rename.
+
+create function v6(p_nom text, p_prenom text, p_departement text, p_categorie_codes text[], p_limit integer)
+returns table(id bigint, rpps_id text, nom text, prenom text, code_departement char(3), match_score real)
+language plpgsql stable
+set plan_cache_mode = force_custom_plan
+as $function$
+declare
+  v_nom text := lower(trim(p_nom));
+  v_prenom text := lower(trim(coalesce(p_prenom, '')));
+  v_categorie_codes text[] := coalesce(nullif(p_categorie_codes, array[]::text[]), array['C']);
+  v_reste int := p_limit;
+  v_lues int;
+  v_n record;
+  v_noms text[];
+  v_prenoms text[];
+begin
+  if v_prenom = '' and p_departement is null and v_categorie_codes @> array['C'] then
+    for v_n in
+      select n.nom, similarity(n.nom_lower, v_nom)::real as s
+      from rpps_noms n where n.nom_lower % v_nom
+      order by s desc, n.nom
+    loop
+      return query
+        select r.id, r.rpps_id, r.nom, r.prenom, r.code_departement, v_n.s
+        from rpps r
+        where r.nom = v_n.nom
+          and (r.categorie_code = any(v_categorie_codes) or r.categorie_code is null)
+        order by r.prenom, r.id
+        limit v_reste;
+      get diagnostics v_lues = row_count;
+      v_reste := v_reste - v_lues;
+      exit when v_reste <= 0;
+    end loop;
+    return;
+  end if;
+
+  select array_agg(n.nom) into v_noms from rpps_noms n where n.nom_lower % v_nom;
+  if v_noms is null then return; end if;
+
+  if v_prenom = '' then
+    return query
+      select r.id, r.rpps_id, r.nom, r.prenom, r.code_departement, similarity(lower(r.nom), v_nom)::real as s
+      from rpps r
+      where r.nom = any(v_noms)
+        and (p_departement is null or r.code_departement = p_departement::char(3))
+        and (r.categorie_code = any(v_categorie_codes) or r.categorie_code is null)
+      order by s desc, r.nom, r.prenom, r.id
+      limit p_limit;
+    return;
+  end if;
+
+  select array_agg(n.prenom) into v_prenoms from rpps_prenoms n where n.prenom_lower % v_prenom;
+  if v_prenoms is null then return; end if;
+  return query
+    select r.id, r.rpps_id, r.nom, r.prenom, r.code_departement,
+      ((similarity(lower(r.nom), v_nom) + similarity(lower(r.prenom), v_prenom)) / 2.0)::real as s
+    from rpps r
+    where r.nom = any(v_noms)
+      and r.prenom = any(v_prenoms)
+      and (p_departement is null or r.code_departement = p_departement::char(3))
+      and (r.categorie_code = any(v_categorie_codes) or r.categorie_code is null)
+    order by s desc, r.nom, r.prenom, r.id
+    limit p_limit;
+end;
+$function$;
+```
