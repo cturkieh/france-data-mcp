@@ -13,6 +13,8 @@ coverage
 *.tgz
 docs/backlog.md
 docs/superpowers/
+# Config MCP personnelle : porte l'identifiant du projet Supabase prod, jamais sur le repo public
+.mcp.json
 # Guide perso/interne — jamais publié sur le repo OSS public
 docs/guide-outils.html
 docs/guide-outils.md
