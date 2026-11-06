@@ -23,13 +23,10 @@ import { IngestError } from "./ingest-error.js";
 // Sélection des fichiers et signature de livraison
 // ---------------------------------------------------------------------------
 
-/** Ressource du dataset telle que rendue par l'API data.gouv.fr. */
+/** Ressource du dataset rendue par l'API data.gouv.fr, réduite aux champs lus ici. */
 export interface DvfResource {
-  title?: string | null;
   url?: string | null;
-  filesize?: number | null;
-  last_modified?: string | null;
-  checksum?: { type?: string | null; value?: string | null } | null;
+  checksum?: { value?: string | null } | null;
 }
 
 export interface DvfFile {
@@ -38,7 +35,6 @@ export interface DvfFile {
   year: number;
   /** `null` : fichier d'année pleine (`full-2025.csv.gz`). */
   semester: 1 | 2 | null;
-  filesize: number | null;
   /** Vide si l'API n'en publie pas : la signature de livraison se rabat alors sur l'URL. */
   checksum: string;
 }
@@ -66,8 +62,7 @@ function fileFromResource(resource: DvfResource): DvfFile | null {
     url: resource.url,
     fileName,
     year: Number(match[1]),
-    semester: match[2] === "1" ? 1 : match[2] === "2" ? 2 : null,
-    filesize: typeof resource.filesize === "number" ? resource.filesize : null,
+    semester: match[2] ? (Number(match[2]) as 1 | 2) : null,
     checksum: resource.checksum?.value ?? "",
   };
 }
@@ -87,12 +82,11 @@ export function selectDvfFiles(resources: readonly DvfResource[]): [DvfFile, Dvf
     .filter((f): f is DvfFile => f !== null)
     .sort((a, b) => periodRank(a) - periodRank(b) || (a.url < b.url ? -1 : 1));
   // Même nom déposé deux fois : le dépôt le plus récent (URL horodatée) l'emporte.
+  // Même nom = même période : la Map conserve l'ordre du tri.
   const byName = new Map(sorted.map((f) => [f.fileName, f]));
   const candidates = [...byName.values()];
   const annualYears = new Set(candidates.filter((f) => f.semester === null).map((f) => f.year));
-  const files = candidates
-    .filter((f) => f.semester === null || !annualYears.has(f.year))
-    .sort((a, b) => periodRank(a) - periodRank(b));
+  const files = candidates.filter((f) => f.semester === null || !annualYears.has(f.year));
   if (files.length < 2) {
     throw new IngestError(
       "download",
@@ -260,8 +254,7 @@ function isInsertableDate(date: string): boolean {
  * glisser toute la fenêtre vers le futur et viderait la table.
  */
 function publishedLastMonth(rowsByMonth: ReadonlyMap<string, number>): string | null {
-  let fullest = 0;
-  for (const n of rowsByMonth.values()) if (n > fullest) fullest = n;
+  const fullest = Math.max(0, ...rowsByMonth.values());
   let last: string | null = null;
   for (const [month, n] of rowsByMonth) {
     if (n * 2 >= fullest && (last === null || month > last)) last = month;
@@ -358,18 +351,14 @@ export async function aggregateDvfRecords(
     }
 
     const valeur = Number.parseFloat(rec.valeur_fonciere ?? "");
-    const surfaceBati = Number.parseFloat(rec.surface_reelle_bati ?? "");
-    const surfaceTerrain = Number.parseFloat(rec.surface_terrain ?? "");
+    const rawBati = Number.parseFloat(rec.surface_reelle_bati ?? "");
+    const rawTerrain = Number.parseFloat(rec.surface_terrain ?? "");
     const typeLocal = (rec.type_local ?? "").trim();
 
+    const bati = Number.isFinite(rawBati) && rawBati > 0 ? rawBati : null;
+    const terrain = Number.isFinite(rawTerrain) && rawTerrain > 0 ? rawTerrain : null;
     const prixM2 =
-      BUILT_TYPES.has(typeLocal) &&
-      Number.isFinite(surfaceBati) &&
-      surfaceBati > 0 &&
-      Number.isFinite(valeur)
-        ? valeur / surfaceBati
-        : null;
-    const terrain = Number.isFinite(surfaceTerrain) && surfaceTerrain > 0 ? surfaceTerrain : null;
+      BUILT_TYPES.has(typeLocal) && bati !== null && Number.isFinite(valeur) ? valeur / bati : null;
     if (prixM2 === null && terrain === null) {
       inutiles++;
       continue;
@@ -383,7 +372,7 @@ export async function aggregateDvfRecords(
       valeur_fonciere: Number.isFinite(valeur) ? valeur : null,
       code_commune: commune,
       type_local: typeLocal,
-      surface_reelle_bati: Number.isFinite(surfaceBati) && surfaceBati > 0 ? surfaceBati : null,
+      surface_reelle_bati: bati,
       surface_terrain: terrain,
       prix_m2: prixM2,
       longitude,
@@ -679,7 +668,7 @@ export function assertDvfNotReceding(lastMonth: string, latestProdDate: string |
  * dupliquerait sans erreur. Ce compte est le filet, il précède le swap. BIGINT :
  * PostgREST peut le rendre en string, `parseRpcCount` couvre les deux formes.
  */
-export function assertDvfStagingCount(rawCount: unknown, expected: number): number {
+export function assertDvfStagingCount(rawCount: unknown, expected: number): void {
   let count: number;
   try {
     count = parseRpcCount(rawCount, "ingest_analyze_dvf_mutations_staging");
@@ -693,7 +682,6 @@ export function assertDvfStagingCount(rawCount: unknown, expected: number): numb
       `dvf_mutations_staging contient ${count} lignes, ${expected} insérées attendues (lot dupliqué ou perdu). Swap refusé.`,
     );
   }
-  return count;
 }
 
 /** Un dry-run laisse la prod intacte et n'écrit pas `success` : dans le cron, il passerait pour un cron vert. */

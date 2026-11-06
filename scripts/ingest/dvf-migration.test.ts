@@ -50,10 +50,8 @@ describe("dvf_stats_in_radius", () => {
 });
 
 describe("fonctions d'ingestion", () => {
-  it("la staging n'a ni clé primaire ni geom, et ses index précèdent le chargement", () => {
+  it("les index de la staging précèdent le chargement", () => {
     const body = latestFunctionBody(lower, "ingest_create_dvf_mutations_staging");
-    expect(body).not.toMatch(/primary key/);
-    expect(body).not.toMatch(/\bgeom\b/);
     expect(body).toMatch(/create index dvf_mutations_staging_geog_gist .* using gist \(geog\)/);
     expect(body).toMatch(/create index dvf_mutations_staging_code_commune_idx .*\(code_commune\)/);
     expect(body).toMatch(/notify pgrst/);

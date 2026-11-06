@@ -23,9 +23,9 @@ vi.mock("../../src/core/http.js", async (original) => ({
   ...(await original<typeof import("../../src/core/http.js")>()),
   fetchJson: vi.fn(async () => ({
     resources: [
-      { url: "https://x.test/a/full-2025.csv.gz", checksum: { type: "sha1", value: "aaa" } },
-      { url: "https://x.test/b/full-2026-s1.csv.gz", checksum: { type: "sha1", value: "bbb" } },
-      { url: "https://x.test/c/dvf.csv.gz", checksum: { type: "sha1", value: "ccc" } },
+      { url: "https://x.test/a/full-2025.csv.gz", checksum: { value: "aaa" } },
+      { url: "https://x.test/b/full-2026-s1.csv.gz", checksum: { value: "bbb" } },
+      { url: "https://x.test/c/dvf.csv.gz", checksum: { value: "ccc" } },
     ],
   })),
 }));
@@ -159,6 +159,7 @@ afterEach(() => {
 
 const swapped = () => h.calls.some((c) => c.startsWith("swap:"));
 const downloaded = () => h.calls.some((c) => c.startsWith("download:"));
+const dbWrites = () => h.calls.filter((c) => c.startsWith("rpc:") || c.startsWith("insert:"));
 
 describe("main : chemin nominal", () => {
   it("enchaîne téléchargement, gardes, staging, compte, swap, canari, journal", async () => {
@@ -256,7 +257,7 @@ describe("main : le swap est refusé", () => {
   it("livraison qui recule : aucune écriture, pas de swap, run `failed`", async () => {
     h.lastMonth = "2025-12";
     await main();
-    expect(h.calls.filter((c) => c.startsWith("rpc:") || c.startsWith("insert:"))).toEqual([]);
+    expect(dbWrites()).toEqual([]);
     expect(swapped()).toBe(false);
     expect(h.failureLogs[0]).toMatchObject({ status: "failed", error_phase: "validate" });
     expect((h.failureLogs[0] as IngestLogEntry).error_message).toMatch(/recul/);
@@ -274,7 +275,7 @@ describe("main : le swap est refusé", () => {
   it("lecture de la prod en erreur : échec visible, pas de contournement", async () => {
     h.latestProdError = { message: "canceling statement due to statement timeout" };
     await main();
-    expect(h.calls.filter((c) => c.startsWith("rpc:") || c.startsWith("insert:"))).toEqual([]);
+    expect(dbWrites()).toEqual([]);
     expect(swapped()).toBe(false);
     expect((h.failureLogs[0] as IngestLogEntry).error_message).toMatch(/statement timeout/);
     expect(exitSpy).toHaveBeenCalledWith(1);
@@ -284,7 +285,7 @@ describe("main : le swap est refusé", () => {
     const { IngestError } = await import("./ingest-error.js");
     h.validationError = new IngestError("validate", "médiane hors bande");
     await main();
-    expect(h.calls.filter((c) => c.startsWith("rpc:") || c.startsWith("insert:"))).toEqual([]);
+    expect(dbWrites()).toEqual([]);
     expect(swapped()).toBe(false);
     expect(h.failureLogs[0]).toMatchObject({ error_message: "médiane hors bande" });
     expect(exitSpy).toHaveBeenCalledWith(1);

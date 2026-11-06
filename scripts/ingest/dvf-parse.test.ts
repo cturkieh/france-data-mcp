@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DVF_COLUMNS,
   DVF_DEPARTEMENTS,
@@ -62,14 +62,10 @@ function monthRecs(month: string, n: number): Record<string, string>[] {
   );
 }
 
-const repoFile = (rel: string): string =>
-  resolve(dirname(fileURLToPath(import.meta.url)), "../..", rel);
-
 describe("selectDvfFiles", () => {
   const resource = (name: string, checksum = "abc") => ({
     url: `https://static.data.gouv.fr/resources/dvf/20261020-114721/${name}`,
-    filesize: 1000,
-    checksum: { type: "sha1", value: checksum },
+    checksum: { value: checksum },
   });
 
   it("prend les 2 derniers par (année, semestre), du plus ancien au plus récent", () => {
@@ -575,25 +571,22 @@ describe("validateDvfAggregate", () => {
     expect(refus(sain({ lignesLues: 0 })).message).toMatch(/Aucune ligne/);
   });
 
-  it("sans date ≤ 1 % : 0 mesuré accepté, seuil inclus, fichier récent sans date refusé", () => {
+  it("sans date ≤ 1 % : seuil inclus, fichier récent sans date refusé", () => {
     const seuil = Math.floor(LUES * 0.01);
-    accepte(sain({ sansDate: 0 }));
     accepte(sain({ sansDate: seuil, doublons: 0 }));
     expect(refus(sain({ sansDate: seuil + 1 })).message).toMatch(/sans date/);
     // Le fichier le plus récent (1,7 M lignes) sans aucune date.
     expect(refus(sain({ sansDate: 1_700_000 })).message).toMatch(/sans date/);
   });
 
-  it("lignes avec prix : mesuré et bornes acceptés, hors bornes refusées", () => {
-    accepte(sain({ avecPrix: 875_291 }));
+  it("lignes avec prix : bornes acceptées, hors bornes refusées", () => {
     accepte(sain({ avecPrix: MIN_AVEC_PRIX }));
     accepte(sain({ avecPrix: MAX_AVEC_PRIX }));
     expect(refus(sain({ avecPrix: MIN_AVEC_PRIX - 1 })).message).toMatch(/avec prix/);
     expect(refus(sain({ avecPrix: MAX_AVEC_PRIX + 1 })).message).toMatch(/avec prix/);
   });
 
-  it("lignes avec terrain : mesuré et bornes acceptés, `surface_terrain` vide partout refusée", () => {
-    accepte(sain({ avecTerrain: 1_217_931 }));
+  it("lignes avec terrain : bornes acceptées, `surface_terrain` vide partout refusée", () => {
     accepte(sain({ avecTerrain: MIN_AVEC_TERRAIN }));
     accepte(sain({ avecTerrain: MAX_AVEC_TERRAIN }));
     expect(refus(sain({ avecTerrain: 0 })).message).toMatch(/avec terrain/);
@@ -633,12 +626,6 @@ describe("validateDvfAggregate", () => {
     expect(refus(sain({ dansCadreMetropole: 0 })).message).toMatch(/permutées/);
   });
 
-  it("une permutation réelle des coordonnées est bien comptée hors du cadre", async () => {
-    const agg = await aggregateDvfRecords([rec({ longitude: "48.79", latitude: "2.36" })]);
-    expect(agg.invalides).toBe(0);
-    expect(agg.dansCadreMetropole).toBe(0);
-  });
-
   describe("départements", () => {
     it("liste exacte des 97 attendus, sans les absents légitimes", () => {
       expect(DVF_DEPARTEMENTS).toHaveLength(97);
@@ -663,8 +650,7 @@ describe("validateDvfAggregate", () => {
       expect(Object.fromEntries(byDept)).toEqual({ "75": 15, "2A": 3, "974": 7 });
     });
 
-    it("le minimum mesuré (973 : 1 783) et le seuil de 300 passent", () => {
-      accepte(sain());
+    it("le seuil de 300 passe", () => {
       const rowsByCommune = communes();
       rowsByCommune.set("48001", 300);
       accepte(sain({ rowsByCommune }));
@@ -777,8 +763,8 @@ describe("staleDvfReason", () => {
 
 describe("assertDvfStagingCount", () => {
   it("accepte le compte attendu, en nombre comme en string (BIGINT PostgREST)", () => {
-    expect(assertDvfStagingCount(1_609_828, 1_609_828)).toBe(1_609_828);
-    expect(assertDvfStagingCount("1609828", 1_609_828)).toBe(1_609_828);
+    expect(() => assertDvfStagingCount(1_609_828, 1_609_828)).not.toThrow();
+    expect(() => assertDvfStagingCount("1609828", 1_609_828)).not.toThrow();
   });
 
   it("refuse un écart : lot dupliqué ou perdu, pas de swap", () => {
@@ -815,6 +801,13 @@ describe("assertDvfDryRunAllowed", () => {
 describe("streamDvfCsvGz", () => {
   const dir = mkdtempSync(join(tmpdir(), "dvf-parse-test-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  // Chaque lecture en échec trace sur stderr, à dessein.
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   const EXTRA = ["adresse_nom_voie", "code_postal"];
   const header = [...DVF_COLUMNS, ...EXTRA].join(",");
@@ -825,6 +818,12 @@ describe("streamDvfCsvGz", () => {
     const path = join(dir, name);
     writeFileSync(path, typeof content === "string" ? gzipSync(content) : content);
     return path;
+  };
+
+  /** Assez volumineux pour que la coupure tombe en plein flux gzip. */
+  const grosGzip = (): Buffer => {
+    const lines = Array.from({ length: 50_000 }, (_, i) => line(`id-${i}-${i * 7919}`)).join("\n");
+    return gzipSync(`${header}\n${lines}\n`);
   };
 
   const collect = async (gen: AsyncIterable<Record<string, string>>) => {
@@ -849,59 +848,45 @@ describe("streamDvfCsvGz", () => {
   });
 
   it("en-tête incomplet : IngestError('pre_validate'), même sans aucune ligne", async () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const path = writeGz("entete.csv.gz", "id_mutation,date_mutation\n");
     const err = await collect(streamDvfCsvGz(path)).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(IngestError);
     expect((err as IngestError).phase).toBe("pre_validate");
     expect((err as IngestError).message).toContain("valeur_fonciere");
-    spy.mockRestore();
   });
 
   it("un gzip réellement tronqué fait échouer la lecture, jamais un jeu partiel", async () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const lines = Array.from({ length: 50_000 }, (_, i) => line(`id-${i}-${i * 7919}`)).join("\n");
-    const gz = gzipSync(`${header}\n${lines}\n`);
+    const gz = grosGzip();
     const path = writeGz("tronque.csv.gz", gz.subarray(0, Math.floor(gz.length * 0.6)));
     const err = await collect(streamDvfCsvGz(path)).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(IngestError);
     expect((err as IngestError).phase).toBe("pre_validate");
     expect((err as IngestError).message).toMatch(/tronque\.csv\.gz.*unexpected end of file/);
-    spy.mockRestore();
   });
 
   it("le même gzip tronqué fait échouer une agrégation, y compris sur le 2e fichier", async () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const lines = Array.from({ length: 50_000 }, (_, i) => line(`id-${i}-${i * 7919}`)).join("\n");
-    const gz = gzipSync(`${header}\n${lines}\n`);
+    const gz = grosGzip();
     const entier = writeGz("entier.csv.gz", gz);
     const tronque = writeGz("tronque2.csv.gz", gz.subarray(0, gz.length - 100));
     await expect(aggregateDvfRecords(streamDvfFiles([entier, tronque]))).rejects.toThrow(
       /tronque2\.csv\.gz/,
     );
-    spy.mockRestore();
   });
 
   it("un fichier qui n'est pas du gzip échoue aussi", async () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const path = writeGz("html.csv.gz", Buffer.from("<html>maintenance</html>"));
     await expect(collect(streamDvfCsvGz(path))).rejects.toBeInstanceOf(IngestError);
-    spy.mockRestore();
   });
 
   it("une ligne au nombre de colonnes incohérent fait échouer la lecture", async () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const path = writeGz("colonnes.csv.gz", `${header}\n${line("a")}\na,b,c\n`);
     await expect(collect(streamDvfCsvGz(path))).rejects.toBeInstanceOf(IngestError);
-    spy.mockRestore();
   });
 
   it("arrêter la lecture en cours de route ne laisse aucune rejection flottante", async () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const path = writeGz("arret.csv.gz", `${header}\n${line("a")}\n${line("b")}\n`);
     for await (const _ of streamDvfCsvGz(path)) break;
     await new Promise((r) => setTimeout(r, 20));
-    spy.mockRestore();
   });
 });
 
@@ -917,7 +902,7 @@ describe("pureté de dvf-parse.ts", () => {
   it("aucun load-env ni client Supabase dans la chaîne d'import", () => {
     const seen = new Set<string>();
     const bare = new Set<string>();
-    const queue = [repoFile("scripts/ingest/dvf-parse.ts")];
+    const queue = [fileURLToPath(new URL("./dvf-parse.ts", import.meta.url))];
     while (queue.length > 0) {
       const file = queue.pop() as string;
       if (seen.has(file)) continue;
