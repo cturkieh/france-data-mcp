@@ -91,9 +91,9 @@ Brings together the most useful French government data sources under a uniform t
 
 ## Status
 
-✅ **v0.31.2 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
+✅ **v0.32.0 — in production.** Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Details: [CHANGELOG](CHANGELOG.md).
 
-> Latest release (v0.31.2): `rpps_search_by_name` no longer fails on short names and no longer drops people, thanks to 2 lists of distinct last and first names; internal ingestion functions restricted to `service_role`; FINESS ingestion adapted to the new ANS feed format; public Agent Skill. 13 sources / 37 tools.
+> Latest release (v0.32.0): `cout_foncier` and `dynamique_immobiliere` now cover the whole DVF area, Paris, Lyon and Marseille included, through a national table refreshed by a monthly cron; prices computed without sampling on the last 12 published months; the server no longer depends on the per-commune files, announced for removal at the end of November 2026.
 
 ---
 

@@ -6,6 +6,8 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+## [0.32.0] — 2026-11-07 — DVF sur une table nationale : Paris, Lyon et Marseille couverts, prix calculés sans échantillonnage
+
 ### Fixed
 
 - **`cout_foncier` et `dynamique_immobiliere` couvrent toute la zone DVF, Paris, Lyon et
