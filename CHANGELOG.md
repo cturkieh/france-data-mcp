@@ -6,18 +6,36 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- **Chargement national DVF (`ingest-dvf.yml`, lancement manuel pour l'instant).**
-  Les fichiers DVF par commune sont annoncés supprimés au 31/11/2026. Ce workflow
-  charge les 12 derniers mois publiés dans `dvf_mutations` depuis les fichiers
-  nationaux de data.gouv, par table temporaire et bascule atomique, après des
-  contrôles calibrés sur les vraies données. `data_freshness` expose la source
-  `dvf`. La RPC `dvf_stats_in_radius` calcule médiane et quartiles sur tout le
-  rayon : lire 500 lignes faussait le prix sur une table nationale (+73 % à 50 km de
-  Paris 15e). Les tools DVF ne changent pas encore : ils passeront sur cette RPC
-  dans la PR suivante, qui activera aussi le cron. Mesures :
-  `docs/experiences/2026-11-06-dvf-chargement-national.md`.
+- **`cout_foncier` et `dynamique_immobiliere` couvrent toute la zone DVF, Paris, Lyon et
+  Marseille compris.** Ces trois villes rendaient 0 vente : le cache par commune cherchait
+  un fichier sous leur code ville, or seuls les arrondissements en ont. Ces fichiers sont
+  en outre annoncés supprimés au 31/11/2026. `dvf_mutations` devient une table nationale,
+  les 12 derniers mois publiés, chargée par `ingest-dvf.yml` : un cron mensuel détecte les
+  livraisons semestrielles, et des contrôles calibrés sur les vraies données précèdent
+  toute bascule. `data_freshness` expose la source `dvf`.
+- **Prix DVF calculé sur toutes les lignes retenues du rayon, sans plafond.** Le calcul sur
+  les 500 lignes les plus récentes aurait faussé le prix sur une table nationale (mesuré à
+  50 km de Paris 15e : 8 370 €/m² au lieu de 4 833). `n_ventes` n'est plus plafonné et peut
+  dépasser 500. Mesures : `docs/experiences/2026-11-06-dvf-chargement-national.md`.
+
+### Changed
+
+- **`couverture.terrains` de `dynamique_immobiliere` vaut `indisponible:no_data` quand le
+  rayon n'a aucune ligne DVF retenue** : zone non couverte (57, 67, 68, 976), ou aucune
+  vente sur 12 mois. Il valait `ok` avec 0 terrain, soit un faux zéro. Tout client qui traite
+  `indisponible:*` comme une panne doit distinguer ce cas (`cout_foncier` le faisait déjà).
+- **Descriptions des tools DVF rendues exactes** : les « terrains » comptent toute mutation
+  avec une surface de terrain, bâti compris, donc `prix_terrain_median` n'est pas le prix
+  d'un terrain nu. Un rayon à cheval sur une zone non couverte rend `ok` avec les seules
+  ventes de la partie couverte.
+
+### Removed
+
+- **Cache paresseux DVF** : téléchargement par commune à la demande et écriture en base
+  depuis l'endpoint public. La table `dvf_commune_cache` et la RPC `dvf_in_radius` sont
+  retirées par la migration `20261106T235900`, à appliquer après le déploiement.
 
 ## [0.31.2] — 2026-11-06 — `rpps_search_by_name` sans erreur sur les noms courts, fonctions internes réservées à `service_role`, FINESS adapté au flux ANS
 

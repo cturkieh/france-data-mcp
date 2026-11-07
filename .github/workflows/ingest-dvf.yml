@@ -2,11 +2,11 @@
 name: Ingest DVF (ventes immobilieres, chargement national)
 
 on:
-  # Pas de cron ici : il est ajoute par la PR de lecture. Une fois merge, il ferait le
-  # swap seul avant le deploiement du nouveau code de lecture et casserait le cache
-  # paresseux encore en prod (son upsert vise une cle primaire qui disparait au swap).
-  # Cron prevu : le 12 du mois, 05:00 UTC (ne concurrence pas FINESS 1/15, RPPS 5,
-  # Sit@del 10, Ameli/CDS lundis), detection mensuelle d'une livraison semestrielle.
+  schedule:
+    # Le 12 du mois, 05:00 UTC : ne concurrence pas FINESS (1/15), RPPS (5), Sit@del
+    # (10), Ameli/CDS (lundis). Detection MENSUELLE d'une livraison SEMESTRIELLE : le
+    # court-circuit sur la signature de livraison evite tout telechargement sinon.
+    - cron: "0 5 12 * *"
   workflow_dispatch:
     inputs:
       force:
