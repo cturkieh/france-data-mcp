@@ -1,6 +1,6 @@
 # DVF : passer du cache par commune au chargement national
 
-**Date :** 2026-11-06 et 2026-11-07. **Statut :** chargement à blanc fait en prod, bascule à faire.
+**Date :** 2026-11-06 et 2026-11-07. **Statut :** terminé, bascule faite et vérifiée en prod le 2026-11-07.
 
 ## Question
 
@@ -39,7 +39,7 @@ Les fichiers ne sont pas triés par commune (1,1 million de retours en arrière 
 
 ### Le plafond de 500 lignes fausse le prix sur une table nationale
 
-Médiane en €/m², fenêtre de 24 mois.
+Médiane en €/m², fenêtre de 24 mois. Les tools plafonnent le rayon à 10 km : au-delà, ces lignes montrent le mécanisme, mais aucun appel ne peut les atteindre. Le biais atteignable mesuré est de +11 %. Le rappel « +73 % » dans l'en-tête de la migration se lit de la même façon.
 
 | Point | Rayon | Lignes dans le rayon | Médiane exacte | 500 plus récentes | Écart |
 |---|---|---|---|---|---|
@@ -82,6 +82,26 @@ Comparaison entre le SQL sur le serveur et une mesure indépendante en Python su
 | Nantes, 5 km | 7 786 | 7 789 | 3 356 | 3 356 |
 | Creuse, 5 km | 138 | 138 | 819 | 819 |
 | Strasbourg, 5 km | 0 | 0 | aucune | aucune |
+
+### Après la bascule, via les vrais tools en prod (2026-11-07)
+
+Run réel : 7 min, 1 609 828 lignes, statut `success`, aucun témoin manquant. Smoke `scripts/smoke-deploy.mjs` vert. Aucune issue Sentry sur les 2 dernières heures.
+
+| Point | Lignes avant (ancien cache) | Lignes après | `cout_foncier` | Temps |
+|---|---|---|---|---|
+| Paris 15e, 2 km | 0 | 4 916 | 4 847 ventes, 9 750 €/m² | 0,5 s |
+| Marseille 6e, 2 km | 0 | 4 866 | 4 614 ventes, 3 766 €/m² | 0,3 s |
+| Lyon 3e, 2 km | 10 | 3 419 | 3 323 ventes, 4 826 €/m² | 0,4 s |
+| Creuse, 5 km | 0 | 138 | 38 ventes, 819 €/m² | 0,2 s |
+| Ajaccio, 5 km | 0 | 833 | 758 ventes, 3 833 €/m² | 0,1 s |
+| La Réunion, 5 km | 0 | 1 111 | 950 ventes, 2 800 €/m² | 0,1 s |
+| Nantes, 5 km | 10 981 | 7 786 | 6 523 ventes, 3 356 €/m² | 0,4 s |
+| Paris 15e, 10 km (rayon maximal) | non mesuré | 61 615 | 58 865 ventes, 8 333 €/m² | 0,3 s |
+| Strasbourg, 5 km | sans objet | 0 | `indisponible:no_data` | 0,1 s |
+
+`dynamique_immobiliere` : `terrains` à `ok` à Paris 15e et en Creuse, à `indisponible:no_data` à Strasbourg. Un rayon de 50 km est refusé en `-32602`. Nantes baisse parce que seules les lignes utiles des 12 derniers mois sont gardées.
+
+Ces temps ne couvrent pas la lecture à froid de cette table : le calcul de 3,7 s plus haut reste non mesuré.
 
 ### Ventes à plusieurs lots, fichier 2025
 
