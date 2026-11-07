@@ -1,6 +1,6 @@
 # DVF : passer du cache par commune au chargement national
 
-**Date :** 2026-11-06. **Statut :** mesures faites, chargement à blanc en prod à faire.
+**Date :** 2026-11-06 et 2026-11-07. **Statut :** chargement à blanc fait en prod, bascule à faire.
 
 ## Question
 
@@ -16,7 +16,7 @@ Les fichiers DVF par commune sont annoncés supprimés au 31/11/2026, et Paris, 
 
 ## Coût
 
-Environ 950 Mo téléchargés en flux, quelques requêtes de lecture seule en prod, aucune écriture.
+Environ 950 Mo téléchargés en flux, quelques requêtes de lecture seule en prod. Le chargement à blanc écrit 338 Mo dans une table temporaire, sans effet sur les utilisateurs.
 
 ## Résultats
 
@@ -55,7 +55,33 @@ Le compteur `n_ventes` était lui aussi faux : il restait sous 500 quel que soit
 
 ### Temps de lecture en prod
 
-26 680 lignes candidates lues en 259 ms, dont 146 ms pour 232 blocs d'index lus sur disque. Le pire cas à 12 mois est d'environ 160 000 lignes à 50 km de Paris : une lecture de quelques secondes est attendue sous la limite de 15 s, à confirmer sur la vraie table.
+26 680 lignes candidates lues en 259 ms, dont 146 ms pour 232 blocs d'index lus sur disque. Avant le chargement, le pire cas à 12 mois était estimé à environ 160 000 lignes à 50 km de Paris. Mesure réelle ci-dessous.
+
+### Chargement à blanc en prod (2026-11-07, sans bascule)
+
+| Mesure | Attendu | Réel |
+|---|---|---|
+| Lignes en base | 1 609 828 | 1 609 828 |
+| Taille totale | ~360 Mo | 338 Mo : table 219, index `geog` 107, index `code_commune` 12 |
+| Durée du run | 90 min au plus | 7 min, dont 5 min 25 d'insertion pour 805 lots |
+| Pic mémoire du script | 1,5 Go | sans incident, non relevé sur le runner |
+| Pire lecture : Paris 15e, 50 km, 165 447 lignes | 15 s au plus | 324 ms, 5 810 blocs dont 169 lus sur disque |
+| Dernière date de la table | 8 s au plus sans budget propre | 392 ms, 28 074 blocs dont 6 282 lus sur disque |
+
+Ces temps ne sont pas à froid : la table venait d'être écrite. Au coût mesuré plus haut (146 ms pour 232 blocs d'index), la pire lecture entièrement sur disque prendrait environ 3,7 s, sous la limite de 15 s : c'est un calcul, pas une mesure.
+
+Comparaison entre le SQL sur le serveur et une mesure indépendante en Python sur le fichier de travail, 13 points. L'écart de médiane est au plus de 0,13 % ; Python calcule sur une sphère et PostGIS sur l'ellipsoïde, d'où quelques lignes de différence en bordure de rayon.
+
+| Point | Lignes SQL | Lignes Python | Médiane SQL | Médiane Python |
+|---|---|---|---|---|
+| Paris 15e, 2 km | 4 916 | 4 938 | 9 750 | 9 750 |
+| Paris 15e, 50 km | 165 447 | 165 520 | 4 871 | 4 870 |
+| Lyon 3e, 2 km | 3 419 | 3 421 | 4 826 | 4 825 |
+| Lyon 3e, 50 km | 51 672 | 51 821 | 3 289 | 3 285 |
+| Marseille 6e, 2 km | 4 866 | 4 859 | 3 766 | 3 771 |
+| Nantes, 5 km | 7 786 | 7 789 | 3 356 | 3 356 |
+| Creuse, 5 km | 138 | 138 | 819 | 819 |
+| Strasbourg, 5 km | 0 | 0 | aucune | aucune |
 
 ### Ventes à plusieurs lots, fichier 2025
 
