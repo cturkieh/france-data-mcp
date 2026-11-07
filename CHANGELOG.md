@@ -17,8 +17,8 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   toute bascule. `data_freshness` expose la source `dvf`.
 - **Prix DVF calculé sur toutes les lignes retenues du rayon, sans plafond.** Le calcul sur
   les 500 lignes les plus récentes aurait faussé le prix sur une table nationale (mesuré à
-  50 km de Paris 15e : 8 370 €/m² au lieu de 4 833). `n_ventes` n'est plus plafonné et peut
-  dépasser 500. Mesures : `docs/experiences/2026-11-06-dvf-chargement-national.md`.
+  10 km de Paris 15e, rayon maximal du tool : 9 206 €/m² au lieu de 8 261, soit +11 %).
+  `n_ventes` n'est plus plafonné et peut dépasser 500. Mesures : `docs/experiences/2026-11-06-dvf-chargement-national.md`.
 
 ### Changed
 

@@ -4,8 +4,8 @@
  * `dvf_mutations` est chargée par un cron mensuel qui détecte les livraisons
  * semestrielles et garde les 12 derniers mois publiés. Médiane et quartiles sont
  * calculés DANS la base par la RPC `dvf_stats_in_radius`, sans échantillonnage : lire un échantillon
- * plafonné puis agréger côté TypeScript faussait le prix (mesuré à 50 km de
- * Paris 15e : médiane exacte 4 833 €/m², 500 lignes les plus récentes 8 370 €/m²).
+ * plafonné puis agréger côté TypeScript faussait le prix (mesuré à 10 km de
+ * Paris 15e : médiane exacte 8 261 €/m², 500 lignes les plus récentes 9 206 €/m²).
  */
 
 import { parseRpcCount } from "../core/parse-rpc-count.js";
