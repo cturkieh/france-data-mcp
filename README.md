@@ -140,9 +140,9 @@ Usage intensif : throttler côté client ou self-héberger.
 
 ## État du projet
 
-✅ **V0.31.2 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
+✅ **V0.32.0 — en production.** Sur le [registry MCP officiel](https://registry.modelcontextprotocol.io/v0.1/servers?search=france-data-mcp). Détail : [CHANGELOG](CHANGELOG.md).
 
-> Dernière version (V0.31.2) : `rpps_search_by_name` ne tombe plus en erreur sur les noms courts et ne perd plus de personnes, grâce à 2 listes de noms et de prénoms distincts ; fonctions internes d'ingestion réservées à `service_role` ; ingestion FINESS adaptée au nouveau format du flux ANS ; Agent Skill public. 13 référentiels / 37 outils.
+> Dernière version (V0.32.0) : `cout_foncier` et `dynamique_immobiliere` couvrent toute la zone DVF, Paris, Lyon et Marseille compris, grâce à une table nationale mise à jour par un cron mensuel ; prix calculés sans échantillonnage sur les 12 derniers mois publiés ; le serveur ne dépend plus des fichiers par commune, annoncés supprimés fin novembre 2026.
 
 ---
 

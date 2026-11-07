@@ -10,7 +10,8 @@
       "supabase/.branches",
       "src/storage/supabase-types.ts",
       ".claude",
-      ".phase2-case4-baseline.json"
+      ".phase2-case4-baseline.json",
+      ".mcp.json"
     ]
   },
   "formatter": {
