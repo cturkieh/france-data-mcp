@@ -48,11 +48,9 @@ const LOOKUP_RPCS = [
   "lister_savoir_faire_rpps",
   "rpps_in_radius",
   // 2026-10-05 — servies à `anon` (plafond rôle 3 s, prouvé prod) et perdues
-  // par DROP + CREATE (FRANCE-DATA-MCP-Q / -T). Migrations
-  // 20261005T100000 (dvf_in_radius) et 20261005T100100 (rpps_par_specialite_dept,
-  // l'ALTER `statement_timeout` DOIT rester le dernier statement touchant la
+  // par DROP + CREATE (FRANCE-DATA-MCP-Q). Migration 20261005T100100
+  // (l'ALTER `statement_timeout` DOIT rester le dernier statement touchant la
   // fonction : ce garde-fou ne lit que la dernière déclaration).
-  "dvf_in_radius",
   "rpps_par_specialite_dept",
   // Servie à `anon` (plafond rôle 3 s) : agrégat sur tout le rayon, 20261106T230000.
   "dvf_stats_in_radius",

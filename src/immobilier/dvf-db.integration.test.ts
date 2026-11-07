@@ -1,56 +1,47 @@
 /**
- * Filet d'intégration PostGIS pour la RPC `dvf_in_radius` (domaine immobilier).
+ * Filet d'intégration PostGIS pour la RPC `dvf_stats_in_radius`.
  *
- * Miroir de `src/sante/finess-db.integration.test.ts` : exclu de `test:unit`
- * (suffixe `*.integration.test.ts`) et SKIPPÉ tant que `SUPABASE_ANON_KEY` est
- * vide. Il ne tourne donc qu'au checkpoint de déploiement, une fois la migration
- * `20260606T120000_immobilier.sql` appliquée et la clé anon présente — c'est
- * attendu.
+ * Exclu de `test:unit` et SKIPPÉ sans les clés. La RPC et la table vivent dans
+ * des migrations au format T, que `supabase db reset` saute : ce test ne vaut
+ * donc que contre une base où elles sont appliquées (checkpoint de déploiement).
  *
- * Ce qu'il prouve (impossible à couvrir en unitaire avec un Supabase mocké) :
- *  - la colonne GÉNÉRÉE `geom` est bien calculée depuis longitude/latitude,
- *  - le cast `::geography` du RPC mesure des mètres réels (la row HORS rayon est
- *    exclue, la row DANS le rayon est retournée),
- *  - la position dérivée du `geom` (longitude/latitude) remonte peuplée.
+ * Ce qu'il prouve (impossible à couvrir avec un Supabase mocké) :
+ *  - la colonne GÉNÉRÉE `geog` mesure des mètres réels (la ligne HORS rayon est exclue),
+ *  - la RPC rend la ligne d'agrégat attendue sous le client anon et la coercition
+ *    de `dvfStatsInRadius` accepte sa sérialisation réelle,
+ *  - un point sans mutation rend bien UNE ligne, `n_lignes` = 0.
  *
- * Données synthétiques préfixées `__itest__` + nettoyées en `finally` pour ne
- * jamais polluer la table de prod.
+ * Point de test en pleine mer : sur une table nationale, n'importe quel point à
+ * terre mêlerait de vraies ventes aux lignes synthétiques. Préfixe distinctif +
+ * nettoyage en fin de test pour ne jamais polluer la table.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import {
-  __resetClientsForTesting,
-  getUntypedAnonClient,
-  getUntypedServiceClient,
-} from "../storage/supabase.js";
-import { DVF_ON_CONFLICT } from "./dvf.js";
+import { __resetClientsForTesting, getUntypedServiceClient } from "../storage/supabase.js";
+import { dvfStatsInRadius } from "./dvf.js";
 
-// Point de test : centre de Charleville-Mézières (aligné finess integration).
-const CENTER = { lat: 49.7724, lon: 4.7203 };
-// Row DANS le rayon : ~50 m du centre (delta lon ≈ 0.0007° ≈ 50 m à cette latitude).
-const INSIDE = { lon: CENTER.lon + 0.0007, lat: CENTER.lat };
-// Row HORS rayon : ~2 km du centre (delta lat ≈ 0.018° ≈ 2 km) — exclue à 500 m.
+// Golfe de Gascogne, à plus de 100 km de la côte.
+const CENTER = { lat: 45.5, lon: -3.5 };
+// DANS le rayon : ~55 m au nord du centre. HORS rayon : ~2 km.
+const INSIDE = { lon: CENTER.lon, lat: CENTER.lat + 0.0005 };
 const OUTSIDE = { lon: CENTER.lon, lat: CENTER.lat + 0.018 };
+const RADIUS_KM = 0.5;
+// Autre point en mer, sans aucune ligne synthétique.
+const EMPTY_POINT = { lat: 45.0, lon: -4.0 };
 
-const RADIUS_METERS = 500;
-
-// Identifiants synthétiques (préfixe distinctif → cleanup ciblé, zéro collision
-// avec des id_mutation réels DVF qui sont des hex de 12 caractères).
 const ITEST_PREFIX = "__itest_dvf__";
 const INSIDE_ID = `${ITEST_PREFIX}inside`;
 const OUTSIDE_ID = `${ITEST_PREFIX}outside`;
+const TERRAIN_ID = `${ITEST_PREFIX}terrain`;
 const ITEST_COMMUNE = "08105";
+const ITEST_DATE = "2026-03-01";
 
-// Skip tant que les clés ne sont pas fournies (web/remote ou CI sans secret).
-// Le test ÉCRIT le cache via service_role (doctrine : anon lit, service écrit) et
-// LIT via anon (RPC) → les DEUX clés sont requises.
+// Écriture via service_role (anon n'a pas de policy INSERT), lecture via anon.
 const hasKey =
   (process.env.SUPABASE_ANON_KEY ?? "") !== "" &&
   (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "") !== "";
 
 beforeAll(() => {
-  // Tests run against Supabase Local (started by `pnpm db:start`) ou la prod au
-  // checkpoint deploy. Defaults alignés sur finess-db.integration.test.ts.
   process.env.SUPABASE_URL ??= "http://127.0.0.1:54321";
   process.env.SUPABASE_ANON_KEY ??= process.env.SUPABASE_LOCAL_ANON_KEY ?? ""; // overridden in CI
   __resetClientsForTesting();
@@ -58,15 +49,12 @@ beforeAll(() => {
 
 async function cleanup(): Promise<void> {
   if (!hasKey) return;
-  // Suppression via service_role : RLS ON sur dvf_mutations sans policy DELETE anon.
-  const supabase = getUntypedServiceClient();
-  // `geom` est GENERATED → on ne supprime que par les colonnes de la PK.
-  const { error } = await supabase
+  const { error } = await getUntypedServiceClient()
     .from("dvf_mutations")
     .delete()
-    .in("id_mutation", [INSIDE_ID, OUTSIDE_ID]);
+    .in("id_mutation", [INSIDE_ID, OUTSIDE_ID, TERRAIN_ID]);
   if (error) {
-    // Ne pas masquer un échec de nettoyage (sinon rows de test laissées en base).
+    // Ne pas masquer un échec de nettoyage (sinon lignes de test laissées en base).
     console.error(`[dvf-db.integration] cleanup failed: ${error.message}`);
   }
 }
@@ -75,86 +63,81 @@ afterAll(async () => {
   await cleanup();
 });
 
-describe.skipIf(!hasKey)("dvf_in_radius (PostGIS integration)", () => {
-  it("ne retourne que la mutation DANS le rayon, avec une position geom peuplée", async () => {
-    // Écriture du cache → service_role (RLS bypass) ; lecture → anon (policy SELECT).
-    const svc = getUntypedServiceClient();
-    const anon = getUntypedAnonClient();
-
-    // Idempotence : purge d'éventuels résidus d'un run précédent interrompu.
+describe.skipIf(!hasKey)("dvf_stats_in_radius (PostGIS integration)", () => {
+  it("n'agrège que les mutations DANS le rayon, terrains compris", async () => {
     await cleanup();
 
-    // Insert 2 rows synthétiques (geom calculé par Postgres depuis lon/lat —
-    // surtout PAS dans le payload : colonne GENERATED, write rejetée).
-    const rows = [
-      {
-        id_mutation: INSIDE_ID,
-        date_mutation: "2024-03-01",
-        nature_mutation: "Vente",
-        valeur_fonciere: 200000,
-        code_commune: ITEST_COMMUNE,
-        type_local: "Appartement",
-        surface_reelle_bati: 50,
-        surface_terrain: null,
-        prix_m2: 4000,
-        longitude: INSIDE.lon,
-        latitude: INSIDE.lat,
-      },
-      {
-        id_mutation: OUTSIDE_ID,
-        date_mutation: "2024-03-02",
-        nature_mutation: "Vente",
-        valeur_fonciere: 300000,
-        code_commune: ITEST_COMMUNE,
-        type_local: "Maison",
-        surface_reelle_bati: 100,
-        surface_terrain: null,
-        prix_m2: 3000,
-        longitude: OUTSIDE.lon,
-        latitude: OUTSIDE.lat,
-      },
-    ];
-
-    // Insert via service_role (le rôle anon n'a PAS de policy INSERT — c'est
-    // précisément l'invariant de sécurité : seul service écrit le cache).
-    const { error: insertError } = await svc.from("dvf_mutations").upsert(rows, {
-      onConflict: DVF_ON_CONFLICT,
-    });
+    const commun = {
+      date_mutation: ITEST_DATE,
+      nature_mutation: "Vente",
+      code_commune: ITEST_COMMUNE,
+    };
+    // `geom`/`geog` sont GENERATED : surtout pas dans le payload.
+    const { error: insertError } = await getUntypedServiceClient()
+      .from("dvf_mutations")
+      .insert([
+        {
+          ...commun,
+          id_mutation: INSIDE_ID,
+          valeur_fonciere: 200000,
+          type_local: "Appartement",
+          surface_reelle_bati: 50,
+          surface_terrain: null,
+          prix_m2: 4000,
+          longitude: INSIDE.lon,
+          latitude: INSIDE.lat,
+        },
+        {
+          ...commun,
+          id_mutation: OUTSIDE_ID,
+          valeur_fonciere: 900000,
+          type_local: "Maison",
+          surface_reelle_bati: 100,
+          surface_terrain: null,
+          prix_m2: 9000,
+          longitude: OUTSIDE.lon,
+          latitude: OUTSIDE.lat,
+        },
+        {
+          ...commun,
+          id_mutation: TERRAIN_ID,
+          valeur_fonciere: 120000,
+          type_local: "",
+          surface_reelle_bati: null,
+          surface_terrain: 300,
+          prix_m2: null,
+          longitude: INSIDE.lon,
+          latitude: INSIDE.lat,
+        },
+      ]);
     expect(insertError).toBeNull();
 
-    // RPC via getUntypedAnonClient (chemin de LECTURE public, couvert par la
-    // policy "anon read dvf_mutations") : `dvf_in_radius` n'est pas encore dans
-    // les types générés (pattern documenté du projet — cf. dvf.ts production).
-    const { data, error } = await anon.rpc("dvf_in_radius", {
-      p_lat: CENTER.lat,
-      p_lon: CENTER.lon,
-      p_radius_meters: RADIUS_METERS,
-      p_limit: 500,
+    const stats = await dvfStatsInRadius(CENTER.lat, CENTER.lon, RADIUS_KM);
+
+    expect(stats.n_lignes).toBe(2);
+    expect(stats.n_ventes).toBe(1);
+    expect(stats.prix_m2_median).toBe(4000);
+    expect(stats.prix_m2_p25).toBe(4000);
+    expect(stats.prix_m2_p75).toBe(4000);
+    expect(stats.n_terrains).toBe(1);
+    expect(stats.prix_terrain_median).toBe(120000);
+    expect(stats.date_min).toBe(ITEST_DATE);
+    expect(stats.date_max).toBe(ITEST_DATE);
+  });
+
+  it("point sans mutation → une ligne, n_lignes = 0, médianes et dates null", async () => {
+    await expect(
+      dvfStatsInRadius(EMPTY_POINT.lat, EMPTY_POINT.lon, RADIUS_KM),
+    ).resolves.toStrictEqual({
+      n_lignes: 0,
+      n_ventes: 0,
+      prix_m2_median: null,
+      prix_m2_p25: null,
+      prix_m2_p75: null,
+      n_terrains: 0,
+      prix_terrain_median: null,
+      date_min: null,
+      date_max: null,
     });
-
-    expect(error).toBeNull();
-    expect(Array.isArray(data)).toBe(true);
-
-    const returned = (data as Array<{ id_mutation: string }>).filter((r) =>
-      r.id_mutation.startsWith(ITEST_PREFIX),
-    );
-
-    // (a) Seule la row DANS le rayon est retournée (la colonne `geog` mesure
-    //     des mètres réels : la row à ~2 km est exclue d'un rayon de 500 m).
-    expect(returned).toHaveLength(1);
-    const inside = returned[0] as {
-      id_mutation: string;
-      longitude: number | null;
-      latitude: number | null;
-    };
-    expect(inside.id_mutation).toBe(INSIDE_ID);
-
-    // (b) La position dérivée du geom (longitude/latitude alimentant la colonne
-    //     GENERATED) remonte peuplée et correspond au point inséré → preuve que
-    //     les colonnes générées `geom` → `geog` ont fonctionné de bout en bout.
-    expect(inside.longitude).not.toBeNull();
-    expect(inside.latitude).not.toBeNull();
-    expect(inside.longitude).toBeCloseTo(INSIDE.lon, 4);
-    expect(inside.latitude).toBeCloseTo(INSIDE.lat, 4);
   });
 });

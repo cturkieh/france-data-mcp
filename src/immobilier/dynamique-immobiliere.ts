@@ -15,9 +15,11 @@
  *     DEUX échouent (point réellement en mer / hors France) → SEULE la section
  *     `permis` est dégradée (`indisponible:commune_introuvable`). La commune ne
  *     sert QU'AUX permis Sit@del (maille commune) ; les zones AU (apicarto) et les
- *     terrains (DVF) sont calculés PAR RAYON (lat/lon) → ils restent servis dans
- *     tous les cas. L'outil NE doit JAMAIS échouer en entier (régression prouvée :
- *     -32602 sur tout l'appel pour un point côtier).
+ *     terrains (DVF) restent calculés PAR RAYON (lat/lon) dans tous les cas. Un point
+ *     en mer peut donc rendre `couverture.terrains = indisponible:no_data`, qui n'est
+ *     pas une panne (sens exact : description du tool, `api/tools.ts`). L'outil NE doit
+ *     JAMAIS échouer en entier (régression prouvée : -32602 sur tout l'appel pour un
+ *     point côtier).
  *   - Échec d'une section → `couverture.<section>` = "indisponible:<raison>",
  *     le reste du résultat est préservé.
  */
@@ -31,7 +33,7 @@ import { parentCommuneInsee } from "../territoire/commune-index.js";
 import { communeContainingPoint } from "../territoire/communes.js";
 import { reverseGeocode } from "../territoire/geocode.js";
 import { getZonesAU } from "./apicarto-plu.js";
-import { aggregatePrix, dvfInRadius } from "./dvf.js";
+import { type DvfStats, dvfStatsInRadius } from "./dvf.js";
 import { type PermitsAnneeEnCours, type PermitsResult, permitsForCommune } from "./sitadel.js";
 
 const LOG_TAG = "[france-data-mcp] dynamique_immobiliere";
@@ -84,7 +86,10 @@ export interface DynamiqueImmobiliereInfo {
   quartiers_au: { libelle: string; secteur: string | null }[];
   /** Prix médian m² des ventes bâties DVF dans le rayon, ou null si absent. */
   prix_m2_median: number | null;
-  /** Ventes de terrains (surface_terrain > 0). */
+  /**
+   * Mutations avec surface de terrain (`surface_terrain > 0`), bâti compris : une maison
+   * avec jardin compte, donc `prix_terrain_median` n'est pas le prix d'un terrain nu.
+   */
   terrains: { n: number; prix_terrain_median: number | null };
 }
 
@@ -194,6 +199,16 @@ function permisStatus(
   return "ok";
 }
 
+/**
+ * Statut de la section `terrains` : `runSection` pose `ok` dès l'absence de throw,
+ * or un rayon sans aucune ligne DVF (zone non couverte, ou aucune vente retenue)
+ * serait servi comme « 0 terrain, donnée fiable ». Jumeau de `permisStatus`.
+ */
+function terrainsStatus(outcome: SectionOutcome<DvfStats>): SectionStatus {
+  if (outcome.status !== "ok" || !outcome.data) return outcome.status;
+  return outcome.data.n_lignes === 0 ? "indisponible:no_data" : "ok";
+}
+
 // ---------------------------------------------------------------------------
 // Signal heuristic
 // ---------------------------------------------------------------------------
@@ -266,14 +281,14 @@ export async function dynamiqueImmobiliere(
   const [permisOut, zonesOut, dvfOut] = await Promise.all([
     permisSection,
     runSection("zones_au", () => getZonesAU(lat, lon, { radiusKm: rayon_km })),
-    runSection("terrains", () => dvfInRadius(lat, lon, rayon_km)),
+    runSection("terrains", () => dvfStatsInRadius(lat, lon, rayon_km)),
   ]);
 
   // --- Couverture ---------------------------------------------------------
   const couverture = {
     permis: permisStatus(permisOut, code_commune),
     zones_au: zonesOut.status,
-    terrains: dvfOut.status,
+    terrains: terrainsStatus(dvfOut),
   };
 
   // --- Permis -------------------------------------------------------------
@@ -328,13 +343,7 @@ export async function dynamiqueImmobiliere(
   });
 
   // --- DVF foncier --------------------------------------------------------
-  const dvfRows = dvfOut.data ?? [];
-  const agg = aggregatePrix(dvfRows);
-  // n_terrains comes directly from aggregatePrix — no redundant re-filter
-  const terrainsInfo = {
-    n: agg.n_terrains,
-    prix_terrain_median: agg.prix_terrain_median,
-  };
+  const dvfStats = dvfOut.data;
 
   // --- Signal + result ---------------------------------------------------
   const signal = computeSignal(logAuthScorable, zonesImm);
@@ -363,8 +372,11 @@ export async function dynamiqueImmobiliere(
         annee_en_cours: permisData?.annee_en_cours ?? null,
       },
       quartiers_au: quartiersAu,
-      prix_m2_median: agg.prix_m2_median,
-      terrains: terrainsInfo,
+      prix_m2_median: dvfStats?.prix_m2_median ?? null,
+      terrains: {
+        n: dvfStats?.n_terrains ?? 0,
+        prix_terrain_median: dvfStats?.prix_terrain_median ?? null,
+      },
     },
     geojson: {
       type: "FeatureCollection",

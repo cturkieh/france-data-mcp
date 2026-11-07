@@ -1,16 +1,5 @@
-export {
-  aggregatePrix,
-  deptPrefixFromInsee,
-  dvfInRadius,
-  ensureCommuneCached,
-  fetchCommuneCsv,
-  fetchCommunesInRadius,
-  getCacheRow,
-  markCommuneCached,
-  upsertMutations,
-} from "./dvf.js";
-
-export type { DvfAggregate, DvfCacheRow, DvfMutation } from "./dvf.js";
+export { dvfStatsInRadius } from "./dvf.js";
+export type { DvfStats } from "./dvf.js";
 
 export { getZonesAU } from "./apicarto-plu.js";
 export type { ZonesAUEntry, ZonesAUResult } from "./apicarto-plu.js";

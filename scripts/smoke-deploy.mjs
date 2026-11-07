@@ -16,6 +16,9 @@
  *   4. Garde-fou anti-régression MER (point réellement en mer, pas de commune) :
  *      IMMO → couverture.permis commence par "indisponible:" (200, jamais throw)
  *      SANTÉ → erreur JSON-RPC -32602 (RangeError "déduire le département" attendu)
+ *   5. DVF Paris 15e : cout_foncier.couverture === "ok"
+ *      ∧ dynamique_immobiliere.couverture.terrains === "ok"
+ *      (RPC absente ou policy perdue, sinon invisible après déploiement)
  *
  * Pourquoi le gate IMMO est `couverture.permis === "ok"` et NON `logements > 0` :
  *   `runSection` (panorama-implantation.ts) expose "ok" dès que Sit@del répond
@@ -37,6 +40,8 @@ const EXPECTED_VERSION = process.argv[3] ?? "0.27.0";
 
 // Point du smoke : usine Orano / commune de La Hague (50041), sans adresse proche.
 const LA_HAGUE = { lat: 49.6546, lon: -1.8214 };
+// Point couvert par DVF, dense : ne doit jamais rendre no_data.
+const PARIS_15E = { lat: 48.8417, lon: 2.2995 };
 // Point réellement en mer (au nord des îles anglo-normandes) : aucune commune.
 const EN_MER = { lat: 49.9, lon: -2.2 };
 
@@ -164,6 +169,33 @@ console.log("\n--- GARDE-FOU MER (49.90,-2.20 — doit TOUJOURS dégrader propre
     "santé mer → -32602 attendu (RangeError mappé)",
     cov.error ? `code=${cov.error.code}` : "PAS d'erreur (régression !)",
   );
+}
+
+// --- Gate 5 : DVF lit bien la table nationale (statut, jamais un chiffre) ---
+console.log("\n--- DVF Paris 15e (cout_foncier + dynamique_immobiliere) ---");
+{
+  const cout = await mcpCall("cout_foncier", { ...PARIS_15E, rayon_km: 2 });
+  gate(
+    !cout.error && cout.result?.couverture === "ok",
+    "cout_foncier servi",
+    cout.error
+      ? `erreur ${cout.error.code} "${cout.error.message}"`
+      : `couverture="${cout.result?.couverture}"`,
+  );
+  const immo = await mcpCall("dynamique_immobiliere", { ...PARIS_15E, rayon_km: 2 });
+  const terrains = immo.result?.couverture?.terrains;
+  gate(
+    !immo.error && terrains === "ok",
+    "terrains DVF servis",
+    immo.error
+      ? `erreur ${immo.error.code} "${immo.error.message}"`
+      : `couverture.terrains="${terrains}"`,
+  );
+  if (!cout.error)
+    info(
+      "n_ventes / periode (INFO, non gaté)",
+      `${cout.result?.n_ventes} / ${cout.result?.periode}`,
+    );
 }
 
 console.log(`\n=== ${failures === 0 ? "✅ SMOKE OK" : `❌ ${failures} GATE(S) EN ÉCHEC`} ===`);

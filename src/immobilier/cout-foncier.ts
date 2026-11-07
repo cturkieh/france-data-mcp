@@ -5,7 +5,7 @@
  * immobilière — usage : affichage dans le rapport d'implantation.
  */
 
-import { aggregatePrix, dvfInRadius } from "./dvf.js";
+import { dvfStatsInRadius } from "./dvf.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -31,17 +31,25 @@ export interface CoutFoncierResult {
 // Implementation
 // ---------------------------------------------------------------------------
 
+/** Année seule si les deux dates tombent la même année, sinon `2025–2026`. */
+function periodeFromDates(dateMin: string | null, dateMax: string | null): string | null {
+  if (!dateMin || !dateMax) return null;
+  const minYear = dateMin.slice(0, 4);
+  const maxYear = dateMax.slice(0, 4);
+  return minYear === maxYear ? minYear : `${minYear}–${maxYear}`;
+}
+
 /**
  * Retourne les prix au m² (médiane, P25, P75) dans le rayon indiqué à partir
- * des données DVF (mutations foncières). Les erreurs de `dvfInRadius` sont
+ * des statistiques DVF calculées en base. Les erreurs de `dvfStatsInRadius` sont
  * propagées sans être swallowées.
  */
 export async function coutFoncier(input: CoutFoncierInput): Promise<CoutFoncierResult> {
   const { lat, lon, rayon_km } = input;
 
-  const rows = await dvfInRadius(lat, lon, rayon_km);
+  const stats = await dvfStatsInRadius(lat, lon, rayon_km);
 
-  if (rows.length === 0) {
+  if (stats.n_lignes === 0) {
     return {
       couverture: "indisponible:no_data",
       prix_m2_median: null,
@@ -53,30 +61,13 @@ export async function coutFoncier(input: CoutFoncierInput): Promise<CoutFoncierR
     };
   }
 
-  const agg = aggregatePrix(rows);
-
-  // Dériver la période depuis les dates de mutation (min..max year)
-  const years = rows
-    .map((r) => {
-      const y = Number.parseInt(r.date_mutation.slice(0, 4), 10);
-      return Number.isFinite(y) ? y : null;
-    })
-    .filter((y): y is number => y !== null);
-
-  let periode: string | null = null;
-  if (years.length > 0) {
-    const minYear = Math.min(...years);
-    const maxYear = Math.max(...years);
-    periode = minYear === maxYear ? String(minYear) : `${minYear}–${maxYear}`;
-  }
-
   return {
     couverture: "ok",
-    prix_m2_median: agg.prix_m2_median,
-    prix_m2_p25: agg.prix_m2_p25,
-    prix_m2_p75: agg.prix_m2_p75,
-    n_ventes: agg.n_ventes,
-    periode,
+    prix_m2_median: stats.prix_m2_median,
+    prix_m2_p25: stats.prix_m2_p25,
+    prix_m2_p75: stats.prix_m2_p75,
+    n_ventes: stats.n_ventes,
+    periode: periodeFromDates(stats.date_min, stats.date_max),
     source: "DGFiP DVF",
   };
 }
