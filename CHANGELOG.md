@@ -6,6 +6,19 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+### Added
+
+- **Chargement national DVF (`ingest-dvf.yml`, lancement manuel pour l'instant).**
+  Les fichiers DVF par commune sont annoncés supprimés au 31/11/2026. Ce workflow
+  charge les 12 derniers mois publiés dans `dvf_mutations` depuis les fichiers
+  nationaux de data.gouv, par table temporaire et bascule atomique, après des
+  contrôles calibrés sur les vraies données. `data_freshness` expose la source
+  `dvf`. La RPC `dvf_stats_in_radius` calcule médiane et quartiles sur tout le
+  rayon : lire 500 lignes faussait le prix sur une table nationale (+73 % à 50 km de
+  Paris 15e). Les tools DVF ne changent pas encore : ils passeront sur cette RPC
+  dans la PR suivante, qui activera aussi le cron. Mesures :
+  `docs/experiences/2026-11-06-dvf-chargement-national.md`.
+
 ## [0.31.2] — 2026-11-06 — `rpps_search_by_name` sans erreur sur les noms courts, fonctions internes réservées à `service_role`, FINESS adapté au flux ANS
 
 ### Security

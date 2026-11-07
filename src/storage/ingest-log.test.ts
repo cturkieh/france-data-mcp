@@ -45,6 +45,7 @@ describe("getDataFreshness", () => {
     expect(result.map((r) => r.source).sort()).toEqual([
       "ameli_ps",
       "cds",
+      "dvf",
       "finess",
       "iris",
       "rpps",

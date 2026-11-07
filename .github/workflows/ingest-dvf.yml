@@ -1,0 +1,122 @@
+# .github/workflows/ingest-dvf.yml
+name: Ingest DVF (ventes immobilieres, chargement national)
+
+on:
+  # Pas de cron ici : il est ajoute par la PR de lecture. Une fois merge, il ferait le
+  # swap seul avant le deploiement du nouveau code de lecture et casserait le cache
+  # paresseux encore en prod (son upsert vise une cle primaire qui disparait au swap).
+  # Cron prevu : le 12 du mois, 05:00 UTC (ne concurrence pas FINESS 1/15, RPPS 5,
+  # Sit@del 10, Ameli/CDS lundis), detection mensuelle d'une livraison semestrielle.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Forcer la re-ingestion meme si la livraison est identique au dernier run (bypass court-circuit)."
+        type: boolean
+        default: false
+      dry_run:
+        description: "Tout jusqu'a la verification du nombre de lignes, SANS swap ni ligne ingest_log. La staging reste en base jusqu'au prochain run reel."
+        type: boolean
+        default: false
+
+# Never run on pull_request - secrets are not available there, by design.
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ingest-dvf
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # Telechargement ~170 Mo, agregation 30 s mesurees (pic 1,5 Go), ~805 lots PostgREST de
+    # 2 000 lignes avec le GiST deja pose. Un run tue par le budget = `cancelled`, alerte ci-dessous.
+    timeout-minutes: 90
+    steps:
+      # Checkout EN PREMIER : l'alerte d'échec est une action LOCALE
+      # (`./.github/actions/notify-ingest-failure`), lue dans le workspace —
+      # sans checkout, un preflight qui échoue rendrait l'alerte MUETTE
+      # (exactement la panne « secrets manquants » qu'elle doit rapporter).
+      # Le preflight reste AVANT `pnpm install` (le poste coûteux).
+      - uses: actions/checkout@v6
+
+      # Preflight AVANT `pnpm install` (le checkout reste en 1er, cf. ci-dessus) : echoue vite et clairement si un secret
+      # manque (convention pour tout nouveau workflow Supabase) plutot que de
+      # crasher opaquement au milieu de l'ingestion.
+      - name: Validate required secrets present
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          missing=()
+          [ -z "$SUPABASE_URL" ] && missing+=("SUPABASE_URL")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Secrets manquants : ${missing[*]} — configurer dans Settings > Secrets and variables > Actions"
+            exit 1
+          fi
+          echo "Secrets requis presents."
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DVF ingestion
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Le script refuse un dry-run si GITHUB_EVENT_NAME = schedule.
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          NODE_OPTIONS: --max-old-space-size=6144
+          # Inputs booleens types (jamais github.event.inputs.x qui stringifie
+          # "false" -> truthy -> force a chaque cron). Voir ingest-rpps.yml.
+          FORCE_REINGEST: ${{ inputs.force && '1' || '0' }}
+          DVF_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: pnpm ingest:dvf
+
+      # Vigie « run vert mais donnée malade » : run `partial` (canary) ou source
+      # TARIE (aucune livraison au-delà de la cadence attendue). `success()` : ne
+      # s'évalue que sur un cron réussi ; `continue-on-error` : une notif KO ne
+      # re-rouge jamais un cron déjà réussi. Pas de vigie sur un dry-run : il n'écrit
+      # aucune ligne, elle jugerait un autre run que le sien.
+      - name: Notify ingest anomaly
+        if: success() && !inputs.dry_run
+        continue-on-error: true
+        uses: ./.github/actions/notify-ingest-anomaly
+        with:
+          source: dvf
+          supabase-url: ${{ secrets.SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
+      # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).
+      - name: Alert on failure or cancelled run
+        if: failure() || cancelled()
+        uses: ./.github/actions/notify-ingest-failure
+        with:
+          source-label: DVF
+          ingest-log-source: dvf
+          issue-labels: ingestion-failure,dvf
+          failure-modes: "API data.gouv.fr en panne ou fichiers full-AAAA renommes (moins de 2 trouves), telechargement > 3 tentatives, gzip tronque ou corrompu, colonne absente de l'en-tete, livraison qui recule par rapport a la prod (fichier retire cote data.gouv : echec repete a chaque cron tant qu'il manque), lignes gardees hors [1,1 M ; 2,4 M], avec prix hors [600 K ; 1,3 M], avec terrain hors [800 K ; 1,7 M], communes hors [29 000 ; 35 500], departement attendu sous 300 lignes, arrondissement PLM absent ou ligne sur un code ville, moins de 95 % des lignes en metropole (coordonnees permutees), mois de la fenetre sous 30 %, dernier mois incoherent avec le fichier le plus recent, mediane hors [1 500 ; 5 000], invalides > 0,1 %, sans date > 1 %, sans coordonnees > 15 %, inutiles > 35 %, doublons > 60 %, compte staging different des lignes inserees (lot duplique, swap refuse). Un dry-run en echec n'ecrit aucune ligne ingest_log : lire le log du run. (Une source TARIE ne fait pas echouer le run : elle le marque partial, cf. notify-ingest-anomaly.)"
+          job-status: ${{ job.status }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          resend-api-key: ${{ secrets.RESEND_API_KEY }}
+          email-to: ${{ vars.NOTIFY_EMAIL_TO || 'cturkieh@gmail.com' }}
+          email-from: ${{ vars.NOTIFY_EMAIL_FROM || 'France Data MCP <onboarding@resend.dev>' }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

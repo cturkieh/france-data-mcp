@@ -559,3 +559,59 @@ describe("staging-create suit la table prod (sitadel_logements)", () => {
     expect(stagingBody).toMatch(/alter table sitadel_logements_staging enable row level security/i);
   });
 });
+
+describe("staging-create suit la table prod (dvf_mutations)", () => {
+  // Pas de clé primaire ni de colonne `geom` dans la staging, à dessein : inutilisées
+  // en lecture, gain disque mesuré. Tout le reste doit survivre au swap semestriel.
+  const VOLONTAIREMENT_ABSENTES = new Set(["geom"]);
+  const stagingBody = latestFunctionBody("ingest_create_dvf_mutations_staging");
+  const columnsOf = (block: string): string[] =>
+    [...block.matchAll(/^\s*([a-z_0-9]+)\s+(?:text|date|numeric|double|geometry|geography)/gm)].map(
+      (m) => m[1] ?? "",
+    );
+  const createTableBody = (sql: string, table: string): string => {
+    const m = sql.match(
+      new RegExp(`create table (?:if not exists )?${table} \\(([\\s\\S]*?)\\n\\s*\\);`),
+    );
+    if (!m?.[1]) throw new Error(`CREATE TABLE ${table} introuvable`);
+    return m[1];
+  };
+
+  it("mêmes colonnes que la prod, hors `geom`, sans clé primaire", () => {
+    expect(stagingBody.length).toBeGreaterThan(0);
+    const prod = columnsOf(createTableBody(allMigrationsSql(), "dvf_mutations"));
+    expect(prod.length).toBeGreaterThan(10);
+    const staging = columnsOf(createTableBody(stagingBody, "dvf_mutations_staging"));
+    const expected = prod.filter((c) => !VOLONTAIREMENT_ABSENTES.has(c));
+    expect(staging.filter((c) => c !== "geog")).toEqual(expected);
+    expect(stagingBody).not.toMatch(/primary key/);
+    expect(stagingBody).not.toMatch(/\bgeom\b/);
+  });
+
+  it("toute colonne ajoutée par ALTER TABLE existe dans la staging-create", () => {
+    const added = [
+      ...allMigrationsSql().matchAll(
+        /ALTER TABLE (?:public\.)?dvf_mutations\s+ADD COLUMN (?:IF NOT EXISTS )?(\w+)/gi,
+      ),
+    ].map((m) => m[1] ?? "");
+    expect(added).toContain("geog");
+    const missing = added.filter((col) => !new RegExp(`\\b${col}\\b`).test(stagingBody));
+    expect(missing, `colonnes perdues au prochain swap : ${JSON.stringify(missing)}`).toEqual([]);
+  });
+
+  it("tout index prod existe dans la staging-create, hors `geom`", () => {
+    const prodCols = liveIndexColumnLists(allMigrationsSql(), "dvf_mutations");
+    expect(prodCols).toContain("geog");
+    expect(prodCols).toContain("code_commune");
+    const stagingCols = indexColumnLists(stagingBody, "dvf_mutations_staging");
+    const missing = [...prodCols].filter(
+      (c) => !VOLONTAIREMENT_ABSENTES.has(c) && !stagingCols.has(c),
+    );
+    expect(missing, `index perdus au prochain swap : ${JSON.stringify(missing)}`).toEqual([]);
+  });
+
+  it("la staging garde la lecture anon : sans policy, anon reçoit [] SANS erreur (0 vente partout, cron vert)", () => {
+    expect(stagingBody).toMatch(/on dvf_mutations_staging for select to anon/i);
+    expect(stagingBody).toMatch(/alter table dvf_mutations_staging enable row level security/i);
+  });
+});

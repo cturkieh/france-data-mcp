@@ -54,6 +54,8 @@ const LOOKUP_RPCS = [
   // fonction : ce garde-fou ne lit que la dernière déclaration).
   "dvf_in_radius",
   "rpps_par_specialite_dept",
+  // Servie à `anon` (plafond rôle 3 s) : agrégat sur tout le rayon, 20261106T230000.
+  "dvf_stats_in_radius",
 ] as const;
 
 const MIN_TIMEOUT_SECONDS = 15;
