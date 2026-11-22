@@ -20,6 +20,15 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   matviews qui en dépendraient encore. `--dry-run` (input `dry_run` du workflow) affiche la décision
   sans rien supprimer.
 
+### Fixed
+
+- **Le cron Sit@del télécharge à nouveau le fichier complet.** Depuis le 10/11/2026 l'export
+  CSV du SDES coupait la connexion avant la fin : il manquait la dernière tranche, donc la fin
+  du Val-d'Oise et tous les DOM. Le cron refusait ce fichier amputé et les permis de
+  `dynamique_immobiliere` restaient au millésime chargé le 10/10. La requête demande
+  désormais un tri explicite (`orderBy=CODE_INSEE`), avec lequel le fichier arrive entier.
+  Mesures : `docs/experiences/2026-11-22-sitadel-export-tronque.md`.
+
 ## [0.32.0] — 2026-11-07 — DVF sur une table nationale : Paris, Lyon et Marseille couverts, prix calculés sans échantillonnage
 
 ### Fixed
