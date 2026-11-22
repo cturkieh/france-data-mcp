@@ -118,7 +118,7 @@ jobs:
           source-label: IRIS
           ingest-log-source: iris
           issue-labels: ingestion-failure,iris
-          failure-modes: "IRIS_CONTOURS_URL périmée (millésime changé côté data.geopf.fr), ogr2ogr/7z absents (install système), row count hors [40K, 55K] (changement de schéma IGN), timeout PostgREST sur grosses géométries."
+          failure-modes: "IRIS_CONTOURS_URL périmée (millésime changé côté data.geopf.fr), ogr2ogr/7z absents (install système), row count hors [40K, 55K] (changement de schéma IGN), timeout PostgREST sur grosses géométries. Échec de ingest_rebuild_iris_full (rattachement de la vue iris_full aux tables en place) : avant bascule rien n'a bougé, vérifier que la migration 20261122T230000 est appliquée ; après bascule les tables sont à jour mais la vue peut encore lire l'ancien millésime, lancer SELECT ingest_rebuild_iris_full(); dans l'éditeur SQL Supabase (le message d'erreur dit si une migration est nécessaire)."
           job-status: ${{ job.status }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           resend-api-key: ${{ secrets.RESEND_API_KEY }}

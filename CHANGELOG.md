@@ -27,6 +27,15 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   `dynamique_immobiliere` restaient au millésime chargé le 10/10. La requête demande
   désormais un tri explicite (`orderBy=CODE_INSEE`), avec lequel le fichier arrive entier.
   Mesures : `docs/experiences/2026-11-22-sitadel-export-tronque.md`.
+- **`profil_iris` servira le nouveau millésime dès le prochain rechargement IRIS.** Les 5 RPC IRIS
+  lisent la vue `iris_full`, et une vue suit ses tables par leur identifiant interne, pas par leur
+  nom. Après le rechargement annuel (20 janvier), la vue serait restée sur les anciennes tables :
+  ancien millésime servi, run en `success`, puis vue détruite au rechargement suivant et outil en
+  erreur. Pas encore arrivé en prod, aucun rechargement IRIS n'ayant eu lieu depuis la création de
+  la vue. `iris.ts` rattache désormais la vue aux tables en place avant la première bascule et
+  après la dernière (`ingest_rebuild_iris_full()`, migration `20261122T230000`) ; un échec de ce
+  rattachement finit en `failed` avec la commande de réparation. Défaut reproduit puis corrigé sur
+  une base jetable : `docs/experiences/2026-11-22-iris-full-apres-bascule.md`.
 - **Le nettoyage des copies de secours ne peut plus détruire une matview encore utilisée.**
   `ingest_drop_stale_previous` supprimait `<prod>_previous` en `CASCADE` : après un run arrêté
   entre la bascule et la reconstruction des matviews, celles-ci partaient avec la copie et les

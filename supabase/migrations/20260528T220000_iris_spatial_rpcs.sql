@@ -2,9 +2,11 @@
 -- Cf. docs/plans/iris-infracommunal.md §5 (contrat GEO Intel, règles R1/R2/R3).
 --
 -- VUE `iris_full` : jointure UNIQUE iris + 3 blocs stats (LEFT JOIN), source DRY
--- des 4 RPCs lookup/spatiales (évite 4 copies du join → anti-drift). VUE SIMPLE
--- (pas matview) → résolue PAR NOM à chaque requête, suit les tables swappées,
--- AUCUNE bombe OID. `security_invoker=true` : la vue s'exécute avec les droits
+-- des 4 RPCs lookup/spatiales (évite 4 copies du join → anti-drift). Une vue,
+-- même simple, suit ses tables par OID et non par nom : après une bascule IRIS
+-- elle lirait `iris*_previous`. `ingest_rebuild_iris_full()` (migration
+-- `20261122T230000`) la rattache aux tables en place, appelée par `iris.ts`.
+-- `security_invoker=true` : la vue s'exécute avec les droits
 -- de l'appelant → les policies « anon read » des 4 tables s'appliquent
 -- (cohérent RLS, pas de fuite via une vue owner-priviligiée).
 --

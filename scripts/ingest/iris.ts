@@ -7,9 +7,12 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { parse } from "csv-parse";
+import { sleep } from "../../src/core/backoff.js";
+import { PG_TRANSIENT_REBUILD_CODES, type PgErrorLike, withTimeout } from "../../src/core/index.js";
 import {
   IngestError,
   type IngestLogEntry,
+  type IngestPhase,
   type RowCountReference,
   SEVENZIP_MAGIC,
   ZIP_MAGIC,
@@ -45,8 +48,10 @@ const execFileAsync = promisify(execFile);
 // CHECKSUM COMBINÉ : un seul `ingest_log.source = 'iris'` + un sha combiné des
 // 4 fichiers sources → court-circuit ssi AUCUN n'a changé. Refresh annuel donc
 // re-ingérer les 4 quand un seul change est acceptable (et 1 seule ligne
-// `data_freshness`). PAS de matview FROM ces tables → pas de bombe OID ; les
-// stats sont jointes à `iris` sur code_iris au query-time (profil_iris).
+// `data_freshness`). Les stats sont jointes à `iris` sur code_iris par la vue
+// `iris_full`, que lisent les RPC de profil_iris. Une vue suit ses tables par
+// OID, pas par nom : après une bascule elle lirait `iris*_previous`. D'où
+// `rebuildIrisFull`, appelée avant la première bascule et après la dernière.
 //
 // GÉOMÉTRIE (bloc 1) = ogr2ogr (reproj Lambert-93→4326 + WKT) + 7z, dépendances
 // SYSTÈME (gdal-bin + p7zip). 7z décompresse AUSSI les .zip INSEE (blocs 2-4).
@@ -128,6 +133,14 @@ async function main(): Promise<void> {
   // quelles tables sont déjà à jour (sinon `failed` nu = « rien n'a bougé »
   // trompeur sur une désync de millésime inter-tables).
   const swappedBlocks: string[] = [];
+  // Déclaré hors du `try` : le `catch` en a besoin pour rattacher la vue.
+  let supabase: SupabaseClient | null = null;
+  // Vrai dès que la reconstruction d'après bascule a été lancée, réussie ou non :
+  // le `catch` ne la relance pas.
+  let rebuildApresTentee = false;
+  // Vrai dès que la reconstruction d'avant bascule a réussi : à partir de là une
+  // bascule a pu être validée en base même si le client n'en a rien su.
+  let basculePossible = false;
   try {
     // 1. DOWNLOAD des 4 sources + dernier checksum success, en parallèle.
     const [contours, pop, familles, revenu, lastSha, referenceRows] = await Promise.all([
@@ -184,7 +197,13 @@ async function main(): Promise<void> {
     for (const { file, ...config } of archives) await preValidateFile(file.filePath, config);
 
     workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "iris-ingest-"));
-    const supabase = getUntypedServiceClient("iris");
+    supabase = getUntypedServiceClient("iris");
+
+    // Avant toute bascule : prouve que la RPC existe (migration absente = échec
+    // net, rien de basculé) et détache la vue d'une éventuelle `_previous` que la
+    // bascule enverrait au `DROP … CASCADE`.
+    await rebuildIrisFull(supabase, "avant_bascule");
+    basculePossible = true;
 
     // ── BLOC 1 — contours → iris ─────────────────────────────────────────────
     const contoursCount = await ingestContours(contours.filePath, workDir, supabase, referenceRows);
@@ -230,6 +249,11 @@ async function main(): Promise<void> {
     });
     swappedBlocks.push("iris_revenu");
 
+    // Après la dernière bascule : la vue doit lire les nouvelles tables. Un échec
+    // ici est un `failed` (vue sur l'ancien millésime), pas un `partial`.
+    rebuildApresTentee = true;
+    await rebuildIrisFull(supabase, "apres_bascule");
+
     // CANARY post-swap (non-bloquant) — cible la table `iris` (contours).
     await runAndRecordCanary(supabase, "iris", log, "iris");
 
@@ -255,10 +279,17 @@ async function main(): Promise<void> {
     // Audit HONNÊTE : si des blocs ont déjà swappé, le dire — un `failed` nu
     // masquerait une désync de millésime (tables swappées N + table échouée N-1).
     // Le prochain run répare tout (checksum combiné changé → ré-ingestion).
-    log.error_message =
+    const vueSuffix = await rebuildIrisFullAfterFailure({
+      basculePossible,
+      rebuildApresTentee,
+      originPhase: ingestErr.phase,
+      supabase,
+    });
+    log.error_message = `${
       swappedBlocks.length > 0
         ? `${ingestErr.message} — ATTENTION ${swappedBlocks.length} bloc(s) DÉJÀ swappé(s) en prod [${swappedBlocks.join(", ")}] : désync de millésime possible jusqu'au prochain run (qui réingère TOUS les blocs via le checksum combiné)`
-        : ingestErr.message;
+        : ingestErr.message
+    }${vueSuffix}`;
     log.finished_at = new Date().toISOString();
     await writeIngestLogFailureFallback(log, "iris");
     console.error(`[iris] FAILED at ${ingestErr.phase}: ${ingestErr.message}`);
@@ -272,6 +303,187 @@ async function main(): Promise<void> {
       }
     }
   }
+}
+
+// ── Vue iris_full ───────────────────────────────────────────────────────────
+
+/** Tables dont `iris_full` doit dépendre, triées comme la RPC les rend. */
+const IRIS_FULL_TABLES = ["iris", "iris_familles", "iris_population", "iris_revenu"] as const;
+const REBUILD_MAX_ATTEMPTS = 3;
+const REBUILD_RETRY_DELAY_MS = 2000;
+/** Borne du rattachement tenté dans le `catch` : l'écriture d'`ingest_log` passe avant. */
+const REBUILD_AFTER_FAILURE_TIMEOUT_MS = 60_000;
+const REBUILD_REPAIR_HINT = "Réparation à la main : SELECT ingest_rebuild_iris_full();";
+/** 42P16 : relancer la fonction échouerait pareil, la vue et la fonction ont divergé. */
+const PG_INVALID_TABLE_DEFINITION = "42P16";
+const REBUILD_42P16_HINT =
+  "La liste de colonnes de la vue iris_full ne correspond plus à celle de ingest_rebuild_iris_full : relancer la fonction échouerait pareil, il faut une migration qui recrée la vue et met la fonction à jour.";
+const DETAIL_MAX_CHARS = 300;
+
+type RebuildMoment = "avant_bascule" | "apres_bascule";
+
+const REBUILD_MOMENT_LABEL: Record<RebuildMoment, string> = {
+  avant_bascule: "avant bascule",
+  apres_bascule: "après bascule",
+};
+
+type RebuildRpcResult = { data: unknown; error: PgErrorLike | null };
+
+/** Seul appel dont la reconstruction a besoin ; le vrai client et un faux de test y satisfont. */
+interface RebuildRpcClient {
+  rpc(fn: "ingest_rebuild_iris_full"): PromiseLike<RebuildRpcResult>;
+}
+
+interface RebuildDeps {
+  sleep?: (ms: number) => Promise<void>;
+  /** Borne du rattachement dans le `catch` (test : quelques ms). */
+  afterFailureTimeoutMs?: number;
+}
+
+function isExpectedIrisFullTables(data: unknown): boolean {
+  return (
+    Array.isArray(data) &&
+    data.length === IRIS_FULL_TABLES.length &&
+    IRIS_FULL_TABLES.every((t, i) => data[i] === t)
+  );
+}
+
+function truncate(s: string): string {
+  return s.length > DETAIL_MAX_CHARS ? `${s.slice(0, DETAIL_MAX_CHARS)}…` : s;
+}
+
+/** Message, puis `details` et `hint` s'ils sont non vides, tronqués. */
+function describePgError(error: PgErrorLike): string {
+  const parts = [error.message ?? "sans message"];
+  if (error.details) parts.push(`details: ${truncate(error.details)}`);
+  if (error.hint) parts.push(`hint: ${truncate(error.hint)}`);
+  return parts.join(" | ");
+}
+
+type AttemptFailure = { code: string | undefined; text: string; cause: unknown };
+
+/**
+ * Une tentative : `null` si la vue est rattachée, l'échec sinon. Lève une
+ * `IngestError` si la RPC rend autre chose que les 4 tables attendues.
+ */
+async function attemptRebuildIrisFull(
+  supabase: RebuildRpcClient,
+  phase: IngestPhase,
+  label: string,
+  attempt: number,
+): Promise<AttemptFailure | null> {
+  const start = Date.now();
+  let result: RebuildRpcResult;
+  try {
+    result = await supabase.rpc("ingest_rebuild_iris_full");
+  } catch (e) {
+    const text = `rpc() a levé : ${e instanceof Error ? e.message : String(e)}`;
+    console.error(`[iris] ingest_rebuild_iris_full (${label}, tentative ${attempt}) : ${text}`);
+    return { code: undefined, text, cause: e };
+  }
+  const elapsedMs = Date.now() - start;
+  const { data, error } = result;
+
+  if (error) {
+    // `!= null` : un `code: null` venu du JSON compte comme absent, pas comme le code "null".
+    const code = error.code != null && String(error.code) !== "" ? String(error.code) : undefined;
+    return { code, text: `${describePgError(error)} (${elapsedMs}ms)`, cause: error };
+  }
+  if (!isExpectedIrisFullTables(data)) {
+    const detail = `ingest_rebuild_iris_full (${label}) a rendu ${JSON.stringify(data)} au lieu de ${JSON.stringify(IRIS_FULL_TABLES)}. ${REBUILD_REPAIR_HINT}`;
+    console.error(`[iris] ${detail}`);
+    throw new IngestError(phase, detail);
+  }
+  console.log(`[iris] vue iris_full rattachée (${label}) en ${elapsedMs}ms`);
+  return null;
+}
+
+/**
+ * Rattache la vue `iris_full` aux tables IRIS en place (`ingest_rebuild_iris_full`).
+ * Réessaie sur un code transitoire (verrou, timeout), sur un code vide ou absent
+ * (coupure réseau, corps de passerelle 502/504) et sur un `rpc()` qui lève : la
+ * fonction est idempotente et une redéfinition échouée ne change rien. Un code
+ * Postgres ou PostgREST hors liste transitoire, ou une valeur rendue autre que les
+ * 4 tables attendues, lève une `IngestError` : phase `pre_validate` avant bascule
+ * (rien n'a bougé), `swap` après.
+ */
+async function rebuildIrisFull(
+  supabase: RebuildRpcClient,
+  moment: RebuildMoment,
+  deps: RebuildDeps = {},
+): Promise<void> {
+  const wait = deps.sleep ?? sleep;
+  const phase = moment === "avant_bascule" ? "pre_validate" : "swap";
+  const label = REBUILD_MOMENT_LABEL[moment];
+  let last: AttemptFailure | undefined;
+
+  for (let attempt = 1; attempt <= REBUILD_MAX_ATTEMPTS; attempt++) {
+    const failure = await attemptRebuildIrisFull(supabase, phase, label, attempt);
+    if (failure === null) return;
+
+    const transient = failure.code === undefined || PG_TRANSIENT_REBUILD_CODES.has(failure.code);
+    const detail = `ingest_rebuild_iris_full a échoué [code=${failure.code ?? "none"}] (${label}, tentative ${attempt}/${REBUILD_MAX_ATTEMPTS}) : ${failure.text}`;
+    console.error(`[iris] ${detail}`);
+
+    if (!transient) {
+      const hint =
+        failure.code === PG_INVALID_TABLE_DEFINITION ? REBUILD_42P16_HINT : REBUILD_REPAIR_HINT;
+      throw new IngestError(phase, `${detail}. ${hint}`, failure.cause);
+    }
+    last = failure;
+    if (attempt < REBUILD_MAX_ATTEMPTS) await wait(REBUILD_RETRY_DELAY_MS);
+  }
+  throw new IngestError(
+    phase,
+    `ingest_rebuild_iris_full a échoué [code=${last?.code ?? "none"}] (${label}) : ${last?.text ?? "sans détail"}. Échec transitoire, ${REBUILD_MAX_ATTEMPTS} tentatives épuisées. ${REBUILD_REPAIR_HINT}`,
+    last?.cause,
+  );
+}
+
+interface AfterFailureInput {
+  /** Vrai dès que la reconstruction d'avant bascule a réussi : une bascule a pu partir. */
+  basculePossible: boolean;
+  /** Vrai si la reconstruction d'après bascule a déjà été lancée : pas de relance. */
+  rebuildApresTentee: boolean;
+  /** Phase de l'erreur d'origine. */
+  originPhase: IngestPhase;
+  supabase: RebuildRpcClient | null;
+}
+
+/**
+ * Chemin d'échec de `main` : dès qu'une bascule a pu partir, la vue peut lire une
+ * `_previous`, même si `swappedBlocks` est vide (bascule validée en base, réponse
+ * perdue côté client). Tente de la rattacher, borné dans le temps et sans jamais
+ * lever : l'erreur d'origine et l'écriture d'`ingest_log` priment. Sans effet sur
+ * une base saine. Rend le suffixe à ajouter au message, vide si rien n'a été tenté.
+ */
+async function rebuildIrisFullAfterFailure(
+  input: AfterFailureInput,
+  deps: RebuildDeps = {},
+): Promise<string> {
+  const { basculePossible, rebuildApresTentee, originPhase, supabase } = input;
+  if (!basculePossible || rebuildApresTentee) return "";
+  const manual = "lancer SELECT ingest_rebuild_iris_full();";
+  if (supabase === null) {
+    console.error("[iris] vue iris_full non rattachée : client Supabase absent");
+    return ` ; vue iris_full NON rattachée : client Supabase absent, ${manual}`;
+  }
+  const timeoutMs = deps.afterFailureTimeoutMs ?? REBUILD_AFTER_FAILURE_TIMEOUT_MS;
+  try {
+    await withTimeout(
+      rebuildIrisFull(supabase, "apres_bascule", deps),
+      timeoutMs,
+      "rattachement de la vue iris_full",
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`[iris] rattachement de la vue iris_full après échec impossible : ${message}`);
+    return ` ; vue iris_full NON rattachée : ${message} — ${manual}`;
+  }
+  if (originPhase === "swap") {
+    return ` ; vue iris_full rattachée aux tables en place, mais la bascule en échec a pu s'appliquer après coup côté serveur : dans ce cas ${manual}`;
+  }
+  return " ; vue iris_full rattachée aux tables en place";
 }
 
 // ── BLOC 1 : contours ──────────────────────────────────────────────────────
@@ -776,6 +988,12 @@ async function findFirst(
 
 /** Surface de test (cf. convention `__TESTING__` de finess.ts). */
 export const __TESTING__ = {
+  rebuildIrisFull,
+  rebuildIrisFullAfterFailure,
+  IRIS_FULL_TABLES,
+  REBUILD_MAX_ATTEMPTS,
+  REBUILD_RETRY_DELAY_MS,
+  REBUILD_AFTER_FAILURE_TIMEOUT_MS,
   mapContourRecord,
   mapPopRecord,
   mapFamillesRecord,
