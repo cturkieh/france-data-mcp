@@ -14,6 +14,13 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   `dynamique_immobiliere` restaient au millésime chargé le 10/10. La requête demande
   désormais un tri explicite (`orderBy=CODE_INSEE`), avec lequel le fichier arrive entier.
   Mesures : `docs/experiences/2026-11-22-sitadel-export-tronque.md`.
+- **Le nettoyage des copies de secours ne peut plus détruire une matview encore utilisée.**
+  `ingest_drop_stale_previous` supprimait `<prod>_previous` en `CASCADE` : après un run arrêté
+  entre la bascule et la reconstruction des matviews, celles-ci partaient avec la copie et les
+  tools qui les lisent (recherche RPPS par nom, rayon, densité) seraient tombés en erreur. Sans
+  `CASCADE`, le nettoyage échoue en 2BP01 sans rien supprimer et le workflow alerte, avec la
+  commande de réparation. Migration `20261122T210000`. Défaut reproduit puis corrigé sur une
+  base jetable : `docs/experiences/2026-11-22-nettoyage-sans-cascade.md`.
 
 ## [0.32.0] — 2026-11-07 — DVF sur une table nationale : Paris, Lyon et Marseille couverts, prix calculés sans échantillonnage
 
