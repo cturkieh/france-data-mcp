@@ -132,8 +132,9 @@ COMMIT;
 The previous version is kept **4 days** after the last run of the source, then dropped by the daily
 `cleanup-stale-previous.yml` job. After that, rolling back means re-ingesting. The cleanup holds off
 as long as any `ingest-*` workflow run started in the last 4 days did not end in success (running,
-killed, failed): see `scripts/ingest/ingest-run-guard.ts`. That is a 4-day window to repair, not a
-guarantee: after it, the copy is dropped with `CASCADE`. An ingestion started from a local machine
+killed, failed): see `scripts/ingest/ingest-run-guard.ts`. After those 4 days the copy is dropped,
+unless a materialized view or a view still depends on it: the drop then fails with 2BP01 and the
+job alerts (no `CASCADE` since migration `20261122T210000`). An ingestion started from a local machine
 is invisible to that guard: do not run one while the cleanup may fire.
 
 ## Conventions importantes — pipeline d'ingestion

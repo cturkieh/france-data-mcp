@@ -16,9 +16,8 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
   Rien n'est nettoyé tant qu'un run d'un workflow d'ingestion a démarré depuis moins de 4 jours sans
   finir en succès (en cours, tué, en échec), ni tant qu'un run de la source figure dans `ingest_log`
   depuis moins de 4 jours, `partial` et `failed` compris. Avant, un run tué juste après sa bascule
-  perdait sa copie au nettoyage suivant. Passé ces 4 jours la copie part quand même, avec les
-  matviews qui en dépendraient encore. `--dry-run` (input `dry_run` du workflow) affiche la décision
-  sans rien supprimer.
+  perdait sa copie au nettoyage suivant. `--dry-run` (input `dry_run` du workflow) affiche la
+  décision sans rien supprimer.
 
 ### Fixed
 

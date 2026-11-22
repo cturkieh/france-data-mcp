@@ -8,17 +8,17 @@
  * run est TUÉ dans cet intervalle (run RPPS du 2026-09-05 : bascule à 59:59,
  * tué 5 s après), `ingest_log` ne sait rien de la bascule. Les gardes d'âge de
  * `dropStalePrevious` liraient le run précédent et supprimeraient la seule
- * copie saine — en `DROP … CASCADE`, donc avec les matviews encore liées à
- * `<prod>_previous` par OID (42P01 sur les tools qui les lisent).
+ * copie saine, celle qu'il faudrait pour revenir en arrière.
  *
  * Règle : si UN run d'un workflow `ingest-*.yml` a démarré depuis moins de N
  * jours sans être `completed` + `success`, on ne nettoie rien. Tout run de la
  * fenêtre compte, pas le seul dernier : un succès qui suit un run tué peut être
  * un court-circuit `same_checksum`, qui n'a rien rebasculé.
  *
- * Ce que la garde donne : N jours pour réparer après un run anormal. Passé ce
- * délai la RPC supprime quand même, matviews liées comprises (backlog P2 :
- * retirer `CASCADE`, dater la bascule).
+ * Ce que la garde donne : N jours pour revenir en arrière après un run
+ * anormal. Passé ce délai la RPC supprime la copie, sauf si une matview ou une
+ * vue y est encore liée : depuis `20261122T210000` elle supprime sans
+ * `CASCADE` et échoue alors en 2BP01, sans rien détruire.
  *
  * Limites assumées : une ingestion lancée hors GitHub Actions (poste local)
  * est invisible ici, cf. skill `ingestion-crons` ; seuls les
