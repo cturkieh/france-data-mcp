@@ -29,6 +29,13 @@ describe("buildSitadelUrl", () => {
     expect(url.searchParams.get("ANNEE")).toBe("gte:2020");
     expect(url.searchParams.get("withColumnName")).toBe("true");
   });
+
+  it("demande un tri explicite : sans lui l'export DiDo perd sa dernière tranche (DOM compris)", () => {
+    // Régression du cron du 2026-11-10 : 3 téléchargements coupés en `terminated`.
+    // Mesuré le 2026-11-22 : 2 820 000 lignes sans tri, 2 832 117 (= total) avec.
+    const url = new URL(buildSitadelUrl(2026));
+    expect(url.searchParams.get("orderBy")).toBe("CODE_INSEE");
+  });
 });
 
 describe("aggregateSitadelRecords", () => {
