@@ -975,9 +975,13 @@ export async function dropStalePrevious(
     p_max_age_days: maxAgeDays,
   });
   if (error) {
+    // `details` nomme l'objet qui bloque un DROP sans CASCADE (2BP01 : « view iris_full
+    // depends on table iris_previous ») : sans lui l'opérateur sait que ça bloque, pas sur quoi.
+    const code = error.code ? ` [${error.code}]` : "";
+    const details = error.details ? ` — ${error.details}` : "";
     throw new IngestError(
       "swap",
-      `DROP stale previous failed for table "${input.prodTable}": ${error.message}`,
+      `DROP stale previous failed for table "${input.prodTable}"${code}: ${error.message}${details}`,
     );
   }
   if (typeof data !== "string") {

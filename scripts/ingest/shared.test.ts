@@ -567,6 +567,23 @@ describe("copie de secours `_previous` — gardes avant suppression", () => {
     expect(rpc).not.toHaveBeenCalled();
   });
 
+  it("erreur de la RPC → throw qui garde le code et le détail (l'objet qui bloque un DROP sans CASCADE)", async () => {
+    const { client, rpc } = fakeCleanupClient({ rows: [] });
+    rpc.mockImplementationOnce(async () => ({
+      data: null,
+      error: {
+        code: "2BP01",
+        message: "cannot drop table iris_previous because other objects depend on it",
+        details: "view iris_full depends on table iris_previous",
+      } as never,
+    }));
+    await expect(
+      dropStalePrevious({ prodTable: "iris", source: "iris" }, { now: NOW, client }),
+    ).rejects.toThrow(
+      /"iris" \[2BP01\]: cannot drop table iris_previous.* — view iris_full depends on table iris_previous/,
+    );
+  });
+
   it("dryRun : la RPC n'est JAMAIS appelée, même quand la suppression serait demandée", async () => {
     const { client, rpc, calls } = fakeCleanupClient({
       rows: [{ started_at: "2026-10-05T11:14:25Z" }],
