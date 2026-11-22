@@ -129,6 +129,13 @@ ALTER TABLE finess_failed RENAME TO finess_previous;
 COMMIT;
 ```
 
+The previous version is kept **4 days** after the last run of the source, then dropped by the daily
+`cleanup-stale-previous.yml` job. After that, rolling back means re-ingesting. The cleanup holds off
+as long as any `ingest-*` workflow run started in the last 4 days did not end in success (running,
+killed, failed): see `scripts/ingest/ingest-run-guard.ts`. That is a 4-day window to repair, not a
+guarantee: after it, the copy is dropped with `CASCADE`. An ingestion started from a local machine
+is invisible to that guard: do not run one while the cleanup may fire.
+
 ## Conventions importantes — pipeline d'ingestion
 
 **Contexte** : la table `annuaire_ameli` peut saturer le disque si la ligne CSV brute est stockée dans une colonne JSONB `raw` (~70-80 % du poids row × 462 K rows = ~560 MB). Le pipeline vide désormais `raw` à l'ingestion. Pour FINESS, la projection Lambert 93 → WGS84 utilise des colonnes typées dédiées.

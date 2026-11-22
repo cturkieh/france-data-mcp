@@ -6,6 +6,20 @@ SemVer (la branche `0.x` autorise les breaking changes mineurs documentés).
 
 ## [Unreleased]
 
+### Changed
+
+- **Les copies de secours `_previous` vivent 4 jours au lieu de 7 à 13, nettoyage quotidien.** Le
+  disque Supabase est facturé à sa taille réservée : la copie RPPS (2 Go) encore présente au
+  rechargement d'une autre source gonflait le pic pour rien. `cleanup-stale-previous.yml` tourne
+  chaque jour. Le retour arrière manuel reste possible 4 jours après chaque rechargement.
+- **Après un rechargement anormal, la copie de secours est gardée 4 jours avant tout nettoyage.**
+  Rien n'est nettoyé tant qu'un run d'un workflow d'ingestion a démarré depuis moins de 4 jours sans
+  finir en succès (en cours, tué, en échec), ni tant qu'un run de la source figure dans `ingest_log`
+  depuis moins de 4 jours, `partial` et `failed` compris. Avant, un run tué juste après sa bascule
+  perdait sa copie au nettoyage suivant. Passé ces 4 jours la copie part quand même, avec les
+  matviews qui en dépendraient encore. `--dry-run` (input `dry_run` du workflow) affiche la décision
+  sans rien supprimer.
+
 ## [0.32.0] — 2026-11-07 — DVF sur une table nationale : Paris, Lyon et Marseille couverts, prix calculés sans échantillonnage
 
 ### Fixed

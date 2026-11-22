@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import {
+  DROP_STALE_PREVIOUS_DEFAULT_DAYS,
   GZIP_MAGIC,
   IngestError,
   type IngestLogEntry,
@@ -14,7 +15,9 @@ import {
   SEVENZIP_MAGIC,
   ZIP_MAGIC,
   assertStagingRowBand,
+  dropStalePrevious,
   getLastRealIngestRowCount,
+  getLastRealRunAgeDays,
   getNonEmpty,
   insertStagingBatchWithRetry,
   isForceReingestEnv,
@@ -23,6 +26,7 @@ import {
   runBatchedRpc,
   runKeysetRpc,
   shortCircuitIfSameChecksum,
+  utcDaysSince,
   writeGithubOutput,
   writeIngestLog,
   writeIngestLogFailureFallback,
@@ -454,6 +458,139 @@ describe("parseDropStalePreviousOutcome", () => {
     expect(() => parseDropStalePreviousOutcome("")).toThrow(IngestError);
     expect(() => parseDropStalePreviousOutcome("dropped:no_age")).toThrow(IngestError);
     expect(() => parseDropStalePreviousOutcome("dropped:table:nan_d")).toThrow(IngestError);
+  });
+});
+
+describe("copie de secours `_previous` — gardes avant suppression", () => {
+  /** Faux client : `ingest_log` rend `rows` (ou `readError`), la RPC rend `rpcData`. */
+  function fakeCleanupClient(opts: {
+    rows?: unknown[];
+    readError?: { message: string };
+    rpcData?: unknown;
+  }) {
+    const calls: Array<[string, unknown[]]> = [];
+    const chain: Record<string, unknown> = {};
+    for (const m of ["select", "eq", "in", "is", "order"]) {
+      chain[m] = (...args: unknown[]) => {
+        calls.push([m, args]);
+        return chain;
+      };
+    }
+    chain.limit = async () => ({ data: opts.rows ?? [], error: opts.readError ?? null });
+    const rpc = vi.fn(async () => ({ data: opts.rpcData ?? null, error: null }));
+    return { client: { from: vi.fn(() => chain), rpc } as never, calls, rpc };
+  }
+  const NOW = new Date("2026-11-19T10:40:00Z"); // un jeudi
+
+  it("utcDaysSince compte en jours calendaires UTC, comme le `::date - ::date` de la RPC", () => {
+    expect(utcDaysSince("2026-11-16T12:24:38.176+00:00", NOW)).toBe(3);
+    // 23 h 59 d'écart mais deux dates différentes → 1 (pas 0).
+    expect(utcDaysSince("2026-11-18T10:41:00Z", NOW)).toBe(1);
+    expect(utcDaysSince("2026-11-19T00:00:01Z", NOW)).toBe(0);
+  });
+
+  it("utcDaysSince throw sur une date illisible (un NaN laisserait passer la suppression)", () => {
+    expect(() => utcDaysSince("pas-une-date", NOW)).toThrow(IngestError);
+  });
+
+  it("getLastRealRunAgeDays : TOUT statut, hors court-circuit — un partial ou un failed après bascule compte", async () => {
+    const { client, calls } = fakeCleanupClient({ rows: [{ started_at: "2026-11-18T12:00:00Z" }] });
+    await expect(getLastRealRunAgeDays("rpps", NOW, client)).resolves.toBe(1);
+    expect(calls).toContainEqual(["eq", ["source", "rpps"]]);
+    expect(calls).toContainEqual(["is", ["skip_reason", null]]);
+    expect(calls).toContainEqual(["order", ["started_at", { ascending: false }]]);
+    // Aucun filtre de statut : le restreindre à `success` rouvrirait le trou.
+    expect(calls.some(([m, args]) => (m === "eq" || m === "in") && args[0] === "status")).toBe(
+      false,
+    );
+  });
+
+  it("getLastRealRunAgeDays : aucun run → null ; erreur de lecture → throw (jamais « pas de run »)", async () => {
+    await expect(
+      getLastRealRunAgeDays("iris", NOW, fakeCleanupClient({ rows: [] }).client),
+    ).resolves.toBeNull();
+    await expect(
+      getLastRealRunAgeDays(
+        "iris",
+        NOW,
+        fakeCleanupClient({ readError: { message: "boom" } }).client,
+      ),
+    ).rejects.toThrow(/ingest_log\(iris, real_run\) lecture échouée: boom/);
+  });
+
+  it("le délai par défaut est de 4 jours (un vendredi garde sa copie jusqu'au mardi)", () => {
+    expect(DROP_STALE_PREVIOUS_DEFAULT_DAYS).toBe(4);
+  });
+
+  it("run il y a 3 jours (moins que le seuil) → `recent_run`, la RPC n'est PAS appelée", async () => {
+    const { client, rpc } = fakeCleanupClient({
+      rows: [{ started_at: "2026-11-16T12:00:00Z" }],
+      rpcData: "dropped:rpps_previous:30d",
+    });
+    await expect(
+      dropStalePrevious({ prodTable: "rpps", source: "rpps" }, { now: NOW, client }),
+    ).resolves.toEqual({ kind: "recent_run", table: "rpps_previous", ageDays: 3 });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("run il y a 4 jours (seuil atteint) → la RPC décide, avec le seuil passé explicitement", async () => {
+    const { client, rpc } = fakeCleanupClient({
+      rows: [{ started_at: "2026-11-15T12:24:38Z" }],
+      rpcData: "dropped:annuaire_ameli_previous:4d",
+    });
+    await expect(
+      dropStalePrevious({ prodTable: "annuaire_ameli", source: "ameli_ps" }, { now: NOW, client }),
+    ).resolves.toEqual({ kind: "dropped", table: "annuaire_ameli_previous", ageDays: 4 });
+    expect(rpc).toHaveBeenCalledWith("ingest_drop_stale_previous", {
+      p_prod_table: "annuaire_ameli",
+      p_source: "ameli_ps",
+      p_max_age_days: 4,
+    });
+  });
+
+  it("aucun run connu → la RPC décide (elle rend `no_history` ou `absent`)", async () => {
+    const { client, rpc } = fakeCleanupClient({ rows: [], rpcData: "no_history:iris_previous" });
+    await expect(
+      dropStalePrevious({ prodTable: "iris", source: "iris" }, { now: NOW, client }),
+    ).resolves.toEqual({ kind: "no_history", table: "iris_previous" });
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("lecture d'ingest_log en erreur → throw AVANT la RPC : dans le doute on ne supprime pas", async () => {
+    const { client, rpc } = fakeCleanupClient({
+      readError: { message: "boom" },
+      rpcData: "dropped:rpps_previous:30d",
+    });
+    await expect(
+      dropStalePrevious({ prodTable: "rpps", source: "rpps" }, { now: NOW, client }),
+    ).rejects.toThrow(IngestError);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it("dryRun : la RPC n'est JAMAIS appelée, même quand la suppression serait demandée", async () => {
+    const { client, rpc, calls } = fakeCleanupClient({
+      rows: [{ started_at: "2026-10-05T11:14:25Z" }],
+      rpcData: "dropped:rpps_previous:45d",
+    });
+    await expect(
+      dropStalePrevious({ prodTable: "rpps", source: "rpps" }, { now: NOW, client, dryRun: true }),
+    ).resolves.toEqual({
+      kind: "dry_run",
+      table: "rpps_previous",
+      lastRunAgeDays: 45,
+      lastSuccessAgeDays: 45,
+    });
+    expect(rpc).not.toHaveBeenCalled();
+    // L'aperçu lit le dernier `success` comme la RPC (court-circuits compris).
+    expect(calls).toContainEqual(["eq", ["status", "success"]]);
+  });
+
+  it("dryRun : la garde TS s'applique comme en vrai (run récent → `recent_run`)", async () => {
+    const { client, rpc } = fakeCleanupClient({ rows: [{ started_at: "2026-11-18T12:00:00Z" }] });
+    await expect(
+      dropStalePrevious({ prodTable: "rpps", source: "rpps" }, { now: NOW, client, dryRun: true }),
+    ).resolves.toEqual({ kind: "recent_run", table: "rpps_previous", ageDays: 1 });
+    expect(rpc).not.toHaveBeenCalled();
   });
 });
 

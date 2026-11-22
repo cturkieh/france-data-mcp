@@ -22,6 +22,7 @@ import {
 import { fetchAllCommunes } from "../../src/territoire/communes.js";
 import { deriveDeptFromCp } from "../../src/territoire/dept-codes.js";
 import {
+  DROP_STALE_PREVIOUS_DEFAULT_DAYS,
   IngestError,
   type IngestLogEntry,
   PGRST_COLUMN_CACHE_MISS,
@@ -1081,8 +1082,8 @@ export async function rebuildRppsMatviews(
  * `rebuildRppsMatviews` pour rester loin de la coupure à 60 s de la passerelle : un
  * échec ici n'annule pas les autres matviews. Il dégrade en `partial` sans throw :
  * la RPC est transactionnelle, l'ancienne liste reste servie et seuls les noms récents
- * manquent. Cette liste dépend encore de `rpps_previous` : le nettoyage du dimanche, qui
- * ne compte pas un run `partial` comme réussi, ou le swap suivant la détruit. La recherche
+ * manquent. Cette liste dépend encore de `rpps_previous` : le nettoyage quotidien la détruit
+ * `DROP_STALE_PREVIOUS_DEFAULT_DAYS` jours après ce run, le swap suivant aussi. La recherche
  * rend alors 42P01, bruyant dans Sentry, jusqu'à la reconstruction. Le message d'alerte
  * donne donc le délai et la commande de réparation.
  */
@@ -1102,7 +1103,7 @@ export async function rebuildRppsSearchLists(
     log.status = "partial";
     appendLogMessage(
       log,
-      `post-swap search lists rebuild (${code}): ${error.message} — rpps_search_by_name manque les noms récents et sera indisponible dès le prochain nettoyage du dimanche (cleanup-stale-previous) ; réparer avant : SELECT ingest_rebuild_rpps_search_lists()`,
+      `post-swap search lists rebuild (${code}): ${error.message} — rpps_search_by_name manque les noms récents et sera indisponible dès que le nettoyage quotidien supprimera rpps_previous, ${DROP_STALE_PREVIOUS_DEFAULT_DAYS} jours après ce run (cleanup-stale-previous) ; réparer avant : SELECT ingest_rebuild_rpps_search_lists()`,
     );
     return;
   }

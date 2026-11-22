@@ -218,7 +218,10 @@ describe("listes de rpps_search_by_name", () => {
     await expect(rebuildRppsSearchLists(supabase, log)).resolves.toBeUndefined();
     expect(log.status).toBe("partial");
     expect(log.error_message).toContain("SELECT ingest_rebuild_rpps_search_lists()");
-    expect(log.error_message).toContain("nettoyage du dimanche");
+    // Le délai annoncé à l'opérateur suit le vrai réglage du nettoyage (quotidien, 4 jours).
+    expect(log.error_message).toContain(
+      "nettoyage quotidien supprimera rpps_previous, 4 jours après ce run",
+    );
     consoleError.mockRestore();
   });
 });
