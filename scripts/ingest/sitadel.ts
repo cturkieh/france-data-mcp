@@ -39,6 +39,9 @@ import {
 export const DIDO_DATAFILE_URL =
   "https://data.statistiques.developpement-durable.gouv.fr/dido/api/v1/datafiles/577a8a66-4157-4787-b00a-031b61afea61/csv";
 
+/** Colonne du tri explicite demandé à DiDo. Sa raison d'être : `buildSitadelUrl`. */
+const SITADEL_ORDER_BY = "CODE_INSEE";
+
 /** Filtré serveur : 107 Mo mesurés. 50 Mo de plancher = troncature franche. */
 const MIN_SIZE_BYTES = 50_000_000;
 
@@ -101,12 +104,21 @@ const BATCH_SIZE = 5_000;
  * courante n'existe pas encore dans le flux. Une fenêtre calée sur l'horloge
  * perdrait une étiquette d'année le 10 janvier (−17 % de lignes) :
  * `assertStagingRowBand` refuserait le swap deux crons de suite, chaque année.
+ *
+ * `orderBy` est LOAD-BEARING, pas cosmétique : sans tri explicite, l'export CSV
+ * DiDo perd sa dernière tranche (il sert des tranches de 10 000 lignes, se fige
+ * 60 s sur la dernière, incomplète, puis coupe la connexion). Le fichier arrive
+ * amputé de la fin du Val-d'Oise et de tous les DOM, et `downloadCsv` échoue en
+ * `terminated` (cron du 2026-11-10). Avec le tri, le fichier arrive entier :
+ * nombre de lignes égal au `total` de l'endpoint `/rows`. Mesures et protocole :
+ * `docs/experiences/2026-11-22-sitadel-export-tronque.md`.
  */
 export function buildSitadelUrl(currentYear: number): string {
   const params = new URLSearchParams({
     withColumnName: "true",
     TYPE_LGT: `eq:${SITADEL_TYPE_LGT_TOTAL}`,
     ANNEE: `gte:${currentYear - SITADEL_YEARS_BACK - 1}`,
+    orderBy: SITADEL_ORDER_BY,
   });
   return `${DIDO_DATAFILE_URL}?${params.toString()}`;
 }
