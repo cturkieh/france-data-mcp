@@ -789,3 +789,32 @@ describe("composite send-ops-email — émetteur Resend UNIQUE et best-effort", 
     expect(stepIfCondition(pending, "Issue — adresses à géocoder")).toMatch(/^always\(\) &&/);
   });
 });
+
+describe("cleanup-stale-previous.yml — la garde sur les runs d'ingestion ne peut pas être désarmée par le YAML", () => {
+  const src = mustGet(workflows, "cleanup-stale-previous.yml");
+  const block = stepBlock(src, "Run cleanup") ?? "";
+
+  it("le nettoyage reçoit GITHUB_TOKEN et la permission actions: read (sans eux la CLI refuse de nettoyer)", () => {
+    expect(block).toMatch(/GITHUB_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}/);
+    expect(src, "sans actions: read, l'API des runs répond 403").toMatch(/^\s+actions:\s*read/m);
+  });
+
+  it("ne passe jamais --no-ingest-guard, et ne nettoie pas en continue-on-error", () => {
+    // Ligne de commande seulement : le commentaire du step cite le flag pour l'interdire.
+    const commands = block
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("#"))
+      .join("\n");
+    expect(commands).not.toContain("--no-ingest-guard");
+    expect(block).not.toMatch(/continue-on-error/);
+  });
+
+  it("le mode simulation est câblé : DRY_RUN=true ajoute --dry-run", () => {
+    expect(block).toMatch(/DRY_RUN:\s*\$\{\{\s*github\.event\.inputs\.dry_run\s*\}\}/);
+    expect(block).toContain('[ "$DRY_RUN" = "true" ] && args+=("--dry-run")');
+  });
+
+  it("tourne tous les jours : la copie vit le même nombre de jours quel que soit le jour du rechargement", () => {
+    expect(src).toMatch(/^\s+- cron: "0 3 \* \* \*"$/m);
+  });
+});

@@ -3,38 +3,45 @@ name: Cleanup stale <source>_previous
 
 on:
   schedule:
-    # Every Sunday at 03:00 UTC — decorrelated from ingestion windows:
-    #   - ingest-finess  : 1st & 15th of month, 04:00 UTC
-    #   - ingest-rpps    : 5th of month,        04:00 UTC
-    #   - ingest-ameli   : every Monday,        04:00 UTC
-    #   - ingest-cds     : every Monday,        06:00 UTC
-    # Decoupled from ingestion by design: when an ingestion succeeds, the
-    # atomic swap overwrites `<prod>_previous` and the cleanup is a no-op
-    # (`kept`); the cleanup only triggers DROP when the ingestion has
-    # stagnated past `--max-age-days` (checksum identical repeatedly, source
-    # upstream broken, cron disabled).
+    # Tous les jours à 03:00 UTC (hebdomadaire jusqu'en 2026-11). Chaque bascule
+    # garde l'ancienne table en `<prod>_previous` ; ce job la supprime 4 jours
+    # après le dernier run de la source (`DROP_STALE_PREVIOUS_DEFAULT_DAYS`).
+    # Quotidien pour que la copie vive 4 jours quel que soit le jour du
+    # rechargement : en hebdomadaire, celle du RPPS (2 Go) restait 7 à 13 jours
+    # et gonflait le pic disque du lundi (Ameli). Le disque Supabase est facturé
+    # à sa taille réservée et ne rétrécit pas seul.
+    #
+    # L'heure ne protège de RIEN : GitHub retarde les crons de plusieurs heures
+    # (03:00 planifié, 10:40 observé), donc ce job peut tomber pendant une
+    # ingestion, ou le lendemain d'un run tué juste après sa bascule. C'est la
+    # garde de `scripts/ingest/ingest-run-guard.ts`, appelée par la CLI, qui
+    # protège : rien n'est nettoyé tant qu'un run d'un workflow `ingest-*` est
+    # récent et pas terminé en succès.
     #
     # NOTE: GitHub disables scheduled workflows after 60 days WITHOUT any
     # repository activity (push/PR). Since this repo receives weekly commits,
     # the schedule stays alive; if activity drops, the cleanup silently stops
     # and `<source>_previous` will accumulate disk. If long inactivity is
     # expected, set up an external monitor (Sentry cron / healthcheck.io ping).
-    - cron: "0 3 * * 0"
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       max_age_days:
-        # Defaut canonique: 7 jours (mirror SQL `p_max_age_days INT DEFAULT 7`
-        # dans migration `20260514T080000_rpc_drop_stale_previous.sql` ET TS
-        # `DROP_STALE_PREVIOUS_DEFAULT_DAYS` dans `scripts/ingest/shared.ts`).
-        # On NE met PAS de `default` ici : si l'input est omis, la step ci-dessous
-        # garde l'override désactivé et le CLI applique le défaut TS — une seule
-        # source de vérité runtime côté code.
-        description: "Override the staleness threshold (1-365 days). Vide = défaut TS (7j)."
+        # Pas de `default` ici : si l'input est omis, la step ci-dessous garde
+        # l'override désactivé et le CLI applique `DROP_STALE_PREVIOUS_DEFAULT_DAYS`
+        # (`scripts/ingest/shared.ts`) — une seule source de vérité côté code.
+        description: "Override the staleness threshold (1-365 days). Vide = défaut du code (4j)."
         required: false
+      dry_run:
+        description: "Simulation : affiche ce qui serait supprimé, n'appelle pas la RPC, n'écrit rien."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   issues: write
+  # Lecture des runs d'ingestion par la garde de la CLI (`ingest-run-guard.ts`).
+  actions: read
 
 concurrency:
   group: cleanup-stale-previous
@@ -43,9 +50,9 @@ concurrency:
 jobs:
   cleanup:
     runs-on: ubuntu-latest
-    # Réaliste : checkout + pnpm install ≈ 30-60s + 3 RPC ~50ms = <2 min.
-    # Cap 5 min = 3× la marge cold-start, suffisant pour alerter sur dérive
-    # structurelle (RPC qui passerait à plusieurs minutes = signal fort).
+    # Réaliste : checkout + pnpm install ≈ 30-60 s, puis 7 lectures de l'API
+    # GitHub et, par table, 1 à 2 lectures d'`ingest_log` et 1 RPC : < 2 min.
+    # Cap 5 min : une dérive à plusieurs minutes est un signal fort.
     timeout-minutes: 5
     env:
       # Pre-validate l'input AVANT install pour échouer fast si bornes violées.
@@ -97,16 +104,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # `GITHUB_TOKEN` n'est PAS optionnel : la CLI s'en sert pour vérifier qu'aucune
+      # ingestion ne tourne ni n'a été tuée récemment, et refuse de nettoyer sans
+      # lui. Ne jamais passer `--no-ingest-guard` ici (réservé à un opérateur).
       - name: Run cleanup
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          if [ -n "$MAX_AGE_DAYS" ]; then
-            pnpm cleanup:stale-previous "--max-age-days=$MAX_AGE_DAYS"
-          else
-            pnpm cleanup:stale-previous
-          fi
+          args=()
+          [ -n "$MAX_AGE_DAYS" ] && args+=("--max-age-days=$MAX_AGE_DAYS")
+          [ "$DRY_RUN" = "true" ] && args+=("--dry-run")
+          pnpm cleanup:stale-previous "${args[@]}"
 
       # Échec OU run tué (`cancelled()` = timeout-minutes / annulation ; cf.
       # `.github/actions/notify-ingest-failure` — sans lui, un run tué est muet).

@@ -22,6 +22,7 @@ import {
 import { fetchAllCommunes } from "../../src/territoire/communes.js";
 import { deriveDeptFromCp } from "../../src/territoire/dept-codes.js";
 import {
+  DROP_STALE_PREVIOUS_DEFAULT_DAYS,
   IngestError,
   type IngestLogEntry,
   PGRST_COLUMN_CACHE_MISS,
@@ -1081,10 +1082,11 @@ export async function rebuildRppsMatviews(
  * `rebuildRppsMatviews` pour rester loin de la coupure à 60 s de la passerelle : un
  * échec ici n'annule pas les autres matviews. Il dégrade en `partial` sans throw :
  * la RPC est transactionnelle, l'ancienne liste reste servie et seuls les noms récents
- * manquent. Cette liste dépend encore de `rpps_previous` : le nettoyage du dimanche, qui
- * ne compte pas un run `partial` comme réussi, ou le swap suivant la détruit. La recherche
- * rend alors 42P01, bruyant dans Sentry, jusqu'à la reconstruction. Le message d'alerte
- * donne donc le délai et la commande de réparation.
+ * manquent. Cette liste dépend encore de `rpps_previous` : le nettoyage quotidien ne peut
+ * plus supprimer cette copie (il échoue en 2BP01, sans rien détruire, depuis
+ * `20261122T210000`) et alerte chaque jour à partir de `DROP_STALE_PREVIOUS_DEFAULT_DAYS`
+ * jours après ce run. Le swap suivant, lui, détruit la liste (`DROP … _previous_OLD CASCADE`)
+ * avant que le même run la reconstruise. Le message d'alerte donne la commande de réparation.
  */
 export async function rebuildRppsSearchLists(
   supabase: SupabaseClient,
@@ -1102,7 +1104,7 @@ export async function rebuildRppsSearchLists(
     log.status = "partial";
     appendLogMessage(
       log,
-      `post-swap search lists rebuild (${code}): ${error.message} — rpps_search_by_name manque les noms récents et sera indisponible dès le prochain nettoyage du dimanche (cleanup-stale-previous) ; réparer avant : SELECT ingest_rebuild_rpps_search_lists()`,
+      `post-swap search lists rebuild (${code}): ${error.message} — rpps_search_by_name manque les noms récents ; tant que la liste n'est pas reconstruite, le nettoyage quotidien de rpps_previous échouera en 2BP01 à partir de ${DROP_STALE_PREVIOUS_DEFAULT_DAYS} jours après ce run (cleanup-stale-previous) ; réparer : SELECT ingest_rebuild_rpps_search_lists()`,
     );
     return;
   }

@@ -803,17 +803,26 @@ export interface DropStalePreviousInput {
   prodTable: string;
   /** Source name as written in `ingest_log` (e.g. "rpps", "finess", "ameli_ps"). */
   source: IngestSource;
-  /** Tolerance before DROP. Default 7 days. */
+  /** Tolerance before DROP. Default `DROP_STALE_PREVIOUS_DEFAULT_DAYS`. */
   maxAgeDays?: number;
 }
 
 /**
- * Default age threshold (jours) avant DROP automatique de `<prod>_previous`.
- * Miroir du `p_max_age_days INT DEFAULT 7` côté SQL (migration
- * `20260514T080000_rpc_drop_stale_previous.sql`) — toute modification doit
- * synchroniser les deux côtés.
+ * Durée de vie (jours) de la copie de secours `<prod>_previous` après un
+ * rechargement (7 avant 2026-11). Court parce que le disque Supabase est
+ * facturé à sa taille réservée et ne rétrécit pas seul : une copie de 2 Go
+ * (RPPS) encore présente au rechargement d'une autre source gonfle le pic.
+ *
+ * Ce sont des jours CALENDAIRES UTC comptés depuis le DÉBUT du run (cf.
+ * `utcDaysSince`) : la copie vit entre 3 et 4 jours pleins. 4 et non 3 pour
+ * qu'il reste toujours un jour ouvré où voir un mauvais fichier : à 3, un
+ * rechargement du vendredi perdrait sa copie le lundi matin.
+ *
+ * Le `p_max_age_days INT DEFAULT 7` de la RPC SQL (migration
+ * `20260514T080000_rpc_drop_stale_previous.sql`) n'est PLUS un miroir : ce
+ * code passe toujours le seuil explicitement, le défaut SQL ne sert jamais.
  */
-export const DROP_STALE_PREVIOUS_DEFAULT_DAYS = 7;
+export const DROP_STALE_PREVIOUS_DEFAULT_DAYS = 4;
 
 /**
  * Borne maximale autorisée par la RPC SQL (`p_max_age_days <= 365`). Au-delà,
@@ -829,37 +838,150 @@ export const DROP_STALE_PREVIOUS_MAX_DAYS = 365;
 export type DropStalePreviousOutcome =
   | { kind: "dropped"; table: string; ageDays: number }
   | { kind: "kept"; table: string; ageDays: number }
+  /** Garde TS : un run a tourné il y a moins de `maxAgeDays`, RPC non appelée. */
+  | { kind: "recent_run"; table: string; ageDays: number }
+  /**
+   * Simulation : la garde TS laisserait passer, la RPC n'a PAS été appelée. Les
+   * deux âges permettent d'annoncer ce qu'elle déciderait (elle garde si le
+   * dernier `success` a moins de `maxAgeDays` jours, et ne supprime que si la
+   * table existe). `null` = aucun run de ce type.
+   */
+  | {
+      kind: "dry_run";
+      table: string;
+      lastRunAgeDays: number | null;
+      lastSuccessAgeDays: number | null;
+    }
   | { kind: "absent"; table: string }
   | { kind: "no_history"; table: string };
 
 /**
- * Drop `<prodTable>_previous` si l'âge dépasse `maxAgeDays` (default 7).
- * Mesuré contre `MAX(ingest_log.started_at WHERE status='success')` de la
- * source — la date du dernier swap réussi. Idempotent : safe d'appeler
- * répétitivement (job de maintenance, post-mortem, etc.).
+ * Jours calendaires UTC entre `iso` et `now` — même arithmétique que le
+ * `NOW()::date - started_at::date` de la RPC, pour que les deux gardes
+ * comptent pareil. Date illisible = throw : un `NaN` rendrait toute
+ * comparaison fausse et la garde laisserait passer la suppression.
+ */
+export function utcDaysSince(iso: string, now: Date): number {
+  const then = new Date(iso);
+  if (Number.isNaN(then.getTime())) {
+    throw new IngestError("swap", `utcDaysSince: date illisible ${JSON.stringify(iso)}`);
+  }
+  const dayOf = (d: Date) => Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return Math.round((dayOf(now) - dayOf(then)) / 86_400_000);
+}
+
+/**
+ * Âge (jours) du run le plus récent d'`ingest_log` retenu par `scope`, `null`
+ * si aucun. Erreur de lecture = throw (jamais « pas de run ») : dans le doute
+ * on ne supprime pas, et l'échec remonte par source dans `drop-stale-previous.ts`.
+ */
+async function readLastRunAgeDays(
+  source: IngestSource,
+  now: Date,
+  scope: "real_run" | "last_success",
+  client?: Pick<SupabaseClient, "from">,
+): Promise<number | null> {
+  const supabase = client ?? getIngestLogClient();
+  const base = supabase.from("ingest_log").select("started_at").eq("source", source);
+  const scoped = scope === "real_run" ? base.is("skip_reason", null) : base.eq("status", "success");
+  const { data, error } = await scoped.order("started_at", { ascending: false }).limit(1);
+  if (error) {
+    throw new IngestError(
+      "swap",
+      `ingest_log(${source}, ${scope}) lecture échouée: ${error.message}`,
+    );
+  }
+  const startedAt = (data?.[0] as { started_at?: unknown } | undefined)?.started_at;
+  if (startedAt == null) return null;
+  if (typeof startedAt !== "string") {
+    throw new IngestError(
+      "swap",
+      `ingest_log(${source}, ${scope}): started_at non-string (${typeof startedAt})`,
+    );
+  }
+  return utcDaysSince(startedAt, now);
+}
+
+/**
+ * Âge (jours) du dernier run de la source qui a PU basculer une table : tout
+ * statut, hors court-circuit. `null` = aucun run connu.
  *
- * Pas intégré au flow d'ingestion lui-même : le swap suivant overwrite
- * previous de toute façon. Utile UNIQUEMENT quand l'ingestion stagne (cron
- * down, source upstream cassée, checksum identique répété) — économie disk
- * sur RPPS_previous (~700 MB) et Ameli_previous (~150 MB) principalement.
+ * Tout statut, à dessein. La RPC ne regarde que le dernier `success` : un run
+ * `partial` (bascule faite, anomalie signalée) ou `failed` APRÈS la bascule
+ * (canari rouge) laisse ce `success` vieux d'une semaine ou d'un mois, donc la
+ * copie de secours du run en cause serait supprimée dès le nettoyage suivant,
+ * au moment précis où elle sert. Un `failed` avant bascule garde la copie
+ * quelques jours de trop : sans conséquence.
+ *
+ * `skip_reason IS NULL` écarte TOUT court-circuit, pas le seul `same_checksum`
+ * (unique valeur écrite aujourd'hui, `shortCircuitIfSameChecksum`). Contrat :
+ * un run qui pose un `skip_reason` n'a rien basculé. Un futur `skip_reason`
+ * posé sur un run qui bascule quand même rouvrirait la suppression.
+ */
+export function getLastRealRunAgeDays(
+  source: IngestSource,
+  now: Date,
+  client?: Pick<SupabaseClient, "from">,
+): Promise<number | null> {
+  return readLastRunAgeDays(source, now, "real_run", client);
+}
+
+/**
+ * Drop `<prodTable>_previous` passé `maxAgeDays` (défaut
+ * `DROP_STALE_PREVIOUS_DEFAULT_DAYS`). Deux gardes doivent être d'accord :
+ *
+ *  1. ici, `getLastRealRunAgeDays` : aucun run (tout statut, hors court-circuit)
+ *     depuis `maxAgeDays` jours — sinon `recent_run`, la RPC n'est pas appelée ;
+ *  2. dans la RPC : dernier `success` (court-circuits compris) vieux d'au moins
+ *     `maxAgeDays` jours.
+ *
+ * Ni l'une ni l'autre ne voit un run EN COURS ou TUÉ après sa bascule : il n'a
+ * rien écrit dans `ingest_log`. C'est `ingest-run-guard.ts`, appelé par la CLI
+ * AVANT cette fonction, qui couvre ces deux cas. N'appeler `dropStalePrevious`
+ * que derrière cette garde.
+ *
+ * `deps.dryRun` : passe la garde TS puis rend `dry_run` SANS appeler la RPC.
+ *
+ * Idempotent : safe d'appeler répétitivement.
  */
 export async function dropStalePrevious(
   input: DropStalePreviousInput,
+  deps: { now?: Date; client?: Pick<SupabaseClient, "from" | "rpc">; dryRun?: boolean } = {},
 ): Promise<DropStalePreviousOutcome> {
+  const maxAgeDays = input.maxAgeDays ?? DROP_STALE_PREVIOUS_DEFAULT_DAYS;
   // Untyped client : la RPC `ingest_drop_stale_previous` (V0.9.3, migration
   // 20260514T080000) n'est pas encore dans les types Supabase générés
   // — `getServiceClient` typé la refuserait au compile time. Pattern miroir
   // de `countFiness` / wrappers `rpps-db.ts`.
-  const supabase = getUntypedServiceClient(`drop-stale:${input.source}`);
+  const supabase = deps.client ?? getUntypedServiceClient(`drop-stale:${input.source}`);
+  const now = deps.now ?? new Date();
+  const table = `${input.prodTable}_previous`;
+  const lastRunAgeDays = await getLastRealRunAgeDays(input.source, now, supabase);
+  if (lastRunAgeDays !== null && lastRunAgeDays < maxAgeDays) {
+    return { kind: "recent_run", table, ageDays: lastRunAgeDays };
+  }
+  if (deps.dryRun) {
+    const lastSuccessAgeDays = await readLastRunAgeDays(
+      input.source,
+      now,
+      "last_success",
+      supabase,
+    );
+    return { kind: "dry_run", table, lastRunAgeDays, lastSuccessAgeDays };
+  }
   const { data, error } = await supabase.rpc("ingest_drop_stale_previous", {
     p_prod_table: input.prodTable,
     p_source: input.source,
-    p_max_age_days: input.maxAgeDays ?? DROP_STALE_PREVIOUS_DEFAULT_DAYS,
+    p_max_age_days: maxAgeDays,
   });
   if (error) {
+    // `details` nomme l'objet qui bloque un DROP sans CASCADE (2BP01 : « view iris_full
+    // depends on table iris_previous ») : sans lui l'opérateur sait que ça bloque, pas sur quoi.
+    const code = error.code ? ` [${error.code}]` : "";
+    const details = error.details ? ` — ${error.details}` : "";
     throw new IngestError(
       "swap",
-      `DROP stale previous failed for table "${input.prodTable}": ${error.message}`,
+      `DROP stale previous failed for table "${input.prodTable}"${code}: ${error.message}${details}`,
     );
   }
   if (typeof data !== "string") {
