@@ -134,6 +134,16 @@ function formatOutcome(outcome: DropStalePreviousOutcome, maxAgeDays: number): s
   }
 }
 
+/**
+ * Pile complète pour une erreur imprévue (dérive de contrat, TypeError) ; une
+ * `IngestError` porte déjà son contexte dans le message.
+ */
+function describeError(err: unknown): string {
+  if (err instanceof IngestError) return err.message;
+  if (err instanceof Error) return err.stack ?? err.message;
+  return String(err);
+}
+
 /** Tout ce que `runCleanup` lit du monde extérieur, injectable pour les tests. */
 export interface CleanupDeps {
   /** Arguments de la ligne de commande, sans `node` ni le chemin du script. */
@@ -227,12 +237,7 @@ export async function runCleanup(deps: CleanupDeps): Promise<CleanupResult> {
       console.log(`  ${formatOutcome(outcome, maxAgeDays)}`);
     } catch (err) {
       failureCount += 1;
-      // Pile complète pour une erreur imprévue (dérive de contrat, TypeError) ;
-      // une IngestError porte déjà son contexte dans le message.
-      let detail = String(err);
-      if (err instanceof IngestError) detail = err.message;
-      else if (err instanceof Error) detail = err.stack ?? err.message;
-      console.error(`[france-data-mcp]   [FAIL] ${prodTable}_previous: ${detail}`);
+      console.error(`[france-data-mcp]   [FAIL] ${prodTable}_previous: ${describeError(err)}`);
     }
   }
   return { blockedByIngestRuns, failureCount };
@@ -253,9 +258,7 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     console.error(
-      `[france-data-mcp] drop-stale-previous interrompu, rien de plus n'a ete supprime : ${
-        err instanceof Error ? err.message : String(err)
-      }`,
+      `[france-data-mcp] drop-stale-previous interrompu, rien de plus n'a ete supprime : ${describeError(err)}`,
     );
     process.exit(1);
   }
